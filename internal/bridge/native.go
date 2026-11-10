@@ -210,22 +210,23 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		deadline, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		var err error
+		var result any
 		state := "done"
 		switch action {
 		case "launch-kimi":
 			err = n.controller.Start(deadline)
 			state = "starting"
 		case "connect-kimi", "prepare-native":
-			var result kimi.ImportResult
-			result, err = n.controller.ImportModelsAuthorized(deadline)
+			var imported kimi.ImportResult
+			imported, err = n.controller.ImportModelsAuthorized(deadline)
 			if err == nil {
-				err = importResultError(result)
+				err = importResultError(imported)
 			}
-			state = result.State
+			state = imported.State
 			if state == "" || state == "accepted" || state == "applied" {
 				state = "prepared"
 			}
-			n.operation["result"] = result
+			result = imported
 		case "apply-connections":
 			n.service.mutation.Lock()
 			d, _, e := n.service.Store.Read()
@@ -241,20 +242,30 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				_, err = n.service.translationAction(deadline, "/api/translation/preview", core.Document{"settings": d["translation"]})
 			}
 		}
-		n.mu.Lock()
-		defer n.mu.Unlock()
-		n.operation["finishedAt"] = time.Now().UnixMilli()
-		if errors.Is(err, kimi.ErrUnmanagedKimiRunning) {
-			state = "waiting-kimi-exit"
-		} else if err != nil {
-			state = "failed"
-		}
-		n.operation["state"] = state
-		if err != nil {
-			n.operation["reason"] = core.ErrorCode(err)
-		}
+		n.finishOperation(id, state, result, err)
 	}()
 	return core.Document{"operation": initial}, nil
+}
+
+func (n *Native) finishOperation(id, state string, result any, err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.operation == nil || n.operation["id"] != id {
+		return
+	}
+	n.operation["finishedAt"] = time.Now().UnixMilli()
+	if errors.Is(err, kimi.ErrUnmanagedKimiRunning) {
+		state = "waiting-kimi-exit"
+	} else if err != nil {
+		state = "failed"
+	}
+	n.operation["state"] = state
+	if result != nil {
+		n.operation["result"] = result
+	}
+	if err != nil {
+		n.operation["reason"] = core.ErrorCode(err)
+	}
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }
