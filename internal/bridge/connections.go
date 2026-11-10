@@ -45,13 +45,9 @@ func (s *Service) stageCredentials(d core.Document, changes map[string]*string) 
 		}
 		// Immutable credentials become active only when the config journal commits their reference.
 		ref := "connection-" + RandomKey()
-		if e := s.Keys.Set(ref, *value); e != nil {
-			return errors.New("credentials_unavailable")
-		}
 		created = append(created, ref)
-		actual, e := s.Keys.Get(ref)
-		if e != nil || actual != *value {
-			return errors.New("credentials_readback_failed")
+		if e := stageCredential(s.Keys, ref, *value); e != nil {
+			return e
 		}
 		c["apiKeyRef"] = ref
 	}
@@ -69,7 +65,7 @@ func connectionRows(d core.Document, keys KeyStore) []any {
 		}
 		key, err := credentialFor(c, keys)
 		if err != nil {
-			row["credentialError"] = "credentials_unavailable"
+			row["credentialError"] = core.ErrorCode(err)
 			row["credentialRecovery"] = "resave-required"
 		}
 		count := 0

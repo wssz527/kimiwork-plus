@@ -72,12 +72,8 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 			return nil, errors.New("credentials_unavailable")
 		}
 		ref := "translation-" + RandomKey()
-		if err := s.Keys.Set(ref, supplied); err != nil {
-			return nil, errors.New("credentials_unavailable")
-		}
-		actual, err := s.Keys.Get(ref)
-		if err != nil || actual != supplied {
-			return nil, errors.New("credentials_readback_failed")
+		if err := stageCredential(s.Keys, ref, supplied); err != nil {
+			return nil, err
 		}
 		normalized["apiKeyEnv"] = ref
 	}

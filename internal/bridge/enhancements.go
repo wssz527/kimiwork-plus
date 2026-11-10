@@ -31,13 +31,9 @@ func (k *webKey) Set(value string) error {
 		return errors.New("credentials_unavailable")
 	}
 	ref := "tavily-" + RandomKey()
-	if err := k.keys.Set(ref, value); err != nil {
-		return err
-	}
-	actual, err := k.keys.Get(ref)
-	if err != nil || actual != value {
+	if err := stageCredential(k.keys, ref, value); err != nil {
 		_ = k.keys.Delete(ref)
-		return errors.New("credentials_readback_failed")
+		return err
 	}
 	k.previousRef = k.ref
 	k.ref = ref

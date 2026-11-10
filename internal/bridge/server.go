@@ -149,6 +149,24 @@ func message(code string) string {
 		return "仍有模型使用此连接，请先修改模型。"
 	case "credentials_unavailable":
 		return "系统凭据存储不可用，密钥未保存。"
+	case "credential_keychain_locked":
+		return "登录钥匙串已锁定，请在 macOS 中解锁后从本窗口重新保存；密钥未写入。"
+	case "credential_keychain_unavailable":
+		return "当前登录会话无法使用系统钥匙串，请检查预览签名和会话权限；密钥未写入。"
+	case "credential_session_unavailable":
+		return "当前后台会话不能显示授权窗口，请从预览窗口重新保存。"
+	case "credential_authorization_required":
+		return "此条目需要系统授权，请从预览窗口重新保存并响应系统提示。"
+	case "credential_authorization_cancelled":
+		return "系统授权已取消，密钥未保存；原配置仍保留。"
+	case "credential_authorization_failed":
+		return "系统未接受授权，密钥未保存；原配置仍保留。"
+	case "credential_store_corrupt":
+		return "凭据条目内容无法识别，请从预览窗口重新输入并保存。"
+	case "credential_interaction_not_restored":
+		return "系统凭据交互状态未能恢复，请重启预览服务后重试。"
+	case "credential_store_failed":
+		return "系统凭据操作未完成，请查看诊断状态；密钥未保存。"
 	}
 	return "操作未完成，请检查输入或诊断信息。"
 }

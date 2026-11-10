@@ -40,6 +40,53 @@ func (k *CachedKeys) Set(name, value string) error {
 	delete(k.values, name)
 	return nil
 }
+func (k *CachedKeys) SetVisible(name, value string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := setVisibleCredential(k.store, name, value); err != nil {
+		return err
+	}
+	delete(k.values, name)
+	return nil
+}
+func (k *CachedKeys) SessionVisible() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	store, ok := k.store.(interface{ SessionVisible() bool })
+	return !ok || store.SessionVisible()
+}
+
+type visibleCredentialStore interface {
+	SetVisible(string, string) error
+	SessionVisible() bool
+}
+
+func setVisibleCredential(keys KeyStore, name, value string) error {
+	if store, ok := keys.(visibleCredentialStore); ok {
+		if !store.SessionVisible() {
+			return errors.New("credential_session_unavailable")
+		}
+		return store.SetVisible(name, value)
+	}
+	return keys.Set(name, value)
+}
+
+func stageCredential(keys KeyStore, name, value string) error {
+	if err := setVisibleCredential(keys, name, value); err != nil {
+		return err
+	}
+	actual, err := keys.Get(name)
+	if err != nil {
+		_ = keys.Delete(name)
+		return err
+	}
+	if actual != value {
+		_ = keys.Delete(name)
+		return errors.New("credentials_readback_failed")
+	}
+	return nil
+}
+
 func (k *CachedKeys) Delete(name string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()

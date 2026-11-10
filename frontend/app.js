@@ -211,6 +211,15 @@ const ERROR_HINT = {
   invalid_connection_config: '连接配置不完整或包含不支持的字段。密钥由系统凭据存储保存，配置文件只记录引用。',
   credentials_unavailable: '系统凭据存储未接受保存，配置未提交。请检查预览权限后重试；不会写入明文。',
   credentials_readback_failed: '新密钥未能从系统凭据存储读回，未切换现有引用。请重试或继续使用稳定版。',
+  credential_keychain_locked: '登录钥匙串已锁定，请在 macOS 中解锁后从本窗口重新保存；密钥未写入。',
+  credential_keychain_unavailable: '当前登录会话无法使用系统钥匙串，请检查预览签名和会话权限；密钥未写入。',
+  credential_session_unavailable: '当前后台会话不能显示授权窗口，请从预览窗口重新保存。',
+  credential_authorization_required: '此条目需要系统授权，请从预览窗口重新保存并响应系统提示。',
+  credential_authorization_cancelled: '系统授权已取消，密钥未保存；原配置仍保留。',
+  credential_authorization_failed: '系统未接受授权，密钥未保存；原配置仍保留。',
+  credential_store_corrupt: '凭据条目内容无法识别，请从预览窗口重新输入并保存。',
+  credential_interaction_not_restored: '系统凭据交互状态未能恢复，请重启预览服务后重试。',
+  credential_store_failed: '系统凭据操作未完成，请查看诊断状态；密钥未保存。',
   panel_action_busy: '上一次操作仍在执行，请等待结果。',
   panel_action_conflict: '操作标识已被使用，请刷新后重试。',
   panel_action_limit: '短时间内操作过多，请稍后再试。',
@@ -5486,26 +5495,82 @@ function renderAll() {
   renderPreviewLifecycle(state.data);
 }
 
+let trackedServiceOperation = '';
+
 function renderPreviewLifecycle(data) {
   const current = $('upd-current');
   if (current) current.textContent = data.updates?.currentVersion || '未知预览版本';
   setText($('upd-current-sub'), '独立 Go/Wails 预览 · ' + (data.service?.buildId || 'development'));
   setText($('preview-service-state'), data.service?.state === 'running' ? '后台运行中' : '后台状态未确认');
-  setText($('preview-service-sub'), data.service?.loginStartup === 'enabled' ? '已允许登录时启动' : '未开启登录时启动；窗口关闭不停止网关');
+  const operation = data.service?.operation;
+  const busy = operation && ['pending', 'running'].includes(operation.phase);
+  setText($('preview-service-sub'), busy ? '后台操作进行中，正在读回结果；登录启动与当前运行状态分开管理。' : data.service?.loginStartup === 'enabled' ? '已允许登录时启动；更改此偏好不会重启当前后台' : '未开启登录时启动；窗口关闭不停止网关');
   const register = $('service-register');
   if (register) register.textContent = data.service?.registered ? '更新服务注册' : '注册后台服务';
   const enable = $('service-enable');
-  if (enable) enable.disabled = data.service?.loginStartup === 'enabled';
+  if (enable) enable.disabled = Boolean(busy) || data.service?.loginStartup === 'enabled';
   const disable = $('service-disable');
-  if (disable) disable.disabled = data.service?.loginStartup !== 'enabled';
+  if (disable) disable.disabled = Boolean(busy) || data.service?.loginStartup !== 'enabled';
+  if (busy && trackedServiceOperation !== operation.id) {
+    trackedServiceOperation = operation.id;
+    void trackServiceOperation(operation.id, operation.action, operation);
+  }
+}
+
+function applyPreviewServiceResult(result) {
+  const operation = result.operation;
+  if (!state.data) return operation;
+  const service = result.service || operation?.state;
+  if (service) {
+    state.data.service = { ...state.data.service, ...service, loginStartup: service.enabled ? 'enabled' : 'manual' };
+  }
+  if (operation) state.data.service.operation = operation;
+  renderPreviewLifecycle(state.data);
+  return operation;
+}
+
+async function trackServiceOperation(id, action, initial) {
+  let operation = initial;
+  const deadline = Date.now() + 30000;
+  try {
+    while (!operation || !['succeeded', 'failed'].includes(operation.phase)) {
+      if (Date.now() >= deadline) {
+        showToast('后台操作尚未完成，请稍后从维护页读回结果；配置与账本未删除。', 'error');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        const result = await request('/api/service', { method: 'POST', body: { action: 'read-service-operation', operationId: id } });
+        operation = applyPreviewServiceResult(result);
+      } catch (error) {
+        if (action === 'stop-service' || action === 'uninstall-service') {
+          showToast('后台连接已断开，停止结果尚未由本窗口读回。重新打开窗口后可核对服务状态；官方 Kimi 不会因此被关闭。');
+          return;
+        }
+        if (Date.now() >= deadline) throw error;
+      }
+    }
+    applyPreviewServiceResult({ operation });
+    if (operation.phase === 'failed') {
+      showToast('后台操作未完成，请在维护页查看诊断并核对实际状态；未确认的更改不会显示为成功。', 'error');
+      return;
+    }
+    if (action === 'enable-login-service' || action === 'disable-login-service') {
+      showToast(operation.loginStart ? '已允许下次登录时启动；当前后台没有因此重启。' : '已禁止下次登录时启动；当前后台和模型请求未因此中断。', 'ok');
+    } else if (action === 'register-service') {
+      showToast('后台注册定义已保存；注册不等于已开启登录启动。', 'ok');
+    } else {
+      showToast('后台操作已完成并读回状态；官方 Kimi 不会因此被关闭。', 'ok');
+    }
+    try { await loadState({ silent: true }); } catch {}
+  } finally {
+    if (trackedServiceOperation === id) trackedServiceOperation = '';
+  }
 }
 
 async function previewServiceAction(action) {
   const result = await request('/api/service', { method: 'POST', body: { action } });
-  if (result.service) {
-    state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
-    renderPreviewLifecycle(state.data);
-  }
+  const operation = applyPreviewServiceResult(result);
   if (action === 'restart-daemon') {
     showToast('后台正在同地址重启，页面将在健康读回后恢复。官方 Kimi 不会因此被关闭。', 'ok');
     const deadline = Date.now() + 15000;
@@ -5520,12 +5585,13 @@ async function previewServiceAction(action) {
       }
     }
   }
-  if (action === 'stop-service') {
-    showToast('停止回执已确认；重新打开窗口会启动同一地址的后台。官方 Kimi 不会因此被关闭。', 'ok');
-  } else {
-    showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');
+  if (operation?.id) {
+    trackedServiceOperation = operation.id;
+    await trackServiceOperation(operation.id, operation.action, operation);
+    return;
   }
-  if (action !== 'restart-daemon') await loadState({ silent: true });
+  showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');
+  await loadState({ silent: true });
 }
 
 async function loadState({ silent = false } = {}) {

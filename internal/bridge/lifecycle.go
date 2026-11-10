@@ -13,17 +13,34 @@ import (
 )
 
 var openServiceManager = platform.OpenManager
+var openServiceController = platform.OpenController
 
-func (s *Service) serviceManager() (platform.Manager, error) {
+func (s *Service) serviceOptions() (platform.ManagerOptions, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, err
+		return platform.ManagerOptions{}, err
 	}
 	binary := filepath.Join(filepath.Dir(executable), "gateway-daemon")
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	return openServiceManager(platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID})
+	return platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID}, nil
+}
+
+func (s *Service) serviceManager() (platform.Manager, error) {
+	options, err := s.serviceOptions()
+	if err != nil {
+		return nil, err
+	}
+	return openServiceManager(options)
+}
+
+func (s *Service) serviceController() (platform.Controller, error) {
+	options, err := s.serviceOptions()
+	if err != nil {
+		return nil, err
+	}
+	return openServiceController(platform.ControllerOptions{ManagerOptions: options, HelperPath: options.Binary})
 }
 
 func (s *Service) serviceStatus() core.Document {
@@ -55,34 +72,46 @@ func (s *Service) serviceStatus() core.Document {
 		state["registrationState"] = "unavailable"
 		state["registrationReason"] = core.ErrorCode(err)
 	}
+	if controller, controllerErr := s.serviceController(); controllerErr == nil {
+		if operation, ok, activeErr := controller.Active(ctx); activeErr == nil && ok {
+			state["operation"] = operation
+		}
+	}
 	return state
 }
 
 func (s *Service) lifecycleAction(ctx context.Context, in core.Document) (any, error) {
-	manager, err := s.serviceManager()
+	controller, err := s.serviceController()
 	if err != nil {
 		return nil, err
 	}
-	if core.String(in["action"]) == "status-service" {
-		state, err := manager.Status(ctx)
+	action := core.String(in["action"])
+	if action == "status-service" {
+		state, err := controller.Status(ctx)
 		return core.Document{"service": state}, err
 	}
-	var state platform.ManagerState
-	switch core.String(in["action"]) {
-	case "register-service":
-		state, err = manager.Register(ctx)
-	case "enable-login-service":
-		state, err = manager.Enable(ctx)
-	case "disable-login-service":
-		state, err = manager.Disable(ctx)
-	case "start-service":
-		state, err = manager.Start(ctx)
-	case "stop-service":
-		state, err = manager.Stop(ctx)
-	case "uninstall-service":
-		state, err = manager.Uninstall(ctx)
-	default:
+	if action == "read-service-operation" {
+		operation, err := controller.Read(ctx, core.String(in["operationId"]))
+		if err != nil {
+			return nil, err
+		}
+		result := core.Document{"operation": operation, "operationId": operation.ID}
+		if operation.State != nil {
+			result["service"] = *operation.State
+		}
+		return result, nil
+	}
+	spec, ok := platform.OperationForAction(action)
+	if !ok {
 		return nil, errors.New("invalid_service_action")
 	}
-	return core.Document{"service": state}, err
+	operation, err := controller.Begin(ctx, spec)
+	if err != nil && operation.ID == "" {
+		return nil, err
+	}
+	result := core.Document{"operation": operation, "operationId": operation.ID}
+	if operation.State != nil {
+		result["service"] = *operation.State
+	}
+	return result, nil
 }

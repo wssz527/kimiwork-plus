@@ -54,7 +54,7 @@ if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 
 `bridge` 侧建议用 `platform.OpenController(platform.ControllerOptions{ManagerOptions: ..., HelperPath: daemonExecutable})`，`Begin` 后对 `PhasePending`/`PhaseRunning` 立即返回 `202` 与 `operationId`，由 `Read`/`Active` 提供状态；不要在同一次 HTTP 响应里等待破坏性操作完成。
 
-本机验收中的签名 daemon 在新建 Keychain 项时仍返回 `credentials_unavailable`。代码实现了禁止交互等待、缺项/拒绝访问区分和引用提交，但这不构成真实凭据保存通过；真实 GUI 重存也仍被阻塞。
+本机 Security SDK 提供 Keychain 的函数声明、CoreFoundation 回调和引用所有权；普通后台读写不显示隐藏授权，显式界面保存可通过 `VisibleSaveStore` 请求一次系统交互。缺失、锁定、取消、拒绝、会话不可用与读回失败分别返回可诊断状态。系统实测与最终 GUI 的完成级别以回传证据为准，不用单元测试替代。
 
 `build/install-preview.sh` 只安装到当前用户的 `Applications/Kimi Work+ Preview.app`。升级前验证新包并正常停止旧预览，保留 `Kimi Work+ Preview.previous.app`；停止或校验失败不会替换旧预览。稳定版不在脚本目标中。
 
