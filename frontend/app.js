@@ -1817,7 +1817,11 @@ function syncState(data) {
   const phases = [info.onboarding?.state, info.onboarding?.stage, info.stage, info.state]
     .filter((value) => typeof value === 'string');
   const has = (...values) => values.some((value) => reasons.includes(value) || phases.includes(value));
-  if (has('native_import_waiting_login', 'account-unverified', 'account_changed',
+  if (info.readback && info.applied === true) {
+    return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
+      note: info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
+  }
+  if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
     return { code: 'login', tone: 'warn', word: '需要登录',
       note: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。' };
@@ -1904,7 +1908,8 @@ function nativeConnectionText(data) {
   if (importReceipt.requiresRestart === true || importReceipt.restartDeferred === true) {
     return '模型已接入 Kimi 原生选择器，但需要重启 Kimi Work 后才会生效。';
   }
-  if (info.imported) return '模型目录已接入 Kimi 原生选择器；保存目录后自动同步。';
+  if (info.imported && info.readback) return info.adopted ? '目录、账号与配置代次已读回；官方菜单采用请在 Kimi 窗口确认。' : '目录、账号与地址已读回，等待官方运行时采用。';
+  if (info.imported) return '原生接口已接受模型目录，等待目录、账号与地址读回。';
   const reason = info.nativeImport?.reason || info.desktop?.reason || info.reason;
   const reasons = {
     native_bridge_unavailable: '正在等待 Kimi 接入通道，空闲后会自动恢复。',
@@ -1926,6 +1931,8 @@ function nativeConnectionText(data) {
     return '模型暂时还不能选择；后台会自动对齐，不用重复点击或重启桌面。';
   }
   if (reasons[reason]) return reasons[reason];
+  if (reason === 'waiting-login') return '请在刚打开的隔离 Kimi 窗口登录；本产品不会复制原账号 Cookie 或令牌。';
+  if (info.state === 'account-unverified') return '等待在隔离 Kimi 窗口登录并确认账号，再点「重新准备接入」。';
   if (info.state === 'pending') return '原生目录已接受，等待 Kimi 内核完成切换。';
   if (info.state === 'conflict') return '接入配置存在冲突，已保留当前内容；请检查配置后重试。';
   if (info.state === 'account-unverified') return '请登录 Kimi Work 并确认当前账户，然后点「打开 / 启动 Kimi」继续。';
@@ -5023,7 +5030,7 @@ function buildConnectionRow(row, index) {
   dot.dataset.tone = row.apiKeySet || row.apiKey ? 'ok' : 'warn';
   const keyText = document.createElement('span');
   keyText.textContent = row.apiKey ? '本次已输入新 Key（未保存）'
-    : row.apiKeySet ? 'Key 已在运行环境中' : 'Key 未在运行环境中';
+    : row.apiKeySet ? 'Key 已在运行环境中' : row.credentialError ? '凭据不可读，请编辑并重新输入 Key 后保存' : 'Key 未在运行环境中';
   keyState.append(dot, keyText);
   const models = document.createElement('p');
   models.className = 'conn-row__line muted';
@@ -5474,6 +5481,35 @@ function renderAll() {
   renderPicker();
   renderActions(state.data);
   renderGrowth(state.data);
+  renderPreviewLifecycle(state.data);
+}
+
+function renderPreviewLifecycle(data) {
+  const current = $('upd-current');
+  if (current) current.textContent = data.updates?.currentVersion || '未知预览版本';
+  setText($('upd-current-sub'), '独立 Go/Wails 预览 · ' + (data.service?.buildId || 'development'));
+  setText($('preview-service-state'), data.service?.state === 'running' ? '后台运行中' : '后台状态未确认');
+  setText($('preview-service-sub'), data.service?.loginStartup === 'enabled' ? '已允许登录时启动' : '未开启登录时启动；窗口关闭不停止网关');
+  const register = $('service-register');
+  if (register) register.textContent = data.service?.registered ? '更新服务注册' : '注册后台服务';
+  const enable = $('service-enable');
+  if (enable) enable.disabled = data.service?.loginStartup === 'enabled';
+  const disable = $('service-disable');
+  if (disable) disable.disabled = data.service?.loginStartup !== 'enabled';
+}
+
+async function previewServiceAction(action) {
+  const result = await request('/api/service', { method: 'POST', body: { action } });
+  if (result.service) {
+    state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
+    renderPreviewLifecycle(state.data);
+  }
+  if (action === 'restart-daemon' || action === 'stop-service') {
+    showToast('停止回执已确认；重新打开窗口会启动同一地址的后台。官方 Kimi 不会因此被关闭。', 'ok');
+  } else {
+    showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');
+  }
+  if (action !== 'restart-daemon') await loadState({ silent: true });
 }
 
 async function loadState({ silent = false } = {}) {
@@ -6108,6 +6144,25 @@ function bindEvents() {
     }
     dom.gateRetry.disabled = false;
   });
+
+  for (const [id, action] of Object.entries({
+    'daemon-restart': 'restart-daemon', 'service-register': 'register-service',
+    'service-enable': 'enable-login-service', 'service-disable': 'disable-login-service',
+    'service-stop': 'stop-service', 'service-uninstall': 'uninstall-service',
+  })) {
+    const button = $(id);
+    if (button) button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { await previewServiceAction(action); }
+      catch (error) { showToast(error.message || '预览后台操作未完成，原运行状态未替换。', 'error'); }
+      finally { button.disabled = false; }
+    });
+  }
+  request('/api/service').then(result => {
+    if (!result.service || !state.data) return;
+    state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
+    renderPreviewLifecycle(state.data);
+  }).catch(() => {});
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
 

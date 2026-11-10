@@ -66,6 +66,14 @@ func (s *Store) Read() (Document, string, error) {
 }
 
 func (s *Store) Update(revision string, change func(Document) error) (Document, string, error) {
+	d, rev, err := s.Prepare(revision, change)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.Commit(d, rev)
+}
+
+func (s *Store) Prepare(revision string, change func(Document) error) (Document, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, rev, err := s.read()
@@ -77,6 +85,19 @@ func (s *Store) Update(revision string, change func(Document) error) (Document, 
 	}
 	if err := change(d); err != nil {
 		return nil, "", err
+	}
+	return d, rev, nil
+}
+
+func (s *Store) Commit(d Document, revision string) (Document, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, rev, err := s.read()
+	if err != nil {
+		return nil, "", err
+	}
+	if revision == "" || revision != rev {
+		return nil, "", ErrConflict
 	}
 	if err := Validate(d); err != nil {
 		return nil, "", err

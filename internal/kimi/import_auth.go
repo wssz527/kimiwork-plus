@@ -1,0 +1,231 @@
+package kimi
+
+import (
+	"context"
+	"errors"
+)
+
+// An import is two separate facts and this file keeps them apart:
+//
+//	the request   the official page accepted importByokModels
+//	the evidence  the profile and the generated config now hold those models
+//
+// A page that answers `ok` has only done the first. The second is read back from
+// the files Kimi itself owns, so `Applied` is never set from the page's word.
+//
+// Authorisation is one shot. Opening Kimi's settings overlay is a visible act the
+// user asked for once, so the grant is consumed by the call that carries it and
+// cleared afterwards whether the import succeeded, failed or never reached the
+// page. A caller that wants to try again asks the user again.
+
+// The reason codes the panel already knows. They stay stable; the coarse state
+// below is what a renderer switches on.
+const (
+	NativeWaitingLogin    = "native_import_waiting_login"
+	NativeWaitingWork     = "native_bridge_waiting_work"
+	NativeWaitingSettings = "native_bridge_waiting_settings"
+	NativeContractChanged = "native_bridge_contract_changed"
+	NativeAccountChanged  = "native_import_account_changed"
+	NativeRequiresRestart = "native_import_requires_restart"
+)
+
+// ImportState is the coarse answer a panel renders. Several reason codes may map
+// to one state, and a state never claims more than the evidence supports.
+const (
+	// ImportStateWaitingLogin means the isolated profile has no account identity
+	// yet. Only the user signing in to the official window produces one.
+	ImportStateWaitingLogin = "waiting-login"
+	// ImportStateWaitingWork means the Work view is not there to ask.
+	ImportStateWaitingWork = "waiting-work"
+	// ImportStateWaitingSettings means the import page is not open and this call
+	// was not authorised to open it.
+	ImportStateWaitingSettings = "waiting-settings"
+	// ImportStateContractChanged means the official page answered something this
+	// package does not understand; the build is not the one it was written for.
+	ImportStateContractChanged = "contract-changed"
+	// ImportStateAccountChanged means the profile belongs to another account than
+	// the configured one. It is never repaired by importing anyway.
+	ImportStateAccountChanged = "account-changed"
+	// ImportStateRequiresRestart means the import is in the files but Kimi has
+	// not loaded it; the application has to restart.
+	ImportStateRequiresRestart = "requires-restart"
+	// ImportStateApplied means the readback found the models in the profile and
+	// the generated config. It is the only state that claims an effect.
+	ImportStateApplied = "applied"
+	// ImportStateAccepted means the page accepted the request and the readback
+	// does not (yet) show the result. It is not an applied import.
+	ImportStateAccepted = "accepted"
+	// ImportStateFailed means the page or the transport refused.
+	ImportStateFailed = "failed"
+)
+
+// ErrImportBusy means an authorised import is already in flight. Two overlays
+// opened at once would fight over the same settings page.
+var ErrImportBusy = errors.New("native_import_busy")
+
+// ImportModelsAuthorized runs the import as an explicit, one-shot user action:
+// this call, and only this call, may open Kimi's settings page and owns the
+// overlay it opened.
+//
+// The authorisation is consumed before the work starts and cleared when it ends,
+// so a second call — from a retry, a periodic reconcile or a stale UI event —
+// can never reopen the overlay on its own.
+func (c *Controller) ImportModelsAuthorized(ctx context.Context) (ImportResult, error) {
+	c.mu.Lock()
+	if c.importGranted {
+		c.mu.Unlock()
+		return ImportResult{State: ImportStateFailed, Reason: ErrImportBusy.Error()}, ErrImportBusy
+	}
+	c.importGranted = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.importGranted = false
+		c.mu.Unlock()
+	}()
+	return c.importModels(ctx, true)
+}
+
+// ImportModels runs the import without opening anything. It keeps the released
+// build's default: the settings page has to be open already, or the answer is
+// waiting-settings for the caller to act on.
+func (c *Controller) ImportModels(ctx context.Context) (ImportResult, error) {
+	return c.importModels(ctx, false)
+}
+
+// importModels is the one import path. `authorized` is true only for the call
+// that carries the user's explicit consent to open the overlay.
+func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportResult, error) {
+	// A child that already exited must not be imported into, and its state must
+	// not stay `ready`.
+	c.reapChild()
+
+	c.mu.Lock()
+	settings := c.settings
+	bridge := c.bridge
+	c.mu.Unlock()
+
+	if bridge == nil {
+		// There is no managed child to import into. That is the "work view is not
+		// there" case, not a settings problem: opening an overlay would have
+		// nothing to open it in.
+		return ImportResult{State: ImportStateWaitingWork, Reason: "native_bridge_unavailable"},
+			errors.New("native_bridge_unavailable")
+	}
+	// The account is read from the isolated profile's own files. A profile that
+	// has not signed in has no identity, and an import into "whatever account
+	// happens to be there" is exactly what this product must not do.
+	account, verified := c.profileAccount()
+	if !verified {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
+	}
+	if settings.AccountScope != "" && settings.AccountScope != account {
+		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
+	}
+
+	result, err := bridge.Client().ImportModels(ctx, ImportRequest{
+		URL: settings.GatewayURL, Token: settings.GatewayToken,
+		ExpectedAccountKey: account, OpenSettings: authorized,
+	})
+	if err != nil {
+		// A bridge that cannot be reached is not a page state: it is a failure the
+		// caller has to report, and it says nothing about what Kimi would have done.
+		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
+	}
+	return c.gradeImport(ctx, result), nil
+}
+
+// gradeImport turns the page's answer into a state backed by readback evidence.
+//
+// The page only reports that the official API accepted the request. Whether the
+// models are in place is answered by reconciling the profile and the generated
+// config again, which is the same readback the periodic caller uses.
+func (c *Controller) gradeImport(ctx context.Context, result ImportResult) ImportResult {
+	if result.State == "" {
+		result.State = importState(result)
+	}
+	if !result.OK {
+		return result
+	}
+	integration := c.ReconcileWithReadback(ctx)
+	result.Readback = integration.Readback
+	result.Adopted = integration.Adopted
+	if result.RequiresRestart {
+		// The files hold the import but Kimi has not loaded it. Calling that
+		// applied would tell the user to look for models the application has not
+		// read yet.
+		result.State = ImportStateRequiresRestart
+		result.Reason = firstNonEmpty(result.Reason, NativeRequiresRestart)
+		result.Applied = integration.Applied
+		return result
+	}
+	if integration.Applied {
+		result.State = ImportStateApplied
+		result.Applied = true
+		return result
+	}
+	// Accepted, not applied: the readback disagrees with the page, and the
+	// readback is the evidence that counts.
+	result.State = ImportStateAccepted
+	result.Applied = false
+	result.Reason = firstNonEmpty(integration.Reason, result.Reason, "native_import_not_verified")
+	return result
+}
+
+// importState maps a page answer onto the coarse vocabulary. It is used by the
+// actions themselves so a result carries a state even when the controller is not
+// in the loop.
+func importState(result ImportResult) string {
+	switch result.Reason {
+	case NativeWaitingLogin:
+		return ImportStateWaitingLogin
+	case "native_bridge_unavailable", NativeWaitingWork:
+		return ImportStateWaitingWork
+	case NativeWaitingSettings, "native_bridge_settings_open_refused":
+		return ImportStateWaitingSettings
+	case NativeContractChanged:
+		return ImportStateContractChanged
+	case NativeAccountChanged, "native_import_account_unverified":
+		return ImportStateAccountChanged
+	}
+	if result.RequiresRestart {
+		return ImportStateRequiresRestart
+	}
+	if result.OK {
+		return ImportStateAccepted
+	}
+	return ImportStateFailed
+}
+
+// profileAccount reads the account identity from the isolated profile only. The
+// path is the one this controller resolved for its own child, so an account is
+// never read from a directory the controller does not own.
+func (c *Controller) profileAccount() (string, bool) {
+	home := c.kimiHome()
+	if home == "" {
+		return "", false
+	}
+	account := AccountScope(home)
+	if account == "" {
+		return "", false
+	}
+	return account, true
+}
+
+// readback reads what the profile and the generated config hold right now. It is
+// the evidence half of an import; the caller's answer is the request half.
+func (c *Controller) readback(account string) *ImportReadback {
+	c.mu.Lock()
+	stateDir := c.settings.StateDir
+	c.mu.Unlock()
+	home := c.kimiHome()
+	if home == "" {
+		return &ImportReadback{AccountDigest: account, AccountVerified: account != ""}
+	}
+	integration, err := NewNativeIntegration(stateDir, home, "gateway")
+	if err != nil {
+		return &ImportReadback{AccountDigest: account, AccountVerified: account != ""}
+	}
+	result := integration.Readback(account)
+	return &result
+}

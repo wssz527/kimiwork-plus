@@ -59,10 +59,18 @@ type ControllerSettings struct {
 	GatewayToken string
 	// Models is the catalog to import.
 	Models []Model
-	// AccountScope identifies the Kimi account, when known.
+	// AccountScope identifies the Kimi account, when known. It is only ever
+	// compared against the account read from the isolated profile; it never
+	// supplies one.
 	AccountScope string
-	// AllowNativeImport authorises the visible settings-page import.
+	// AllowNativeImport is retained for callers that still set it, but it no
+	// longer opens anything: the settings overlay is opened only by
+	// ImportModelsAuthorized, for one call, as an explicit user action. A
+	// permanently-on flag is exactly the behaviour this replaces.
 	AllowNativeImport bool
+	// ProfileMode selects the profile the managed child runs against. Empty means
+	// isolated, which is the only implemented mode.
+	ProfileMode string
 	// Translation configures the renderer injection.
 	Translation TranslationSettings
 	// Executor bounds the contract probe.
@@ -140,6 +148,16 @@ type Controller struct {
 	integration *IntegrationResult
 	translation *TranslationStatus
 	startedAt   time.Time
+	// importGranted is held only while the one authorised import runs. It is
+	// what makes the authorisation one-shot: a second call waits rather than
+	// opening a second overlay.
+	importGranted bool
+	// loadedGeneration is the intent generation the running child was started
+	// against. A child started before an import cannot have loaded it, so
+	// adoption is decided by this number rather than by "a child is running".
+	loadedGeneration int
+	// loadedKnown is false until a child has actually been launched here.
+	loadedKnown bool
 }
 
 // ErrUnmanagedKimiRunning is returned by Start when an official Kimi this
@@ -221,6 +239,8 @@ func (c *Controller) PublicState(ctx context.Context) PublicState {
 		// Only the fact that a bridge is published, never where or with what.
 		public.Bridge = &BridgePublication{Published: true, Contract: BridgeContractGeneration}
 	}
+	profile := c.ProfileStatus()
+	public.Profile = &profile
 	return public
 }
 
@@ -235,6 +255,8 @@ type PublicState struct {
 	Integration    *IntegrationResult `json:"integration,omitempty"`
 	Translation    *TranslationStatus `json:"translation,omitempty"`
 	Bridge         *BridgePublication `json:"bridge,omitempty"`
+	// Profile reports the profile mode and its digests, never the path.
+	Profile *ProfileStatus `json:"profileStatus,omitempty"`
 }
 
 // BridgePublication says a bridge exists without naming its endpoint.
@@ -258,10 +280,15 @@ func (c *Controller) NativeState(ctx context.Context) NativeState {
 
 // Start launches a managed Kimi in an isolated profile.
 //
-// It refuses to proceed when an official Kimi is already running, because
-// attaching to it would mean taking over an application the user started. It
-// never sends a signal to that process: the answer is `needs_user_close` and the
-// user decides.
+// It is idempotent for the child this controller already owns: when that child is
+// still running, Start checks it (the published bridge answers, or the host
+// re-syncs) and returns without starting a second application. A child that has
+// exited is recorded as such, never revived.
+//
+// It refuses to proceed when an official Kimi is already running that this
+// controller did not start, because attaching to it would mean taking over an
+// application the user started. It never sends a signal to that process: the
+// answer is `needs_user_close` and the user decides.
 func (c *Controller) Start(ctx context.Context) error {
 	c.mu.Lock()
 	settings := c.settings
@@ -271,9 +298,25 @@ func (c *Controller) Start(ctx context.Context) error {
 		c.setState(StateUnsupported, "platform_cannot_manage_child")
 		return errors.New("platform_cannot_manage_child")
 	}
+	// The managed child, if this controller still holds a live one, is checked
+	// rather than duplicated. A second launch would leave two applications on one
+	// profile, which is the failure this branch exists to prevent. It comes first
+	// because a running child is already the answer: there is nothing to launch
+	// and no installation left to resolve.
+	if c.managedChildAlive() {
+		return c.checkManagedChild(ctx)
+	}
 	if settings.Installation.Application == "" {
 		c.setState(StateFailed, "kimi_application_missing")
 		return errors.New("kimi_application_missing")
+	}
+	// A profile mode this build does not implement is refused before anything is
+	// started or written. `existing-authorized` needs ownership proof and a safe
+	// handover of the user's own tree; a soft link into it would be a way around
+	// state containment, not a feature.
+	if err := c.requireSupportedProfileMode(); err != nil {
+		c.setState(StateFailed, err.Error())
+		return err
 	}
 	profile, err := c.validateProfile(settings.UserDataDir)
 	if err != nil {
@@ -301,12 +344,133 @@ func (c *Controller) Start(ctx context.Context) error {
 		c.setState(StateFailed, "kimi_start_failed")
 		return err
 	}
+	// The child is about to read the profile as it is now, so it can load the
+	// current intent generation. That is what later adoption compares against.
+	// It is read before the lock: currentGeneration takes c.mu itself.
+	generation := c.currentGeneration()
 	c.mu.Lock()
 	c.child = child
+	c.loadedGeneration = generation
+	c.loadedKnown = true
 	c.mu.Unlock()
 
 	c.setState(StateAttaching, "")
 	return c.attachChild(ctx, child, settings.Translation)
+}
+
+// currentGeneration reads the intent generation for this controller's profile
+// without writing anything. It answers 0 when there is no intent yet.
+func (c *Controller) currentGeneration() int {
+	c.mu.Lock()
+	stateDir := c.settings.StateDir
+	c.mu.Unlock()
+	home := c.kimiHome()
+	if home == "" {
+		return 0
+	}
+	integration, err := NewNativeIntegration(stateDir, home, "gateway")
+	if err != nil {
+		return 0
+	}
+	return integration.Readback("").Generation
+}
+
+// managedChildAlive reports whether this controller still holds a child that has
+// not exited. It is the whole idempotency test: a live child is this
+// controller's own, so it is checked rather than duplicated.
+func (c *Controller) managedChildAlive() bool {
+	c.mu.Lock()
+	child := c.child
+	c.mu.Unlock()
+	if child == nil {
+		return false
+	}
+	select {
+	case <-child.Exit():
+		return false
+	default:
+		return true
+	}
+}
+
+// checkManagedChild re-confirms a child that is already running. It answers the
+// same contract the launch would have established, without starting anything:
+// the bridge must answer, or the host must re-sync when there is no bridge.
+func (c *Controller) checkManagedChild(ctx context.Context) error {
+	c.mu.Lock()
+	bridge := c.bridge
+	host := c.host
+	enabled := c.settings.Translation.Enabled
+	c.mu.Unlock()
+
+	if bridge != nil {
+		status, err := bridge.Client().Status(ctx)
+		if err == nil && status.OK {
+			c.setState(StateReady, "")
+			return nil
+		}
+	}
+	if host != nil && enabled {
+		if _, err := host.Sync(ctx); err == nil {
+			c.setState(StateReady, "")
+			return nil
+		}
+	}
+	if host != nil {
+		// The pipe is still this controller's own; only the bridge is missing.
+		c.setState(StateReady, "native_bridge_unavailable")
+		return nil
+	}
+	// A live child with no host at all cannot be checked. It is not a reason to
+	// start a second application, so the state says what is missing.
+	c.setState(StateFailed, "managed_child_unattached")
+	return errors.New("managed_child_unattached")
+}
+
+// reapChild notices a managed child that exited on its own and records it.
+//
+// It never restarts and never pretends the exit did not happen: the child this
+// controller started is gone, so the state becomes `stopped` with the exit kind
+// as its reason. Nothing is signalled — the process is already gone.
+func (c *Controller) reapChild() bool {
+	c.mu.Lock()
+	child := c.child
+	c.mu.Unlock()
+	if child == nil {
+		return false
+	}
+	select {
+	case <-child.Exit():
+	default:
+		return false
+	}
+	exit := child.ExitState()
+
+	c.mu.Lock()
+	host := c.host
+	bridge := c.bridge
+	c.child = nil
+	c.host = nil
+	c.bridge = nil
+	c.actions = nil
+	c.mu.Unlock()
+
+	if host != nil {
+		host.DetachAll(context.Background())
+	}
+	if bridge != nil {
+		_ = bridge.Close()
+	}
+	reason := "managed_child_exited"
+	if exit.Kind != "" {
+		reason = "managed_child_exited_" + exit.Kind
+	}
+	status := TranslationStatus{State: "inactive", Reason: "no_managed_child"}
+	c.mu.Lock()
+	c.translation = &status
+	c.mu.Unlock()
+	c.setState(StateStopped, reason)
+	return true
 }
 
 // attachChild builds the host for a started child and publishes the native
@@ -499,10 +663,49 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 }
 
 // Reconcile runs the native integration against the configured catalog.
+//
+// It reads the account from the isolated profile first. A profile that has not
+// signed in is reported as `account-unverified` rather than reconciled against
+// whatever account happens to be there, because an import into the wrong account
+// is the one mistake that cannot be undone from here.
 func (c *Controller) Reconcile() IntegrationResult {
+	return c.reconcile(false)
+}
+
+// ReconcileWithReadback is the call the production loop uses: reconcile, then
+// read back the directory, the account, the URL and the config generation, and
+// grade the result from that evidence.
+//
+// The account is always taken from this controller's own isolated profile, never
+// from the caller's configuration and never from a directory outside it.
+func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
+	_ = ctx
+	return c.reconcile(true)
+}
+
+func (c *Controller) reconcile(withReadback bool) IntegrationResult {
 	c.mu.Lock()
 	settings := c.settings
 	c.mu.Unlock()
+
+	// A child that exited is recorded before anything is written for it.
+	c.reapChild()
+
+	account, verified := c.profileAccount()
+	scope := account
+	if !verified {
+		// Nothing is read from a profile without an identity, and no reconcile
+		// writes into it either: the answer is waiting for the user's login.
+		if withReadback {
+			result := IntegrationResult{State: IntegrationAccountUnknown, Reason: "waiting-login",
+				Readback: c.readback("")}
+			c.mu.Lock()
+			c.integration = &result
+			c.mu.Unlock()
+			return result
+		}
+		scope = settings.AccountScope
+	}
 
 	kimiDir := c.kimiHome()
 	integration, err := NewNativeIntegration(settings.StateDir, kimiDir, "gateway")
@@ -515,36 +718,57 @@ func (c *Controller) Reconcile() IntegrationResult {
 	}
 	result := integration.Reconcile(ReconcileOptions{
 		Enabled: settings.GatewayURL != "", URL: settings.GatewayURL, Models: settings.Models,
-		AccountScope: settings.AccountScope, AllowNativeImport: settings.AllowNativeImport,
+		AccountScope: scope, AllowNativeImport: false,
 	})
+	if withReadback {
+		readback := integration.Readback(account)
+		result.Readback = &readback
+		if readback.AccountDigest != "" {
+			// The digest is the profile's own identity, so the result says which
+			// account this evidence belongs to without naming it.
+			result.AccountDigest = readback.AccountDigest
+		}
+		// `Applied` is the readback's answer, not the reconcile's: the profile and
+		// the generated config must both hold the models at the configured URL.
+		result.Applied = readback.Holds(settings.GatewayURL) &&
+			(result.State == IntegrationReady || result.State == IntegrationRepaired)
+		result.Adopted = result.Applied && c.runtimeLoaded(readback.Generation)
+	}
 	c.mu.Lock()
 	c.integration = &result
 	c.mu.Unlock()
 	return result
 }
 
-// ImportModels performs the native import through the managed child's bridge.
+// runtimeLoaded reports whether the running application can have loaded the
+// import this reconcile just read back.
 //
-// It is a separate call from Reconcile because it is a visible action: the
-// caller decides when Kimi's own settings page may be opened. A result that
-// still owes a restart says so instead of claiming the import applied.
-func (c *Controller) ImportModels(ctx context.Context) (ImportResult, error) {
+// "A child is running" is not enough: a child that was already up before the
+// import has not read the new profile, and reporting it as adopted would tell
+// the user to look for models their application cannot see. So the child is
+// tagged with the intent generation it started against, and adoption requires
+// that generation to be the current one.
+func (c *Controller) runtimeLoaded(generation int) bool {
 	c.mu.Lock()
-	settings := c.settings
 	bridge := c.bridge
+	child := c.child
+	known := c.loadedKnown
+	loaded := c.loadedGeneration
 	c.mu.Unlock()
-
-	if bridge == nil {
-		return ImportResult{}, errors.New("native_bridge_unavailable")
+	if bridge == nil || child == nil || !known {
+		return false
 	}
-	result, err := bridge.Client().ImportModels(ctx, ImportRequest{
-		URL: settings.GatewayURL, Token: settings.GatewayToken,
-		ExpectedAccountKey: settings.AccountScope, OpenSettings: settings.AllowNativeImport,
-	})
-	if err != nil {
-		return ImportResult{}, err
+	select {
+	case <-child.Exit():
+		return false
+	default:
 	}
-	return result, nil
+	// A generation of 0 means the readback found no intent at all, so there is
+	// nothing to compare and nothing to claim.
+	if generation <= 0 {
+		return false
+	}
+	return loaded >= generation
 }
 
 // WorkSurface reports what is on screen, through the managed child's bridge.

@@ -63,6 +63,11 @@ var ImportableReasons = map[string]bool{
 }
 
 // IntegrationResult is the reconcile answer.
+//
+// `Imported` says the profile holds the catalog this tool owns; it does not say
+// Kimi has loaded it. `Applied` and `Adopted` are the graded answers and are set
+// only from readback evidence, so a caller cannot turn a page's `ok` into
+// "in use" by mistake.
 type IntegrationResult struct {
 	State            string            `json:"state"`
 	Reason           string            `json:"reason,omitempty"`
@@ -74,6 +79,15 @@ type IntegrationResult struct {
 	AccountDigest    string            `json:"accountDigest,omitempty"`
 	ProfileKeyDigest string            `json:"profileKeyDigest,omitempty"`
 	CredentialRef    string            `json:"credentialRef,omitempty"`
+	// Applied means the readback found the models in the profile and in the
+	// generated config. It is never set from a request that was merely accepted.
+	Applied bool `json:"applied"`
+	// Adopted means the running application has the import loaded. It needs the
+	// official application to have started after the import, so it is only ever
+	// reported from a caller that observed the runtime, never inferred here.
+	Adopted bool `json:"adopted"`
+	// Readback is what the profile and the generated config hold right now.
+	Readback *ImportReadback `json:"readback,omitempty"`
 }
 
 // NativeIntegration reconciles one Kimi home.
@@ -1074,6 +1088,10 @@ func ownedEntries(intent *nativeIntent) ownership {
 	return out
 }
 
+// intentSignature is the content of the intent, excluding its generation and
+// timestamp. It decides whether a write is needed, so the generation only moves
+// when the intent's content actually changes: a generation that incremented on
+// every call would make "the child loaded generation N" meaningless.
 func intentSignature(intent *nativeIntent) string {
 	if intent == nil {
 		return ""
@@ -1082,7 +1100,7 @@ func intentSignature(intent *nativeIntent) string {
 		"sourceID": intent.SourceID, "kimiHome": intent.KimiHome, "url": intent.URL,
 		"accountDigest": intent.AccountDigest, "profileKeyDigest": intent.ProfileKeyDigest,
 		"credentialRef": intent.CredentialRef, "aliases": intent.Aliases,
-		"active": intent.Active, "generation": intent.Generation,
+		"active": intent.Active,
 	})
 }
 

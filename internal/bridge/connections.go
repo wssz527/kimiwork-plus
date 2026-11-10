@@ -70,6 +70,7 @@ func connectionRows(d core.Document, keys KeyStore) []any {
 		key, err := credentialFor(c, keys)
 		if err != nil {
 			row["credentialError"] = "credentials_unavailable"
+			row["credentialRecovery"] = "resave-required"
 		}
 		count := 0
 		for _, m := range core.Rows(d["models"]) {

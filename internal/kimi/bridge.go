@@ -104,6 +104,11 @@ type ImportRequest struct {
 
 // ImportResult is the host's answer. A confirmed import that still owes a
 // restart is not an applied import, and says so.
+//
+// `OK` is the page's own word: the official API accepted the request. `State`
+// and `Applied` are the graded answers. `Applied` is set only from a readback of
+// the profile and the generated config, so a caller must never render `OK` as
+// "the models are in use".
 type ImportResult struct {
 	OK              bool   `json:"ok"`
 	Reason          string `json:"reason,omitempty"`
@@ -112,6 +117,17 @@ type ImportResult struct {
 	RestartDeferred bool   `json:"restartDeferred,omitempty"`
 	Opened          bool   `json:"opened,omitempty"`
 	Closed          *bool  `json:"closed,omitempty"`
+	// State is one of the ImportState values: waiting-login, waiting-work,
+	// waiting-settings, contract-changed, account-changed, requires-restart,
+	// applied, accepted, failed.
+	State string `json:"state,omitempty"`
+	// Applied is true only when the readback found the import in place.
+	Applied bool `json:"applied,omitempty"`
+	// Adopted is true only when the running application is known to have loaded
+	// it. It is never inferred from the request.
+	Adopted bool `json:"adopted,omitempty"`
+	// Readback is the evidence `Applied` was decided from.
+	Readback *ImportReadback `json:"readback,omitempty"`
 }
 
 // ActionResult is the answer to the page actions.

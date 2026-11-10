@@ -33,8 +33,16 @@ func run() error {
 		return e
 	}
 	dir := flag.String("state-dir", defaultDir, "isolated preview state directory")
-	port := flag.String("port", "0", "loopback port (0 selects a free port)")
+	port := flag.String("port", "", "loopback port (empty preserves the preview address)")
+	stopDaemon := flag.Bool("stop-daemon", false, "stop this preview daemon after draining its HTTP requests")
 	flag.Parse()
+	if *stopDaemon {
+		if err := bridge.StopDaemon(*dir); err != nil {
+			return err
+		}
+		fmt.Println("Kimi Work+ preview daemon stopped")
+		return nil
+	}
 	absolute, e := filepath.Abs(*dir)
 	if e != nil {
 		return e
@@ -65,6 +73,7 @@ func run() error {
 	service := &bridge.Service{Store: store, StateDir: *dir, Keys: keys, Gateway: gateway, OnConfig: gateway.Apply, Extra: gateway.Action}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	service.SetStop(stop)
 	if e = service.Start(*port, func() error {
 		_, err := bridge.AttachNative(ctx, service, gateway)
 		return err

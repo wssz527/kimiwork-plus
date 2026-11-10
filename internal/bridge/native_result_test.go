@@ -13,7 +13,10 @@ func TestRejectedImportIsNotPrepared(t *testing.T) {
 			t.Fatal("rejected import accepted")
 		}
 	}
-	if err := importResultError(kimi.ImportResult{OK: true}); err != nil {
+	if err := importResultError(kimi.ImportResult{OK: true}); err == nil {
+		t.Fatal("accepted without readback treated as applied")
+	}
+	if err := importResultError(kimi.ImportResult{OK: true, Applied: true}); err != nil {
 		t.Fatal(err)
 	}
 }

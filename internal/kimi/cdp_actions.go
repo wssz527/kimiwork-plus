@@ -282,19 +282,30 @@ return { visible: doc.visibilityState === "visible", painted: painted, text: tex
 //     control if this call opened it.
 func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (ImportResult, error) {
 	if !isLoopbackGateway(request.URL) {
-		return ImportResult{Reason: "native_bridge_invalid_request"}, nil
+		return ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request"}, nil
 	}
 	if request.Token == "" || len(request.Token) > 4096 {
-		return ImportResult{Reason: "native_bridge_invalid_request"}, nil
+		return ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request"}, nil
 	}
-	// The expected account is the caller's proof of which profile this import
-	// belongs to. A mismatch is refused before any page is touched.
+	// The account is read from this managed profile's own files before any page
+	// is touched. An empty expected key is not "any account will do": a profile
+	// with no identity has not signed in, and importing into it would either fail
+	// or land in an account nobody named.
+	//
+	// An empty kimiHome is refused rather than read: a relative path here would
+	// make the identity lookup read whatever config.json happens to sit in the
+	// working directory.
+	if a.kimiHome == "" || !filepath.IsAbs(a.kimiHome) {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
+	}
 	current := AccountScope(a.kimiHome)
-	if request.ExpectedAccountKey != "" && current != "" && request.ExpectedAccountKey != current {
-		return ImportResult{Reason: "native_import_account_changed"}, nil
+	if current == "" {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
 	}
-	if request.ExpectedAccountKey != "" && current == "" {
-		return ImportResult{Reason: "native_import_account_unverified"}, nil
+	// A configured expectation that disagrees with the profile is refused before
+	// the page sees anything.
+	if request.ExpectedAccountKey != "" && request.ExpectedAccountKey != current {
+		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 
 	targets, err := a.targets(ctx)
@@ -305,15 +316,15 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	opened := false
 	if !found {
 		if !request.OpenSettings {
-			return ImportResult{Reason: "native_bridge_waiting_settings"}, nil
+			return ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings}, nil
 		}
 		work, ok := findPath(targets, "/kimi-agent.html")
 		if !ok {
-			return ImportResult{Reason: "native_bridge_waiting_work"}, nil
+			return ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
 		}
 		asked, err := a.evaluate(ctx, work.sessionID, openSettingsExpression)
 		if err != nil || asked != true {
-			return ImportResult{Reason: "native_bridge_settings_open_refused", Opened: false}, nil
+			return ImportResult{State: ImportStateWaitingSettings, Reason: "native_bridge_settings_open_refused"}, nil
 		}
 		opened = true
 		for attempt := 0; attempt < settingsOpenReads && !found; attempt++ {
@@ -321,6 +332,7 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 				select {
 				case <-time.After(settingsOpenStep):
 				case <-ctx.Done():
+					a.closeIfOpened(ctx, opened)
 					return ImportResult{}, ctx.Err()
 				}
 			}
@@ -333,7 +345,11 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		}
 	}
 	if !found {
-		return ImportResult{Reason: "native_bridge_waiting_settings", Opened: opened}, nil
+		// The overlay this call opened is closed again: leaving it up would strand
+		// a window the user did not ask for.
+		result := ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings, Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, nil
 	}
 
 	// The import itself. The answer reports only what the caller may act on:
@@ -343,8 +359,9 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	expression := importExpression(request.Token, request.URL)
 	value, err := a.evaluate(ctx, settings.sessionID, expression)
 	if err != nil {
-		a.closeIfOpened(ctx, opened)
-		return ImportResult{Reason: "native_bridge_contract_changed", Opened: opened}, nil
+		result := ImportResult{State: ImportStateContractChanged, Reason: NativeContractChanged, Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, nil
 	}
 	answer, _ := value.(map[string]any)
 	result := ImportResult{Opened: opened}
@@ -359,21 +376,40 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		if deferred, ok := answer["restartDeferred"].(bool); ok {
 			result.RestartDeferred = deferred
 		}
+		// The page's own word: accepted. The controller grades this against a
+		// readback before anything is called applied.
+		result.State = ImportStateAccepted
 	} else {
 		code, _ := answer["code"].(string)
 		if code == "" {
 			code = "import-failed"
 		}
+		result.State = ImportStateFailed
 		result.Reason = "native_import_" + safeActionCode(code)
 	}
-	if opened {
-		closed, closeErr := a.CloseWorkSettings(ctx)
-		if closeErr == nil {
-			value := closed.OK
-			result.Closed = &value
-		}
-	}
+	// Only an overlay this call opened is closed, and the outcome is recorded
+	// either way: a close that failed means the window may still be up.
+	a.closeIfOpenedInto(ctx, opened, &result)
 	return result, nil
+}
+
+// closeIfOpened closes the overlay this call opened and records the outcome.
+func (a *cdpActions) closeIfOpened(ctx context.Context, opened bool) {
+	if !opened {
+		return
+	}
+	_, _ = a.CloseWorkSettings(ctx)
+}
+
+// closeIfOpenedInto is closeIfOpened with the answer written into the result, so
+// a failed close is reported rather than silently swallowed.
+func (a *cdpActions) closeIfOpenedInto(ctx context.Context, opened bool, result *ImportResult) {
+	if !opened || result == nil {
+		return
+	}
+	closed, err := a.CloseWorkSettings(ctx)
+	value := err == nil && closed.OK
+	result.Closed = &value
 }
 
 // findImportTarget looks for the page that carries the import API.
@@ -390,13 +426,6 @@ func (a *cdpActions) findImportTarget(ctx context.Context, targets []actionTarge
 		}
 	}
 	return actionTarget{}, false
-}
-
-func (a *cdpActions) closeIfOpened(ctx context.Context, opened bool) {
-	if !opened {
-		return
-	}
-	_, _ = a.CloseWorkSettings(ctx)
 }
 
 // CloseWorkSettings asks both official close controls, on the overlay first.

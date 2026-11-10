@@ -23,13 +23,14 @@ import (
 	"kimiworkplus.local/migration/internal/webtools"
 )
 
-const Version = "0.13.0-preview.1"
+const Version = "0.13.0-preview.2"
 
 type Endpoint struct {
 	URL     string `json:"url"`
 	Key     string `json:"key"`
 	PID     int    `json:"pid"`
 	Version string `json:"version"`
+	BuildID string `json:"buildId"`
 }
 type KeyStore interface {
 	Get(string) (string, error)
@@ -49,6 +50,18 @@ type Service struct {
 	mu          sync.RWMutex
 	discoveries map[string]core.Document
 	http        *http.Server
+	stop        context.CancelFunc
+	stopOnce    sync.Once
+}
+
+func (s *Service) SetStop(stop context.CancelFunc) { s.stop = stop }
+
+func (s *Service) stopDaemon() {
+	s.stopOnce.Do(func() {
+		if s.stop != nil {
+			s.stop()
+		}
+	})
 }
 
 func RandomKey() string {
@@ -59,11 +72,24 @@ func RandomKey() string {
 	return hex.EncodeToString(b)
 }
 func (s *Service) Start(port string, setup ...func() error) error {
+	previous, previousErr := ReadEndpoint(s.StateDir)
+	if port == "" {
+		if previousErr == nil {
+			port = previous.URL[len("http://127.0.0.1:"):]
+		}
+		if port == "" {
+			port = "0"
+		}
+	}
 	l, e := net.Listen("tcp4", "127.0.0.1:"+port)
 	if e != nil {
 		return e
 	}
-	s.Endpoint = Endpoint{URL: "http://" + l.Addr().String(), Key: RandomKey(), PID: os.Getpid(), Version: Version}
+	key := RandomKey()
+	if previousErr == nil {
+		key = previous.Key
+	}
+	s.Endpoint = Endpoint{URL: "http://" + l.Addr().String(), Key: key, PID: os.Getpid(), Version: Version, BuildID: BuildID}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32768}
 	for _, initialize := range setup {
 		if e = initialize(); e != nil {
@@ -174,7 +200,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/api/health" && r.Method == "GET" {
-		reply(w, 200, core.Document{"version": Version, "pid": os.Getpid(), "state": "running", "isolated": true})
+		reply(w, 200, core.Document{"version": Version, "buildId": BuildID, "pid": os.Getpid(), "state": "running", "isolated": true})
 		return
 	}
 	var input core.Document
@@ -203,7 +229,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := http.StatusOK
-	if r.URL.Path == "/api/actions" && r.Method == "POST" {
+	if (r.URL.Path == "/api/actions" || r.URL.Path == "/api/daemon/stop" || r.URL.Path == "/api/service") && r.Method == "POST" {
 		status = http.StatusAccepted
 	}
 	reply(w, status, out)
@@ -215,6 +241,8 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 			return s.State()
 		case "/api/providers":
 			return core.Providers(), nil
+		case "/api/service":
+			return s.lifecycleAction(ctx, core.Document{"action": "status-service"})
 		}
 	}
 	if method == "POST" {
@@ -231,6 +259,18 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 			return s.discover(ctx, in)
 		case "/api/model-search":
 			return s.search(in)
+		case "/api/service":
+			out, err := s.lifecycleAction(ctx, in)
+			if core.String(in["action"]) == "restart-daemon" {
+				go s.stopDaemon()
+			}
+			return out, err
+		case "/api/daemon/stop":
+			if s.stop == nil {
+				return nil, errors.New("daemon_stop_unavailable")
+			}
+			go s.stopDaemon()
+			return core.Document{"operation": core.Document{"action": "stop-daemon", "state": "stopping"}}, nil
 		}
 	}
 	expected := map[string]string{"/api/usage/query": "POST", "/api/usage/export": "GET", "/api/usage/clear": "POST", "/api/quota": "GET", "/api/quota/refresh": "POST", "/api/quota/sources": "POST"}
@@ -250,7 +290,7 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	}
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
-	d, _, e := s.Store.Update(core.String(in["revision"]), func(d core.Document) error {
+	d, rev, e := s.Store.Prepare(core.String(in["revision"]), func(d core.Document) error {
 		switch path {
 		case "/api/models":
 			if _, ok := in["models"].([]any); !ok {
@@ -283,6 +323,10 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	if e != nil {
 		return nil, e
 	}
+	d, _, e = s.Store.Commit(d, rev)
+	if e != nil {
+		return nil, e
+	}
 	if s.OnConfig != nil {
 		if e = s.OnConfig(d); e != nil {
 			return nil, e
@@ -300,7 +344,7 @@ func (s *Service) State() (core.Document, error) {
 	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
 	state := core.Document{
 		"schemaVersion": 1, "revision": rev, "capabilities": core.Document{"modelEditor": core.Document{"upstreamProtocol": true}},
-		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": core.Document{"mode": "preview", "state": "running"}, "updates": core.Document{"currentVersion": Version, "state": "not-checked"},
+		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": core.Document{"mode": "preview", "state": "running", "buildId": BuildID, "windowIndependent": true, "loginStartup": "manual"}, "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "preview-local"},
 		"gateway": core.Document{"state": "unavailable", "modelCount": 0, "activeRequests": 0}, "models": d["models"],
 		"connections": core.Document{"active": connections, "saved": connections, "restartRequired": false, "apply": core.Document{"state": "applied"}},
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},

@@ -56,7 +56,7 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	}
 	value := core.Document{}
 	for k, v := range in {
-		if k != "revision" && k != "documentRevision" && k != "translationRevision" {
+		if k != "revision" && k != "documentRevision" && k != "translationRevision" && k != "apiKey" {
 			value[k] = v
 		}
 	}
@@ -67,7 +67,22 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	b, _ := json.Marshal(settings)
 	var normalized map[string]any
 	_ = json.Unmarshal(b, &normalized)
-	d, _, e = s.Store.Update(rev, func(d core.Document) error { d["translation"] = normalized; return nil })
+	if supplied, ok := in["apiKey"].(string); ok && supplied != "" {
+		if s.Keys == nil {
+			return nil, errors.New("credentials_unavailable")
+		}
+		ref := "translation-" + RandomKey()
+		if err := s.Keys.Set(ref, supplied); err != nil {
+			return nil, errors.New("credentials_unavailable")
+		}
+		actual, err := s.Keys.Get(ref)
+		if err != nil || actual != supplied {
+			return nil, errors.New("credentials_readback_failed")
+		}
+		normalized["apiKeyEnv"] = ref
+	}
+	d["translation"] = normalized
+	d, _, e = s.Store.Commit(d, rev)
 	if e != nil {
 		return nil, e
 	}

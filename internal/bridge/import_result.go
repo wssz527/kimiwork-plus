@@ -6,7 +6,10 @@ import (
 )
 
 func importResultError(result kimi.ImportResult) error {
-	if result.OK {
+	if result.Applied {
+		return nil
+	}
+	if result.State == kimi.ImportStateWaitingLogin || result.State == kimi.ImportStateRequiresRestart || result.State == kimi.ImportStateAccepted {
 		return nil
 	}
 	if result.Reason != "" {

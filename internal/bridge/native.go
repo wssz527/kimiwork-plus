@@ -133,6 +133,7 @@ func (n *Native) watch(ctx context.Context) {
 				}
 			}
 			n.controller.Tick(ctx)
+			n.controller.ReconcileWithReadback(ctx)
 			n.mu.Unlock()
 			configObserved = n.reconcile(configObserved)
 		}
@@ -169,7 +170,7 @@ func (n *Native) State() core.Document {
 			operation[k] = v
 		}
 	}
-	out := core.Document{"kimiProcess": process, "integration": integration, "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components()}}
+	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components()}}
 	if d, _, e := n.service.Store.Read(); e == nil {
 		for k, v := range n.policies.State(d) {
 			out[k] = v
@@ -215,11 +216,15 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			state = "starting"
 		case "connect-kimi", "prepare-native":
 			var result kimi.ImportResult
-			result, err = n.controller.ImportModels(deadline)
+			result, err = n.controller.ImportModelsAuthorized(deadline)
 			if err == nil {
 				err = importResultError(result)
 			}
-			state = "prepared"
+			state = result.State
+			if state == "" || state == "accepted" || state == "applied" {
+				state = "prepared"
+			}
+			n.operation["result"] = result
 		case "apply-connections":
 			n.service.mutation.Lock()
 			d, _, e := n.service.Store.Read()

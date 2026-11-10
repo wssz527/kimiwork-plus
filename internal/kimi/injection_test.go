@@ -22,6 +22,15 @@ type fakePage struct {
 	attachFailure bool
 	navigateOn    bool
 
+	// actions models the official preload API the CDP actions call. It is off by
+	// default so every existing test keeps the behaviour it was written for.
+	actions      bool
+	importAPI    bool
+	hideSettings bool
+	settingsOpen bool
+	importReply  map[string]any
+	closeFails   bool
+
 	// observations
 	methods      []string
 	injections   int
@@ -32,6 +41,9 @@ type fakePage struct {
 	contextID    int
 	generation   int
 	bindingCalls int
+	openCalls    int
+	closeCalls   int
+	importCalls  int
 }
 
 func (p *fakePage) record(method string) {
@@ -56,13 +68,22 @@ func (p *fakePage) handle(write func(string)) func(string) {
 		result := map[string]any{}
 		switch request.Method {
 		case "Target.getTargets":
-			result["targetInfos"] = []any{
+			p.mu.Lock()
+			settingsOpen := p.settingsOpen
+			p.mu.Unlock()
+			targets := []any{
 				map[string]any{"targetId": "work-1", "type": "page", "url": "app://localhost/kimi-agent.html"},
 				map[string]any{"targetId": "chat-1", "type": "page", "url": "https://www.kimi.com/chat/abc-123"},
-				map[string]any{"targetId": "settings", "type": "page", "url": "app://localhost/work-settings.html"},
 				map[string]any{"targetId": "evil", "type": "page", "url": "https://www.kimi.com.evil.test/chat/abc"},
 				map[string]any{"targetId": "worker", "type": "worker", "url": "https://www.kimi.com/chat/abc"},
 			}
+			// The settings overlay only exists as a target once it is open, which
+			// is what a real desktop does: the page is created by openSettings.
+			if !p.hideSettings || settingsOpen {
+				targets = append(targets, map[string]any{"targetId": "settings", "type": "page",
+					"url": "app://localhost/work-settings.html"})
+			}
+			result["targetInfos"] = targets
 		case "Target.attachToTarget":
 			if p.attachFailure {
 				result = nil
@@ -116,6 +137,8 @@ func (p *fakePage) handle(write func(string)) func(string) {
 						"top": true, "structure": "matched", "blocks": 3, "seenBlocks": 3}
 				}
 				result["result"] = reply
+			case p.actions:
+				result["result"] = p.actionReply(request.SessionID, expression)
 			default:
 				result["result"] = nil
 			}
@@ -128,6 +151,51 @@ func (p *fakePage) handle(write func(string)) func(string) {
 func (p *fakePage) emit(write func(string), message map[string]any) {
 	encoded, _ := json.Marshal(message)
 	write(string(encoded))
+}
+
+// actionReply models the official preload API for the CDP actions. It is the
+// same surface main_test.go's fake child speaks, so the actions are exercised
+// through their real expressions rather than through a stub.
+func (p *fakePage) actionReply(sessionID, expression string) any {
+	switch {
+	case strings.Contains(expression, "typeof globalThis.clawBridgeAPI?.importByokModels"):
+		// Only the settings overlay carries the import API. The Work view has the
+		// settings *open* call; a fake that answered both from every page would
+		// hide the ordering the actions depend on.
+		return p.importAPI && sessionID == "session-settings"
+	case strings.Contains(expression, "importByokModels"):
+		p.mu.Lock()
+		p.importCalls++
+		reply := p.importReply
+		p.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"ok": true, "models": float64(2), "requiresRestart": false}
+		}
+		return reply
+	case strings.Contains(expression, "revealByok"):
+		return map[string]any{"available": true}
+	case strings.Contains(expression, "closeSettingsPage") || strings.Contains(expression, "closeKimiWorkSettingPage"):
+		p.mu.Lock()
+		p.closeCalls++
+		fails := p.closeFails
+		p.settingsOpen = false
+		p.mu.Unlock()
+		if fails {
+			return map[string]any{"asked": []any{}, "failed": []any{"overlay"}}
+		}
+		return map[string]any{"asked": []any{"overlay"}, "failed": []any{}}
+	case strings.Contains(expression, "openKimiWorkTab"):
+		return map[string]any{"asked": true, "failed": false}
+	case strings.Contains(expression, "openSettings"):
+		p.mu.Lock()
+		p.openCalls++
+		p.settingsOpen = true
+		p.mu.Unlock()
+		return true
+	case strings.Contains(expression, "visibilityState"):
+		return map[string]any{"visible": true, "painted": true, "text": 10, "open": false}
+	}
+	return nil
 }
 
 // harness wires a Pipe to a fake page through two pipes.

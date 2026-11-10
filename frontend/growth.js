@@ -267,7 +267,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     }
     const envReady = data.translation.environment?.keySet === true;
     text('tr-key-state', config.provider === 'custom'
-      ? envReady ? '当前宿主已提供此凭据变量；Key 不会回显。' : '当前宿主未提供此变量；请按已有宿主流程准备 Key，不能在页面明文补填。'
+      ? envReady ? '当前宿主已提供此凭据变量；Key 不会回显。' : '当前宿主未提供此变量；请在下方重新输入 Key 并保存。'
       : 'Bing / Google 使用现有翻译服务；不需要模型连接 Key。');
     text('tr-runtime', `运行状态：${data.translation.runtime?.state || '未报告'}。${data.translation.runtime?.warning || data.translation.runtime?.reason || '保存设置与运行采用是分开的状态。'}`);
     text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致');
@@ -294,12 +294,14 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       const data = getState();
       const res = await request('/api/translation', { method: 'POST', body: {
         ...draft, revision: data.revision, translationRevision: data.translation.revision,
+        ...($('tr-key').value ? { apiKey: $('tr-key').value } : {}),
       } });
       if (res.state) {
         local.trKey = JSON.stringify([res.state.translation.configured, res.state.translation.revision]);
         local.trDraft = { ...res.state.translation.configured };
       }
       await refresh({ silent: true });
+      $('tr-key').value = '';
       notify('翻译设置已保存；请按运行状态确认采用情况。', 'ok');
     } catch (error) { showError('tr-errors', errorText(error)); }
   }
@@ -502,7 +504,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     if (!web) { text('web-state', '本机适配服务尚未接入，请刷新面板状态。'); return; }
     $('web-provider').value = local.webDraft || web.provider || 'official';
     hidden('web-key-field', $('web-provider').value !== 'tavily');
-    text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : '尚未保存 Tavily Key。');
+    text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
     text('web-state', local.webResult?.message || web.message || `当前方式：${web.provider || 'official'}。测试与当前会话采用分开报告。`);
     hidden('svc-panel', $('web-provider').value !== 'native');
     text('web-draft', local.webResult
