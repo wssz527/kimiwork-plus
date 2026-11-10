@@ -5,8 +5,8 @@
 <key>CFBundleDisplayName</key><string>Kimi Work+</string>
 <key>CFBundleExecutable</key><string>KimiWorkPlus</string>
 <key>CFBundleIdentifier</key><string>dev.kimi-work-plus.preview</string>
-<key>CFBundleShortVersionString</key><string>0.13.0-preview.3</string>
-<key>CFBundleVersion</key><string>13.0.3</string>
+<key>CFBundleShortVersionString</key><string>0.13.0-preview.4</string>
+<key>CFBundleVersion</key><string>13.0.4</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>kimi-work-plus.icns</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>

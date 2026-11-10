@@ -23,7 +23,7 @@ import (
 	"kimiworkplus.local/migration/internal/webtools"
 )
 
-const Version = "0.13.0-preview.3"
+const Version = "0.13.0-preview.4"
 
 type Endpoint struct {
 	URL     string `json:"url"`

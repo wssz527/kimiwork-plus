@@ -196,6 +196,9 @@ func drain(ctx context.Context, transport DaemonTransport, stateDir string, time
 	}
 	health := transport.Health(ctx, endpoint)
 	if !health.Alive {
+		if health.Reason != "" {
+			return DrainResult{Reason: health.Reason, Detail: "The daemon's health could not be confirmed; no stop request was sent."}
+		}
 		return DrainResult{Drained: true}
 	}
 	if health.PID != endpoint.PID || health.BuildID != endpoint.BuildID {
@@ -214,6 +217,9 @@ func drain(ctx context.Context, transport DaemonTransport, stateDir string, time
 		}
 		probe := transport.Health(ctx, endpoint)
 		if !probe.Alive {
+			if probe.Reason != "" {
+				return DrainResult{Reason: probe.Reason, Detail: "The daemon accepted the stop, but its exit could not be confirmed."}
+			}
 			return DrainResult{Drained: true}
 		}
 		if probe.PID != endpoint.PID {

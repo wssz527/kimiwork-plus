@@ -17,6 +17,9 @@ type fakeTransport struct {
 	mu sync.Mutex
 
 	endpoint DaemonEndpoint
+	// endpointSequence models the replacement daemon's new private record.
+	endpointSequence []DaemonEndpoint
+	endpointCalls    int
 	// noEndpoint makes Endpoint report "no daemon record".
 	noEndpoint bool
 	// endpointErr overrides the Endpoint result.
@@ -31,13 +34,23 @@ type fakeTransport struct {
 }
 
 func (f *fakeTransport) Endpoint(string) (DaemonEndpoint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.endpointErr != nil {
 		return DaemonEndpoint{}, f.endpointErr
 	}
 	if f.noEndpoint {
 		return DaemonEndpoint{}, errEndpointUnavailable
 	}
-	return f.endpoint, nil
+	if len(f.endpointSequence) == 0 {
+		return f.endpoint, nil
+	}
+	index := f.endpointCalls
+	f.endpointCalls++
+	if index >= len(f.endpointSequence) {
+		index = len(f.endpointSequence) - 1
+	}
+	return f.endpointSequence[index], nil
 }
 
 func (f *fakeTransport) Stop(context.Context, DaemonEndpoint) error {
@@ -251,9 +264,12 @@ func TestDestructiveActionIsHandedToAnIndependentHelper(t *testing.T) {
 // back. This is the whole success path for a restart.
 func TestHelperDrainsThenReadsTheNewDaemonBack(t *testing.T) {
 	host := newFakeHost()
-	transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{
+	replacement := liveEndpoint()
+	replacement.PID = 5151
+	transport := &fakeTransport{endpointSequence: []DaemonEndpoint{liveEndpoint(), replacement}, healthSequence: []HealthResult{
 		{Alive: true, PID: 4242, BuildID: "build-a"}, // before
 		{Alive: false}, // after the stop
+		{Alive: true, PID: 5151, BuildID: "build-a"}, // actual replacement health
 	}}
 	controller, options := controllerFor(t, host, transport, "darwin")
 	ctx := context.Background()
@@ -444,33 +460,119 @@ func TestDrainTimeoutAndReplacementAreDistinct(t *testing.T) {
 	}
 }
 
-// A build mismatch in the serving daemon is a distinct, visible failure: a
-// restart that produces another build's daemon did not complete this change.
-func TestReadBackVerifiesTheServingBuild(t *testing.T) {
-	host := newFakeHost()
-	transport := &fakeTransport{endpoint: liveEndpoint()}
-	_, options := controllerFor(t, host, transport, "darwin")
-	manager, err := OpenManager(options.ManagerOptions)
+func TestStartRequiresRunningAndHealthyServingIdentity(t *testing.T) {
+	t.Run("not running", func(t *testing.T) {
+		host := newFakeHost()
+		transport := &fakeTransport{endpoint: liveEndpoint()}
+		controller, options := controllerFor(t, host, transport, "darwin")
+		if _, err := controller.Begin(context.Background(), OperationSpec{Action: OperationRegister}); err != nil {
+			t.Fatal(err)
+		}
+		operation, err := controller.Begin(context.Background(), OperationSpec{Action: OperationStartService})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.outputs["/bin/launchctl"] = []string{"", "", ""}
+		host.used["/bin/launchctl"] = 0
+		if err := runFastHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
+			t.Fatal(err)
+		}
+		dir, _ := ensureOperationDirectory(options.StateDir)
+		final, err := readOperationRecord(dir, operation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final.Phase != PhaseFailed || final.Reason != "service_not_running" || final.ServingBuildID != "" {
+			t.Fatalf("a stopped daemon was reported as started: %+v", final)
+		}
+	})
+	t.Run("health build mismatch", func(t *testing.T) {
+		host := newFakeHost()
+		transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{
+			{Alive: true, PID: 4242, BuildID: "build-b"},
+		}}
+		controller, options := controllerFor(t, host, transport, "darwin")
+		if _, err := controller.Begin(context.Background(), OperationSpec{Action: OperationRegister}); err != nil {
+			t.Fatal(err)
+		}
+		operation, err := controller.Begin(context.Background(), OperationSpec{Action: OperationStartService})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.outputs["/bin/launchctl"] = []string{"", "",
+			"gui/501/dev.kimi-work-plus.preview.daemon = {\n\tstate = running\n\tpid = 4242\n}\n"}
+		host.used["/bin/launchctl"] = 0
+		if err := runFastHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
+			t.Fatal(err)
+		}
+		dir, _ := ensureOperationDirectory(options.StateDir)
+		final, err := readOperationRecord(dir, operation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final.Phase != PhaseFailed || final.Reason != "service_serving_build_mismatch" || final.ServingBuildID != "build-b" {
+			t.Fatalf("the caller's build replaced the actual health response: %+v", final)
+		}
+	})
+}
+
+func TestHealthUnknownDoesNotConfirmDrain(t *testing.T) {
+	t.Run("initial probe", func(t *testing.T) {
+		transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{{Reason: "daemon_health_unreachable"}}}
+		result := drain(context.Background(), transport, t.TempDir(), time.Second, newClock().Now, newClock().Sleep)
+		if result.Drained || result.Reason != "daemon_health_unreachable" || transport.stopCalls != 0 {
+			t.Fatalf("unknown health was treated as stopped: %+v", result)
+		}
+	})
+	t.Run("after accepted stop", func(t *testing.T) {
+		host := newFakeHost()
+		transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{
+			{Alive: true, PID: 4242, BuildID: "build-a"},
+			{Reason: "daemon_health_refused"},
+		}}
+		controller, options := controllerFor(t, host, transport, "darwin")
+		if _, err := controller.Begin(context.Background(), OperationSpec{Action: OperationRegister}); err != nil {
+			t.Fatal(err)
+		}
+		operation, err := controller.Begin(context.Background(), OperationSpec{Action: OperationUninstall})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.commands = nil
+		if err := runFastHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
+			t.Fatal(err)
+		}
+		dir, _ := ensureOperationDirectory(options.StateDir)
+		final, err := readOperationRecord(dir, operation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final.Phase != PhaseFailed || final.Reason != "daemon_health_refused" || final.Drained || final.Forced {
+			t.Fatalf("a refused health response was treated as drained: %+v", final)
+		}
+		for _, line := range host.commandLines() {
+			if strings.Contains(line, "bootout") {
+				t.Fatalf("an unconfirmed drain continued to bootout: %s", line)
+			}
+		}
+	})
+}
+
+func runFastHelperForTest(t *testing.T, host *fakeHost, stateDir, id string, transport DaemonTransport) error {
+	t.Helper()
+	dir, err := ensureOperationDirectory(stateDir)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	state := ManagerState{Kind: "launchd", Label: ServiceLabel, Registered: true, Running: true,
-		RegisteredBuildID: "build-b", CurrentBuildID: "build-a", Stale: true,
-		Reason: "registered_for_another_build"}
-	if reason, _ := verifyOutcome(OperationSpec{Action: OperationStartService}, state); reason != "service_registered_for_another_build" {
-		t.Fatalf("stale build was accepted: %q", reason)
+	request, err := readOperationRequest(dir, id)
+	if err != nil {
+		return err
 	}
-	// The daemon's own health answer is what names the serving build; a
-	// definition cannot stand in for it.
-	operation := ServiceOperation{ID: strings.Repeat("a", 32), Action: OperationStartService,
-		Phase: PhaseRunning, ExpectedBuildID: "build-a", StartedAt: time.Now(), UpdatedAt: time.Now()}
-	executor := helperExecutor{dir: t.TempDir(), id: operation.ID, request: OperationRequest{
-		ID: operation.ID, Action: OperationStartService, BuildID: "build-a"},
-		transport: transport, manager: options.ManagerOptions}
-	if err := writeOperation(executor.dir, operation); err != nil {
-		t.Fatal(err)
+	request.StepTimeoutMS = 1
+	if err := writePrivateJSON(requestPath(dir, id), request); err != nil {
+		return err
 	}
-	_ = manager
+	return runHelperForTest(t, host, stateDir, id, transport)
 }
 
 func operationHasStep(operation ServiceOperation, name string) bool {

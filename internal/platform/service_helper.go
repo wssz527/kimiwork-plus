@@ -343,19 +343,27 @@ func (e *helperExecutor) keepState(operation *ServiceOperation, manager Manager)
 		return
 	}
 	operation.State = &state
-	operation.ServingBuildID = state.CurrentBuildID
 }
 
 func (e *helperExecutor) succeed(operation *ServiceOperation, manager Manager) {
-	state := e.readBack(operation, manager)
+	state, health, servingErr := e.readBack(operation, manager)
 	if state.Kind != "" {
 		operation.State = &state
-		operation.ServingBuildID = state.CurrentBuildID
+	}
+	if health.BuildID != "" {
+		operation.ServingBuildID = health.BuildID
 	}
 	if reason, detail := verifyOutcome(e.request.spec(), state); reason != "" {
 		operation.Phase = PhaseFailed
 		operation.Reason = reason
 		operation.Detail = detail
+		e.update(operation)
+		return
+	}
+	if servingErr != nil {
+		operation.Phase = PhaseFailed
+		operation.Reason = reasonOf(servingErr)
+		operation.Detail = detailOf(servingErr)
 		e.update(operation)
 		return
 	}
@@ -367,11 +375,14 @@ func (e *helperExecutor) succeed(operation *ServiceOperation, manager Manager) {
 
 // readBack waits briefly for the platform to settle, then reads the state. A
 // change is not complete until the platform agrees, so the read-back is not
-// optional.
-func (e *helperExecutor) readBack(operation *ServiceOperation, manager Manager) ManagerState {
+// optional. Starting or restarting additionally requires the replacement
+// daemon's own health response to confirm its identity.
+func (e *helperExecutor) readBack(operation *ServiceOperation, manager Manager) (ManagerState, HealthResult, error) {
 	timeout := requestDuration(e.request.StepTimeoutMS, 20*time.Second)
 	deadline := time.Now().Add(timeout)
 	var state ManagerState
+	var health HealthResult
+	var servingErr error
 	for {
 		ctx, cancel := contextWithTimeout(minDuration(5*time.Second, timeout))
 		read, err := manager.Status(ctx)
@@ -379,14 +390,50 @@ func (e *helperExecutor) readBack(operation *ServiceOperation, manager Manager) 
 		if err == nil {
 			state = read
 			if !needsSettlement(e.request.spec(), read) {
-				return read
+				switch e.request.Action {
+				case OperationStartService, OperationRestart:
+					health, servingErr = e.servingHealth(read)
+					if servingErr == nil {
+						return read, health, nil
+					}
+					if reason := reasonOf(servingErr); reason == "service_serving_identity_mismatch" || reason == "service_serving_build_mismatch" {
+						return read, health, servingErr
+					}
+				default:
+					return read, HealthResult{}, nil
+				}
 			}
+		} else {
+			servingErr = err
 		}
 		if !time.Now().Before(deadline) {
-			return state
+			return state, health, servingErr
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (e *helperExecutor) servingHealth(state ManagerState) (HealthResult, error) {
+	endpoint, err := e.transport.Endpoint(e.request.StateDir)
+	if err != nil {
+		return HealthResult{}, err
+	}
+	ctx, cancel := contextWithTimeout(minDuration(5*time.Second, e.request.stepTimeout()))
+	defer cancel()
+	health := e.transport.Health(ctx, endpoint)
+	if health.Reason != "" {
+		return health, errors.New(health.Reason)
+	}
+	if !health.Alive {
+		return health, errors.New("service_daemon_not_ready")
+	}
+	if endpoint.PID <= 0 || health.PID != endpoint.PID || (state.PID > 0 && state.PID != health.PID) {
+		return health, errors.New("service_serving_identity_mismatch")
+	}
+	if endpoint.BuildID != e.request.BuildID || health.BuildID != e.request.BuildID {
+		return health, errors.New("service_serving_build_mismatch")
+	}
+	return health, nil
 }
 
 func minDuration(left, right time.Duration) time.Duration {
@@ -447,6 +494,9 @@ func verifyOutcome(spec OperationSpec, state ManagerState) (reason, detail strin
 	if state.Stale {
 		return "service_registered_for_another_build", "The definition belongs to a different build."
 	}
+	if (spec.Action == OperationStartService || spec.Action == OperationRestart) && !state.Running {
+		return "service_not_running", "The platform command finished, but no running daemon was read back."
+	}
 	return "", ""
 }
 
@@ -459,7 +509,6 @@ func (e *helperExecutor) fail(operation *ServiceOperation, reason, detail string
 	operation.Detail = detail
 	if state.Kind != "" {
 		operation.State = &state
-		operation.ServingBuildID = state.CurrentBuildID
 	}
 	e.update(operation)
 }

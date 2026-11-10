@@ -126,6 +126,14 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 		if e != nil {
 			return nil, e
 		}
+		saved, e := core.TranslationSettings(d["translation"])
+		if e != nil {
+			return nil, e
+		}
+		c.APIKeyRef = ""
+		if c == translationPublicConfig(saved) {
+			c.APIKeyRef = saved.APIKeyRef
+		}
 		const original = "Open `src/app.js`, read https://example.test/docs and update config.json before the next step."
 		translated, e := core.NewTranslator().Translate(ctx, original, c, s.translationKey(d, c), []string{"src/app.js", "https://example.test/docs", "config.json"})
 		if e != nil {
