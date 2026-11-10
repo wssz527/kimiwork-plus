@@ -26,9 +26,12 @@ type TranslationConfig struct {
 	CustomEndpoint string `json:"customEndpoint"`
 	CustomModel    string `json:"customModel"`
 	APIKeyEnv      string `json:"apiKeyEnv"`
+	APIKeyRef      string `json:"apiKeyRef,omitempty"`
 }
 
 var languages = map[string][3]string{"zh": {"zh-Hans", "zh-CN", "Simplified Chinese"}, "en": {"en", "en", "English"}, "ja": {"ja", "ja", "Japanese"}, "ko": {"ko", "ko", "Korean"}, "es": {"es", "es", "Spanish"}, "fr": {"fr", "fr", "French"}, "de": {"de", "de", "German"}, "ru": {"ru", "ru", "Russian"}}
+
+var translationRefPattern = regexp.MustCompile(`^translation-[a-f0-9]{64}$`)
 
 func TranslationSettings(v any) (TranslationConfig, error) {
 	c := TranslationConfig{Provider: "bing", TargetLanguage: "zh", View: "translated", APIKeyEnv: "KIMI_WORK_TRANSLATION_API_KEY"}
@@ -38,7 +41,7 @@ func TranslationSettings(v any) (TranslationConfig, error) {
 			return c, errors.New("invalid_translation_config")
 		}
 		for k := range obj {
-			if !strings.Contains(" enabled provider targetLanguage view customEndpoint customModel apiKeyEnv ", " "+k+" ") {
+			if !strings.Contains(" enabled provider targetLanguage view customEndpoint customModel apiKeyEnv apiKeyRef ", " "+k+" ") {
 				return c, errors.New("invalid_translation_config")
 			}
 		}
@@ -46,6 +49,13 @@ func TranslationSettings(v any) (TranslationConfig, error) {
 		if json.Unmarshal(b, &c) != nil {
 			return c, errors.New("invalid_translation_config")
 		}
+	}
+	if c.APIKeyRef == "" && translationRefPattern.MatchString(c.APIKeyEnv) {
+		c.APIKeyRef = c.APIKeyEnv
+		c.APIKeyEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+	}
+	if c.APIKeyRef != "" && !translationRefPattern.MatchString(c.APIKeyRef) {
+		return c, errors.New("invalid_translation_config")
 	}
 	if c.Provider != "bing" && c.Provider != "google" && c.Provider != "custom" {
 		return c, errors.New("invalid_translation_config")

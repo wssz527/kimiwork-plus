@@ -15,7 +15,19 @@ func translationRevision(c core.TranslationConfig) string {
 	_ = json.Unmarshal(b, &d)
 	return core.Revision(d)
 }
+func translationPublicConfig(c core.TranslationConfig) core.TranslationConfig {
+	c.APIKeyRef = ""
+	return c
+}
+
 func (s *Service) translationKey(d core.Document, c core.TranslationConfig) string {
+	if s.Keys == nil {
+		return ""
+	}
+	if c.APIKeyRef != "" {
+		key, _ := s.Keys.Get(c.APIKeyRef)
+		return key
+	}
 	for _, v := range core.Rows(d["connections"]) {
 		row := core.Object(v)
 		if row["apiKeyEnv"] == c.APIKeyEnv {
@@ -29,7 +41,7 @@ func (s *Service) translationKey(d core.Document, c core.TranslationConfig) stri
 	}
 	return ""
 }
-func (s *Service) saveTranslation(in core.Document) (any, error) {
+func (s *Service) saveTranslation(in core.Document) (result any, err error) {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
 	d, rev, e := s.Store.Read()
@@ -56,7 +68,7 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	}
 	value := core.Document{}
 	for k, v := range in {
-		if k != "revision" && k != "documentRevision" && k != "translationRevision" && k != "apiKey" {
+		if k != "revision" && k != "documentRevision" && k != "translationRevision" && k != "apiKey" && k != "apiKeyRef" {
 			value[k] = v
 		}
 	}
@@ -64,24 +76,38 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	if e != nil {
 		return nil, e
 	}
+	if current.APIKeyEnv == settings.APIKeyEnv {
+		settings.APIKeyRef = current.APIKeyRef
+	}
 	b, _ := json.Marshal(settings)
 	var normalized map[string]any
 	_ = json.Unmarshal(b, &normalized)
+	staged := ""
+	defer func() {
+		if err != nil && staged != "" {
+			if deleteErr := s.Keys.Delete(staged); deleteErr != nil {
+				err = errors.New("credentials_cleanup_failed")
+				result = nil
+			}
+		}
+	}()
 	if supplied, ok := in["apiKey"].(string); ok && supplied != "" {
 		if s.Keys == nil {
 			return nil, errors.New("credentials_unavailable")
 		}
 		ref := "translation-" + RandomKey()
+		staged = ref
 		if err := stageCredential(s.Keys, ref, supplied); err != nil {
 			return nil, err
 		}
-		normalized["apiKeyEnv"] = ref
+		normalized["apiKeyRef"] = ref
 	}
 	d["translation"] = normalized
 	d, _, e = s.Store.Commit(d, rev)
 	if e != nil {
 		return nil, e
 	}
+	staged = ""
 	if s.OnConfig != nil {
 		if e = s.OnConfig(d); e != nil {
 			return nil, e

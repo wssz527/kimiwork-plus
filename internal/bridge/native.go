@@ -184,7 +184,7 @@ func (n *Native) State() core.Document {
 		if e == nil {
 			c, e := core.TranslationSettings(d["translation"])
 			if e == nil {
-				out["translation"] = core.Document{"configured": c, "revision": translationRevision(c), "environment": core.Document{"keySet": n.service.translationKey(d, c) != ""}, "runtime": status.Translation}
+				out["translation"] = core.Document{"configured": translationPublicConfig(c), "revision": translationRevision(c), "environment": core.Document{"keySet": n.service.translationKey(d, c) != ""}, "runtime": status.Translation}
 			}
 		}
 	}

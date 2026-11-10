@@ -397,7 +397,7 @@ func (s *Service) State() (core.Document, error) {
 		runtimeState = "disabled"
 		reason = "translation_disabled"
 	}
-	state["translation"] = core.Document{"configured": settings, "revision": translationRevision(settings), "environment": core.Document{"keySet": s.translationKey(d, settings) != ""}, "runtime": core.Document{"state": runtimeState, "reason": reason}}
+	state["translation"] = core.Document{"configured": translationPublicConfig(settings), "revision": translationRevision(settings), "environment": core.Document{"keySet": s.translationKey(d, settings) != ""}, "runtime": core.Document{"state": runtimeState, "reason": reason}}
 	core.Object(state["gateway"])["url"] = s.Endpoint.URL + "/v1"
 	if s.NativeState != nil {
 		for k, v := range s.NativeState() {
