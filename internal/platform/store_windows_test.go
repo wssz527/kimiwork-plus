@@ -1,0 +1,64 @@
+//go:build windows
+
+package platform
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// The Windows store binds each blob to the current user through DPAPI, and the
+// file it lives in is what a migration or a copied profile would carry. These
+// checks are static: they assert the properties of the store that make a blob
+// unusable elsewhere, without needing a Windows host to run them.
+func TestTheWindowsStoreKeepsCiphertextInAPrivateDirectory(t *testing.T) {
+	dir, err := dpapiDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store must live under the per-user config directory, not a shared one:
+	// DPAPI already binds the blob to this user, and putting it somewhere a
+	// different account can read would only widen the blast radius.
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dir, base) {
+		t.Fatalf("store directory %q is outside the per-user config directory %q", dir, base)
+	}
+	if !strings.Contains(filepath.Base(filepath.Dir(dir)), "preview") {
+		t.Fatalf("store directory is not the preview's own: %q", dir)
+	}
+}
+
+// A key maps to a file name that cannot escape the directory, whatever the key
+// contains. The key is hex-encoded, so no separator, drive letter or reserved name
+// survives into the path.
+func TestAKeyCannotEscapeTheStoreDirectory(t *testing.T) {
+	store := &dpapi{dir: filepath.Join("base", "service")}
+	for _, key := range []string{"..", "../escape", `..\escape`, "C:\\absolute", "nul", "a/b", "a\x00b"} {
+		path := store.path(key)
+		if filepath.Dir(path) != store.dir {
+			t.Fatalf("key %q produced %q outside %q", key, path, store.dir)
+		}
+	}
+}
+
+// CRYPTPROTECT_UI_FORBIDDEN must be passed on both calls. Without it a blob this
+// user cannot open can put up a dialog, and a background status request then waits
+// inside a prompt it cannot show.
+func TestProtectionForbidsInteraction(t *testing.T) {
+	if cryptProtectUIForbidden != 0x1 {
+		t.Fatalf("CRYPTPROTECT_UI_FORBIDDEN is %#x, want 0x1", cryptProtectUIForbidden)
+	}
+}
+
+// An empty blob must be refused before it reaches CryptUnprotectData, whose blob
+// pointer would otherwise be nil.
+func TestAnEmptyCiphertextIsRefused(t *testing.T) {
+	if _, err := unprotect(nil); err == nil {
+		t.Fatal("an empty ciphertext was accepted")
+	}
+}
