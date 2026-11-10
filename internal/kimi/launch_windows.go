@@ -91,9 +91,9 @@ func inheritablePipeHandle(file *os.File, name string) (syscall.Handle, error) {
 // CDP disconnect: DevToolsPipeHandler's reader sees EOF and posts its
 // on_disconnect closure, which in Electron quits the browser.
 //
-// This is a request, not a kill. If the child does not end itself, Stop escalates
-// to Kill after the caller's timeout, and the caller learns that from the
-// timeout rather than from a silent success.
+// This is a disconnect request, not a kill. Production Stop reports a child that
+// does not exit so the user can close it normally; only test stand-ins may opt
+// into forced cleanup after the caller's timeout.
 func requestChildStop(child *Child) {
 	if child.writeTo == nil {
 		return

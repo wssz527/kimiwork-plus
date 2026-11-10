@@ -689,8 +689,9 @@ alone means "works".
 `Child.Stop` asks the child to end through `requestChildStop`: SIGINT on Unix,
 and closing the parent's command-pipe end on Windows, which is the documented CDP
 disconnect (`DevToolsPipeHandler` sees EOF and runs its `on_disconnect`, which in
-Electron quits the browser). `Kill` remains the escalation after the caller's
-timeout, so a child that ignores both is reported rather than silently "stopped".
+Electron quits the browser). Production `Child.Stop` returns
+`kimi_normal_exit_required` after its timeout instead of killing the official
+application. Only a test stand-in may explicitly allow forced cleanup.
 
 The fake child in `main_test.go` reads the same `--remote-debugging-io-pipes`
 switch, so a Windows host runs the production handover instead of a test-only

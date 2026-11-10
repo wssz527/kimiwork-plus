@@ -31,6 +31,7 @@ func startFakeChild(t *testing.T) (*Child, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	child.allowForceStop = true
 	t.Cleanup(func() { _ = child.Stop(3 * time.Second) })
 	return child, profile
 }

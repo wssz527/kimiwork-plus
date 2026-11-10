@@ -51,8 +51,9 @@ type Child struct {
 	exit     ExitState
 	exitWait chan struct{}
 
-	mu      sync.Mutex
-	stopped bool
+	mu             sync.Mutex
+	stopped        bool
+	allowForceStop bool
 }
 
 // ExitState records how the child ended.
@@ -305,14 +306,10 @@ func childEnvironment(options LaunchOptions) []string {
 	return out
 }
 
-// Stop ends the child. It never targets any other process: only the pid this
-// handle started is signalled.
-//
-// The polite request is platform-specific (see requestChildStop): a POSIX child
-// gets SIGINT, and a Windows child is told by closing the command pipe, which is
-// the documented CDP disconnect. Either way the child ends itself, and Kill is
-// only the escalation after the caller's timeout. A child that ignores both is
-// reported by the timeout returning, not silently "stopped".
+// Stop asks only the child owned by this handle to end. A production child that
+// does not answer the polite request must be exited normally by the user; its
+// ownership as a child is not an authorization to kill it. Test stand-ins may
+// explicitly allow force-stop so their own cleanup remains bounded.
 func (c *Child) Stop(timeout time.Duration) error {
 	c.mu.Lock()
 	if c.stopped {
@@ -330,6 +327,9 @@ func (c *Child) Stop(timeout time.Duration) error {
 	case <-c.exitWait:
 		return nil
 	case <-time.After(timeout):
+	}
+	if !c.allowForceStop {
+		return errors.New("kimi_normal_exit_required")
 	}
 	if err := c.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
