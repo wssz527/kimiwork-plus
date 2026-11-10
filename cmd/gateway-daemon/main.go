@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	if code, handled := platform.RunHelperFromArgs(os.Args); handled {
+		os.Exit(code)
+	}
 	if len(os.Args) > 1 && os.Args[1] == kimi.ContractWorkerFlag {
 		os.Exit(kimi.RunContractWorker(os.Stdin, os.Stdout))
 	}

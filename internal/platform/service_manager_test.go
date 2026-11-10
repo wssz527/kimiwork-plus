@@ -359,16 +359,32 @@ func TestAFailedStepAbortsThePlan(t *testing.T) {
 	}
 }
 
+// Registering is a file operation. It must not bootstrap the job: a launchd call
+// here would make the daemon start before the user asked, which is exactly the
+// "installed means running" mistake the product avoids.
+func TestRegisterDoesNotCallLaunchd(t *testing.T) {
+	host := newFakeHost()
+	manager, _ := managerFor(t, "darwin", host)
+	if _, err := manager.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range host.commandLines() {
+		if strings.Contains(line, "/bin/launchctl bootstrap") {
+			t.Fatalf("Register bootstrapped the job: %s", line)
+		}
+	}
+}
+
 // A step marked best-effort must not abort the plan: booting out a job that is
 // not loaded is normal.
 func TestABestEffortStepDoesNotAbortThePlan(t *testing.T) {
 	host := newFakeHost()
 	manager, options := managerFor(t, "darwin", host)
-	// The first launchctl call is bootout, which fails when nothing is loaded.
+	// Every launchctl call fails, which is what an unloaded job looks like.
 	host.failOn["/bin/launchctl"] = errors.New("Could not find service")
-	// Register must still fail, because its bootstrap step is not best-effort.
-	if _, err := manager.Register(context.Background()); err == nil {
-		t.Fatal("Register ignored a failing bootstrap")
+	// Start is not best-effort, so a failing kickstart must be reported.
+	if _, err := manager.Start(context.Background()); err == nil {
+		t.Fatal("Start ignored a failing kickstart")
 	}
 	// Uninstall marks every step best-effort, so it completes and removes the file.
 	host.files[definitionPathFor("darwin", options.Home)] = []byte("plist")
