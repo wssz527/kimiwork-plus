@@ -622,3 +622,213 @@ configuration file appears or changes. File-level tests cover delayed creation,
 no-op observations and preservation of foreign values; real kernel reload is
 still not established. Remote companion/updater and old Electron safeStorage
 compatibility remain outside the implemented equivalence boundary.
+
+---
+
+# Round 7 (Phase 2, worker B): Windows transport, service lifecycle, credential order
+
+Scope of this round: `internal/platform/**`, `internal/kimi/launch*.go`,
+`proc_*`, `resident_*`, `discover_*`. `controller.go`, `cdp_actions.go`,
+`native_work.go`, `cmd/`, `internal/bridge`, `frontend/` and `build/` were not
+modified.
+
+## 31. Windows CDP transport — implemented, not yet run on Windows
+
+`StartKimi` no longer assumes `exec.Cmd.ExtraFiles` works everywhere. It builds
+the two pipes, then calls a platform seam:
+
+```go
+prepareManagedChild(command *exec.Cmd, pipes launchPipes) (extraArgs []string, err error)
+```
+
+| Platform | Mechanism | Arguments added |
+|---|---|---|
+| `!windows` | `ExtraFiles[0]=fd3` (commands), `ExtraFiles[1]=fd4` (responses) + `Setpgid` | none |
+| `windows` | both child ends inherit by value via `SysProcAttr.AdditionalInheritedHandles` | `--remote-debugging-io-pipes=<read>,<write>` |
+
+Why the Windows path is this and not "ExtraFiles with different numbers" — all
+checked against source on 2026-11-10:
+
+1. `os/exec` documents `ExtraFiles` as unsupported on Windows.
+2. `content/public/browser/devtools_agent_host.h` defines `kReadFD = 3`,
+   `kWriteFD = 4` for every platform, and
+   `StartRemoteDebuggingPipeHandler` overrides them **on Windows only** when
+   `--remote-debugging-io-pipes` is non-empty.
+3. `content/browser/devtools/devtools_agent_host_impl.cc` `AdoptHandle()`
+   requires `GetFileType(handle) == FILE_TYPE_PIPE` and then calls
+   `_open_osfhandle(handle, flags)`. The value is a real pipe **HANDLE**, and it
+   works because inherited handles keep the parent's numeric value in the child.
+4. `content/public/common/content_switches.cc` documents the value as "a comma
+   separated list of two pipe handles serialized as unsigned integers".
+5. `electron/shell/browser/electron_browser_main_parts.cc` at v43.7.7 — the
+   framework inside the installed Kimi 3.2.25 — calls
+   `StartRemoteDebuggingPipeHandler` on `--remote-debugging-pipe` with no
+   Electron-specific override of that logic.
+6. The switch exists unchanged in Chromium 123, 140 and 150, with no feature
+   flag gating it.
+
+What the Windows launcher refuses rather than guesses:
+
+- a child end whose `GetFileType` is not `FILE_TYPE_PIPE`;
+- a handle value above `2^32-1`, which Chromium's `uint32` parser would truncate
+  into a different handle;
+- inheriting anything beyond those two handles (the list is exactly two entries,
+  so `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` restricts inheritance instead of
+  widening it).
+
+`ManagedChildConfigured()` is no longer a hard-coded platform list. It reads:
+
+```go
+transport := kimi.ManagedTransportInfo()
+// Kind: "fd-pipe" | "handle-pipe"
+// Supported, Verified, Reason, Detail
+```
+
+`Verified` is false on **both** platforms: Unix has only been exercised with a
+stand-in child that speaks the same protocol, and Windows has never run on a
+Windows host. A panel must render `Supported` and `Verified` separately; neither
+alone means "works".
+
+`Child.Stop` asks the child to end through `requestChildStop`: SIGINT on Unix,
+and closing the parent's command-pipe end on Windows, which is the documented CDP
+disconnect (`DevToolsPipeHandler` sees EOF and runs its `on_disconnect`, which in
+Electron quits the browser). `Kill` remains the escalation after the caller's
+timeout, so a child that ignores both is reported rather than silently "stopped".
+
+The fake child in `main_test.go` reads the same `--remote-debugging-io-pipes`
+switch, so a Windows host runs the production handover instead of a test-only
+shortcut.
+
+**Windows gap that remains:** no Windows host was available. The code compiles,
+`go test -c` produces a Windows test binary, and the handle rules are unit
+tested, but nothing here is a claim of Windows runtime behaviour. The first
+Windows run must confirm: the child starts, one `Target.getTargets` answers over
+the pipe, the window appears, and `Child.Stop` ends it.
+
+## 32. A lost transport is reported, never "recovered"
+
+```go
+lost, ok := child.TransportLost()
+// lost.Recoverable == false, always
+// lost.Reason      == "managed_child_restart_required"
+// lost.ChildAlive  diagnostic only
+// lost.Exit        recorded exit when the child ended
+```
+
+The descriptors were handed to the child at `exec`; there is no protocol for a
+second parent to claim them again. So this package does not implement, promise or
+imply reattachment. When the child is still alive the detail tells the user to
+quit it normally and start again from the panel; when it has exited, the exit
+state is reported. Nothing copies PID metadata to fake a resumed session.
+
+## 33. `platform.Manager` — operating the service, not printing commands
+
+```go
+manager, err := platform.OpenManager(platform.ManagerOptions{
+    Binary: abs, StateDir: abs, LogPath: abs,
+    Port: "43117",        // fixed port keeps an imported official URL working
+    BuildID: buildID,     // provenance of the definition
+})
+state, err := manager.Register(ctx)   // writes the definition, login start OFF
+state, err := manager.Enable(ctx)     // the only path that turns login start on
+state, err := manager.Disable(ctx)    // off, definition kept
+state, err := manager.Start(ctx)      // start now
+state, err := manager.Stop(ctx)       // ask the daemon to end; official Kimi untouched
+state, err := manager.Status(ctx)     // read-only
+state, err := manager.Uninstall(ctx)  // remove definition + provenance record
+desc,  err := manager.Describe(true)  // pure: what would change, and why
+```
+
+`ManagerState` keeps three answers apart, because they are three different user
+questions:
+
+| Field | Means |
+|---|---|
+| `Registered` | a definition exists on this machine |
+| `Enabled` | it will start when the user logs in |
+| `Running` | the daemon is up now |
+
+`Registered && !Enabled` is the normal resting state. Collapsing these is how a
+product adds a login item without asking.
+
+| Platform | Definition | Login start is |
+|---|---|---|
+| macOS | LaunchAgent in `~/Library/LaunchAgents`, `gui/<uid>` domain, no elevation | `<key>RunAtLoad</key>` |
+| Windows | `schtasks /Create /SC ONLOGON /RL LIMITED`, then `/DISABLE` in the same plan | task `Enabled` |
+
+`KeepAlive` is false on both: a crashed daemon is reported, not restarted in a
+loop that hides the failure. schtasks has no "create disabled" form, which is why
+`Register` creates the task and disables it in one action.
+
+A definition written by a different build is `Stale` with
+`registered_for_another_build` and is **never** rewritten behind the user's back;
+`Status` reports it and the user decides. The build identity lives in the plist's
+`BuildID` key on macOS, and in `<stateDir>/service-definition.json` on Windows,
+because schtasks has no metadata field that round-trips.
+
+Every side effect goes through `ManagerHost`, so the tests drive both plans on
+either host and never register, load or start a real service.
+
+**What this does not do:** it does not implement normal-restart port retention
+end to end (the daemon side is the main session's), it does not drain in-flight
+gateway requests, and it does not touch the official Kimi application. `Port` is
+passed through so a fixed endpoint is possible; choosing it is the caller's
+decision.
+
+## 34. Credential order: stage, verify, then switch
+
+```go
+ref, err := platform.ReplaceValue(store, newKey, func(ref string) error {
+    return commitConfigReference(ref)   // caller's own config revision
+})
+```
+
+`Transaction` writes the value under a fresh immutable reference and reads it
+back **before** any config can name it. A read-back that differs is a hard
+failure that deletes its own reference; a failed config switch leaves the
+currently active reference untouched. `Close` is safe after `Commit` and safe
+twice, so a deferred `Close` cannot delete a live key.
+
+```go
+probe := platform.Probe(store, key)
+// present | missing | access-denied | unavailable
+```
+
+`missing` and `access-denied` are separate states on purpose: the first is a
+first-run screen, the second is fixed only by re-saving the key. Merging them is
+how a user ends up with no idea why a working key stopped working. An
+access-denied read returns immediately — no retry, no wait — so a background
+status call cannot sit inside an authorisation prompt it is unable to show.
+
+`ErrCredentialWriteDenied` is distinct from `ErrCredentialAccessDenied`: a denied
+write is usually a locked or full store, a denied read is an ACL only the user can
+replace. There is still no plaintext fallback and no old-safeStorage decryption.
+
+## 35. Round 7 evidence
+
+| Check | Result |
+|---|---|
+| `go test ./internal/kimi ./internal/platform` | pass |
+| `go test -race ./internal/kimi ./internal/platform` | pass |
+| `go vet ./internal/kimi ./internal/platform` | clean |
+| cross build `internal/...` + `cmd/gateway-daemon` for darwin/arm64, darwin/amd64, windows/amd64, linux/amd64 with `CGO_ENABLED=0` | pass |
+| `GOOS=windows go test -c` for `internal/kimi`, `internal/platform` | pass |
+| transport tests | 5: switch format, malformed values rejected, Supported≠Verified, real pipe round trip, only the platform's own arguments |
+| transport-lost tests | 3: live pipe not reported, disposed pipe → `restart_required` with `Recoverable=false`, exited child reports its exit |
+| service manager tests | 13, both platforms: Register leaves login start off, only Enable turns it on, Uninstall removes definition and record, stale build reported and not rewritten, missing service is not an error, record alone is not a service, disabled task reports `enabled=false`, launchctl parsing is conservative, a failed step aborts, a best-effort step does not, Describe has no side effect, port reaches the definition, bad options refused |
+| credential transaction tests | 9: stage+readback, discard on Close, survive Commit, mismatched readback leaves nothing, denied write is a denial, failed switch keeps the old reference, commit after switch, probe states, re-save over an unreadable item |
+
+## 36. What is still not proven (round 7)
+
+- **Windows transport has never run on Windows.** Compilation and the handle
+  rules are evidence; runtime behaviour is not. First run must confirm start, one
+  CDP answer, a visible window, and a clean `Stop`.
+- **The official application was not launched.** No macOS launch of Kimi 3.2.25
+  was performed in this round, so the fd3/fd4 path's `Verified` flag stays false
+  as well.
+- **Service registration was not performed on a real machine.** The plans and
+  parsers are tested through `ManagerHost`; an actual `launchctl bootstrap` or
+  `schtasks /Create` on the user's account was deliberately not executed.
+- **Port retention across a restart** is available as an option but is not proven
+  end to end: the daemon side that reuses a port and token is the main session's
+  work.

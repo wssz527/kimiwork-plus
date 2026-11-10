@@ -29,6 +29,12 @@ var (
 	procLocalFree      = kernel32.NewProc("LocalFree")
 )
 
+// cryptProtectUIForbidden is CRYPTPROTECT_UI_FORBIDDEN. It is set on both calls
+// so a protection operation that would need a dialog fails immediately instead.
+// A background daemon cannot show one, and a status call that blocks inside an
+// invisible prompt is worse than an error the panel can explain.
+const cryptProtectUIForbidden = 0x1
+
 type dataBlob struct {
 	size uint32
 	data *byte
@@ -128,13 +134,14 @@ func randomSuffix() string {
 }
 
 // protect wraps CryptProtectData. The description string is empty so the blob
-// carries no user-visible label.
+// carries no user-visible label, and CRYPTPROTECT_UI_FORBIDDEN keeps the call
+// from ever waiting on a dialog.
 func protect(plain []byte) ([]byte, error) {
 	var in, out dataBlob
 	if len(plain) > 0 {
 		in = dataBlob{size: uint32(len(plain)), data: &plain[0]}
 	}
-	status, _, _ := procCryptProtect.Call(uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0, 0,
+	status, _, _ := procCryptProtect.Call(uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0, cryptProtectUIForbidden,
 		uintptr(unsafe.Pointer(&out)))
 	if status == 0 {
 		return nil, errors.New("credential_protect_failed")
@@ -148,10 +155,18 @@ func protect(plain []byte) ([]byte, error) {
 
 // unprotect wraps CryptUnprotectData. A failure is reported as an access error
 // rather than an empty value, so a corrupt blob never reads as "no secret".
+//
+// CRYPTPROTECT_UI_FORBIDDEN matters most here: without it, a blob whose
+// protection is not available to this user could make CryptUnprotectData put up a
+// dialog and block. With it, the call returns an error immediately, which is what
+// lets a background status request answer instead of hanging.
 func unprotect(ciphertext []byte) (string, error) {
+	if len(ciphertext) == 0 {
+		return "", ErrCredentialAccessDenied
+	}
 	var in, out dataBlob
 	in = dataBlob{size: uint32(len(ciphertext)), data: &ciphertext[0]}
-	status, _, _ := procCryptUnprotect.Call(uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0, 0,
+	status, _, _ := procCryptUnprotect.Call(uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0, cryptProtectUIForbidden,
 		uintptr(unsafe.Pointer(&out)))
 	if status == 0 {
 		return "", ErrCredentialAccessDenied
