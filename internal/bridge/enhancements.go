@@ -14,18 +14,19 @@ import (
 type webService = webtools.Service
 
 type webKey struct {
-	keys KeyStore
-	ref  string
+	keys        KeyStore
+	ref         string
+	previousRef string
 }
 
-func (k webKey) Get() (string, error) {
+func (k *webKey) Get() (string, error) {
 	if k.keys == nil || k.ref == "" {
 		return "", nil
 	}
 	return k.keys.Get(k.ref)
 }
 
-func (k webKey) Set(value string) error {
+func (k *webKey) Set(value string) error {
 	if k.keys == nil {
 		return errors.New("credentials_unavailable")
 	}
@@ -35,13 +36,29 @@ func (k webKey) Set(value string) error {
 	}
 	actual, err := k.keys.Get(ref)
 	if err != nil || actual != value {
+		_ = k.keys.Delete(ref)
 		return errors.New("credentials_readback_failed")
 	}
+	k.previousRef = k.ref
 	k.ref = ref
 	return nil
 }
 
-type webCredentialSettings struct{ path string }
+func (k *webKey) rollback() {
+	if k.previousRef == "" && k.ref == "" {
+		return
+	}
+	if k.previousRef != k.ref {
+		_ = k.keys.Delete(k.ref)
+	}
+	k.ref = k.previousRef
+	k.previousRef = ""
+}
+
+type webCredentialSettings struct {
+	path       string
+	credential *webKey
+}
 
 func (s webCredentialSettings) Read() ([]byte, error) {
 	return core.ReadPrivateFile(s.path, 4096)
@@ -52,7 +69,11 @@ func (s webCredentialSettings) Write(body []byte) error {
 		return errors.New("invalid_web_settings")
 	}
 	value := map[string]any{"schemaVersion": document.SchemaVersion, "provider": document.Provider}
-	if ref := currentWebCredentialRef(s.path); ref != "" {
+	ref := currentWebCredentialRef(s.path)
+	if s.credential != nil && s.credential.ref != "" {
+		ref = s.credential.ref
+	}
+	if ref != "" {
 		value["credentialRef"] = ref
 	}
 	return core.AtomicJSON(s.path, value)
@@ -66,12 +87,12 @@ func currentWebCredentialRef(path string) string {
 	var value struct {
 		Ref string `json:"credentialRef"`
 	}
-	if json.Unmarshal(body, &value) != nil || len(value.Ref) < 74 || len(value.Ref) > 128 {
+	if json.Unmarshal(body, &value) != nil || len(value.Ref) != len("tavily-")+64 || value.Ref[:7] != "tavily-" {
 		return ""
 	}
-	for _, char := range value.Ref {
+	for _, char := range value.Ref[7:] {
 		switch {
-		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '-':
+		case char >= 'a' && char <= 'f', char >= '0' && char <= '9':
 		default:
 			return ""
 		}
@@ -110,8 +131,8 @@ func (n *Native) initEnhancements() error {
 		return err
 	}
 	settings := filepath.Join(n.service.StateDir, "web-tools-settings.json")
-	keys := webKey{keys: n.service.Keys, ref: currentWebCredentialRef(settings)}
-	n.web = webtools.NewService(webtools.ServiceOptions{Settings: webCredentialSettings{path: settings}, Credentials: keys, AuthFile: filepath.Join(n.service.StateDir, "web-tools-local-auth.json")})
+	n.webKeys = &webKey{keys: n.service.Keys, ref: currentWebCredentialRef(settings)}
+	n.web = webtools.NewService(webtools.ServiceOptions{Settings: webCredentialSettings{path: settings, credential: n.webKeys}, Credentials: n.webKeys, AuthFile: filepath.Join(n.service.StateDir, "web-tools-local-auth.json")})
 	if state := n.web.State(nil); state.Provider == webtools.ProviderTavily && state.KeySet {
 		block, err := n.web.SaveProvider(webtools.ProviderTavily, "")
 		if err != nil {
@@ -176,6 +197,12 @@ func (n *Native) webAction(in core.Document) (any, error) {
 	defer n.service.mutation.Unlock()
 	n.policies.mu.Lock()
 	defer n.policies.mu.Unlock()
+	committed := false
+	defer func() {
+		if !committed {
+			n.webKeys.rollback()
+		}
+	}()
 	block, err := n.web.SaveProvider(provider, key)
 	if err != nil {
 		return nil, err
@@ -188,5 +215,7 @@ func (n *Native) webAction(in core.Document) (any, error) {
 	if err = n.web.Commit(provider); err != nil {
 		return nil, err
 	}
+	n.webKeys.previousRef = ""
+	committed = true
 	return core.Document{"state": n.web.State(n.policies.servicesView())}, nil
 }

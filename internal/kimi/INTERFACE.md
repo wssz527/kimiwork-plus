@@ -612,10 +612,7 @@ the isolated official window required login and the request returned
 `native_bridge_waiting_settings`. Model adoption and translated reasoning in a
 logged-in official session remain unverified.
 
-Windows cross-compilation is not native-launch acceptance. `StartKimi` currently
-uses `exec.Cmd.ExtraFiles` for fd3/fd4, which Go does not support on Windows.
-Windows handle inheritance and Chromium pipe transport remain an implementation
-blocker, even though both desktop and Gateway PE executables build successfully.
+Windows 不再使用 `exec.Cmd.ExtraFiles` 模拟 CRT fd3/fd4。`StartKimi` 创建两条私有管道，只把所需的两个 HANDLE 通过 `AdditionalInheritedHandles` 传给子进程，并使用 `--remote-debugging-io-pipes=<read>,<write>`。管道类型、句柄范围和继承列表均有显式校验；第 31 节记录协议依据与未验证边界。Windows 真机上的官方启动、CDP 收发、DPAPI 和 WebView2 尚未验收。
 
 The bridge reconciles owned context/subagent/services settings when the isolated
 configuration file appears or changes. File-level tests cover delayed creation,
@@ -769,11 +766,7 @@ because schtasks has no metadata field that round-trips.
 Every side effect goes through `ManagerHost`, so the tests drive both plans on
 either host and never register, load or start a real service.
 
-**What this does not do:** it does not implement normal-restart port retention
-end to end (the daemon side is the main session's), it does not drain in-flight
-gateway requests, and it does not touch the official Kimi application. `Port` is
-passed through so a fixed endpoint is possible; choosing it is the caller's
-decision.
+正常 daemon 停止由 bridge 的 `/api/daemon/stop` 和 `http.Server.Shutdown` 排空本服务请求；`Manager.Stop` 在用户级服务上发出正常终止，不操作官方 Kimi。daemon 的 `Start("")` 沿用私有 endpoint 的 loopback 地址和面板令牌，同构建替换进程有界等待目录锁。失去 CDP 管道仍不能靠复制 PID 元数据恢复。
 
 ## 34. Credential order: stage, verify, then switch
 

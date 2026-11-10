@@ -37,7 +37,7 @@ func (k *CachedKeys) Set(name, value string) error {
 	if e := k.store.Set(name, value); e != nil {
 		return e
 	}
-	k.values[name] = value
+	delete(k.values, name)
 	return nil
 }
 func (k *CachedKeys) Delete(name string) error {

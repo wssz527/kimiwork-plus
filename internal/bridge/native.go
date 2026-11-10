@@ -26,6 +26,7 @@ type Native struct {
 	jobs       chan struct{}
 	policies   *nativePolicies
 	web        *webService
+	webKeys    *webKey
 	mcp        *kimi.MCPManager
 }
 

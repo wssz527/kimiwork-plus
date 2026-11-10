@@ -350,7 +350,7 @@ func (s *Service) State() (core.Document, error) {
 	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
 	state := core.Document{
 		"schemaVersion": 1, "revision": rev, "capabilities": core.Document{"modelEditor": core.Document{"upstreamProtocol": true}},
-		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": core.Document{"mode": "preview", "state": "running", "buildId": BuildID, "windowIndependent": true, "loginStartup": "manual"}, "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "preview-local"},
+		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": s.serviceStatus(), "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "preview-local"},
 		"gateway": core.Document{"state": "unavailable", "modelCount": 0, "activeRequests": 0}, "models": d["models"],
 		"connections": core.Document{"active": connections, "saved": connections, "restartRequired": false, "apply": core.Document{"state": "applied"}},
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},

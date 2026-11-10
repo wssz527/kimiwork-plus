@@ -81,7 +81,7 @@ func processPIDs(ctx context.Context, application string) (pids []int, known boo
 }
 
 func darwinPIDs(ctx context.Context, application string) ([]int, bool, string) {
-	command := execCommandContext(ctx, "ps", "-axo", "pid=,command=")
+	command := execCommandContext(ctx, "ps", "-ww", "-axo", "pid=,comm=")
 	command.Env = append(command.Environ(), "LC_ALL=C")
 	out, err := command.Output()
 	if err != nil {

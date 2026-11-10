@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"kimiworkplus.local/migration/internal/core"
 	"kimiworkplus.local/migration/internal/platform"
 )
+
+var openServiceManager = platform.OpenManager
 
 func (s *Service) serviceManager() (platform.Manager, error) {
 	executable, err := os.Executable()
@@ -20,13 +23,42 @@ func (s *Service) serviceManager() (platform.Manager, error) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	return platform.OpenManager(platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID})
+	return openServiceManager(platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID})
+}
+
+func (s *Service) serviceStatus() core.Document {
+	state := core.Document{"mode": "preview", "state": "running", "buildId": BuildID,
+		"windowIndependent": true, "loginStartup": "manual"}
+	if s.StateDir == "" {
+		return state
+	}
+	manager, err := s.serviceManager()
+	if err != nil {
+		state["registrationState"] = "unavailable"
+		state["registrationReason"] = core.ErrorCode(err)
+		return state
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	registered, err := manager.Status(ctx)
+	state["registered"] = registered.Registered
+	state["loginStartup"] = "manual"
+	if registered.Enabled {
+		state["loginStartup"] = "enabled"
+	}
+	state["serviceKind"] = registered.Kind
+	state["registrationState"] = "ready"
+	if registered.Stale {
+		state["registrationState"] = "stale"
+	}
+	if err != nil {
+		state["registrationState"] = "unavailable"
+		state["registrationReason"] = core.ErrorCode(err)
+	}
+	return state
 }
 
 func (s *Service) lifecycleAction(ctx context.Context, in core.Document) (any, error) {
-	if core.String(in["action"]) == "restart-daemon" {
-		return core.Document{"operation": core.Document{"action": "restart-daemon", "state": "stopping", "reason": "window_reopens_same_endpoint"}}, nil
-	}
 	manager, err := s.serviceManager()
 	if err != nil {
 		return nil, err

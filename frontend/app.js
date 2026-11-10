@@ -208,7 +208,7 @@ const ERROR_HINT = {
   protocol_conflict: '模型 ID 末段以 kimi- 开头时必须使用 Chat，其他必须使用 Responses。',
   invalid_base_url: '上游地址需使用 HTTPS（本机回环可用 HTTP），且不能包含账号、查询参数或片段。',
   invalid_config: '配置无效，请检查端口和环境变量名称。',
-  invalid_connection_config: '连接配置不完整或包含不支持的字段。凭证请保存在环境变量中。',
+  invalid_connection_config: '连接配置不完整或包含不支持的字段。密钥由系统凭据存储保存，配置文件只记录引用。',
   panel_action_busy: '上一次操作仍在执行，请等待结果。',
   panel_action_conflict: '操作标识已被使用，请刷新后重试。',
   panel_action_limit: '短时间内操作过多，请稍后再试。',

@@ -1,13 +1,14 @@
-param([string]$OutputDir = "out/windows-amd64", [string]$Go = "go")
+param([string]$OutputDir = "out/windows-amd64", [string]$Go = "go", [string]$BuildId = "development")
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
-& $Go build -trimpath -ldflags "-s -w -H windowsgui" -o (Join-Path $OutputDir "KimiWorkPlus.exe") ./cmd/desktop
+$Flags = "-s -w -X kimiworkplus.local/migration/internal/bridge.BuildID=$BuildId"
+& $Go build -trimpath -ldflags "$Flags -H windowsgui" -o (Join-Path $OutputDir "KimiWorkPlus.exe") ./cmd/desktop
 if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
-& $Go build -trimpath -ldflags "-s -w" -o (Join-Path $OutputDir "gateway-daemon.exe") ./cmd/gateway-daemon
+& $Go build -trimpath -ldflags $Flags -o (Join-Path $OutputDir "gateway-daemon.exe") ./cmd/gateway-daemon
 if ($LASTEXITCODE -ne 0) { throw "Gateway build failed" }
 Get-FileHash -Algorithm SHA256 (Join-Path $OutputDir "*.exe") | Format-Table Hash,Path
 Write-Host "Requires the system Microsoft Edge WebView2 Runtime. No Node.js or Chromium runtime is bundled."
