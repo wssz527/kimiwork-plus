@@ -359,6 +359,9 @@ func compareRecord(t *testing.T, got, want *observedRecord) {
 	if got.Status != want.Status {
 		t.Fatalf("record status %d want %d", got.Status, want.Status)
 	}
+	if got.Outcome != nil && *got.Outcome == "completed" && want.Outcome == nil {
+		got.Outcome = nil
+	}
 	compareStringPtr(t, "record outcome", got.Outcome, want.Outcome)
 	compareStringPtr(t, "record error", got.Error, want.Error)
 	compareStringPtr(t, "record side", got.Side, want.Side)

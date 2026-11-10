@@ -99,7 +99,7 @@ func (r *Record) LedgerStatus() string {
 	if r.Outcome == string(OutcomeFailed) || r.Status >= 400 {
 		return "failed"
 	}
-	if r.Outcome == string(OutcomeIncomplete) {
+	if r.Outcome != string(OutcomeCompleted) {
 		return "incomplete"
 	}
 	if r.Status >= 200 && r.Status < 300 {
@@ -782,14 +782,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		return usageContext
 	}
 	usage := scanner.Finish()
-	if outcome := scanner.Outcome(); outcome != "" {
-		if record != nil {
-			status := upstream.Status
-			record.TransportStatus = &status
-			record.Outcome = string(outcome)
-			if outcome == OutcomeFailed {
-				record.Error = "upstream_stream_failed"
-			}
+	if record != nil {
+		status := upstream.Status
+		record.TransportStatus = &status
+		record.Outcome = string(scanner.Outcome())
+		if scanner.Outcome() == OutcomeFailed {
+			record.Error = "upstream_stream_failed"
 		}
 	}
 	if usage != nil && record != nil {

@@ -185,7 +185,7 @@ func (s *UsageScanner) classify(payload map[string]json.RawMessage) {
 		return
 	}
 	if response, ok := rawObject(payload["response"]); ok {
-		if status, _ := rawString(response["status"]); status == "failed" {
+		if status, _ := rawString(response["status"]); status == "failed" || status == "cancelled" {
 			s.outcome = OutcomeFailed
 			return
 		}
@@ -202,6 +202,17 @@ func (s *UsageScanner) classify(payload map[string]json.RawMessage) {
 	}
 	if typ, _ := rawString(payload["type"]); typ == "response.completed" {
 		s.outcome = OutcomeCompleted
+		return
+	}
+	if status, _ := rawString(payload["status"]); status != "" {
+		switch status {
+		case "completed":
+			s.outcome = OutcomeCompleted
+		case "incomplete":
+			s.outcome = OutcomeIncomplete
+		case "failed", "cancelled":
+			s.outcome = OutcomeFailed
+		}
 		return
 	}
 	if choices, ok := payload["choices"]; ok {
@@ -246,6 +257,20 @@ func (s *UsageScanner) Finish() *Usage {
 		if json.Unmarshal(s.body, &payload) == nil {
 			if usage := usageFromJSON(payload); usage != nil {
 				s.usage = usage
+			}
+			s.classify(payload)
+			if s.outcome == "" {
+				var choices []struct {
+					Message json.RawMessage `json:"message"`
+				}
+				if raw := payload["choices"]; len(raw) > 0 && json.Unmarshal(raw, &choices) == nil {
+					for _, choice := range choices {
+						var message map[string]json.RawMessage
+						if json.Unmarshal(choice.Message, &message) == nil && len(message) > 0 {
+							s.outcome = OutcomeCompleted
+						}
+					}
+				}
 			}
 		}
 	case ScanSSE:
