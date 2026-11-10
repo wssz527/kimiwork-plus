@@ -32,9 +32,26 @@ func TestMain(m *testing.M) {
 }
 
 // runFakeCDPChild answers the CDP calls the host makes over the pipe.
+//
+// It speaks both transports the launcher can use, because a test host is not
+// necessarily the host the transport was written for: descriptors 3 and 4 on
+// Unix, and the inherited handles named in --remote-debugging-io-pipes on
+// Windows. Reading the same switch Chromium reads means a Windows run exercises
+// the real handover rather than a convenience path the product does not use.
 func runFakeCDPChild() int {
-	commands := os.NewFile(3, "commands")
-	responses := os.NewFile(4, "responses")
+	commandHandle, responseHandle := uintptr(3), uintptr(4)
+	for _, argument := range os.Args[1:] {
+		const prefix = "--remote-debugging-io-pipes="
+		if strings.HasPrefix(argument, prefix) {
+			read, write, ok := parseIOPipes(strings.TrimPrefix(argument, prefix))
+			if !ok {
+				return 2
+			}
+			commandHandle, responseHandle = read, write
+		}
+	}
+	commands := os.NewFile(commandHandle, "commands")
+	responses := os.NewFile(responseHandle, "responses")
 	if commands == nil || responses == nil {
 		return 2
 	}

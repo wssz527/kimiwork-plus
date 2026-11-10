@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -85,11 +84,45 @@ func (c *Child) ExitState() ExitState {
 	return c.exit
 }
 
+// launchPipes is the pair of OS pipes one managed child uses.
+//
+// The child reads CDP commands from commandReader and writes responses to
+// responseWriter. The parent keeps the other two ends. How the child's ends are
+// handed over differs by platform, and that difference is the whole reason this
+// type exists: Unix can pass them as file descriptors 3 and 4, Windows cannot.
+type launchPipes struct {
+	commandReader  *os.File
+	commandWriter  *os.File
+	responseReader *os.File
+	responseWriter *os.File
+}
+
+// closeParentEnds releases every end the parent still holds.
+func (p launchPipes) closeParentEnds() {
+	for _, file := range []*os.File{p.commandReader, p.commandWriter, p.responseReader, p.responseWriter} {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+}
+
+// closeChildEnds releases the two ends that belong to the child. The parent must
+// not keep them: an open copy here stops the pipe from ever reporting EOF.
+func (p launchPipes) closeChildEnds() {
+	for _, file := range []*os.File{p.commandReader, p.responseWriter} {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+}
+
 // StartKimi launches the installation with a private CDP pipe.
 //
-// The pipe uses the descriptors Chromium documents for -remote-debugging-pipe:
-// the child reads commands from fd3 and writes responses to fd4. Go's ExtraFiles
-// maps straight onto that: ExtraFiles[0] becomes fd3, ExtraFiles[1] becomes fd4.
+// The transport is platform-specific because Chromium's is. On Unix the child
+// reads fd3 and writes fd4, which is exactly what exec.Cmd.ExtraFiles produces.
+// On Windows ExtraFiles does nothing at all, so the handles are inherited by
+// value through PROC_THREAD_ATTRIBUTE_HANDLE_LIST and named in
+// --remote-debugging-io-pipes; see launch_windows.go for the evidence.
 //
 // `ctx` bounds the launch request only, never the child. A managed Kimi is meant
 // to outlive the HTTP call that asked for it, so the process is started with
@@ -122,30 +155,37 @@ func StartKimi(ctx context.Context, options LaunchOptions) (*Child, error) {
 		commandWriter.Close()
 		return nil, err
 	}
+	pipes := launchPipes{commandReader: commandReader, commandWriter: commandWriter,
+		responseReader: responseReader, responseWriter: responseWriter}
 
 	args := []string{"-remote-debugging-pipe", "--user-data-dir=" + options.UserDataDir}
-	args = append(args, options.ExtraArgs...)
-	command := exec.Command(options.Installation.Application, args...)
+	command := exec.Command(options.Installation.Application)
 	command.Env = childEnvironment(options)
-	// ExtraFiles[0] is fd3 (child reads commands), ExtraFiles[1] is fd4 (child
-	// writes responses). stdio stays detached: this process has no terminal.
+	// stdio stays detached: this process has no terminal.
 	command.Stdin = nil
 	command.Stdout = nil
 	command.Stderr = nil
-	command.ExtraFiles = []*os.File{commandReader, responseWriter}
-	configureManagedChild(command)
+
+	// The platform decides how the child's two ends reach it, and appends the
+	// arguments that name them. A platform that cannot do it returns
+	// ErrManagedChildUnsupported here rather than starting a child that would
+	// have no transport.
+	extraArgs, err := prepareManagedChild(command, pipes)
+	if err != nil {
+		pipes.closeParentEnds()
+		return nil, err
+	}
+	args = append(args, extraArgs...)
+	args = append(args, options.ExtraArgs...)
+	command.Args = append(command.Args, args...)
 
 	if err := command.Start(); err != nil {
-		commandReader.Close()
-		commandWriter.Close()
-		responseReader.Close()
-		responseWriter.Close()
+		pipes.closeParentEnds()
 		return nil, fmt.Errorf("kimi_start_failed: %w", err)
 	}
 	// The child holds these ends now; keeping them open here would stop the
 	// pipe from ever reporting EOF.
-	commandReader.Close()
-	responseWriter.Close()
+	pipes.closeChildEnds()
 
 	child := &Child{command: command, readFrom: responseReader, writeTo: commandWriter,
 		exitWait: make(chan struct{})}
@@ -205,6 +245,12 @@ func childEnvironment(options LaunchOptions) []string {
 
 // Stop ends the child. It never targets any other process: only the pid this
 // handle started is signalled.
+//
+// The polite request is platform-specific (see requestChildStop): a POSIX child
+// gets SIGINT, and a Windows child is told by closing the command pipe, which is
+// the documented CDP disconnect. Either way the child ends itself, and Kill is
+// only the escalation after the caller's timeout. A child that ignores both is
+// reported by the timeout returning, not silently "stopped".
 func (c *Child) Stop(timeout time.Duration) error {
 	c.mu.Lock()
 	if c.stopped {
@@ -217,7 +263,7 @@ func (c *Child) Stop(timeout time.Duration) error {
 	if c.command.Process == nil {
 		return nil
 	}
-	_ = c.command.Process.Signal(os.Interrupt)
+	requestChildStop(c)
 	select {
 	case <-c.exitWait:
 		return nil
@@ -230,13 +276,34 @@ func (c *Child) Stop(timeout time.Duration) error {
 	return nil
 }
 
-// ManagedChildConfigured reports whether this platform can start a child with
-// extra descriptors. It exists so the panel can say "unsupported here" instead
-// of failing at start time on a platform without it.
-func ManagedChildConfigured() bool {
-	switch runtime.GOOS {
-	case "darwin", "linux", "windows":
-		return true
-	}
-	return false
+// ManagedTransport describes the CDP transport this build can give a managed
+// child on this platform.
+//
+// Supported and Verified are deliberately separate. Supported means this build
+// implements a transport whose mechanism the target documents: the fd3/fd4
+// mapping on Unix, and inherited pipe handles named in
+// --remote-debugging-io-pipes on Windows. Verified means the transport has
+// actually been exercised against the official application on that platform.
+//
+// Neither flag alone means "works". The Windows path is implemented from
+// Chromium's own source and has never run on a Windows host, so it reports
+// Supported with Verified false; the Unix path has run against a stand-in child
+// only, so it does the same. A panel must show that difference.
+type ManagedTransport struct {
+	// Kind is "fd-pipe", "handle-pipe" or "" when there is no transport.
+	Kind string `json:"kind"`
+	// Supported is true when this build implements a transport here.
+	Supported bool `json:"supported"`
+	// Verified is true only when the transport has been exercised against the
+	// official application on this platform.
+	Verified bool `json:"verified"`
+	// Reason is a short machine-readable code.
+	Reason string `json:"reason,omitempty"`
+	// Detail is one sentence a panel can render.
+	Detail string `json:"detail,omitempty"`
 }
+
+// ManagedChildConfigured reports whether this platform can start a child that
+// has a CDP transport. It exists so the panel can say "unsupported here"
+// instead of failing at start time on a platform without one.
+func ManagedChildConfigured() bool { return ManagedTransportInfo().Supported }
