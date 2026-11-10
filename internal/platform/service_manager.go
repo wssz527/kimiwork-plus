@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ManagerState is what a panel renders about the user-level background service.
@@ -82,6 +83,14 @@ type ManagerOptions struct {
 	// both plans can be built and inspected on one host; the manager never uses
 	// it to pretend a platform is present.
 	GOOS string
+	// Transport is how a drain reaches the running daemon. Nil means the real
+	// loopback HTTP client.
+	Transport DaemonTransport
+	// DrainTimeout bounds the graceful stop. Zero means fifteen seconds.
+	DrainTimeout time.Duration
+	// Now and Sleep are the clock seam, so a drain test does not wait.
+	Now   func() time.Time
+	Sleep func(time.Duration)
 }
 
 // ManagerHost is the seam every side effect goes through.
@@ -132,16 +141,27 @@ func (localHost) Remove(path string) error {
 // that does not start at login, and only Enable changes that. The daemon the
 // service runs is the same binary the panel runs; this type never touches the
 // official Kimi application.
+//
+// The methods also split what used to be one step. Enable and Disable change the
+// login-start preference and deliberately do not unload, kill or restart a
+// running daemon: turning a login item off must not interrupt a model request
+// that is in flight. Stop is the only graceful way to end the daemon, and it
+// uses the daemon's own authenticated HTTP endpoint rather than a platform
+// termination.
 type Manager interface {
 	// Register writes or replaces the definition without enabling login start.
 	Register(ctx context.Context) (ManagerState, error)
-	// Enable turns login start on. It is the only path that does.
+	// Enable turns login start on. It rewrites the definition and never unloads
+	// a running job.
 	Enable(ctx context.Context) (ManagerState, error)
-	// Disable turns login start off and leaves the definition in place.
+	// Disable turns login start off, leaves the definition and the running
+	// daemon in place.
 	Disable(ctx context.Context) (ManagerState, error)
-	// Start starts the daemon now, without changing the login-start setting.
+	// Start starts the daemon now, without changing the login-start setting and
+	// without restarting a daemon that is already serving.
 	Start(ctx context.Context) (ManagerState, error)
-	// Stop asks the daemon to end. It never touches the official Kimi process.
+	// Stop asks the daemon to drain through its authenticated endpoint, then
+	// confirms it stopped answering.
 	Stop(ctx context.Context) (ManagerState, error)
 	// Status reads the current state without changing anything.
 	Status(ctx context.Context) (ManagerState, error)
@@ -192,6 +212,35 @@ func (m *serviceManager) serviceOptions() ServiceOptions {
 		LogPath: m.options.LogPath, Port: m.options.Port, BuildID: m.options.BuildID}
 }
 
+func (m *serviceManager) transport() DaemonTransport {
+	if m.options.Transport != nil {
+		return m.options.Transport
+	}
+	return HTTPTransport{}
+}
+
+func (m *serviceManager) now() time.Time {
+	if m.options.Now != nil {
+		return m.options.Now()
+	}
+	return time.Now()
+}
+
+func (m *serviceManager) sleep(duration time.Duration) {
+	if m.options.Sleep != nil {
+		m.options.Sleep(duration)
+		return
+	}
+	time.Sleep(duration)
+}
+
+func (m *serviceManager) drainTimeout() time.Duration {
+	if m.options.DrainTimeout > 0 {
+		return m.options.DrainTimeout
+	}
+	return 15 * time.Second
+}
+
 // definitionPath is where the definition lives for this platform and home.
 func (m *serviceManager) definitionPath() string {
 	return definitionPathFor(m.goos, m.home())
@@ -209,6 +258,14 @@ func (m *serviceManager) uid() string {
 		return m.options.UID
 	}
 	return currentUID()
+}
+
+// target is the launchd service target, or the task name on Windows.
+func (m *serviceManager) target() string {
+	if m.goos == "darwin" {
+		return "gui/" + m.uid() + "/" + ServiceLabel
+	}
+	return ServiceLabel
 }
 
 // step is one side effect in a plan.
@@ -254,44 +311,53 @@ func (m *serviceManager) plan(action string) ([]step, error) {
 // the daemon runs as the signed-in user in the gui/<uid> domain and needs no
 // elevation. RunAtLoad is the login-start switch: false for Register and
 // Disable, true only for Enable.
+//
+// Enable and Disable only rewrite the definition. launchd reads it at login (and
+// at bootstrap), so rewriting is enough to change what happens at the next login
+// while leaving the daemon that is serving right now untouched. A reload
+// (bootout + bootstrap) is a separate, destructive action and is never part of a
+// preference change.
 func launchdPlan(action string, options ServiceOptions, definition, uid string) ([]step, error) {
 	target := "gui/" + uid + "/" + ServiceLabel
 	domain := "gui/" + uid
-	load := func(loginStart bool) []step {
+	write := func(loginStart bool) []step {
 		description, err := describeServiceFor("darwin", options, loginStart)
 		if err != nil {
 			return nil
 		}
-		return []step{
-			{WriteFile: &fileStep{Path: definition, Content: description.Content, Mode: 0o600}},
-			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootout", target}}, IgnoreFailure: true},
-			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootstrap", domain, definition}}},
-		}
+		return []step{{WriteFile: &fileStep{Path: definition, Content: description.Content, Mode: 0o600}}}
 	}
 	switch action {
 	case actionRegister:
-		return load(false), nil
+		return write(false), nil
 	case actionEnable:
-		return load(true), nil
+		return write(true), nil
 	case actionDisable:
-		return load(false), nil
+		return write(false), nil
 	case actionStart:
-		// kickstart starts the job now; -k restarts it if it is already running,
-		// which is what "start" means for a service the user just pressed play on.
-		return []step{{Command: &commandStep{Name: "/bin/launchctl",
-			Args: []string{"kickstart", "-k", target}}}}, nil
-	case actionStop:
-		// SIGTERM through launchd is the documented way to stop one job without
-		// unloading it. The daemon drains its own requests and exits.
-		return []step{{Command: &commandStep{Name: "/bin/launchctl",
-			Args: []string{"kill", "SIGTERM", target}}}}, nil
+		// bootstrap loads the job when it is not loaded (a disabled job does not
+		// start by itself now that RunAtLoad is false), then kickstart starts it
+		// without -k so a daemon that is already serving is left alone.
+		return []step{
+			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootstrap", domain, definition}}, IgnoreFailure: true},
+			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"kickstart", target}}},
+		}, nil
+	case actionRestart:
+		// The caller has already drained the old daemon; kickstart starts the
+		// one this definition describes.
+		return []step{
+			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootstrap", domain, definition}}, IgnoreFailure: true},
+			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"kickstart", target}}},
+		}, nil
+	case actionTerminate:
+		// Last resort only. bootout unloads the job; the daemon receives a
+		// termination signal and does not drain. It is reported as forced.
+		return []step{{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootout", target}}, IgnoreFailure: true}}, nil
 	case actionStatus:
-		return []step{{Command: &commandStep{Name: "/bin/launchctl",
-			Args: []string{"print", target}}}}, nil
+		return []step{{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"print", target}}}}, nil
 	case actionUninstall:
 		return []step{
 			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootout", target}}, IgnoreFailure: true},
-			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"kill", "SIGTERM", target}}, IgnoreFailure: true},
 			{RemovePath: definition, IgnoreFailure: true},
 		}, nil
 	}
@@ -305,6 +371,10 @@ func launchdPlan(action string, options ServiceOptions, definition, uid string) 
 // That combination is deliberate: schtasks has no "create without a trigger"
 // form, and a task that exists but is disabled cannot start anything at login.
 // Enable is the only step that makes it active.
+//
+// /End is not a graceful stop: it terminates the task's process and does not ask
+// it to drain. It appears only in a forced path, and every caller that uses it
+// reports a forced termination.
 func schtasksPlan(action string, options ServiceOptions, definition string) ([]step, error) {
 	commandLine := taskCommandLine(options)
 	task := func(args ...string) step {
@@ -321,12 +391,12 @@ func schtasksPlan(action string, options ServiceOptions, definition string) ([]s
 		return []step{task("/Change", "/ENABLE")}, nil
 	case actionDisable:
 		return []step{task("/Change", "/DISABLE")}, nil
-	case actionStart:
+	case actionStart, actionRestart:
 		return []step{task("/Run")}, nil
-	case actionStop:
-		// /End asks the task to stop; the daemon receives the console close and
-		// drains. It is not a process kill of anything the user started.
-		return []step{task("/End")}, nil
+	case actionTerminate:
+		// /End kills the task's process. It is a forced termination and is never
+		// described as a drain.
+		return []step{{Command: &commandStep{Name: "schtasks", Args: []string{"/End", "/TN", ServiceLabel}}, IgnoreFailure: true}}, nil
 	case actionStatus:
 		return []step{
 			task("/Query", "/XML"),
@@ -356,7 +426,8 @@ const (
 	actionEnable    = "enable"
 	actionDisable   = "disable"
 	actionStart     = "start"
-	actionStop      = "stop"
+	actionRestart   = "restart"
+	actionTerminate = "terminate"
 	actionStatus    = "status"
 	actionUninstall = "uninstall"
 )
@@ -367,6 +438,10 @@ func (m *serviceManager) run(ctx context.Context, action string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
+	return m.runSteps(ctx, steps)
+}
+
+func (m *serviceManager) runSteps(ctx context.Context, steps []step) ([]string, error) {
 	outputs := make([]string, 0, len(steps))
 	for _, item := range steps {
 		switch {
@@ -392,7 +467,9 @@ func (m *serviceManager) run(ctx context.Context, action string) ([]string, erro
 	return outputs, nil
 }
 
-// Register writes the definition without enabling login start.
+// Register writes the definition without enabling login start. It does not
+// bootstrap the job either: registration is a file the user asked for, and
+// touching launchd here would make "registered but not started" false.
 func (m *serviceManager) Register(ctx context.Context) (ManagerState, error) {
 	if _, err := m.run(ctx, actionRegister); err != nil {
 		return ManagerState{}, err
@@ -401,7 +478,8 @@ func (m *serviceManager) Register(ctx context.Context) (ManagerState, error) {
 	return m.Status(ctx)
 }
 
-// Enable is the only path that makes the daemon start at login.
+// Enable is the only path that makes the daemon start at login. It rewrites the
+// definition and does not reload the job, so a request in flight is unaffected.
 func (m *serviceManager) Enable(ctx context.Context) (ManagerState, error) {
 	if _, err := m.run(ctx, actionEnable); err != nil {
 		return ManagerState{}, err
@@ -410,7 +488,8 @@ func (m *serviceManager) Enable(ctx context.Context) (ManagerState, error) {
 	return m.Status(ctx)
 }
 
-// Disable turns login start off without removing the definition.
+// Disable turns login start off without removing the definition and without
+// stopping the daemon that is running now.
 func (m *serviceManager) Disable(ctx context.Context) (ManagerState, error) {
 	if _, err := m.run(ctx, actionDisable); err != nil {
 		return ManagerState{}, err
@@ -427,16 +506,35 @@ func (m *serviceManager) Start(ctx context.Context) (ManagerState, error) {
 	return m.Status(ctx)
 }
 
-// Stop asks the daemon to end. Only the daemon this service runs is affected.
+// Stop asks the daemon to drain and exit through its own authenticated endpoint.
+// A daemon that refuses or does not stop is reported, not killed.
 func (m *serviceManager) Stop(ctx context.Context) (ManagerState, error) {
-	if _, err := m.run(ctx, actionStop); err != nil {
-		return ManagerState{}, err
+	result := m.drain(ctx)
+	if result.Replaced {
+		return ManagerState{}, errors.New(result.Reason)
+	}
+	if !result.Drained {
+		return ManagerState{}, errors.New(result.Reason)
 	}
 	return m.Status(ctx)
 }
 
-// Uninstall removes the definition.
+// drain is the shared graceful stop.
+func (m *serviceManager) drain(ctx context.Context) DrainResult {
+	return drain(ctx, m.transport(), m.options.StateDir, m.drainTimeout(), m.now, m.sleep)
+}
+
+// terminate is the forced platform stop. It is used only after a failed drain
+// and an explicit force.
+func (m *serviceManager) terminate(ctx context.Context) ([]string, error) {
+	return m.run(ctx, actionTerminate)
+}
+
+// Uninstall removes the definition. It drains first so an in-flight request can
+// finish; a daemon that survives the drain is unloaded anyway, and the caller
+// records that as forced.
 func (m *serviceManager) Uninstall(ctx context.Context) (ManagerState, error) {
+	_ = m.drain(ctx)
 	if _, err := m.run(ctx, actionUninstall); err != nil {
 		return ManagerState{}, err
 	}
@@ -685,9 +783,3 @@ func parseSchtasksStatus(output string) (running bool, ok bool) {
 	}
 	return false, false
 }
-
-// schtasksBuildID reads the BuildID recorded for this task. schtasks offers no
-// free-form metadata field that survives a round trip, so the build identity is
-// recorded in the state directory by Register instead (see definitionRecord);
-// this function exists only so the Status path has one shape on both platforms.
-func schtasksBuildID(string) string { return "" }
