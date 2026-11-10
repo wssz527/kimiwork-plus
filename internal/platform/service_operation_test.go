@@ -605,6 +605,12 @@ func TestPendingOperationsSurviveAndListNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A real schtasks query answers with the task XML and a status line; without
+	// them the read-back would (correctly) call the registration unsuccessful.
+	host.outputs["schtasks"] = []string{
+		`<Task><Settings><Enabled>false</Enabled></Settings></Task>`,
+		"TaskName: \\" + ServiceLabel + "\nStatus:        Ready\n",
+	}
 	ctx := context.Background()
 	first, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister})
 	if err != nil {
