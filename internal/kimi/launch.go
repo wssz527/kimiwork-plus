@@ -215,6 +215,68 @@ func (c *Child) await() {
 	})
 }
 
+// TransportLost describes a CDP pipe that ended while its child may still be
+// running.
+//
+// This type exists to stop a lie. When the pipe closes, the only thing this
+// package knows is that the channel is gone: the browser may have exited, or it
+// may be running with no way to reach it. There is no reconnect path, because the
+// transport is the child's own descriptors and a new parent cannot acquire them
+// again — the child was handed them at exec and there is no protocol for taking
+// them back.
+//
+// So Recoverable is always false and the reason says why. A caller must not turn
+// this into "retrying" or "restoring the session": the honest actions are to
+// report it, and to offer the user a controlled restart through the managed
+// launch, which starts a new child with a new pipe.
+type TransportLost struct {
+	// Recoverable is false. It is a field rather than a constant so a caller
+	// reads it instead of assuming.
+	Recoverable bool `json:"recoverable"`
+	// Reason is the machine-readable code a panel renders.
+	Reason string `json:"reason"`
+	// Detail is one sentence explaining what the user can do.
+	Detail string `json:"detail,omitempty"`
+	// ChildAlive reports whether the process was still running when the
+	// transport ended. It is a diagnostic, never a licence to attach again.
+	ChildAlive bool `json:"childAlive"`
+	// Exit is the recorded exit state when the child did end.
+	Exit ExitState `json:"exit"`
+}
+
+// RestartRequired is the reason code for a managed child whose transport is gone.
+const RestartRequired = "managed_child_restart_required"
+
+// TransportLost reports the state of this child's CDP transport.
+//
+// A child whose pipe is closed and whose process is still running cannot be
+// reattached: the descriptors belong to the child, were handed over at exec, and
+// there is no protocol for a second parent to claim them. Reporting that as
+// recoverable would be a promise this code cannot keep, so it is reported as a
+// restart request and the user decides.
+func (c *Child) TransportLost() (TransportLost, bool) {
+	if c == nil || c.pipe == nil {
+		return TransportLost{}, false
+	}
+	closed, _ := c.pipe.Closed()
+	if !closed {
+		return TransportLost{}, false
+	}
+	alive := false
+	select {
+	case <-c.exitWait:
+	default:
+		alive = c.command != nil && c.command.Process != nil
+	}
+	detail := "The connection to the managed application ended. Start it again from this panel to reconnect."
+	if alive {
+		detail = "The connection to the managed application ended while the application is still running. " +
+			"Quit it normally, then start it again from this panel: a new session cannot attach to the old one."
+	}
+	return TransportLost{Recoverable: false, Reason: RestartRequired, Detail: detail,
+		ChildAlive: alive, Exit: c.ExitState()}, true
+}
+
 // childEnvironment builds the child's environment. Every protected name is
 // removed, and DAIMON_BUNDLE_DIR is set only when the caller asked for it: a
 // leftover value from this process must never leak into Kimi.
