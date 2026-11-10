@@ -91,11 +91,12 @@ type keychain struct {
 // interleave "forbid / restore" around each other's SecItemCopyMatching.
 var interactionMu sync.Mutex
 
-// withoutInteraction runs one read with prompting forbidden and puts the
-// previous process setting back afterwards.
-func (k *keychain) withoutInteraction(read func() (string, error)) (string, error) {
+// withoutInteraction runs one Keychain operation with prompting forbidden and
+// restores the previous process setting afterwards. Both reads and writes use it:
+// a daemon cannot display an ACL or unlock dialog.
+func (k *keychain) withoutInteraction(operation func() (string, error)) (string, error) {
 	if k.secKeychainSetUserInteractionAllowed == nil {
-		return read()
+		return operation()
 	}
 	interactionMu.Lock()
 	defer interactionMu.Unlock()
@@ -105,7 +106,7 @@ func (k *keychain) withoutInteraction(read func() (string, error)) (string, erro
 	}
 	k.secKeychainSetUserInteractionAllowed(false)
 	defer k.secKeychainSetUserInteractionAllowed(previous)
-	return read()
+	return operation()
 }
 
 func newKeychain(service string) (Credentials, error) {
@@ -314,6 +315,11 @@ func (k *keychain) read(key string) (string, error) {
 }
 
 func (k *keychain) Set(key, value string) error {
+	_, err := k.withoutInteraction(func() (string, error) { return "", k.set(key, value) })
+	return err
+}
+
+func (k *keychain) set(key, value string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
@@ -335,8 +341,18 @@ func (k *keychain) Set(key, value string) error {
 	}
 	defer k.release(attributesOwned)
 
-	if k.secItemUpdate(identity, attributes) == errSecSuccess {
+	status := k.secItemUpdate(identity, attributes)
+	if status == errSecInteractionRequired || status == errSecInteractionNotAllowed {
+		if _, err := k.read(key); !errors.Is(err, ErrCredentialMissing) {
+			return credentialWriteError(status)
+		}
+		status = errSecItemNotFound
+	}
+	if status == errSecSuccess {
 		return nil
+	}
+	if status != errSecItemNotFound {
+		return credentialWriteError(status)
 	}
 	// No existing item: add one dictionary carrying both the identity and the
 	// value, which is what SecItemAdd expects.
@@ -347,16 +363,27 @@ func (k *keychain) Set(key, value string) error {
 		return ErrUnsupported
 	}
 	defer k.release(addOwned)
-	switch k.secItemAdd(add, nil) {
-	case errSecSuccess:
+	status = k.secItemAdd(add, nil)
+	if status == errSecSuccess {
 		return nil
-	case errSecDuplicateItem:
+	}
+	if status == errSecDuplicateItem {
 		// Another writer won the race; updating is the correct retry.
-		if k.secItemUpdate(identity, attributes) == errSecSuccess {
+		status = k.secItemUpdate(identity, attributes)
+		if status == errSecSuccess {
 			return nil
 		}
 	}
-	return errors.New("credential_store_failed")
+	return credentialWriteError(status)
+}
+
+func credentialWriteError(status int32) error {
+	switch status {
+	case errSecAuthFailed, errSecUserCanceled, errSecInteractionRequired, errSecInteractionNotAllowed:
+		return ErrCredentialAccessDenied
+	default:
+		return errors.New("credential_store_failed")
+	}
 }
 
 func (k *keychain) Delete(key string) error {

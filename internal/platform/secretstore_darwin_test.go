@@ -145,3 +145,30 @@ func TestCredentialAccessDeniedIsDistinguishable(t *testing.T) {
 		t.Fatalf("reason code: %q", ErrCredentialAccessDenied.Error())
 	}
 }
+
+func TestNoninteractiveWriteDistinguishesMissingFromDenied(t *testing.T) {
+	store, err := OpenCredentials("dev.kimi-work-plus.preview.write.test")
+	if err != nil {
+		t.Skipf("no keychain here: %v", err)
+	}
+	keychain := store.(*keychain)
+	for _, denied := range []bool{false, true} {
+		added := 0
+		keychain.secItemUpdate = func(cfRef, cfRef) int32 { return errSecInteractionRequired }
+		keychain.secItemCopyMatching = func(_ cfRef, _ *cfRef) int32 {
+			if denied {
+				return errSecInteractionRequired
+			}
+			return errSecItemNotFound
+		}
+		keychain.secItemAdd = func(cfRef, *cfRef) int32 { added++; return errSecSuccess }
+		err := keychain.Set("new-reference", "fixture")
+		if denied {
+			if !errors.Is(err, ErrCredentialAccessDenied) || added != 0 {
+				t.Fatalf("a denied item was treated as missing: %v, adds=%d", err, added)
+			}
+		} else if err != nil || added != 1 {
+			t.Fatalf("a missing item was not created: %v, adds=%d", err, added)
+		}
+	}
+}

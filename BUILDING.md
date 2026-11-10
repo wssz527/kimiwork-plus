@@ -35,6 +35,8 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o o
 
 维护页可以显式注册、启停、允许登录启动和卸载预览自己的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。连接、翻译和 Tavily 密钥写入系统 Keychain/DPAPI，配置只保存新引用；写入后从系统存储读回再提交，不解密旧版 safeStorage。ad-hoc 更新导致 ACL 拒绝时，需要在界面重新输入密钥。
 
+本机验收中的签名 daemon 在新建 Keychain 项时仍返回 `credentials_unavailable`。代码实现了禁止交互等待、缺项/拒绝访问区分和引用提交，但这不构成真实凭据保存通过；真实 GUI 重存也仍被阻塞。
+
 `build/install-preview.sh` 只安装到当前用户的 `Applications/Kimi Work+ Preview.app`。升级前验证新包并正常停止旧预览，保留 `Kimi Work+ Preview.previous.app`；停止或校验失败不会替换旧预览。稳定版不在脚本目标中。
 
 Windows 使用 `build/windows.ps1 -BuildId <build-id>` 或以下等价命令生成同身份 PE 文件：
