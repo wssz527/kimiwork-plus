@@ -138,6 +138,11 @@ func TestDiscoveryDoesNotSendSavedKeyToAnotherEndpoint(t *testing.T) {
 	if e != nil || core.Object(result)["state"] != "passed" || calls != 1 {
 		t.Fatal(result, e, calls)
 	}
+	panel, e := s.action(context.Background(), http.MethodPost, "/api/discovery", in)
+	discovery := core.Object(core.Object(panel)["discovery"])
+	if e != nil || core.String(discovery["state"]) != "passed" || core.Rows(discovery["models"]) == nil || calls != 2 {
+		t.Fatalf("panel discovery envelope: %+v %v", panel, e)
+	}
 }
 func TestCredentialStageDoesNotReplaceCurrentOnConflict(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")

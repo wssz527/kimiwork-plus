@@ -274,7 +274,11 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 		case "/api/translation/preview", "/api/translation/from-connection":
 			return s.translationAction(ctx, path, in)
 		case "/api/discovery":
-			return s.discover(ctx, in)
+			result, e := s.discover(ctx, in)
+			if e != nil {
+				return nil, e
+			}
+			return core.Document{"discovery": result}, nil
 		case "/api/model-search":
 			return s.search(in)
 		case "/api/service":
