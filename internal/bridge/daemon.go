@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +15,12 @@ import (
 	"time"
 
 	"kimiworkplus.local/migration/internal/core"
+)
+
+var (
+	errBuildMismatch = errors.New("daemon_build_mismatch")
+	errHealthRefused = errors.New("daemon_health_refused")
+	errStopDaemon    = errors.New("daemon_stop_failed")
 )
 
 func DefaultStateDir() (string, error) {
@@ -58,13 +65,13 @@ func health(ctx context.Context, endpoint Endpoint) error {
 		BuildID string `json:"buildId"`
 	}
 	if response.StatusCode != http.StatusOK {
-		return errors.New("daemon_health_refused")
+		return errHealthRefused
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&value); err != nil {
 		return err
 	}
 	if value.PID != endpoint.PID || value.Version != Version || value.BuildID != BuildID || endpoint.BuildID != BuildID {
-		return errors.New("daemon_build_mismatch")
+		return errBuildMismatch
 	}
 	return nil
 }
@@ -83,16 +90,21 @@ func StopDaemon(dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := requestStop(ctx, endpoint); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errStopDaemon, err)
 	}
 	for {
-		if health(ctx, endpoint) != nil {
-			return nil
+		err := health(ctx, endpoint)
+		if errors.Is(err, errHealthRefused) {
+			return errors.New("daemon_stop_replaced")
 		}
-		if ctx.Err() != nil {
-			return errors.New("daemon_stop_timeout")
+		if err == nil {
+			if ctx.Err() != nil {
+				return errors.New("daemon_stop_timeout")
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-		time.Sleep(50 * time.Millisecond)
+		return nil
 	}
 }
 
@@ -116,6 +128,52 @@ func requestStop(ctx context.Context, endpoint Endpoint) error {
 	return nil
 }
 
+func ReplaceDaemon(dir string) error {
+	endpoint, err := ReadEndpoint(dir)
+	if err != nil {
+		return err
+	}
+	if endpoint.PID != os.Getpid() || !Healthy(endpoint) {
+		return errors.New("daemon_restart_identity_mismatch")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(executable, "--state-dir", dir, "--port", "")
+	cmd.Env = append(os.Environ(), "KIMI_WORK_REPLACE_DAEMON=1")
+	log, err := daemonLog(dir)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	cmd.Stdout = log
+	cmd.Stderr = log
+	return cmd.Start()
+}
+
+func daemonLog(dir string) (*os.File, error) {
+	path := filepath.Join(dir, "daemon.log")
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+			return nil, errors.New("unsafe_daemon_log")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	log, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	opened, openErr := log.Stat()
+	current, statErr := os.Lstat(path)
+	if openErr != nil || statErr != nil || !current.Mode().IsRegular() || current.Mode().Perm()&0077 != 0 || !os.SameFile(opened, current) {
+		log.Close()
+		return nil, errors.New("unsafe_daemon_log")
+	}
+	return log, nil
+}
+
 func Ensure(dir, binary string) (Endpoint, error) {
 	previous, readErr := ReadEndpoint(dir)
 	if readErr == nil {
@@ -126,21 +184,8 @@ func Ensure(dir, binary string) (Endpoint, error) {
 			return previous, nil
 		}
 		if errors.Is(err, errBuildMismatch) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			stopErr := requestStop(ctx, previous)
-			cancel()
-			if stopErr != nil {
+			if err := StopDaemon(dir); err != nil {
 				return Endpoint{}, errors.New("daemon_upgrade_requires_stop")
-			}
-			deadline := time.Now().Add(10 * time.Second)
-			for time.Now().Before(deadline) {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				err := health(ctx, previous)
-				cancel()
-				if err != nil && err.Error() != "daemon_health_refused" {
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	}
@@ -151,24 +196,11 @@ func Ensure(dir, binary string) (Endpoint, error) {
 	if err != nil {
 		return Endpoint{}, err
 	}
-	logPath := filepath.Join(dir, "daemon.log")
-	if info, err := os.Lstat(logPath); err == nil {
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-			return Endpoint{}, errors.New("unsafe_daemon_log")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return Endpoint{}, err
-	}
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	log, err := daemonLog(dir)
 	if err != nil {
 		return Endpoint{}, err
 	}
 	defer log.Close()
-	opened, openErr := log.Stat()
-	current, statErr := os.Lstat(logPath)
-	if openErr != nil || statErr != nil || !current.Mode().IsRegular() || current.Mode().Perm()&0077 != 0 || !os.SameFile(opened, current) {
-		return Endpoint{}, errors.New("unsafe_daemon_log")
-	}
 	cmd := exec.Command(absolute, "--state-dir", dir, "--port", "")
 	cmd.Stdout = log
 	cmd.Stderr = log
@@ -185,5 +217,3 @@ func Ensure(dir, binary string) (Endpoint, error) {
 	}
 	return Endpoint{}, errors.New("daemon_start_timeout")
 }
-
-var errBuildMismatch = errors.New("daemon_build_mismatch")

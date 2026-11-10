@@ -260,11 +260,17 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 		case "/api/model-search":
 			return s.search(in)
 		case "/api/service":
-			out, err := s.lifecycleAction(ctx, in)
 			if core.String(in["action"]) == "restart-daemon" {
+				if s.stop == nil {
+					return nil, errors.New("daemon_restart_unavailable")
+				}
+				if err := ReplaceDaemon(s.StateDir); err != nil {
+					return nil, err
+				}
 				go s.stopDaemon()
+				return core.Document{"operation": core.Document{"action": "restart-daemon", "state": "stopping", "endpoint": s.Endpoint.URL}}, nil
 			}
-			return out, err
+			return s.lifecycleAction(ctx, in)
 		case "/api/daemon/stop":
 			if s.stop == nil {
 				return nil, errors.New("daemon_stop_unavailable")

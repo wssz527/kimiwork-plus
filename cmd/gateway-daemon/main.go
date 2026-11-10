@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -50,6 +51,22 @@ func run() error {
 	*dir = absolute
 	if e = core.PrivateDirectory(*dir); e != nil {
 		return e
+	}
+	if os.Getenv("KIMI_WORK_REPLACE_DAEMON") == "1" {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			locked, err := platform.LockHeldByAnother(*dir)
+			if err != nil {
+				return err
+			}
+			if !locked {
+				break
+			}
+			if time.Now().After(deadline) {
+				return errors.New("daemon_replace_lock_timeout")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	lock, e := platform.AcquireLock(*dir)
 	if e != nil {

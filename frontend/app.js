@@ -5504,7 +5504,21 @@ async function previewServiceAction(action) {
     state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
     renderPreviewLifecycle(state.data);
   }
-  if (action === 'restart-daemon' || action === 'stop-service') {
+  if (action === 'restart-daemon') {
+    showToast('后台正在同地址重启，页面将在健康读回后恢复。官方 Kimi 不会因此被关闭。', 'ok');
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        if (await loadState({ silent: true })) return;
+      } catch {}
+      if (Date.now() >= deadline) {
+        showToast('后台未在限定时间内恢复；请查看维护页诊断，原配置与账本未删除。', 'error');
+        return;
+      }
+    }
+  }
+  if (action === 'stop-service') {
     showToast('停止回执已确认；重新打开窗口会启动同一地址的后台。官方 Kimi 不会因此被关闭。', 'ok');
   } else {
     showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');

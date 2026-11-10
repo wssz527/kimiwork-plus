@@ -27,7 +27,10 @@ if [ -x "$target/Contents/MacOS/gateway-daemon" ]; then
   endpoint="$HOME/Library/Application Support/kimi-work-plus-preview/desktop-endpoint.json"
   if [ -f "$endpoint" ]; then
     state="$HOME/Library/Application Support/kimi-work-plus-preview"
-    "$target/Contents/MacOS/gateway-daemon" --state-dir "$state" --stop-daemon || true
+    if ! "$target/Contents/MacOS/gateway-daemon" --state-dir "$state" --stop-daemon; then
+      echo 'The preview daemon did not stop normally. The installed preview was not replaced.' >&2
+      exit 1
+    fi
   fi
 fi
 ditto "$app" "$staging/Kimi Work+ Preview.app"
