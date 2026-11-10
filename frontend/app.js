@@ -209,6 +209,8 @@ const ERROR_HINT = {
   invalid_base_url: '上游地址需使用 HTTPS（本机回环可用 HTTP），且不能包含账号、查询参数或片段。',
   invalid_config: '配置无效，请检查端口和环境变量名称。',
   invalid_connection_config: '连接配置不完整或包含不支持的字段。密钥由系统凭据存储保存，配置文件只记录引用。',
+  credentials_unavailable: '系统凭据存储未接受保存，配置未提交。请检查预览权限后重试；不会写入明文。',
+  credentials_readback_failed: '新密钥未能从系统凭据存储读回，未切换现有引用。请重试或继续使用稳定版。',
   panel_action_busy: '上一次操作仍在执行，请等待结果。',
   panel_action_conflict: '操作标识已被使用，请刷新后重试。',
   panel_action_limit: '短时间内操作过多，请稍后再试。',
