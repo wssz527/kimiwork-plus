@@ -1,404 +1,445 @@
-//go:build darwin
+//go:build darwin && cgo
 
 package platform
 
 import (
-	"errors"
 	"sync"
-	"unsafe"
-
-	"github.com/ebitengine/purego"
 )
 
-// The macOS store is the Security framework's generic-secret API, called through
-// purego so this package needs no cgo and stays cross-compilable.
+// The macOS store is the Security framework's generic-secret API, reached
+// through a thin cgo layer (secretstore_darwin_shim.go) so the SDK headers, not
+// hand-written declarations, define the ABI, the CoreFoundation callback
+// structures and reference ownership.
 //
-// SecItemAdd / SecItemUpdate / SecItemCopyMatching / SecItemDelete operate on the
-// login keychain of the calling user. An item is addressed by
+// SecItemAdd / SecItemUpdate / SecItemCopyMatching / SecItemDelete operate on
+// the login keychain of the calling user. An item is addressed by
 // (class=generic, service, account).
 //
 // This store never reads a value the old Electron build encrypted with
 // safeStorage: those blobs are bound to that build's code identity and are not a
 // format this package decrypts.
 
+// OSStatus values used by this file. They mirror SecBase.h; the dedicated test
+// compares them with the constants the SDK exports, so a mismatch between this
+// table and the installed headers fails a build-time check instead of becoming a
+// wrong diagnosis at runtime.
 const (
-	securityFramework = "/System/Library/Frameworks/Security.framework/Security"
-	coreFoundation    = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-
-	errSecSuccess       = 0
-	errSecItemNotFound  = -25300
+	errSecSuccess = 0
+	// errSecUserCanceled is the Carbon-era -128 the framework still returns when
+	// the user dismisses an authorization dialog.
+	errSecUserCanceled = -128
+	// errSecAuthFailed means the credentials offered to unlock or authorize were
+	// rejected.
+	errSecAuthFailed = -25293
+	// errSecDuplicateItem means the item already exists; the write path retries
+	// as an update.
 	errSecDuplicateItem = -25299
-	errSecAuthFailed    = -25293
-	errSecUserCanceled  = -128
-	// A keychain item whose ACL does not include the current binary answers with
-	// one of these instead of prompting, once interaction is forbidden.
-	errSecInteractionRequired   = -25308
-	errSecInteractionNotAllowed = -25315
-
-	cfStringEncodingUTF8 = 0x08000100
+	// errSecItemNotFound is the only status that means "no such item". It is
+	// distinct from every refusal below.
+	errSecItemNotFound = -25300
+	// errSecInteractionNotAllowed (-25308) means the operation needs user
+	// interaction and interaction is currently not allowed. It says nothing by
+	// itself about the item's age or its ACL.
+	errSecInteractionNotAllowed = -25308
+	// errSecInteractionRequired (-25315) means user interaction is required but
+	// is currently not allowed. Apple documents the two codes separately; the
+	// store still classifies them together because both mean "an interaction was
+	// needed and could not happen".
+	errSecInteractionRequired = -25315
+	// errSecNotAvailable means no keychain is available to this session.
+	errSecNotAvailable = -25291
+	// errSecNoSuchKeychain means the addressed keychain does not exist.
+	errSecNoSuchKeychain = -25294
+	// errSecDecode means the stored blob is not the CFData this store wrote.
+	errSecDecode = -26275
+	// errSecBufferTooSmall means the stored value is larger than the buffer this
+	// store reads into; the item exists but is not a value this build wrote.
+	errSecBufferTooSmall = -25301
+	// errSecMissingEntitlement means the process lacks an entitlement the store
+	// requires; a development build can see this for data-protection items.
+	errSecMissingEntitlement = -34018
 )
 
-type cfRef = uintptr
+// Error codes. Each is a stable machine-readable identifier that also passes the
+// panel's error-code pattern, so a caller can map it to a sentence without
+// matching on an OSStatus number.
+const (
+	// CodeCredentialLocked: the login keychain is locked. The remedy is to unlock
+	// it, not to re-enter the key.
+	CodeCredentialLocked = "credential_keychain_locked"
+	// CodeCredentialUnavailable: no keychain is reachable from this session, or
+	// an entitlement is missing.
+	CodeCredentialUnavailable = "credential_keychain_unavailable"
+	// CodeCredentialAuthorizationRequired: an item exists but reading or
+	// replacing it needs an authorization this process may not request. A
+	// background read must return this instead of showing a hidden prompt.
+	CodeCredentialAuthorizationRequired = "credential_authorization_required"
+	// CodeCredentialSessionUnavailable: the operation needed an interaction, but
+	// this process has no console GUI session in which the system could show it.
+	// A launchd job started outside the user's login session sees this. It is a
+	// calling-context problem, not an item ACL problem, and the remedy is to run
+	// the save from the app window or to start the service in the user's session.
+	CodeCredentialSessionUnavailable = "credential_session_unavailable"
+	// CodeCredentialAuthorizationCancelled: the user dismissed the dialog.
+	CodeCredentialAuthorizationCancelled = "credential_authorization_cancelled"
+	// CodeCredentialAuthorizationFailed: the authorization was rejected.
+	CodeCredentialAuthorizationFailed = "credential_authorization_failed"
+	// CodeCredentialStoreCorrupt: the stored value is not the format written
+	// here. It is never reported as a missing credential.
+	CodeCredentialStoreCorrupt = "credential_store_corrupt"
+	// CodeCredentialStoreFailed: an unexpected Security framework failure.
+	CodeCredentialStoreFailed = "credential_store_failed"
+	// CodeCredentialInteractionNotRestored: the process-wide interaction flag
+	// could not be put back after an operation. The store refuses to pretend the
+	// process state is unchanged.
+	CodeCredentialInteractionNotRestored = "credential_interaction_not_restored"
+)
 
-// unsafeLoadUintptr reads one word from a linker-provided address.
+// KeychainError describes a failed store operation with the state the panel
+// needs: what was attempted, whether the item already existed, and whether the
+// caller is in a session that could have shown a dialog.
 //
-// The address is data owned by CoreFoundation, not by Go, and it stays mapped
-// for the life of the process, so no Go pointer is being laundered here. The
-// value is read as bytes and assembled by hand, which is what vet accepts for a
-// foreign address.
-func unsafeLoadUintptr(address uintptr) uintptr {
-	var value uintptr
-	target := unsafe.Slice((*byte)(unsafe.Add(nil, address)), unsafe.Sizeof(value))
-	for i := uint(0); i < uint(unsafe.Sizeof(value)); i++ {
-		value |= uintptr(target[i]) << (8 * i)
+// It never carries the secret. Errors.Is works against ErrCredentialAccessDenied
+// for the states a user resolves by re-entering the key, and against
+// ErrCredentialMissing for an absent item.
+type KeychainError struct {
+	// Code is the machine-readable reason and also the Error() text.
+	Code string
+	// Op is "read", "write" or "delete".
+	Op string
+	// Status is the OSStatus the framework returned, or 0 when the failure came
+	// from this layer.
+	Status int32
+	// Existed is 1 when the item was already present, 0 when the write was
+	// creating it, and -1 when that could not be determined.
+	Existed int
+	// Stage is "update" or "add" for a write, empty otherwise.
+	Stage string
+	// Interactive records whether the system dialog was permitted for this call.
+	Interactive bool
+	// Session is "console", "background" or "unknown".
+	Session string
+	// Detail is one sentence for diagnostics; it never contains a secret.
+	Detail string
+
+	cause error
+}
+
+func (e *KeychainError) Error() string { return e.Code }
+
+// Unwrap exposes the sentinel callers already match on.
+func (e *KeychainError) Unwrap() error { return e.cause }
+
+// StoreState is one observation of the system context around the keychain.
+type StoreState struct {
+	// Available reports whether the default keychain could be read at all.
+	Available bool
+	// Locked reports that the default keychain exists but is locked.
+	Locked bool
+	// InteractionAllowed is the current process-wide switch.
+	InteractionAllowed bool
+	// VisibleSession reports that this process belongs to a console GUI session
+	// that could display a SecurityAgent prompt.
+	VisibleSession bool
+	// LoginComplete reports that the console session finished logging in.
+	LoginComplete bool
+}
+
+// ScreenState renders the observation for a diagnostics panel.
+func (s StoreState) ScreenState() string {
+	switch {
+	case !s.Available:
+		return CodeCredentialUnavailable
+	case s.Locked:
+		return CodeCredentialLocked
+	case !s.VisibleSession:
+		return CodeCredentialSessionUnavailable
+	default:
+		return "credential_session_console"
 	}
-	return value
+}
+
+// keychainSDK is the platform surface. It exists so the decision logic below is
+// testable without touching the user's keychain.
+type keychainSDK interface {
+	state() sdkState
+	read(service, account string) keychainRead
+	write(service, account, secret string, interactive bool) keychainWrite
+	remove(service, account string, interactive bool) (int32, bool)
+}
+
+type keychainRead struct {
+	status   int32
+	value    string
+	restored bool
+}
+
+// Write stages. A create can be refused because the keychain is locked, while an
+// update can be refused because the existing item's ACL does not admit this
+// binary. Keeping the stage lets the error say which happened.
+const (
+	stageUpdate = 0
+	stageAdd    = 1
+)
+
+type keychainWrite struct {
+	status   int32
+	existed  int
+	stage    int
+	restored bool
 }
 
 type keychain struct {
 	service string
-
-	secItemAdd          func(cfRef, *cfRef) int32
-	secItemUpdate       func(cfRef, cfRef) int32
-	secItemCopyMatching func(cfRef, *cfRef) int32
-	secItemDelete       func(cfRef) int32
-
-	cfStringCreateWithBytes func(allocator cfRef, bytes *byte, length int, encoding uint32, external bool) cfRef
-	cfDataCreate            func(allocator cfRef, bytes *byte, length int) cfRef
-	cfDataGetBytePtr        func(data cfRef) *byte
-	cfDataGetLength         func(data cfRef) int
-	cfDictionaryCreate      func(allocator cfRef, keys *cfRef, values *cfRef, count int,
-		keyCallbacks cfRef, valueCallbacks cfRef) cfRef
-	cfRelease func(value cfRef)
-
-	kSecClass, kSecAttrService, kSecAttrAccount                    cfRef
-	kSecValueData, kSecReturnData, kSecMatchLimit                  cfRef
-	kSecClassGenericPassword, kSecMatchLimitOne                    cfRef
-	kSecUseAuthenticationUI, kSecUseAuthenticationUIFail           cfRef
-	kCFBooleanTrue                                                 cfRef
-	kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks cfRef
-
-	// SecKeychainSetUserInteractionAllowed / ...Get... are the legacy
-	// file-keychain switches. They are process-scoped: they change what this
-	// process may prompt for, not any system setting, item ACL or other
-	// application.
-	secKeychainSetUserInteractionAllowed func(bool) int32
-	secKeychainGetUserInteractionAllowed func() bool
+	sdk     keychainSDK
 }
 
-// interactionMu serialises the process-wide interaction flag. The switch is a
-// property of the process, not of a query, so two concurrent reads must not
-// interleave "forbid / restore" around each other's SecItemCopyMatching.
+// interactionMu serialises every call that can change the process-wide
+// interaction flag. The flag belongs to the process, so two concurrent calls
+// must not interleave "forbid / allow / restore"; the shim reads and restores the
+// exact previous value inside one locked call.
 var interactionMu sync.Mutex
 
-// withoutInteraction runs one Keychain operation with prompting forbidden and
-// restores the previous process setting afterwards. Both reads and writes use it:
-// a daemon cannot display an ACL or unlock dialog.
-func (k *keychain) withoutInteraction(operation func() (string, error)) (string, error) {
-	if k.secKeychainSetUserInteractionAllowed == nil {
-		return operation()
-	}
-	interactionMu.Lock()
-	defer interactionMu.Unlock()
-	previous := true
-	if k.secKeychainGetUserInteractionAllowed != nil {
-		previous = k.secKeychainGetUserInteractionAllowed()
-	}
-	k.secKeychainSetUserInteractionAllowed(false)
-	defer k.secKeychainSetUserInteractionAllowed(previous)
-	return operation()
-}
+var (
+	_ Credentials      = (*keychain)(nil)
+	_ VisibleSaveStore = (*keychain)(nil)
+)
 
 func newKeychain(service string) (Credentials, error) {
-	store := &keychain{service: service}
-
-	security, err := purego.Dlopen(securityFramework, purego.RTLD_NOW|purego.RTLD_GLOBAL)
-	if err != nil {
-		return nil, ErrUnsupported
-	}
-	cf, err := purego.Dlopen(coreFoundation, purego.RTLD_NOW|purego.RTLD_GLOBAL)
-	if err != nil {
-		return nil, ErrUnsupported
-	}
-
-	purego.RegisterLibFunc(&store.secItemAdd, security, "SecItemAdd")
-	purego.RegisterLibFunc(&store.secItemUpdate, security, "SecItemUpdate")
-	purego.RegisterLibFunc(&store.secItemCopyMatching, security, "SecItemCopyMatching")
-	purego.RegisterLibFunc(&store.secItemDelete, security, "SecItemDelete")
-	purego.RegisterLibFunc(&store.cfStringCreateWithBytes, cf, "CFStringCreateWithBytes")
-	purego.RegisterLibFunc(&store.cfDataCreate, cf, "CFDataCreate")
-	purego.RegisterLibFunc(&store.cfDataGetBytePtr, cf, "CFDataGetBytePtr")
-	purego.RegisterLibFunc(&store.cfDataGetLength, cf, "CFDataGetLength")
-	purego.RegisterLibFunc(&store.cfDictionaryCreate, cf, "CFDictionaryCreate")
-	purego.RegisterLibFunc(&store.cfRelease, cf, "CFRelease")
-	// A missing symbol leaves the field nil; the read path then reports the
-	// interaction denial it gets rather than panicking.
-	if address, err := purego.Dlsym(security, "SecKeychainSetUserInteractionAllowed"); err == nil && address != 0 {
-		purego.RegisterFunc(&store.secKeychainSetUserInteractionAllowed, address)
-	}
-	if address, err := purego.Dlsym(security, "SecKeychainGetUserInteractionAllowed"); err == nil && address != 0 {
-		purego.RegisterFunc(&store.secKeychainGetUserInteractionAllowed, address)
-	}
-
-	store.kSecClass = cfVariable(security, "kSecClass")
-	store.kSecAttrService = cfVariable(security, "kSecAttrService")
-	store.kSecAttrAccount = cfVariable(security, "kSecAttrAccount")
-	store.kSecValueData = cfVariable(security, "kSecValueData")
-	store.kSecReturnData = cfVariable(security, "kSecReturnData")
-	store.kSecMatchLimit = cfVariable(security, "kSecMatchLimit")
-	store.kSecClassGenericPassword = cfVariable(security, "kSecClassGenericPassword")
-	store.kSecMatchLimitOne = cfVariable(security, "kSecMatchLimitOne")
-	store.kSecUseAuthenticationUI = cfVariable(security, "kSecUseAuthenticationUI")
-	store.kSecUseAuthenticationUIFail = cfVariable(security, "kSecUseAuthenticationUIFail")
-	store.kCFBooleanTrue = cfVariable(cf, "kCFBooleanTrue")
-	store.kCFTypeDictionaryKeyCallBacks = cfVariable(cf, "kCFTypeDictionaryKeyCallBacks")
-	store.kCFTypeDictionaryValueCallBacks = cfVariable(cf, "kCFTypeDictionaryValueCallBacks")
-	if store.kSecClass == 0 || store.kSecClassGenericPassword == 0 || store.kCFBooleanTrue == 0 {
-		return nil, ErrUnsupported
-	}
-	return store, nil
+	return &keychain{service: service, sdk: sdkKeychain{}}, nil
 }
 
-// cfVariable resolves an exported CoreFoundation data symbol. The symbol address
-// holds the reference, so it is dereferenced once.
-func cfVariable(library uintptr, name string) cfRef {
-	address, err := purego.Dlsym(library, name)
-	if err != nil || address == 0 {
-		return 0
+// newDPAPI is the Windows store; on macOS the Keychain is used instead.
+func newDPAPI(string) (Credentials, error) { return nil, ErrUnsupported }
+
+// VisibleSaveStore is implemented by a store that can complete one save from a
+// user-visible action, permitting the system authorization dialog that a
+// background read must never request.
+//
+// Callers must only reach this from a GUI gesture, and only after
+// SessionVisible reports true; the store checks the session again itself.
+type VisibleSaveStore interface {
+	// SetVisible stores the value, permitting at most the interaction the
+	// platform itself initiates for this one call.
+	SetVisible(key, value string) error
+	// SessionVisible reports whether a dialog started now could be shown.
+	SessionVisible() bool
+}
+
+// SessionVisible reports whether a prompt started now could reach the user.
+func (k *keychain) SessionVisible() bool {
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	return k.sdk.state().hasVisibleSession()
+}
+
+// State reports the keychain and session context without changing anything.
+func (k *keychain) State() StoreState {
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	state := k.sdk.state()
+	return StoreState{
+		Available:          state.available == 1,
+		Locked:             state.locked == 1,
+		InteractionAllowed: state.interactionAllowed != 0,
+		VisibleSession:     state.hasVisibleSession(),
+		LoginComplete:      state.loginComplete == 1,
 	}
-	// The exported symbol is a variable holding the reference. It is read with
-	// an explicit unsafe load, and the address comes from the dynamic linker
-	// rather than from Go memory, so the pointer is valid for the life of the
-	// process.
-	return cfRef(unsafeLoadUintptr(address))
-}
-
-// pair is one dictionary member. Ownership is tracked so every created
-// reference is released exactly once.
-type pair struct {
-	key, value cfRef
-	owned      bool
-}
-
-func (k *keychain) dictionary(pairs []pair) (cfRef, []cfRef) {
-	keys := make([]cfRef, len(pairs))
-	values := make([]cfRef, len(pairs))
-	var owned []cfRef
-	for i, item := range pairs {
-		keys[i] = item.key
-		values[i] = item.value
-		if item.owned {
-			owned = append(owned, item.key, item.value)
-		}
-	}
-	dictionary := k.cfDictionaryCreate(0, &keys[0], &values[0], len(pairs),
-		k.kCFTypeDictionaryKeyCallBacks, k.kCFTypeDictionaryValueCallBacks)
-	if dictionary != 0 {
-		owned = append(owned, dictionary)
-	}
-	return dictionary, owned
-}
-
-func (k *keychain) cfString(value string) (cfRef, bool) {
-	bytes := []byte(value)
-	var pointer *byte
-	if len(bytes) > 0 {
-		pointer = &bytes[0]
-	}
-	ref := k.cfStringCreateWithBytes(0, pointer, len(bytes), cfStringEncodingUTF8, false)
-	return ref, true
-}
-
-func (k *keychain) cfData(value string) (cfRef, bool) {
-	bytes := []byte(value)
-	var pointer *byte
-	if len(bytes) > 0 {
-		pointer = &bytes[0]
-	}
-	return k.cfDataCreate(0, pointer, len(bytes)), true
-}
-
-// stringMember and dataMember build the owned pair for a created reference.
-func (k *keychain) stringMember(value string) pair {
-	ref, _ := k.cfString(value)
-	return pair{value: ref, owned: true}
-}
-
-func (k *keychain) dataMember(value string) pair {
-	ref, _ := k.cfData(value)
-	return pair{value: ref, owned: true}
-}
-
-// identity is the (class, service, account) triple every operation starts from.
-func (k *keychain) identity(key string) []pair {
-	service := k.stringMember(k.service)
-	account := k.stringMember(key)
-	return []pair{
-		{key: k.kSecClass, value: k.kSecClassGenericPassword},
-		{key: k.kSecAttrService, value: service.value, owned: true},
-		{key: k.kSecAttrAccount, value: account.value, owned: true},
-	}
-}
-
-func (k *keychain) release(refs []cfRef) {
-	for _, ref := range refs {
-		if ref != 0 {
-			k.cfRelease(ref)
-		}
-	}
-}
-
-// readPairs is the query for one item. It carries the documented query-level
-// switch `kSecUseAuthenticationUI = kSecUseAuthenticationUIFail`, which keeps a
-// data-protection-keychain read from asking for authentication. It is not
-// sufficient on its own: the legacy file keychain ignores this key, which is why
-// Get also sets the process-scoped switch below.
-func (k *keychain) readPairs(key string) []pair {
-	pairs := append(k.identity(key),
-		pair{key: k.kSecReturnData, value: k.kCFBooleanTrue},
-		pair{key: k.kSecMatchLimit, value: k.kSecMatchLimitOne})
-	if k.kSecUseAuthenticationUI != 0 && k.kSecUseAuthenticationUIFail != 0 {
-		pairs = append(pairs, pair{key: k.kSecUseAuthenticationUI, value: k.kSecUseAuthenticationUIFail})
-	}
-	return pairs
 }
 
 func (k *keychain) Get(key string) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	// The query-level switch only covers the data-protection keychain. An item
-	// written by an earlier, differently signed build of this same product lives
-	// in the legacy file keychain, where `kSecUseAuthenticationUI` is ignored and
-	// SecItemCopyMatching instead waits for an unlock dialog a background daemon
-	// can never show. `SecKeychainSetUserInteractionAllowed` is the documented
-	// switch for that path; it is process-scoped and touches no system setting,
-	// item ACL or other application.
-	return k.withoutInteraction(func() (string, error) { return k.read(key) })
-}
-
-// read performs the query itself.
-func (k *keychain) read(key string) (string, error) {
-	query, owned := k.dictionary(k.readPairs(key))
-	if query == 0 {
-		k.release(owned)
-		return "", ErrUnsupported
+	// A read never permits interaction. A background daemon cannot show an
+	// authorization or unlock dialog, so it must answer with the state instead of
+	// blocking inside one.
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	result := k.sdk.read(k.service, key)
+	if !result.restored {
+		return "", k.notRestored("read", result.status, -1, "", false)
 	}
-	defer k.release(owned)
-
-	var result cfRef
-	switch k.secItemCopyMatching(query, &result) {
-	case errSecSuccess:
-	case errSecItemNotFound:
-		return "", ErrCredentialMissing
-	case errSecAuthFailed, errSecUserCanceled, errSecInteractionRequired, errSecInteractionNotAllowed:
-		// The item exists but this binary's code identity is not on its ACL. The
-		// user can only resolve that in Keychain Access, so the panel gets a
-		// reason it can act on instead of a blocked call.
-		return "", ErrCredentialAccessDenied
-	default:
-		return "", errors.New("credential_store_failed")
+	if result.status == errSecSuccess {
+		if len(result.value) > maxSecretBytes {
+			return "", &KeychainError{Code: CodeCredentialStoreCorrupt, Op: "read",
+				Detail: "The stored value is larger than this build writes."}
+		}
+		return result.value, nil
 	}
-	if result == 0 {
-		return "", ErrCredentialMissing
-	}
-	defer k.cfRelease(result)
-	length := k.cfDataGetLength(result)
-	if length <= 0 || length > maxSecretBytes {
-		return "", errors.New("credential_store_failed")
-	}
-	pointer := k.cfDataGetBytePtr(result)
-	if pointer == nil {
-		return "", errors.New("credential_store_failed")
-	}
-	return string(unsafe.Slice(pointer, length)), nil
+	return "", k.readError(result.status, false)
 }
 
 func (k *keychain) Set(key, value string) error {
-	_, err := k.withoutInteraction(func() (string, error) { return "", k.set(key, value) })
-	return err
-}
-
-func (k *keychain) set(key, value string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
 	if err := validateValue(value); err != nil {
 		return err
 	}
-	identity, identityOwned := k.dictionary(k.identity(key))
-	if identity == 0 {
-		k.release(identityOwned)
-		return ErrUnsupported
-	}
-	defer k.release(identityOwned)
-
-	payload := k.dataMember(value)
-	attributes, attributesOwned := k.dictionary([]pair{{key: k.kSecValueData, value: payload.value, owned: true}})
-	if attributes == 0 {
-		k.release(attributesOwned)
-		return ErrUnsupported
-	}
-	defer k.release(attributesOwned)
-
-	status := k.secItemUpdate(identity, attributes)
-	if status == errSecInteractionRequired || status == errSecInteractionNotAllowed {
-		if _, err := k.read(key); !errors.Is(err, ErrCredentialMissing) {
-			return credentialWriteError(status)
-		}
-		status = errSecItemNotFound
-	}
-	if status == errSecSuccess {
-		return nil
-	}
-	if status != errSecItemNotFound {
-		return credentialWriteError(status)
-	}
-	// No existing item: add one dictionary carrying both the identity and the
-	// value, which is what SecItemAdd expects.
-	added := k.dataMember(value)
-	add, addOwned := k.dictionary(append(k.identity(key), pair{key: k.kSecValueData, value: added.value, owned: true}))
-	if add == 0 {
-		k.release(addOwned)
-		return ErrUnsupported
-	}
-	defer k.release(addOwned)
-	status = k.secItemAdd(add, nil)
-	if status == errSecSuccess {
-		return nil
-	}
-	if status == errSecDuplicateItem {
-		// Another writer won the race; updating is the correct retry.
-		status = k.secItemUpdate(identity, attributes)
-		if status == errSecSuccess {
-			return nil
-		}
-	}
-	return credentialWriteError(status)
+	// The default write is background-safe: no dialog, no waiting. An item that
+	// needs authorization is reported, and SetVisible is the user-driven path
+	// that can complete it.
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	return k.writeResult(k.sdk.write(k.service, key, value, false), false)
 }
 
-func credentialWriteError(status int32) error {
-	switch status {
-	case errSecAuthFailed, errSecUserCanceled, errSecInteractionRequired, errSecInteractionNotAllowed:
-		return ErrCredentialAccessDenied
-	default:
-		return errors.New("credential_store_failed")
+func (k *keychain) SetVisible(key, value string) error {
+	if err := validateKey(key); err != nil {
+		return err
 	}
+	if err := validateValue(value); err != nil {
+		return err
+	}
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	state := k.sdk.state()
+	if !state.hasVisibleSession() {
+		// Starting the dialog here would leave the caller waiting for a prompt
+		// nobody can see. Refuse immediately and let the panel explain why.
+		return &KeychainError{Code: CodeCredentialSessionUnavailable, Op: "write",
+			Existed: -1, Interactive: false, Session: sessionName(state),
+			Detail: "This process is not in a console session that could show the authorization dialog."}
+	}
+	return k.writeResult(k.sdk.write(k.service, key, value, true), true)
 }
 
 func (k *keychain) Delete(key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	query, owned := k.dictionary(k.identity(key))
-	if query == 0 {
-		k.release(owned)
-		return ErrUnsupported
+	interactionMu.Lock()
+	defer interactionMu.Unlock()
+	status, restored := k.sdk.remove(k.service, key, false)
+	if !restored {
+		return k.notRestored("delete", status, -1, "", false)
 	}
-	defer k.release(owned)
-	switch k.secItemDelete(query) {
+	switch status {
 	case errSecSuccess, errSecItemNotFound:
+		// Deleting an absent key succeeds: the caller asked for it to be gone.
 		return nil
 	}
-	return errors.New("credential_store_failed")
+	return k.readError(status, false)
+}
+
+func (k *keychain) writeResult(result keychainWrite, interactive bool) error {
+	if !result.restored {
+		return k.notRestored("write", result.status, result.existed, stageName(result.stage), interactive)
+	}
+	if result.status == errSecSuccess {
+		return nil
+	}
+	return k.classify(result.status, "write", result.existed, stageName(result.stage), interactive)
+}
+
+func (k *keychain) readError(status int32, interactive bool) error {
+	if status == errSecItemNotFound {
+		return ErrCredentialMissing
+	}
+	return k.classify(status, "read", -1, "", interactive)
+}
+
+func (k *keychain) notRestored(op string, status int32, existed int, stage string, interactive bool) error {
+	return &KeychainError{
+		Code:        CodeCredentialInteractionNotRestored,
+		Op:          op,
+		Status:      status,
+		Existed:     existed,
+		Stage:       stage,
+		Interactive: interactive,
+		Session:     sessionName(k.sdk.state()),
+		Detail:      "The process-wide interaction setting could not be restored; restart the service before using the credential store again.",
+	}
+}
+
+// classify turns an OSStatus into a state. The same number means different
+// things depending on what was attempted: -25308 on an update can be an existing
+// item that needs authorization, while the same number on a create usually means
+// the keychain is locked, because a brand-new item's ACL names the caller.
+func (k *keychain) classify(status int32, op string, existed int, stage string, interactive bool) error {
+	state := k.sdk.state()
+	base := KeychainError{
+		Op:          op,
+		Status:      status,
+		Existed:     existed,
+		Stage:       stage,
+		Interactive: interactive,
+		Session:     sessionName(state),
+	}
+	switch status {
+	case errSecInteractionNotAllowed, errSecInteractionRequired:
+		if state.locked == 1 {
+			base.Code = CodeCredentialLocked
+			base.Detail = "The login keychain is locked; unlock it and retry."
+			return &base
+		}
+		if op == "write" && existed == 0 {
+			// The interaction is needed to show a dialog, so the process's
+			// session is the deciding factor: a create from a launchd job without
+			// a console session cannot show one, and the remedy is the app window.
+			if state.hasVisibleSession() {
+				base.Code = CodeCredentialAuthorizationRequired
+				base.Detail = "Creating the item needs an authorization the system did not allow; save it again from the app window."
+			} else {
+				base.Code = CodeCredentialSessionUnavailable
+				base.Detail = "This process has no console session that could show the authorization dialog; save from the app window."
+			}
+			return &base
+		}
+		base.Code = CodeCredentialAuthorizationRequired
+		if interactive {
+			base.Detail = "The system did not allow the authorization this save required."
+			if !state.hasVisibleSession() {
+				base.Code = CodeCredentialSessionUnavailable
+				base.Detail = "This process has no console session that could show the authorization dialog."
+			}
+		} else {
+			base.Detail = "The item exists but needs an authorization a background operation must not request. Save it again from the app window."
+		}
+		if op == "read" || (op == "write" && existed == 1) {
+			base.cause = ErrCredentialAccessDenied
+		}
+		return &base
+	case errSecUserCanceled:
+		base.Code = CodeCredentialAuthorizationCancelled
+		base.Detail = "The authorization was dismissed."
+		base.cause = ErrCredentialAccessDenied
+		return &base
+	case errSecAuthFailed:
+		base.Code = CodeCredentialAuthorizationFailed
+		base.Detail = "The keychain rejected the authorization."
+		base.cause = ErrCredentialAccessDenied
+		return &base
+	case errSecNotAvailable, errSecNoSuchKeychain, errSecMissingEntitlement:
+		base.Code = CodeCredentialUnavailable
+		base.Detail = "No usable keychain is reachable from this session."
+		return &base
+	case errSecDecode, errSecBufferTooSmall:
+		base.Code = CodeCredentialStoreCorrupt
+		base.Detail = "The stored item is not a value this build wrote."
+		return &base
+	default:
+		base.Code = CodeCredentialStoreFailed
+		base.Detail = "The Security framework did not complete the operation."
+		return &base
+	}
+}
+
+func sessionName(state sdkState) string {
+	switch state.onConsole {
+	case 1:
+		return "console"
+	case 0:
+		return "background"
+	default:
+		return "unknown"
+	}
+}
+
+func stageName(stage int) string {
+	if stage == stageAdd {
+		return "add"
+	}
+	return "update"
 }
