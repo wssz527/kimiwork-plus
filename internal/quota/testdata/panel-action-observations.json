@@ -1,0 +1,523 @@
+{
+  "schemaVersion": 1,
+  "implementation": "legacy-0.12.1-panel-action",
+  "cases": [
+    {
+      "label": "refresh-all-omitted",
+      "path": "/api/quota/refresh",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "deepseek:default",
+            "status": "ok",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          },
+          {
+            "sourceId": "moonshot-cn",
+            "adapter": "moonshot-cn",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "moonshot:default",
+            "status": "error",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.moonshot.cn/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": 110,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          },
+          {
+            "sourceId": "moonshot-cn",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": {
+          "results": [
+            {
+              "sourceId": "deepseek",
+              "status": "ok",
+              "errorReason": null
+            },
+            {
+              "sourceId": "moonshot-cn",
+              "status": "error",
+              "errorReason": "auth_rejected"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-empty-list-means-none",
+      "path": "/api/quota/refresh",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "deepseek:default",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": {
+          "results": []
+        }
+      }
+    },
+    {
+      "label": "refresh-one",
+      "path": "/api/quota/refresh",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "deepseek:default",
+            "status": "ok",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          },
+          {
+            "sourceId": "moonshot-cn",
+            "adapter": "moonshot-cn",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "moonshot:default",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.moonshot.cn/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": 5,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          },
+          {
+            "sourceId": "moonshot-cn",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": {
+          "results": [
+            {
+              "sourceId": "deepseek",
+              "status": "ok",
+              "errorReason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-unknown-id",
+      "path": "/api/quota/refresh",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "deepseek:default",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": {
+          "results": [
+            {
+              "sourceId": "nope",
+              "status": "unknown",
+              "errorReason": "unknown_source"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-force-false",
+      "path": "/api/quota/refresh",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "deepseek:default",
+            "status": "ok",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": 7,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": {
+          "results": [
+            {
+              "sourceId": "deepseek",
+              "status": "ok",
+              "errorReason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-bad-sourceIds-type",
+      "path": "/api/quota/refresh",
+      "status": 400,
+      "code": "invalid_quota_refresh"
+    },
+    {
+      "label": "refresh-bad-sourceId-shape",
+      "path": "/api/quota/refresh",
+      "status": 400,
+      "code": "invalid_quota_refresh"
+    },
+    {
+      "label": "refresh-too-many",
+      "path": "/api/quota/refresh",
+      "status": 400,
+      "code": "invalid_quota_refresh"
+    },
+    {
+      "label": "refresh-bad-force",
+      "path": "/api/quota/refresh",
+      "status": 400,
+      "code": "invalid_quota_refresh"
+    },
+    {
+      "label": "upsert-preset",
+      "path": "/api/quota/sources",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "connection:conn-a",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": null
+      }
+    },
+    {
+      "label": "upsert-preset-unchanged",
+      "path": "/api/quota/sources",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "deepseek",
+            "adapter": "deepseek",
+            "kind": "api_balance",
+            "unit": "CNY",
+            "credentialRef": "connection:conn-a",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": false,
+            "officialUrl": "https://platform.deepseek.com/",
+            "endpoint": null,
+            "method": null,
+            "windowLabel": null,
+            "fields": null,
+            "auth": null
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "deepseek",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "CNY"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": null
+      }
+    },
+    {
+      "label": "upsert-custom",
+      "path": "/api/quota/sources",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "local-gateway",
+            "adapter": "custom",
+            "kind": "coding_plan",
+            "unit": "tokens",
+            "credentialRef": "connection:conn-b",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": true,
+            "officialUrl": null,
+            "endpoint": "https://relay.example.test/api/quota",
+            "method": "GET",
+            "windowLabel": "5 小时",
+            "fields": {
+              "remaining": "data.remaining",
+              "used": "data.used",
+              "limit": "data.limit",
+              "resetAt": "data.resetAt"
+            },
+            "auth": {
+              "mode": "header",
+              "headerName": "x-api-key"
+            }
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "local-gateway",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "coding_plan",
+            "unit": "tokens"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": null
+      }
+    },
+    {
+      "label": "upsert-custom-bearer",
+      "path": "/api/quota/sources",
+      "ok": {
+        "sources": [
+          {
+            "sourceId": "relay-bearer",
+            "adapter": "custom",
+            "kind": "api_balance",
+            "unit": "USD",
+            "credentialRef": "connection:conn-b",
+            "status": "not_read",
+            "credentialSet": true,
+            "removable": true,
+            "officialUrl": null,
+            "endpoint": "https://relay.example.test/balance",
+            "method": "GET",
+            "windowLabel": null,
+            "fields": {
+              "remaining": "data.left"
+            },
+            "auth": {
+              "mode": "bearer"
+            }
+          }
+        ],
+        "records": [
+          {
+            "sourceId": "relay-bearer",
+            "remaining": null,
+            "limit": null,
+            "used": null,
+            "kind": "api_balance",
+            "unit": "USD"
+          }
+        ],
+        "combining": "never",
+        "lastRefresh": null
+      }
+    },
+    {
+      "label": "upsert-unknown-connection",
+      "path": "/api/quota/sources",
+      "status": 409,
+      "code": "quota_credential_connection_unavailable"
+    },
+    {
+      "label": "upsert-bad-adapter",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "invalid_quota_source"
+    },
+    {
+      "label": "upsert-custom-bad-kind",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "invalid_quota_source"
+    },
+    {
+      "label": "upsert-custom-bad-auth-type",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "invalid_quota_source"
+    },
+    {
+      "label": "upsert-custom-inference-endpoint",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "inference_endpoint"
+    },
+    {
+      "label": "upsert-duplicate-id",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "duplicate_source"
+    },
+    {
+      "label": "upsert-bad-action",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "invalid_quota_source"
+    },
+    {
+      "label": "remove-custom",
+      "path": "/api/quota/sources",
+      "ok": {
+        "sources": [],
+        "records": [],
+        "combining": "never",
+        "lastRefresh": null
+      }
+    },
+    {
+      "label": "remove-preset-refused",
+      "path": "/api/quota/sources",
+      "status": 409,
+      "code": "quota_source_not_removable"
+    },
+    {
+      "label": "remove-unknown",
+      "path": "/api/quota/sources",
+      "status": 409,
+      "code": "quota_source_not_removable"
+    },
+    {
+      "label": "remove-missing-sourceId",
+      "path": "/api/quota/sources",
+      "status": 400,
+      "code": "invalid_quota_source"
+    }
+  ]
+}

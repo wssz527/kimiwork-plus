@@ -1,0 +1,376 @@
+{
+  "schemaVersion": 1,
+  "note": "Shared quota fixtures for the legacy-vs-Go dual run. Mock transports only.",
+  "scenarios": [
+    {
+      "name": "deepseek-ok-then-fail",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "accountLabel": "工作账号",
+        "credentialRef": "connection:conn-a"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "is_available": true,
+              "balance_infos": [
+                {
+                  "currency": "USD",
+                  "total_balance": "0.00",
+                  "granted_balance": "0.00",
+                  "topped_up_balance": "0.00"
+                },
+                {
+                  "currency": "CNY",
+                  "total_balance": "110.00",
+                  "granted_balance": "10.00",
+                  "topped_up_balance": "100.00"
+                }
+              ]
+            }
+          },
+          "advanceMs": 0
+        },
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 500,
+            "body": {
+              "error": {
+                "message": "internal"
+              }
+            }
+          },
+          "advanceMs": 1000
+        }
+      ]
+    },
+    {
+      "name": "deepseek-first-failure",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "credentialRef": "deepseek:default"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 403,
+            "body": "forbidden"
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "no-credential",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "credentialRef": "absent:default"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {}
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "kimi-code-unsupported",
+      "source": {
+        "adapter": "kimi-code",
+        "sourceId": "kimi-code",
+        "accountLabel": "主力账号",
+        "credentialRef": "kimi-code:default"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {}
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "custom-window",
+      "source": {
+        "adapter": "custom",
+        "sourceId": "gateway-plan",
+        "providerId": "relay",
+        "sourceName": "自建网关 · Coding Plan",
+        "kind": "coding_plan",
+        "unit": "tokens",
+        "endpoint": "https://relay.example.test/api/quota",
+        "windowLabel": "5h",
+        "fields": {
+          "limit": "data.quota.limit",
+          "used": "data.quota.used",
+          "resetAt": "data.quota.resetAt"
+        },
+        "credentialRef": "connection:conn-a"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "data": {
+                "quota": {
+                  "limit": 500000,
+                  "used": 125000,
+                  "resetAt": 1767225600
+                }
+              }
+            }
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "custom-used-only",
+      "source": {
+        "adapter": "custom",
+        "sourceId": "spent-only",
+        "kind": "gateway_limit",
+        "unit": "requests",
+        "endpoint": "https://relay.example.test/usage",
+        "fields": {
+          "used": "data.used"
+        },
+        "credentialRef": "custom"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "data": {
+                "used": 42
+              }
+            }
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "custom-shape-changed",
+      "source": {
+        "adapter": "custom",
+        "sourceId": "relay",
+        "kind": "api_balance",
+        "unit": "USD",
+        "endpoint": "https://relay.example.test/balance",
+        "fields": {
+          "remaining": "data.remaining"
+        },
+        "credentialRef": "custom"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "data": {
+                "remaining": 12
+              }
+            }
+          },
+          "advanceMs": 0
+        },
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "data": {
+                "remaining": "not a number"
+              }
+            }
+          },
+          "advanceMs": 1000
+        }
+      ]
+    },
+    {
+      "name": "freshness-ageing",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "credentialRef": "deepseek:default"
+      },
+      "freshnessMs": 60000,
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "is_available": true,
+              "balance_infos": [
+                {
+                  "currency": "CNY",
+                  "total_balance": "5.00",
+                  "granted_balance": "0.00",
+                  "topped_up_balance": "5.00"
+                }
+              ]
+            }
+          },
+          "advanceMs": 0
+        },
+        {
+          "kind": "state",
+          "advanceMs": 120000
+        }
+      ]
+    },
+    {
+      "name": "moonshot-regional",
+      "source": {
+        "adapter": "moonshot-cn",
+        "sourceId": "moonshot-cn",
+        "credentialRef": "moonshot:default"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "code": 0,
+              "status": true,
+              "data": {
+                "available_balance": 49.58894,
+                "voucher_balance": 46.58893,
+                "cash_balance": 3.00001
+              }
+            }
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "two-sources-never-combine",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "credentialRef": "connection:conn-a"
+      },
+      "extraSources": [
+        {
+          "adapter": "moonshot-cn",
+          "sourceId": "moonshot-cn"
+        }
+      ],
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 200,
+            "body": {
+              "is_available": true,
+              "balance_infos": [
+                {
+                  "currency": "CNY",
+                  "total_balance": "110.00",
+                  "granted_balance": "10.00",
+                  "topped_up_balance": "100.00"
+                }
+              ]
+            }
+          },
+          "advanceMs": 0
+        }
+      ]
+    },
+    {
+      "name": "auth-rejected-keeps-nothing",
+      "source": {
+        "adapter": "deepseek",
+        "sourceId": "deepseek",
+        "credentialRef": "deepseek:default"
+      },
+      "steps": [
+        {
+          "kind": "refresh",
+          "reply": {
+            "status": 401,
+            "body": {
+              "error": "bad key"
+            }
+          },
+          "advanceMs": 0
+        }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "amount-parsing",
+      "inputs": [
+        "110.00",
+        110,
+        "  3.00001 ",
+        "abc",
+        "",
+        null,
+        "1e9"
+      ]
+    },
+    {
+      "name": "timestamp-parsing",
+      "inputs": [
+        1767225600,
+        1767225600000,
+        "2026-11-10T00:00:00Z",
+        "2026-11-10",
+        "3pm",
+        ""
+      ]
+    },
+    {
+      "name": "endpoint-gate",
+      "inputs": [
+        "https://relay.example.com/api/balance",
+        "http://127.0.0.1:3425/v1/magpie/quotas",
+        "http://localhost:3000/usage",
+        "http://relay.example.com/balance",
+        "http://169.254.169.254/latest/meta-data",
+        "https://10.0.0.5/balance",
+        "https://192.168.1.1/balance",
+        "https://172.16.0.1/balance",
+        "https://100.64.0.1/balance",
+        "https://[fd00::1]/balance",
+        "https://[fe80::1]/balance",
+        "https://metadata/balance",
+        "https://nas.local/balance",
+        "https://box.internal/balance",
+        "https://relay.example.com/balance?key=abc",
+        "https://relay.example.com/balance#frag",
+        "file:///etc/passwd",
+        "not a url",
+        "https://relay.example.test/v1/responses",
+        "http://127.0.0.1:3000/v1/chat/completions"
+      ]
+    }
+  ]
+}

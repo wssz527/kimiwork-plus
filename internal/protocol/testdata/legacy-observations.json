@@ -1,0 +1,1540 @@
+{
+  "schemaVersion": 1,
+  "implementation": "legacy-0.12.1",
+  "cases": [
+    {
+      "name": "chat-json-cache",
+      "status": 200,
+      "body": {
+        "id": "cmpl_fx",
+        "object": "chat.completion",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 100,
+          "completion_tokens": 20,
+          "total_tokens": 120,
+          "prompt_tokens_details": {
+            "cached_tokens": 60
+          }
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "kimi-probe",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-probe",
+        "usage": {
+          "inputTokens": 100,
+          "outputTokens": 20,
+          "totalTokens": 120,
+          "cachedInputTokens": 60
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "chat-sse-usage-twice",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "hi"
+              }
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 4,
+            "total_tokens": 34
+          }
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 4,
+            "total_tokens": 34
+          }
+        },
+        "[DONE]"
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "kimi-probe",
+            "stream": true,
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "completed",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-probe",
+        "usage": {
+          "inputTokens": 30,
+          "outputTokens": 4,
+          "totalTokens": 34
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "chat-sse-error-terminal",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "par"
+              }
+            }
+          ]
+        },
+        {
+          "error": {
+            "type": "overloaded_error",
+            "message": "synthetic overload"
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "kimi-probe",
+            "stream": true,
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "failed",
+        "error": "upstream_stream_failed",
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-probe",
+        "usage": null,
+        "failureReason": "upstream_stream_failed",
+        "failureSide": "upstream",
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "chat-sse-length",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "trunc"
+              }
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "length"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 9,
+            "completion_tokens": 2
+          }
+        },
+        "[DONE]"
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "kimi-probe",
+            "stream": true,
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "incomplete",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-probe",
+        "usage": {
+          "inputTokens": 9,
+          "outputTokens": 2
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "responses-json",
+      "status": 200,
+      "body": {
+        "id": "resp_fx",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "ok"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 10,
+          "total_tokens": 50
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/responses",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "vendor/model",
+            "input": "hi"
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "vendor/model",
+        "usage": {
+          "inputTokens": 40,
+          "outputTokens": 10,
+          "totalTokens": 50
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "responses-sse-completed",
+      "status": 200,
+      "body": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "resp_fx",
+            "status": "in_progress"
+          }
+        },
+        {
+          "type": "response.completed",
+          "response": {
+            "id": "resp_fx",
+            "status": "completed",
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 3,
+              "total_tokens": 14
+            }
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/responses",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "vendor/model",
+            "stream": true,
+            "input": "hi"
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "completed",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "vendor/model",
+        "usage": {
+          "inputTokens": 11,
+          "outputTokens": 3,
+          "totalTokens": 14
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "responses-sse-failed",
+      "status": 200,
+      "body": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "resp_fx",
+            "status": "in_progress"
+          }
+        },
+        {
+          "type": "response.failed",
+          "response": {
+            "id": "resp_fx",
+            "status": "failed"
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/responses",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "vendor/model",
+            "stream": true,
+            "input": "hi"
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "failed",
+        "error": "upstream_stream_failed",
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "vendor/model",
+        "usage": null,
+        "failureReason": "upstream_stream_failed",
+        "failureSide": "upstream",
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "upstream-403-vendor-type",
+      "status": 403,
+      "body": {
+        "error": {
+          "type": "permission_error",
+          "message": "no access"
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "kimi-probe",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 403,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-probe",
+        "usage": null,
+        "failureReason": "upstream_forbidden",
+        "failureSide": "upstream",
+        "upstreamType": "permission_error"
+      }
+    },
+    {
+      "name": "anthropic-chat-tool-nonstream",
+      "status": 200,
+      "body": {
+        "id": "msg_fx",
+        "object": "chat.completion",
+        "created": 1794276644,
+        "model": "claude-fx",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "checking",
+              "tool_calls": [
+                {
+                  "id": "tool_fx",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"a.txt\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 7,
+          "total_tokens": 21,
+          "prompt_tokens_details": {
+            "cached_tokens": 4
+          }
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "read a.txt"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": {
+          "inputTokens": 14,
+          "outputTokens": 7,
+          "totalTokens": 21,
+          "cachedInputTokens": 4
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-chat-tool-roundtrip-request",
+      "status": 200,
+      "body": {
+        "id": "msg_fx",
+        "object": "chat.completion",
+        "created": 1794276644,
+        "model": "claude-fx",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "20C"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5,
+          "completion_tokens": 2,
+          "total_tokens": 7
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 512,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "what is this?"
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "AAAA"
+                    }
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "url",
+                      "url": "https://example.test/a.jpg"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "weather",
+                    "input": {
+                      "city": "Paris"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": "{\"temperature\":20}"
+                  }
+                ]
+              }
+            ],
+            "system": "be terse",
+            "tools": [
+              {
+                "name": "weather",
+                "description": "lookup",
+                "input_schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            ],
+            "tool_choice": {
+              "type": "auto"
+            },
+            "stop_sequences": [
+              "END"
+            ],
+            "temperature": 0.25,
+            "output_config": {
+              "effort": "xhigh"
+            }
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": {
+          "inputTokens": 5,
+          "outputTokens": 2,
+          "totalTokens": 7
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-responses-tool-roundtrip-request",
+      "status": 200,
+      "body": {
+        "id": "msg_fx",
+        "object": "response",
+        "created_at": 1794276644,
+        "model": "claude-fx",
+        "status": "completed",
+        "output": [
+          {
+            "id": "msg_fx_item_0",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "done"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 5,
+          "output_tokens": 2,
+          "total_tokens": 7
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "claude-fx",
+            "max_tokens": 256,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "look it up"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "tool_use",
+                    "id": "call_2",
+                    "name": "lookup",
+                    "input": {
+                      "id": 7
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "tool_result",
+                    "tool_use_id": "call_2",
+                    "content": "{\"value\":\"ok\"}"
+                  },
+                  {
+                    "type": "text",
+                    "text": "thanks"
+                  }
+                ]
+              }
+            ],
+            "system": "stay in scope",
+            "tools": [
+              {
+                "name": "lookup",
+                "input_schema": {
+                  "type": "object"
+                }
+              }
+            ],
+            "output_config": {
+              "effort": "low"
+            }
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "claude-fx",
+        "usage": {
+          "inputTokens": 5,
+          "outputTokens": 2,
+          "totalTokens": 7
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-chat-stream-text",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "你好🙂"
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_fx",
+          "object": "chat.completion.chunk",
+          "model": "claude-fx",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 5,
+            "total_tokens": 125,
+            "prompt_tokens_details": {
+              "cached_tokens": 90
+            },
+            "cache_write_tokens": 20
+          }
+        },
+        "[DONE]"
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hi"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "completed",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 5,
+          "totalTokens": 125,
+          "cachedInputTokens": 90,
+          "cacheWriteTokens": 20
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-chat-stream-tool",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "tool_fx",
+                    "type": "function",
+                    "function": {
+                      "name": "read_file",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{\"path\":"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "\"a.txt\"}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_fx",
+          "object": "chat.completion.chunk",
+          "model": "claude-fx",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 7,
+            "total_tokens": 127,
+            "prompt_tokens_details": {
+              "cached_tokens": 90
+            },
+            "cache_write_tokens": 20
+          }
+        },
+        "[DONE]"
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "read"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "completed",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 7,
+          "totalTokens": 127,
+          "cachedInputTokens": 90,
+          "cacheWriteTokens": 20
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-responses-stream-tool",
+      "status": 200,
+      "body": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "msg_fx",
+            "object": "response",
+            "model": "claude-fx",
+            "status": "in_progress",
+            "output": [],
+            "usage": {
+              "input_tokens": 120,
+              "input_tokens_details": {
+                "cached_tokens": 90
+              },
+              "cache_write_tokens": 20
+            }
+          }
+        },
+        {
+          "type": "response.output_item.added",
+          "output_index": 0,
+          "item": {
+            "id": "tool_fx",
+            "type": "function_call",
+            "call_id": "tool_fx",
+            "name": "read_file",
+            "arguments": "",
+            "status": "in_progress"
+          }
+        },
+        {
+          "type": "response.function_call_arguments.delta",
+          "item_id": "tool_fx",
+          "output_index": 0,
+          "delta": "{\"path\":"
+        },
+        {
+          "type": "response.function_call_arguments.delta",
+          "item_id": "tool_fx",
+          "output_index": 0,
+          "delta": "\"a.txt\"}"
+        },
+        {
+          "type": "response.function_call_arguments.done",
+          "item_id": "tool_fx",
+          "output_index": 0,
+          "arguments": "{\"path\":\"a.txt\"}"
+        },
+        {
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "id": "tool_fx",
+            "type": "function_call",
+            "call_id": "tool_fx",
+            "name": "read_file",
+            "arguments": "{\"path\":\"a.txt\"}",
+            "status": "completed"
+          }
+        },
+        {
+          "type": "response.completed",
+          "response": {
+            "id": "msg_fx",
+            "object": "response",
+            "model": "claude-fx",
+            "status": "completed",
+            "output": [
+              {
+                "id": "tool_fx",
+                "type": "function_call",
+                "call_id": "tool_fx",
+                "name": "read_file",
+                "arguments": "{\"path\":\"a.txt\"}",
+                "status": "completed"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 7,
+              "total_tokens": 127,
+              "input_tokens_details": {
+                "cached_tokens": 90
+              },
+              "cache_write_tokens": 20
+            }
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "claude-fx",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "read"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "completed",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "claude-fx",
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 7,
+          "totalTokens": 127,
+          "cachedInputTokens": 90,
+          "cacheWriteTokens": 20
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-stream-error",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "你好🙂"
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_fx",
+          "object": "chat.completion.chunk",
+          "model": "claude-fx",
+          "choices": [],
+          "error": {
+            "type": "overloaded_error",
+            "message": "synthetic overload"
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hi"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "failed",
+        "error": "upstream_stream_failed",
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": null,
+        "failureReason": "upstream_stream_failed",
+        "failureSide": "upstream",
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-stream-truncated",
+      "status": 200,
+      "body": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "你好🙂"
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_fx",
+          "object": "chat.completion.chunk",
+          "model": "claude-fx",
+          "choices": [],
+          "error": {
+            "type": "incomplete_stream",
+            "message": "upstream_message_stop_missing"
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hi"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "failed",
+        "error": "upstream_stream_failed",
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": null,
+        "failureReason": "upstream_stream_failed",
+        "failureSide": "upstream",
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-stream-max-tokens",
+      "status": 200,
+      "body": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "msg_fx",
+            "object": "response",
+            "model": "claude-fx",
+            "status": "in_progress",
+            "output": [],
+            "usage": {
+              "input_tokens": 120,
+              "input_tokens_details": {
+                "cached_tokens": 90
+              },
+              "cache_write_tokens": 20
+            }
+          }
+        },
+        {
+          "type": "response.output_item.added",
+          "output_index": 0,
+          "item": {
+            "id": "msg_fx_item_0",
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [
+              {
+                "type": "output_text",
+                "text": ""
+              }
+            ]
+          }
+        },
+        {
+          "type": "response.content_part.added",
+          "item_id": "msg_fx_item_0",
+          "output_index": 0,
+          "content_index": 0,
+          "part": {
+            "type": "output_text",
+            "text": ""
+          }
+        },
+        {
+          "type": "response.output_text.delta",
+          "item_id": "msg_fx_item_0",
+          "output_index": 0,
+          "content_index": 0,
+          "delta": "你好🙂"
+        },
+        {
+          "type": "response.output_text.done",
+          "item_id": "msg_fx_item_0",
+          "output_index": 0,
+          "content_index": 0,
+          "text": "你好🙂"
+        },
+        {
+          "type": "response.content_part.done",
+          "item_id": "msg_fx_item_0",
+          "output_index": 0,
+          "content_index": 0,
+          "part": {
+            "type": "output_text",
+            "text": "你好🙂"
+          }
+        },
+        {
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "id": "msg_fx_item_0",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "你好🙂"
+              }
+            ]
+          }
+        },
+        {
+          "type": "response.incomplete",
+          "response": {
+            "id": "msg_fx",
+            "object": "response",
+            "model": "claude-fx",
+            "status": "incomplete",
+            "output": [
+              {
+                "id": "msg_fx_item_0",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "你好🙂"
+                  }
+                ]
+              }
+            ],
+            "incomplete_details": {
+              "reason": "max_output_tokens"
+            },
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 5,
+              "total_tokens": 125,
+              "input_tokens_details": {
+                "cached_tokens": 90
+              },
+              "cache_write_tokens": 20
+            }
+          }
+        }
+      ],
+      "contentType": "text/event-stream",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "claude-fx",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hi"
+                  }
+                ]
+              }
+            ],
+            "stream": true
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": "incomplete",
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "claude-fx",
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 5,
+          "totalTokens": 125,
+          "cachedInputTokens": 90,
+          "cacheWriteTokens": 20
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "anthropic-cache-nested",
+      "status": 200,
+      "body": {
+        "id": "msg_fx",
+        "object": "chat.completion",
+        "created": 1794276644,
+        "model": "claude-fx",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 20,
+          "completion_tokens": 5,
+          "total_tokens": 25,
+          "cache_write_tokens": 10
+        }
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/messages",
+          "method": "POST",
+          "authorization": "absent",
+          "apiKey": "present",
+          "anthropicVersion": "2023-06-01",
+          "body": {
+            "model": "kimi-claude",
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "hi"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": "anthropic",
+        "model": "kimi-claude",
+        "usage": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "totalTokens": 25,
+          "cacheWriteTokens": 10
+        },
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    },
+    {
+      "name": "alias-prefix-and-upstream-model",
+      "status": 200,
+      "body": {
+        "id": "cmpl_fx",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "contentType": "application/json",
+      "upstream": [
+        {
+          "url": "/chat/completions",
+          "method": "POST",
+          "authorization": "present",
+          "apiKey": "absent",
+          "anthropicVersion": null,
+          "body": {
+            "model": "deepseek-chat",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      ],
+      "record": {
+        "status": 200,
+        "outcome": null,
+        "error": null,
+        "side": "upstream",
+        "upstreamProtocol": null,
+        "model": "kimi-byok-deepseek",
+        "usage": null,
+        "failureReason": null,
+        "failureSide": null,
+        "upstreamType": null
+      }
+    }
+  ]
+}

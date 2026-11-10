@@ -1,0 +1,1 @@
+{"package.json":"{\"name\":\"kimi-work-remote-runtime\",\"version\":\"1.0.0\",\"type\":\"module\",\"main\":\"bootstrap.mjs\"}","bootstrap.mjs":"import { app } from \"electron\";\napp.exit(0);\n"}

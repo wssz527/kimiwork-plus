@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "note": "Shared web-adapter fixtures for the legacy-vs-Go dual run. Mock vendor only.",
+  "search": [
+    {
+      "label": "plain",
+      "body": {
+        "results": [
+          {
+            "title": "Tavily Docs",
+            "url": "https://docs.tavily.test/intro",
+            "content": "  How   it works  ",
+            "score": 0.99,
+            "published_date": "2026-01-02",
+            "raw_content": "ignored",
+            "images": [
+              "x"
+            ]
+          },
+          {
+            "title": "",
+            "url": "https://www.example.test/page",
+            "content": "a snippet"
+          },
+          {
+            "title": "No URL",
+            "url": "",
+            "content": "dropped"
+          },
+          {
+            "title": "Bad scheme",
+            "url": "ftp://example.test/x",
+            "content": "dropped"
+          }
+        ]
+      }
+    },
+    {
+      "label": "empty-results",
+      "body": {
+        "results": []
+      }
+    },
+    {
+      "label": "no-results-key",
+      "body": {}
+    },
+    {
+      "label": "results-not-array",
+      "body": {
+        "results": "nope"
+      }
+    },
+    {
+      "label": "long-snippet",
+      "body": {
+        "results": [
+          {
+            "title": "Long",
+            "url": "https://a.test/",
+            "content": "aaaa bbbb"
+          }
+        ]
+      }
+    },
+    {
+      "label": "unicode-snippet",
+      "body": {
+        "results": [
+          {
+            "title": "中文标题",
+            "url": "https://cn.test/页",
+            "content": "这是一段很长的中文摘要内容"
+          }
+        ]
+      }
+    }
+  ],
+  "searchErrors": [
+    {
+      "label": "status-401",
+      "status": 401
+    },
+    {
+      "label": "status-403",
+      "status": 403
+    },
+    {
+      "label": "status-429",
+      "status": 429
+    },
+    {
+      "label": "status-400",
+      "status": 400
+    },
+    {
+      "label": "status-500",
+      "status": 500
+    },
+    {
+      "label": "status-503",
+      "status": 503
+    }
+  ],
+  "fetch": [
+    {
+      "label": "plain",
+      "url": "https://example.test/page",
+      "body": {
+        "results": [
+          {
+            "url": "https://example.test/page",
+            "raw_content": "  # Title\n\nBody  "
+          }
+        ],
+        "failed_results": []
+      }
+    },
+    {
+      "label": "failed-results",
+      "url": "https://example.test/blocked",
+      "body": {
+        "results": [],
+        "failed_results": [
+          {
+            "url": "https://example.test/blocked",
+            "error": "robots.txt"
+          }
+        ]
+      }
+    },
+    {
+      "label": "empty-content",
+      "url": "https://example.test/x",
+      "body": {
+        "results": [
+          {
+            "url": "https://example.test/x",
+            "raw_content": "   "
+          }
+        ]
+      }
+    },
+    {
+      "label": "mismatched-two",
+      "url": "https://example.test/wanted",
+      "body": {
+        "results": [
+          {
+            "url": "https://other.test/a",
+            "raw_content": "A"
+          },
+          {
+            "url": "https://other.test/b",
+            "raw_content": "B"
+          }
+        ]
+      }
+    },
+    {
+      "label": "normalised-single",
+      "url": "https://example.test/page",
+      "body": {
+        "results": [
+          {
+            "url": "https://example.test/page/",
+            "raw_content": "ok"
+          }
+        ]
+      }
+    }
+  ],
+  "urlGate": [
+    "https://api.tavily.com/search",
+    "http://127.0.0.1:8080/search",
+    "http://localhost:3000/fetch",
+    "http://vendor.example.test/search",
+    "https://user:pw@vendor.test/x",
+    "https://vendor.test/x?a=1",
+    "https://vendor.test/x#f",
+    "ftp://vendor.test/x",
+    "not a url",
+    ""
+  ],
+  "requests": [
+    {
+      "label": "query-empty",
+      "kind": "search",
+      "request": {
+        "text_query": "  "
+      }
+    },
+    {
+      "label": "query-too-long",
+      "kind": "search",
+      "request": {
+        "text_query": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "label": "depth-bad",
+      "kind": "search",
+      "request": {
+        "text_query": "ok"
+      },
+      "searchDepth": "deep"
+    },
+    {
+      "label": "url-empty",
+      "kind": "fetch",
+      "request": {
+        "url": ""
+      }
+    },
+    {
+      "label": "url-ftp",
+      "kind": "fetch",
+      "request": {
+        "url": "ftp://x.test/a"
+      }
+    },
+    {
+      "label": "url-js",
+      "kind": "fetch",
+      "request": {
+        "url": "javascript:alert(1)"
+      }
+    }
+  ]
+}

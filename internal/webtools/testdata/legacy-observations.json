@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "implementation": "legacy-0.12.1",
+  "search": [
+    {
+      "label": "plain",
+      "answer": {
+        "search_results": [
+          {
+            "title": "Tavily Docs",
+            "url": "https://docs.tavily.test/intro",
+            "snippet": "How it works",
+            "date": "2026-01-02",
+            "site_name": "docs.tavily.test"
+          },
+          {
+            "title": "example.test",
+            "url": "https://www.example.test/page",
+            "snippet": "a snippet",
+            "site_name": "example.test"
+          }
+        ]
+      }
+    },
+    {
+      "label": "empty-results",
+      "answer": {
+        "search_results": []
+      }
+    },
+    {
+      "label": "no-results-key",
+      "code": "web_adapter_invalid_response",
+      "status": 502
+    },
+    {
+      "label": "results-not-array",
+      "code": "web_adapter_invalid_response",
+      "status": 502
+    },
+    {
+      "label": "long-snippet",
+      "answer": {
+        "search_results": [
+          {
+            "title": "Long",
+            "url": "https://a.test/",
+            "snippet": "aaaa bbbb",
+            "site_name": "a.test"
+          }
+        ]
+      }
+    },
+    {
+      "label": "unicode-snippet",
+      "answer": {
+        "search_results": [
+          {
+            "title": "中文标题",
+            "url": "https://cn.test/%E9%A1%B5",
+            "snippet": "这是一段很长的中文摘要内容",
+            "site_name": "cn.test"
+          }
+        ]
+      }
+    }
+  ],
+  "searchErrors": [
+    {
+      "label": "status-401",
+      "code": "web_adapter_auth_failed",
+      "status": 401,
+      "vendorStatus": 401
+    },
+    {
+      "label": "status-403",
+      "code": "web_adapter_auth_failed",
+      "status": 401,
+      "vendorStatus": 403
+    },
+    {
+      "label": "status-429",
+      "code": "web_adapter_rate_limited",
+      "status": 429,
+      "vendorStatus": 429
+    },
+    {
+      "label": "status-400",
+      "code": "web_adapter_invalid_request",
+      "status": 400,
+      "vendorStatus": 400
+    },
+    {
+      "label": "status-500",
+      "code": "web_adapter_upstream_error",
+      "status": 502,
+      "vendorStatus": 500
+    },
+    {
+      "label": "status-503",
+      "code": "web_adapter_upstream_error",
+      "status": 502,
+      "vendorStatus": 503
+    }
+  ],
+  "fetch": [
+    {
+      "label": "plain",
+      "page": "# Title\n\nBody"
+    },
+    {
+      "label": "failed-results",
+      "code": "web_adapter_extract_failed",
+      "status": 502
+    },
+    {
+      "label": "empty-content",
+      "code": "web_adapter_extract_failed",
+      "status": 502
+    },
+    {
+      "label": "mismatched-two",
+      "code": "web_adapter_extract_failed",
+      "status": 502
+    },
+    {
+      "label": "normalised-single",
+      "page": "ok"
+    }
+  ],
+  "urlGate": [
+    {
+      "input": "https://api.tavily.com/search",
+      "accepted": true
+    },
+    {
+      "input": "http://127.0.0.1:8080/search",
+      "accepted": true
+    },
+    {
+      "input": "http://localhost:3000/fetch",
+      "accepted": true
+    },
+    {
+      "input": "http://vendor.example.test/search",
+      "accepted": false
+    },
+    {
+      "input": "https://user:pw@vendor.test/x",
+      "accepted": false
+    },
+    {
+      "input": "https://vendor.test/x?a=1",
+      "accepted": false
+    },
+    {
+      "input": "https://vendor.test/x#f",
+      "accepted": false
+    },
+    {
+      "input": "ftp://vendor.test/x",
+      "accepted": false
+    },
+    {
+      "input": "not a url",
+      "accepted": false
+    },
+    {
+      "input": "",
+      "accepted": false
+    }
+  ],
+  "requests": [
+    {
+      "label": "query-empty",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    },
+    {
+      "label": "query-too-long",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    },
+    {
+      "label": "depth-bad",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    },
+    {
+      "label": "url-empty",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    },
+    {
+      "label": "url-ftp",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    },
+    {
+      "label": "url-js",
+      "code": "web_adapter_invalid_request",
+      "status": 400
+    }
+  ]
+}

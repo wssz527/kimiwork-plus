@@ -1,0 +1,315 @@
+{
+  "schemaVersion": 1,
+  "note": "Shared usage-ledger fixtures for the legacy-vs-Go dual run. No real history.",
+  "entries": [
+    {
+      "operationId": "a1",
+      "source": "gateway",
+      "at": "2026-11-06T02:00:00.000Z",
+      "status": "completed",
+      "modelId": "claude-sonnet",
+      "modelAlias": "byok-claude",
+      "providerId": "anthropic",
+      "connectionId": "work",
+      "usageProtocol": "anthropic",
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 90,
+        "cache_creation_input_tokens": 20
+      },
+      "latencyMs": 900,
+      "httpStatus": 200
+    },
+    {
+      "operationId": "a2",
+      "source": "gateway",
+      "at": "2026-11-06T03:00:00.000Z",
+      "status": "completed",
+      "modelId": "claude-sonnet",
+      "providerId": "anthropic",
+      "connectionId": "work",
+      "usageProtocol": "anthropic",
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 7,
+          "ephemeral_1h_input_tokens": 3
+        }
+      }
+    },
+    {
+      "operationId": "a3",
+      "source": "gateway",
+      "at": "2026-11-06T04:00:00.000Z",
+      "status": "completed",
+      "modelId": "claude-sonnet",
+      "providerId": "anthropic",
+      "usageProtocol": "anthropic",
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5
+      }
+    },
+    {
+      "operationId": "o1",
+      "source": "gateway",
+      "at": "2026-11-07T03:00:00.000Z",
+      "status": "completed",
+      "modelId": "gpt-sol",
+      "providerId": "openai",
+      "connectionId": "home",
+      "usage": {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "prompt_tokens_details": {
+          "cached_tokens": 60
+        }
+      },
+      "latencyMs": 300,
+      "httpStatus": 200
+    },
+    {
+      "operationId": "o2",
+      "source": "gateway",
+      "at": "2026-11-07T04:00:00.000Z",
+      "status": "completed",
+      "modelId": "gpt-sol",
+      "providerId": "openai",
+      "usage": {
+        "prompt_tokens": 100
+      }
+    },
+    {
+      "operationId": "o3",
+      "source": "gateway",
+      "at": "2026-11-07T05:00:00.000Z",
+      "status": "failed",
+      "modelId": "gpt-sol",
+      "providerId": "openai",
+      "connectionId": "home",
+      "errorCode": "upstream_rate_limited",
+      "httpStatus": 429,
+      "latencyMs": 40
+    },
+    {
+      "operationId": "o4",
+      "source": "gateway",
+      "at": "2026-11-08T01:00:00.000Z",
+      "status": "cancelled",
+      "modelId": "gpt-sol",
+      "providerId": "openai",
+      "usage": {
+        "prompt_tokens": 7,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "operationId": "o5",
+      "source": "gateway",
+      "at": "2026-11-08T02:00:00.000Z",
+      "status": "completed",
+      "modelId": "claude-sonnet",
+      "modelAlias": "byok-claude",
+      "providerId": "anthropic",
+      "account": "synthetic-account-label",
+      "apiKeyId": "synthetic-key-label",
+      "conversationId": "conv-77",
+      "usageProtocol": "anthropic",
+      "usage": {
+        "input_tokens": 1000,
+        "output_tokens": 200,
+        "cache_read_input_tokens": 500
+      },
+      "latencyMs": 1200,
+      "httpStatus": 200
+    },
+    {
+      "operationId": "a1",
+      "source": "panel",
+      "at": "2026-11-08T03:00:00.000Z",
+      "status": "completed",
+      "modelId": "claude-sonnet",
+      "providerId": "anthropic",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 1
+      }
+    },
+    {
+      "operationId": "o6",
+      "source": "gateway",
+      "at": "2026-11-08T04:00:00.000Z",
+      "status": "completed",
+      "modelId": "gpt-sol",
+      "providerId": "openai",
+      "inputTokens": 999,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 2
+      }
+    }
+  ],
+  "queries": [
+    {
+      "label": "today-hour",
+      "query": {
+        "preset": "today",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "7d-day",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "30d-day",
+      "query": {
+        "preset": "30d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "filter-model-id",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000,
+        "filters": {
+          "modelId": "claude-sonnet"
+        }
+      }
+    },
+    {
+      "label": "filter-model-alias",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000,
+        "filters": {
+          "modelId": "byok-claude"
+        }
+      }
+    },
+    {
+      "label": "filter-connection",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000,
+        "filters": {
+          "connectionId": "work"
+        }
+      }
+    },
+    {
+      "label": "filter-account",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000,
+        "filters": {
+          "account": "__REDACTED_ACCOUNT__"
+        }
+      }
+    },
+    {
+      "label": "custom-single-day",
+      "query": {
+        "preset": "custom",
+        "from": "2026-11-08",
+        "to": "2026-11-08",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "custom-week-unit",
+      "query": {
+        "preset": "custom",
+        "from": "2026-01-01",
+        "to": "2026-11-01",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "limit-2",
+      "query": {
+        "preset": "7d",
+        "timeZone": "Asia/Shanghai",
+        "now": 1794196800000,
+        "limit": 2
+      }
+    },
+    {
+      "label": "dst-fall-back",
+      "query": {
+        "preset": "custom",
+        "from": "2026-11-01",
+        "to": "2026-11-01",
+        "timeZone": "America/New_York",
+        "now": 1794196800000
+      }
+    },
+    {
+      "label": "utc",
+      "query": {
+        "preset": "today",
+        "timeZone": "UTC",
+        "now": 1794168000000
+      }
+    }
+  ],
+  "errors": [
+    {
+      "label": "bad-zone",
+      "query": {
+        "preset": "today",
+        "timeZone": "Not/AZone"
+      }
+    },
+    {
+      "label": "bad-preset",
+      "query": {
+        "preset": "9x",
+        "timeZone": "UTC"
+      }
+    },
+    {
+      "label": "reversed",
+      "query": {
+        "preset": "custom",
+        "from": "2026-11-05",
+        "to": "2026-11-01",
+        "timeZone": "UTC"
+      }
+    },
+    {
+      "label": "bad-filter",
+      "query": {
+        "preset": "7d",
+        "timeZone": "UTC",
+        "filters": {
+          "at": "x"
+        }
+      }
+    },
+    {
+      "label": "bad-limit",
+      "query": {
+        "preset": "7d",
+        "timeZone": "UTC",
+        "limit": -5
+      }
+    }
+  ]
+}

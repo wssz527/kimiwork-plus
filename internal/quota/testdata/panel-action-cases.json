@@ -1,0 +1,657 @@
+{
+  "schemaVersion": 1,
+  "note": "Panel-level quota actions: the body the existing UI sends. Mock transports only.",
+  "cases": [
+    {
+      "label": "refresh-all-omitted",
+      "path": "/api/quota/refresh",
+      "input": {},
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          },
+          {
+            "adapter": "moonshot-cn",
+            "sourceId": "moonshot-cn"
+          }
+        ]
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "Provider A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {
+          "is_available": true,
+          "balance_infos": [
+            {
+              "currency": "CNY",
+              "total_balance": "110.00",
+              "granted_balance": "10.00",
+              "topped_up_balance": "100.00"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-empty-list-means-none",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": []
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "refresh-one",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": [
+          "deepseek"
+        ]
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          },
+          {
+            "adapter": "moonshot-cn",
+            "sourceId": "moonshot-cn"
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {
+          "is_available": true,
+          "balance_infos": [
+            {
+              "currency": "CNY",
+              "total_balance": "5.00",
+              "granted_balance": "0.00",
+              "topped_up_balance": "5.00"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-unknown-id",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": [
+          "nope"
+        ]
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "refresh-force-false",
+      "path": "/api/quota/refresh",
+      "input": {
+        "force": false
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {
+          "is_available": true,
+          "balance_infos": [
+            {
+              "currency": "CNY",
+              "total_balance": "7.00",
+              "granted_balance": "0.00",
+              "topped_up_balance": "7.00"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "refresh-bad-sourceIds-type",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": "deepseek"
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "refresh-bad-sourceId-shape",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": [
+          "Not Valid!"
+        ]
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "refresh-too-many",
+      "path": "/api/quota/refresh",
+      "input": {
+        "sourceIds": [
+          "s0",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5",
+          "s6",
+          "s7",
+          "s8",
+          "s9",
+          "s10",
+          "s11",
+          "s12",
+          "s13",
+          "s14",
+          "s15",
+          "s16",
+          "s17",
+          "s18",
+          "s19",
+          "s20"
+        ]
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "refresh-bad-force",
+      "path": "/api/quota/refresh",
+      "input": {
+        "force": "yes"
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-preset",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "deepseek",
+          "sourceId": "deepseek",
+          "sourceName": "DeepSeek 余额",
+          "auth": {
+            "connectionId": "conn-a"
+          }
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "Provider A",
+          "providerPresetId": "deepseek",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-preset-unchanged",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "deepseek",
+          "sourceId": "deepseek",
+          "sourceName": "DeepSeek 余额",
+          "auth": {
+            "connectionId": "conn-a"
+          }
+        }
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek",
+            "credentialRef": "connection:conn-a"
+          }
+        ]
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "Provider A",
+          "providerPresetId": "deepseek",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-custom",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "custom",
+          "sourceId": "local-gateway",
+          "sourceName": "本机网关",
+          "kind": "coding_plan",
+          "unit": "tokens",
+          "endpoint": "https://relay.example.test/api/quota",
+          "windowLabel": "5 小时",
+          "auth": {
+            "connectionId": "conn-b",
+            "type": "x-api-key"
+          },
+          "valuePath": "data.remaining",
+          "usedPath": "data.used",
+          "limitPath": "data.limit",
+          "resetAtPath": "data.resetAt"
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-b",
+          "name": "Provider B",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-custom-bearer",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "custom",
+          "sourceId": "relay-bearer",
+          "sourceName": "中继",
+          "kind": "api_balance",
+          "unit": "USD",
+          "endpoint": "https://relay.example.test/balance",
+          "auth": {
+            "connectionId": "conn-b",
+            "type": "bearer"
+          },
+          "valuePath": "data.left"
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-b",
+          "name": "Provider B",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-unknown-connection",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "deepseek",
+          "sourceId": "deepseek",
+          "sourceName": "x",
+          "auth": {
+            "connectionId": "missing"
+          }
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-bad-adapter",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "nope",
+          "sourceId": "x",
+          "sourceName": "x",
+          "auth": {
+            "connectionId": "conn-a"
+          }
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-custom-bad-kind",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "custom",
+          "sourceId": "x",
+          "sourceName": "x",
+          "kind": "subscription_window",
+          "unit": "USD",
+          "endpoint": "https://relay.example.test/b",
+          "auth": {
+            "connectionId": "conn-a",
+            "type": "bearer"
+          },
+          "valuePath": "a"
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-custom-bad-auth-type",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "custom",
+          "sourceId": "x",
+          "sourceName": "x",
+          "kind": "api_balance",
+          "unit": "USD",
+          "endpoint": "https://relay.example.test/b",
+          "auth": {
+            "connectionId": "conn-a",
+            "type": "cookie"
+          },
+          "valuePath": "a"
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-custom-inference-endpoint",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "custom",
+          "sourceId": "x",
+          "sourceName": "x",
+          "kind": "api_balance",
+          "unit": "USD",
+          "endpoint": "https://relay.example.test/v1/responses",
+          "auth": {
+            "connectionId": "conn-a",
+            "type": "bearer"
+          },
+          "valuePath": "a"
+        }
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-duplicate-id",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "upsert",
+        "source": {
+          "adapter": "moonshot-cn",
+          "sourceId": "deepseek",
+          "sourceName": "x",
+          "auth": {
+            "connectionId": "conn-a"
+          }
+        }
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          }
+        ]
+      },
+      "connections": [
+        {
+          "id": "conn-a",
+          "name": "A",
+          "hasCredential": true
+        }
+      ],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "upsert-bad-action",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "rename",
+        "sourceId": "x"
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "remove-custom",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "remove",
+        "sourceId": "local-gateway"
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "custom",
+            "sourceId": "local-gateway",
+            "kind": "api_balance",
+            "unit": "USD",
+            "endpoint": "https://relay.example.test/b",
+            "fields": {
+              "remaining": "a"
+            }
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "remove-preset-refused",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "remove",
+        "sourceId": "deepseek"
+      },
+      "setup": {
+        "sources": [
+          {
+            "adapter": "deepseek",
+            "sourceId": "deepseek"
+          }
+        ]
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "remove-unknown",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "remove",
+        "sourceId": "nope"
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "label": "remove-missing-sourceId",
+      "path": "/api/quota/sources",
+      "input": {
+        "action": "remove"
+      },
+      "setup": {
+        "sources": []
+      },
+      "connections": [],
+      "reply": {
+        "status": 200,
+        "body": {}
+      }
+    }
+  ]
+}

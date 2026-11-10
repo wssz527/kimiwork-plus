@@ -1,0 +1,990 @@
+{
+  "schemaVersion": 1,
+  "implementation": "legacy-0.12.1-panel",
+  "scenarios": [
+    {
+      "name": "deepseek-ok-then-fail",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "工作账号",
+              "billingIdentity": "deepseek:工作账号",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 110,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "DeepSeek 余额",
+              "parts": [
+                {
+                  "label": "赠金",
+                  "amount": 10,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "充值",
+                  "amount": 100,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.deepseek.com/"
+            },
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "工作账号",
+              "billingIdentity": "deepseek:工作账号",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "USD",
+              "limit": null,
+              "used": null,
+              "remaining": 0,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "DeepSeek 余额",
+              "parts": [
+                {
+                  "label": "赠金",
+                  "amount": 10,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "充值",
+                  "amount": 100,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "connection:conn-a",
+              "accountLabel": "工作账号",
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [
+            {
+              "id": "conn-a",
+              "name": "Provider A",
+              "providerPresetId": "deepseek",
+              "hasCredential": true
+            }
+          ],
+          "combining": "never"
+        },
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "工作账号",
+              "billingIdentity": "deepseek:工作账号",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 110,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": true,
+              "status": "stale",
+              "errorReason": "upstream_error",
+              "sourceName": "DeepSeek 余额",
+              "parts": [
+                {
+                  "label": "赠金",
+                  "amount": 10,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "充值",
+                  "amount": 100,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.deepseek.com/"
+            },
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "工作账号",
+              "billingIdentity": "deepseek:工作账号",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "USD",
+              "limit": null,
+              "used": null,
+              "remaining": 0,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": true,
+              "status": "stale",
+              "errorReason": "upstream_error",
+              "sourceName": "DeepSeek 余额",
+              "parts": [
+                {
+                  "label": "赠金",
+                  "amount": 10,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "充值",
+                  "amount": 100,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "connection:conn-a",
+              "accountLabel": "工作账号",
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "stale",
+              "credentialSet": true,
+              "errorReason": "upstream_error",
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [
+            {
+              "id": "conn-a",
+              "name": "Provider A",
+              "providerPresetId": "deepseek",
+              "hasCredential": true
+            }
+          ],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "deepseek-first-failure",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-c2881064",
+              "billingIdentity": "deepseek:acct-c2881064",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "error",
+              "errorReason": "auth_rejected",
+              "sourceName": "DeepSeek 余额",
+              "parts": [],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "deepseek:default",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "error",
+              "credentialSet": true,
+              "errorReason": "auth_rejected",
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "no-credential",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-5fdc43d4",
+              "billingIdentity": "deepseek:acct-5fdc43d4",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "not_configured",
+              "errorReason": "credential_missing",
+              "sourceName": "DeepSeek 余额",
+              "parts": [],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "absent:default",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "not_configured",
+              "credentialSet": false,
+              "errorReason": "credential_missing",
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "kimi-code-unsupported",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "kimi-code",
+              "providerId": "kimi-code",
+              "accountRefMasked": "主力账号",
+              "billingIdentity": "kimi-code:主力账号",
+              "kind": "coding_plan",
+              "windowLabel": null,
+              "unit": null,
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "unsupported",
+              "errorReason": "unsupported_source",
+              "sourceName": "Kimi Code 订阅额度",
+              "parts": [],
+              "officialUrl": "https://www.kimi.com/code/console"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "kimi-code",
+              "adapter": "kimi-code",
+              "providerId": "kimi-code",
+              "sourceName": "Kimi Code 订阅额度",
+              "kind": "coding_plan",
+              "unit": null,
+              "supported": false,
+              "credentialRef": "kimi-code:default",
+              "accountLabel": "主力账号",
+              "officialPage": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+              "consoleUrl": "https://www.kimi.com/code/console",
+              "notes": [
+                "Kimi Code 2.4.1 的本机服务器提供实验性只读额度接口，需要运行服务器并明确授权访问令牌；本版本尚未接入。",
+                "可在官方控制台查看额度。本产品不自动读取服务器令牌、控制台登录态或 Cookie。"
+              ],
+              "status": "unsupported",
+              "credentialSet": true,
+              "errorReason": "unsupported_source",
+              "removable": false,
+              "officialUrl": "https://www.kimi.com/code/console"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "custom-window",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "gateway-plan",
+              "providerId": "relay",
+              "accountRefMasked": "acct-262ffea7",
+              "billingIdentity": "relay:acct-262ffea7",
+              "kind": "coding_plan",
+              "windowLabel": null,
+              "unit": "tokens",
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "not_configured",
+              "errorReason": "credential_missing",
+              "sourceName": "自建网关 · Coding Plan",
+              "parts": [],
+              "officialUrl": null
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "gateway-plan",
+              "adapter": "custom",
+              "providerId": "relay",
+              "sourceName": "自建网关 · Coding Plan",
+              "kind": "coding_plan",
+              "unit": "tokens",
+              "supported": true,
+              "credentialRef": "connection:conn-b",
+              "accountLabel": null,
+              "method": "GET",
+              "endpoint": "https://relay.example.test/api/quota",
+              "host": "relay.example.test",
+              "fields": {
+                "used": "data.quota.used",
+                "limit": "data.quota.limit",
+                "resetAt": "data.quota.resetAt"
+              },
+              "auth": {
+                "mode": "bearer"
+              },
+              "windowLabel": "5h",
+              "officialPage": null,
+              "consoleUrl": null,
+              "notes": [],
+              "status": "not_configured",
+              "credentialSet": false,
+              "errorReason": "credential_missing",
+              "removable": true,
+              "officialUrl": null
+            }
+          ],
+          "connections": [
+            {
+              "id": "conn-b",
+              "name": "Provider B",
+              "hasCredential": false
+            }
+          ],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "custom-used-only",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "spent-only",
+              "providerId": "custom",
+              "accountRefMasked": "acct-d773db7b",
+              "billingIdentity": "custom:acct-d773db7b",
+              "kind": "gateway_limit",
+              "windowLabel": null,
+              "unit": "requests",
+              "limit": null,
+              "used": 42,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "自定义余额来源",
+              "parts": [],
+              "officialUrl": null
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "spent-only",
+              "adapter": "custom",
+              "providerId": "custom",
+              "sourceName": "自定义余额来源",
+              "kind": "gateway_limit",
+              "unit": "requests",
+              "supported": true,
+              "credentialRef": "custom",
+              "accountLabel": null,
+              "method": "GET",
+              "endpoint": "https://relay.example.test/usage",
+              "host": "relay.example.test",
+              "fields": {
+                "used": "data.used"
+              },
+              "auth": {
+                "mode": "bearer"
+              },
+              "windowLabel": null,
+              "officialPage": null,
+              "consoleUrl": null,
+              "notes": [],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": true,
+              "officialUrl": null
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "custom-shape-changed",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "relay",
+              "providerId": "custom",
+              "accountRefMasked": "acct-d773db7b",
+              "billingIdentity": "custom:acct-d773db7b",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "USD",
+              "limit": null,
+              "used": null,
+              "remaining": 12,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "自定义余额来源",
+              "parts": [],
+              "officialUrl": null
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "relay",
+              "adapter": "custom",
+              "providerId": "custom",
+              "sourceName": "自定义余额来源",
+              "kind": "api_balance",
+              "unit": "USD",
+              "supported": true,
+              "credentialRef": "custom",
+              "accountLabel": null,
+              "method": "GET",
+              "endpoint": "https://relay.example.test/balance",
+              "host": "relay.example.test",
+              "fields": {
+                "remaining": "data.remaining"
+              },
+              "auth": {
+                "mode": "bearer"
+              },
+              "windowLabel": null,
+              "officialPage": null,
+              "consoleUrl": null,
+              "notes": [],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": true,
+              "officialUrl": null
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        },
+        {
+          "records": [
+            {
+              "sourceId": "relay",
+              "providerId": "custom",
+              "accountRefMasked": "acct-d773db7b",
+              "billingIdentity": "custom:acct-d773db7b",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "USD",
+              "limit": null,
+              "used": null,
+              "remaining": 12,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": true,
+              "status": "stale",
+              "errorReason": "value_missing",
+              "sourceName": "自定义余额来源",
+              "parts": [],
+              "officialUrl": null
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "relay",
+              "adapter": "custom",
+              "providerId": "custom",
+              "sourceName": "自定义余额来源",
+              "kind": "api_balance",
+              "unit": "USD",
+              "supported": true,
+              "credentialRef": "custom",
+              "accountLabel": null,
+              "method": "GET",
+              "endpoint": "https://relay.example.test/balance",
+              "host": "relay.example.test",
+              "fields": {
+                "remaining": "data.remaining"
+              },
+              "auth": {
+                "mode": "bearer"
+              },
+              "windowLabel": null,
+              "officialPage": null,
+              "consoleUrl": null,
+              "notes": [],
+              "status": "stale",
+              "credentialSet": true,
+              "errorReason": "value_missing",
+              "removable": true,
+              "officialUrl": null
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "freshness-ageing",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-c2881064",
+              "billingIdentity": "deepseek:acct-c2881064",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 5,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "DeepSeek 余额",
+              "parts": [],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "deepseek:default",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        },
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-c2881064",
+              "billingIdentity": "deepseek:acct-c2881064",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 5,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": true,
+              "status": "stale",
+              "errorReason": null,
+              "sourceName": "DeepSeek 余额",
+              "parts": [],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "deepseek:default",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "stale",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "moonshot-regional",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "moonshot-cn",
+              "providerId": "moonshot-open-cn",
+              "accountRefMasked": "acct-1def1197",
+              "billingIdentity": "moonshot-open-cn:acct-1def1197",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 49.58894,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "Kimi 开放平台余额（国内）",
+              "parts": [
+                {
+                  "label": "代金券",
+                  "amount": 46.58893,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "现金",
+                  "amount": 3.00001,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.moonshot.cn/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "moonshot-cn",
+              "adapter": "moonshot-cn",
+              "providerId": "moonshot-open-cn",
+              "sourceName": "Kimi 开放平台余额（国内）",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "moonshot:default",
+              "accountLabel": null,
+              "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+              "consoleUrl": "https://platform.moonshot.cn/",
+              "notes": [
+                "这是开放平台按量余额，与 Kimi Code 会员订阅额度是两个产品、两套 Key。"
+              ],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": false,
+              "officialUrl": "https://platform.moonshot.cn/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "two-sources-never-combine",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-d773db7b",
+              "billingIdentity": "deepseek:acct-d773db7b",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": 110,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": "2026-11-09T04:00:00.000Z",
+              "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+              "stale": false,
+              "status": "ok",
+              "errorReason": null,
+              "sourceName": "DeepSeek 余额",
+              "parts": [
+                {
+                  "label": "赠金",
+                  "amount": 10,
+                  "unit": "CNY"
+                },
+                {
+                  "label": "充值",
+                  "amount": 100,
+                  "unit": "CNY"
+                }
+              ],
+              "officialUrl": "https://platform.deepseek.com/"
+            },
+            {
+              "sourceId": "moonshot-cn",
+              "providerId": "moonshot-open-cn",
+              "accountRefMasked": "acct-1def1197",
+              "billingIdentity": "moonshot-open-cn:acct-1def1197",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "error",
+              "errorReason": "auth_rejected",
+              "sourceName": "Kimi 开放平台余额（国内）",
+              "parts": [],
+              "officialUrl": "https://platform.moonshot.cn/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "connection:conn-a",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "ok",
+              "credentialSet": true,
+              "errorReason": null,
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            },
+            {
+              "sourceId": "moonshot-cn",
+              "adapter": "moonshot-cn",
+              "providerId": "moonshot-open-cn",
+              "sourceName": "Kimi 开放平台余额（国内）",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "moonshot:default",
+              "accountLabel": null,
+              "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+              "consoleUrl": "https://platform.moonshot.cn/",
+              "notes": [
+                "这是开放平台按量余额，与 Kimi Code 会员订阅额度是两个产品、两套 Key。"
+              ],
+              "status": "error",
+              "credentialSet": true,
+              "errorReason": "auth_rejected",
+              "removable": false,
+              "officialUrl": "https://platform.moonshot.cn/"
+            }
+          ],
+          "connections": [
+            {
+              "id": "conn-a",
+              "name": "Provider A",
+              "providerPresetId": "deepseek",
+              "hasCredential": true
+            }
+          ],
+          "combining": "never"
+        }
+      ]
+    },
+    {
+      "name": "auth-rejected-keeps-nothing",
+      "steps": [
+        {
+          "records": [
+            {
+              "sourceId": "deepseek",
+              "providerId": "deepseek",
+              "accountRefMasked": "acct-c2881064",
+              "billingIdentity": "deepseek:acct-c2881064",
+              "kind": "api_balance",
+              "windowLabel": null,
+              "unit": "CNY",
+              "limit": null,
+              "used": null,
+              "remaining": null,
+              "periodStart": null,
+              "resetAt": null,
+              "observedAt": null,
+              "lastSuccessfulAt": null,
+              "stale": false,
+              "status": "error",
+              "errorReason": "auth_rejected",
+              "sourceName": "DeepSeek 余额",
+              "parts": [],
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "sources": [
+            {
+              "sourceId": "deepseek",
+              "adapter": "deepseek",
+              "providerId": "deepseek",
+              "sourceName": "DeepSeek 余额",
+              "kind": "api_balance",
+              "unit": "CNY",
+              "supported": true,
+              "credentialRef": "deepseek:default",
+              "accountLabel": null,
+              "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+              "consoleUrl": "https://platform.deepseek.com/",
+              "notes": [
+                "按币种分行显示总余额；同一账户的 CNY 与 USD 是两个余额，不可相加。"
+              ],
+              "status": "error",
+              "credentialSet": true,
+              "errorReason": "auth_rejected",
+              "removable": false,
+              "officialUrl": "https://platform.deepseek.com/"
+            }
+          ],
+          "connections": [],
+          "combining": "never"
+        }
+      ]
+    }
+  ]
+}

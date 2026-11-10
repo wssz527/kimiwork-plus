@@ -1,0 +1,2598 @@
+{
+  "presets": [
+    {
+      "id": "kimi-code-cn",
+      "name": "Kimi Code（国内）",
+      "kind": "coding",
+      "family": "kimi-code",
+      "familyName": "Kimi Code",
+      "region": "cn",
+      "baseURL": "https://api.kimi.com/coding/v1",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "k3",
+          "name": "K3",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "Kimi K3",
+            "月之暗面 K3"
+          ],
+          "description": "旗舰编程模型，2.8T 参数。官方 1M 上下文只对高档位套餐开放，支持图片与视频输入。"
+        },
+        {
+          "id": "k3-256k",
+          "name": "K3 256K",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "K3 256K"
+          ],
+          "description": "K3 的 256K 上下文版本，上下文固定 262144，仅支持图片输入，消耗约为 k3 的一半。"
+        },
+        {
+          "id": "kimi-for-coding",
+          "name": "K2.8 Preview",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "Kimi K2.8",
+            "K2.8 Preview"
+          ],
+          "description": "K2.8 Preview，综合性能接近 K3，思考默认 max 档，支持图片与视频输入。"
+        },
+        {
+          "id": "kimi-for-coding-highspeed",
+          "name": "K2.7 Code HighSpeed",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "Kimi K2.7 Code HighSpeed"
+          ],
+          "description": "K2.7 Code 高速版，编码能力一致，输出速度约为普通版 5–6 倍、消耗约为 3 倍；思考固定开启，无分档。"
+        }
+      ],
+      "source": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://www.kimi.com/code/console",
+      "keySource": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "Kimi Code 的 key 只在 Kimi Code 控制台创建，与 Moonshot 开放平台按量 key、网页会员互不通用。",
+        "k3 的 1M 上下文只对 Allegretto / Pro 及以上套餐开放；Moderato / Plus 调用 k3 实际上限 262144，超出会返回 401。",
+        "k3-256k 上下文固定 262144；kimi-for-coding-highspeed 需要 Allegretto / Pro 及以上套餐。",
+        "官方要求第三方工具保留真实客户端标识，伪造 User-Agent 或客户端身份可能导致订阅权益被暂停。",
+        "K3 系列与 K2.8 Preview 关闭 thinking 后由 K2.8 Preview 的无思考版处理。"
+      ]
+    },
+    {
+      "id": "kimi-code-global",
+      "name": "Kimi Code（海外）",
+      "kind": "coding",
+      "family": "kimi-code",
+      "familyName": "Kimi Code",
+      "region": "global",
+      "baseURL": "https://api.kimi.ai/coding/v1",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "k3",
+          "name": "K3",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "Kimi K3",
+            "月之暗面 K3"
+          ],
+          "description": "旗舰编程模型，2.8T 参数。官方 1M 上下文只对高档位套餐开放，支持图片与视频输入。"
+        },
+        {
+          "id": "k3-256k",
+          "name": "K3 256K",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "K3 256K"
+          ],
+          "description": "K3 的 256K 上下文版本，上下文固定 262144，仅支持图片输入，消耗约为 k3 的一半。"
+        },
+        {
+          "id": "kimi-for-coding",
+          "name": "K2.8 Preview",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "Kimi K2.8",
+            "K2.8 Preview"
+          ],
+          "description": "K2.8 Preview，综合性能接近 K3，思考默认 max 档，支持图片与视频输入。"
+        },
+        {
+          "id": "kimi-for-coding-highspeed",
+          "name": "K2.7 Code HighSpeed",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "Kimi K2.7 Code HighSpeed"
+          ],
+          "description": "K2.7 Code 高速版，编码能力一致，输出速度约为普通版 5–6 倍、消耗约为 3 倍；思考固定开启，无分档。"
+        }
+      ],
+      "source": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://www.kimi.ai/code/console",
+      "keySource": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "海外域名与国内域名的 key 各自独立，不能互相调用。",
+        "k3 的 1M 上下文只对 Allegretto / Pro 及以上套餐开放；Moderato / Plus 调用 k3 实际上限 262144，超出会返回 401。",
+        "k3-256k 上下文固定 262144；kimi-for-coding-highspeed 需要 Allegretto / Pro 及以上套餐。",
+        "官方要求第三方工具保留真实客户端标识，伪造 User-Agent 或客户端身份可能导致订阅权益被暂停。"
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "kind": "api",
+      "family": "deepseek",
+      "familyName": "DeepSeek",
+      "baseURL": "https://api.deepseek.com",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1000000,
+          "maxOutputTokens": 384000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "DeepSeek V4.1 Flash",
+            "deepseek-v4-flash"
+          ],
+          "description": "支持非思考与思考（默认）两种模式；旧 ID deepseek-v4-flash 已退役但仍被接受，请求会由当前 Flash 模型处理。",
+          "source": {
+            "url": "https://api-docs.deepseek.com/quick_start/pricing",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1000000,
+          "maxOutputTokens": 384000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ],
+          "aliases": [
+            "DeepSeek V4 Pro"
+          ],
+          "description": "旗舰 MoE 模型，思考为默认模式；官方模型表未标注视觉输入，因此不声明图片能力。",
+          "source": {
+            "url": "https://api-docs.deepseek.com/quick_start/pricing",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://api-docs.deepseek.com/api/list-models",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "keySource": {
+        "url": "https://api-docs.deepseek.com/",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "官方 /models 返回 context_window、max_output_tokens、input_modalities、effort 与 api_capabilities 结构化元数据，导入后以实际响应为准。",
+        "Responses 与 Chat Completions 都由官方文档声明支持；未列出的请求参数可能被静默忽略，需要按真实支持列表校验。",
+        "截至核查日期只查到按量计费的 API，未查到可预设的编码订阅方案；这不等于官方不存在任何订阅产品。"
+      ]
+    },
+    {
+      "id": "zhipu-coding-cn-chat",
+      "name": "智谱 GLM Coding Plan（国内 · Chat）",
+      "kind": "coding",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "inputModalities": [
+            "text"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。"
+        },
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3-flash",
+          "name": "GLM-5.3-Flash",
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3 Flash"
+          ],
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。"
+        }
+      ],
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/coding-plan/tool/others",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "Coding Plan 的 chat 端点（/api/coding/paas/v4）与 responses 端点（/api/v1）是不同 Base URL，不能混用；用错端点无法扣减套餐额度。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "Coding Plan 的 key 与标准 API 的 key 分开管理、互不通用。",
+        "在 Claude Code（Anthropic 兼容）入口启用 1M 需要模型名后缀 [1m]，本目录使用 OpenAI 兼容端点，无需该后缀。"
+      ]
+    },
+    {
+      "id": "zhipu-coding-cn-responses",
+      "name": "智谱 GLM Coding Plan（国内 · Responses）",
+      "kind": "coding",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "baseURL": "https://open.bigmodel.cn/api/v1",
+      "protocols": [
+        "responses"
+      ],
+      "models": [
+        {
+          "protocols": [
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "inputModalities": [
+            "text"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。"
+        },
+        {
+          "protocols": [
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3-flash",
+          "name": "GLM-5.3-Flash",
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3 Flash"
+          ],
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。"
+        }
+      ],
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/coding-plan/latest-model",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "该 Base URL 只承载 OpenAI Responses 协议；chat 请求必须改用 /api/coding/paas/v4，混用无法扣减套餐额度。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "Coding Plan 的 key 与标准 API 的 key 分开管理、互不通用。"
+      ]
+    },
+    {
+      "id": "zhipu-api-cn",
+      "name": "智谱开放平台（国内 · 按量）",
+      "kind": "api",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "inputModalities": [
+            "text"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。"
+        },
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          },
+          "id": "glm-5.3-flash",
+          "name": "GLM-5.3-Flash",
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3 Flash"
+          ],
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。"
+        }
+      ],
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/api/introduction",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "按量计费使用标准 API Base URL 与标准 API key，与 Coding Plan 的端点和 key 都不通用。",
+        "模型能力与上限取自智谱模型概览；未在该页声明的能力不写入目录。"
+      ]
+    },
+    {
+      "id": "zai-coding-global-chat",
+      "name": "Z.AI GLM Coding Plan（海外 · Chat）",
+      "kind": "coding",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "baseURL": "https://api.z.ai/api/coding/paas/v4",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "Coding Plan 的 chat 端点与 responses 端点（https://api.z.ai/api/v1）是不同 Base URL，不能混用。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "z.ai 的 devpack 文档只公布了 glm-5.3 的 1M 上下文；其它模型是否在该套餐内未证实，因此未列入预设。"
+      ]
+    },
+    {
+      "id": "zai-coding-global-responses",
+      "name": "Z.AI GLM Coding Plan（海外 · Responses）",
+      "kind": "coding",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "baseURL": "https://api.z.ai/api/v1",
+      "protocols": [
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "protocols": [
+            "responses"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "该 Base URL 是 Coding Plan 的 Responses 专用入口；chat 请求必须改用 https://api.z.ai/api/coding/paas/v4。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "z.ai 的 devpack 文档只公布了 glm-5.3 的 1M 上下文；其它模型是否在该套餐内未证实，因此未列入预设。"
+      ]
+    },
+    {
+      "id": "zai-api-global",
+      "name": "Z.AI 开放平台（海外 · 按量）",
+      "kind": "api",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "baseURL": "https://api.z.ai/api/paas/v4",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "aliases": [
+            "智谱 GLM-5.3"
+          ],
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "按量计费使用标准 API Base URL 与标准 API key，与 Coding Plan 的端点和 key 都不通用。",
+        "模型能力与上限取自智谱模型概览，端点取自 z.ai 开发文档。"
+      ]
+    },
+    {
+      "id": "qwen-coding",
+      "name": "千问 Coding Plan（百炼）",
+      "kind": "coding",
+      "family": "qwen",
+      "familyName": "千问",
+      "region": "cn",
+      "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "id": "qwen3.7-plus",
+          "name": "Qwen3.7-Plus",
+          "maxOutputTokens": 131072,
+          "aliases": [
+            "千问 3.7 Plus"
+          ],
+          "description": "旗舰均衡多模态模型，1M 上下文 / 128K 输出，支持图片与视频输入、函数调用与结构化输出。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "id": "qwen3.6-plus",
+          "name": "Qwen3.6-Plus",
+          "maxOutputTokens": 65536,
+          "aliases": [
+            "千问 3.6 Plus"
+          ],
+          "description": "上一代 Plus 多模态模型，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-6-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen3.5-Plus",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "maxOutputTokens": 65536,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "aliases": [
+            "千问 3.5 Plus"
+          ],
+          "description": "Coding Plan 仍列出的更早版本，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-5-plus",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan",
+      "keySource": {
+        "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "Coding Plan 必须使用 sk-sp- 开头的套餐专用 key 与该专用 Base URL；和按量 key（sk-）或按量 Base URL 混用会按量额外计费。",
+        "官方条款只允许在受支持的交互式编程工具中使用，禁止自动化脚本、应用后端等非交互场景，也禁止账号共享。",
+        "仅预置官方列出的确切模型版本；Anthropic 兼容入口 https://coding.dashscope.aliyuncs.com/apps/anthropic 不在本目录的 chat/responses 范围内。"
+      ]
+    },
+    {
+      "id": "qwen-api",
+      "name": "千问百炼（按量）",
+      "kind": "api",
+      "family": "qwen",
+      "familyName": "千问",
+      "region": "cn",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "qwen3.8-max",
+          "name": "Qwen3.8-Max",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1000000,
+          "maxOutputTokens": 131072,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "xhigh"
+          ],
+          "aliases": [
+            "千问 3.8 Max"
+          ],
+          "description": "旗舰 2.4T MoE 模型，1M 上下文 / 128K 输出；思考档位为 none/low/medium/xhigh，high 与 max 会映射到 xhigh。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "id": "qwen3.7-plus",
+          "name": "Qwen3.7-Plus",
+          "maxOutputTokens": 131072,
+          "aliases": [
+            "千问 3.7 Plus"
+          ],
+          "description": "旗舰均衡多模态模型，1M 上下文 / 128K 输出，支持图片与视频输入、函数调用与结构化输出。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "id": "qwen3.6-plus",
+          "name": "Qwen3.6-Plus",
+          "maxOutputTokens": 65536,
+          "aliases": [
+            "千问 3.6 Plus"
+          ],
+          "description": "上一代 Plus 多模态模型，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-6-plus",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ],
+      "source": {
+        "url": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key",
+      "keySource": {
+        "url": "https://help.aliyun.com/zh/model-studio/get-api-key",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "按量计费使用 sk- key；API key 与地域绑定，跨地域调用会返回 401。",
+        "官方推荐改用业务空间专属域名 https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1；此处保留仍可用的旧域名 dashscope.aliyuncs.com。",
+        "Responses 与 Chat Completions 都支持流式；各模型 reasoning 档位不同，未列出的档位不能假定可用。",
+        "官方兼容性文档同时说明：未列入 Responses 支持列表的模型只保证基础兼容，Agent 能力有限。"
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "kind": "api",
+      "family": "openai",
+      "familyName": "OpenAI",
+      "baseURL": "https://api.openai.com/v1",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "name": "GPT-6 Astra",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "aliases": [
+            "Astra"
+          ],
+          "description": "旗舰推理与编码模型；输入超过 272K tokens 的请求按官方规则按 2 倍输入价格计费。"
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "aliases": [
+            "Sol"
+          ],
+          "description": "接近 Astra 的复杂任务能力，价格更低。"
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "name": "GPT-6.1 Terra",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "aliases": [
+            "Terra"
+          ],
+          "description": "偏视觉推理、计算机操作与写作的高效模型。"
+        },
+        {
+          "id": "gpt-6-luna",
+          "name": "GPT-6 Luna",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "aliases": [
+            "Luna"
+          ],
+          "description": "高吞吐、低成本模型。"
+        }
+      ],
+      "source": {
+        "url": "https://developers.openai.com/api/docs/models",
+        "checkedAt": "2026-11-02"
+      },
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "keySource": {
+        "url": "https://developers.openai.com/api/docs/quickstart",
+        "checkedAt": "2026-11-09"
+      },
+      "notes": [
+        "按量计费：按官方模型页公布的每百万 tokens 单价结算。",
+        "模型 ID 与上限取自官方模型页当前展示的 GPT-6 系列；未在该页声明的能力不写入目录。",
+        "输入超过 272K tokens 的请求按官方价格规则加收费用（2 倍输入、1.5 倍输出）。"
+      ]
+    }
+  ],
+  "menu": {
+    "checkedAt": "2026-11-02",
+    "families": [
+      {
+        "family": "kimi-code",
+        "name": "Kimi Code",
+        "regions": [
+          {
+            "region": "cn",
+            "name": "国内",
+            "plans": [
+              {
+                "plan": "coding",
+                "name": "Coding Plan",
+                "variants": [
+                  {
+                    "presetId": "kimi-code-cn",
+                    "name": "Kimi Code（国内）",
+                    "keyScope": "kimi-code-cn",
+                    "baseURL": "https://api.kimi.com/coding/v1",
+                    "host": "api.kimi.com",
+                    "protocols": [
+                      "chat",
+                      "responses"
+                    ],
+                    "modelCount": 4,
+                    "keyUrl": "https://www.kimi.com/code/console",
+                    "keySource": {
+                      "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "region": "global",
+            "name": "海外",
+            "plans": [
+              {
+                "plan": "coding",
+                "name": "Coding Plan",
+                "variants": [
+                  {
+                    "presetId": "kimi-code-global",
+                    "name": "Kimi Code（海外）",
+                    "keyScope": "kimi-code-global",
+                    "baseURL": "https://api.kimi.ai/coding/v1",
+                    "host": "api.kimi.ai",
+                    "protocols": [
+                      "chat",
+                      "responses"
+                    ],
+                    "modelCount": 4,
+                    "keyUrl": "https://www.kimi.ai/code/console",
+                    "keySource": {
+                      "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "family": "deepseek",
+        "name": "DeepSeek",
+        "regions": [
+          {
+            "region": null,
+            "name": null,
+            "plans": [
+              {
+                "plan": "api",
+                "name": "按量 API",
+                "variants": [
+                  {
+                    "presetId": "deepseek",
+                    "name": "DeepSeek",
+                    "keyScope": "deepseek",
+                    "baseURL": "https://api.deepseek.com",
+                    "host": "api.deepseek.com",
+                    "protocols": [
+                      "chat",
+                      "responses"
+                    ],
+                    "modelCount": 2,
+                    "keyUrl": "https://platform.deepseek.com/api_keys",
+                    "keySource": {
+                      "url": "https://api-docs.deepseek.com/",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://api-docs.deepseek.com/api/list-models",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "family": "glm",
+        "name": "GLM",
+        "regions": [
+          {
+            "region": "cn",
+            "name": "国内",
+            "plans": [
+              {
+                "plan": "coding",
+                "name": "Coding Plan",
+                "variants": [
+                  {
+                    "presetId": "zhipu-coding-cn-chat",
+                    "name": "智谱 GLM Coding Plan（国内 · Chat）",
+                    "keyScope": "zhipu-coding-cn-chat",
+                    "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "host": "open.bigmodel.cn",
+                    "protocols": [
+                      "chat"
+                    ],
+                    "modelCount": 2,
+                    "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+                    "keySource": {
+                      "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.bigmodel.cn/cn/coding-plan/tool/others",
+                      "checkedAt": "2026-11-02"
+                    }
+                  },
+                  {
+                    "presetId": "zhipu-coding-cn-responses",
+                    "name": "智谱 GLM Coding Plan（国内 · Responses）",
+                    "keyScope": "zhipu-coding-cn-responses",
+                    "baseURL": "https://open.bigmodel.cn/api/v1",
+                    "host": "open.bigmodel.cn",
+                    "protocols": [
+                      "responses"
+                    ],
+                    "modelCount": 2,
+                    "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+                    "keySource": {
+                      "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.bigmodel.cn/cn/coding-plan/latest-model",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              },
+              {
+                "plan": "api",
+                "name": "按量 API",
+                "variants": [
+                  {
+                    "presetId": "zhipu-api-cn",
+                    "name": "智谱开放平台（国内 · 按量）",
+                    "keyScope": "zhipu-api-cn",
+                    "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+                    "host": "open.bigmodel.cn",
+                    "protocols": [
+                      "chat"
+                    ],
+                    "modelCount": 2,
+                    "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+                    "keySource": {
+                      "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.bigmodel.cn/cn/api/introduction",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "region": "global",
+            "name": "海外",
+            "plans": [
+              {
+                "plan": "coding",
+                "name": "Coding Plan",
+                "variants": [
+                  {
+                    "presetId": "zai-coding-global-chat",
+                    "name": "Z.AI GLM Coding Plan（海外 · Chat）",
+                    "keyScope": "zai-coding-global-chat",
+                    "baseURL": "https://api.z.ai/api/coding/paas/v4",
+                    "host": "api.z.ai",
+                    "protocols": [
+                      "chat"
+                    ],
+                    "modelCount": 1,
+                    "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+                    "keySource": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-02"
+                    }
+                  },
+                  {
+                    "presetId": "zai-coding-global-responses",
+                    "name": "Z.AI GLM Coding Plan（海外 · Responses）",
+                    "keyScope": "zai-coding-global-responses",
+                    "baseURL": "https://api.z.ai/api/v1",
+                    "host": "api.z.ai",
+                    "protocols": [
+                      "responses"
+                    ],
+                    "modelCount": 1,
+                    "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+                    "keySource": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              },
+              {
+                "plan": "api",
+                "name": "按量 API",
+                "variants": [
+                  {
+                    "presetId": "zai-api-global",
+                    "name": "Z.AI 开放平台（海外 · 按量）",
+                    "keyScope": "zai-api-global",
+                    "baseURL": "https://api.z.ai/api/paas/v4",
+                    "host": "api.z.ai",
+                    "protocols": [
+                      "chat"
+                    ],
+                    "modelCount": 1,
+                    "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+                    "keySource": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://docs.z.ai/devpack/tool/codex",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "family": "qwen",
+        "name": "千问",
+        "regions": [
+          {
+            "region": "cn",
+            "name": "国内",
+            "plans": [
+              {
+                "plan": "coding",
+                "name": "Coding Plan",
+                "variants": [
+                  {
+                    "presetId": "qwen-coding",
+                    "name": "千问 Coding Plan（百炼）",
+                    "keyScope": "qwen-coding",
+                    "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
+                    "host": "coding.dashscope.aliyuncs.com",
+                    "protocols": [
+                      "chat"
+                    ],
+                    "modelCount": 3,
+                    "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan",
+                    "keySource": {
+                      "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              },
+              {
+                "plan": "api",
+                "name": "按量 API",
+                "variants": [
+                  {
+                    "presetId": "qwen-api",
+                    "name": "千问百炼（按量）",
+                    "keyScope": "qwen-api",
+                    "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "host": "dashscope.aliyuncs.com",
+                    "protocols": [
+                      "chat",
+                      "responses"
+                    ],
+                    "modelCount": 3,
+                    "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key",
+                    "keySource": {
+                      "url": "https://help.aliyun.com/zh/model-studio/get-api-key",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "family": "openai",
+        "name": "OpenAI",
+        "regions": [
+          {
+            "region": null,
+            "name": null,
+            "plans": [
+              {
+                "plan": "api",
+                "name": "按量 API",
+                "variants": [
+                  {
+                    "presetId": "openai",
+                    "name": "OpenAI",
+                    "keyScope": "openai",
+                    "baseURL": "https://api.openai.com/v1",
+                    "host": "api.openai.com",
+                    "protocols": [
+                      "chat",
+                      "responses"
+                    ],
+                    "modelCount": 4,
+                    "keyUrl": "https://platform.openai.com/api-keys",
+                    "keySource": {
+                      "url": "https://developers.openai.com/api/docs/quickstart",
+                      "checkedAt": "2026-11-09"
+                    },
+                    "source": {
+                      "url": "https://developers.openai.com/api/docs/models",
+                      "checkedAt": "2026-11-02"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "details": {
+    "kimi-code-cn": {
+      "presetId": "kimi-code-cn",
+      "name": "Kimi Code（国内）",
+      "family": "kimi-code",
+      "familyName": "Kimi Code",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://api.kimi.com/coding/v1",
+      "host": "api.kimi.com",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "keyScope": "kimi-code-cn",
+      "keyUrl": "https://www.kimi.com/code/console",
+      "keySource": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "Kimi Code 的 key 只在 Kimi Code 控制台创建，与 Moonshot 开放平台按量 key、网页会员互不通用。",
+        "k3 的 1M 上下文只对 Allegretto / Pro 及以上套餐开放；Moderato / Plus 调用 k3 实际上限 262144，超出会返回 401。",
+        "k3-256k 上下文固定 262144；kimi-for-coding-highspeed 需要 Allegretto / Pro 及以上套餐。",
+        "官方要求第三方工具保留真实客户端标识，伪造 User-Agent 或客户端身份可能导致订阅权益被暂停。",
+        "K3 系列与 K2.8 Preview 关闭 thinking 后由 K2.8 Preview 的无思考版处理。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "k3",
+          "label": "K3",
+          "description": "旗舰编程模型，2.8T 参数。官方 1M 上下文只对高档位套餐开放，支持图片与视频输入。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "k3-256k",
+          "label": "K3 256K",
+          "description": "K3 的 256K 上下文版本，上下文固定 262144，仅支持图片输入，消耗约为 k3 的一半。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 262144,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "kimi-for-coding",
+          "label": "K2.8 Preview",
+          "description": "K2.8 Preview，综合性能接近 K3，思考默认 max 档，支持图片与视频输入。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "kimi-for-coding-highspeed",
+          "label": "K2.7 Code HighSpeed",
+          "description": "K2.7 Code 高速版，编码能力一致，输出速度约为普通版 5–6 倍、消耗约为 3 倍；思考固定开启，无分档。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 262144,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/models",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "kimi-code-global": {
+      "presetId": "kimi-code-global",
+      "name": "Kimi Code（海外）",
+      "family": "kimi-code",
+      "familyName": "Kimi Code",
+      "region": "global",
+      "regionName": "海外",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://api.kimi.ai/coding/v1",
+      "host": "api.kimi.ai",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "keyScope": "kimi-code-global",
+      "keyUrl": "https://www.kimi.ai/code/console",
+      "keySource": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "海外域名与国内域名的 key 各自独立，不能互相调用。",
+        "k3 的 1M 上下文只对 Allegretto / Pro 及以上套餐开放；Moderato / Plus 调用 k3 实际上限 262144，超出会返回 401。",
+        "k3-256k 上下文固定 262144；kimi-for-coding-highspeed 需要 Allegretto / Pro 及以上套餐。",
+        "官方要求第三方工具保留真实客户端标识，伪造 User-Agent 或客户端身份可能导致订阅权益被暂停。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "k3",
+          "label": "K3",
+          "description": "旗舰编程模型，2.8T 参数。官方 1M 上下文只对高档位套餐开放，支持图片与视频输入。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "k3-256k",
+          "label": "K3 256K",
+          "description": "K3 的 256K 上下文版本，上下文固定 262144，仅支持图片输入，消耗约为 k3 的一半。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 262144,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "kimi-for-coding",
+          "label": "K2.8 Preview",
+          "description": "K2.8 Preview，综合性能接近 K3，思考默认 max 档，支持图片与视频输入。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "kimi-for-coding-highspeed",
+          "label": "K2.7 Code HighSpeed",
+          "description": "K2.7 Code 高速版，编码能力一致，输出速度约为普通版 5–6 倍、消耗约为 3 倍；思考固定开启，无分档。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 262144,
+          "maxOutputTokens": "unknown",
+          "source": {
+            "url": "https://www.kimi.ai/zh-hans/help/kimi-code/membership-guide",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "deepseek": {
+      "presetId": "deepseek",
+      "name": "DeepSeek",
+      "family": "deepseek",
+      "familyName": "DeepSeek",
+      "region": null,
+      "regionName": null,
+      "plan": "api",
+      "planName": "按量 API",
+      "baseURL": "https://api.deepseek.com",
+      "host": "api.deepseek.com",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "keyScope": "deepseek",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "keySource": {
+        "url": "https://api-docs.deepseek.com/",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://api-docs.deepseek.com/api/list-models",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "官方 /models 返回 context_window、max_output_tokens、input_modalities、effort 与 api_capabilities 结构化元数据，导入后以实际响应为准。",
+        "Responses 与 Chat Completions 都由官方文档声明支持；未列出的请求参数可能被静默忽略，需要按真实支持列表校验。",
+        "截至核查日期只查到按量计费的 API，未查到可预设的编码订阅方案；这不等于官方不存在任何订阅产品。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "deepseek-flash",
+          "label": "DeepSeek V4.1 Flash",
+          "description": "支持非思考与思考（默认）两种模式；旧 ID deepseek-v4-flash 已退役但仍被接受，请求会由当前 Flash 模型处理。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 384000,
+          "source": {
+            "url": "https://api-docs.deepseek.com/quick_start/pricing",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "deepseek-v4-pro",
+          "label": "DeepSeek V4 Pro",
+          "description": "旗舰 MoE 模型，思考为默认模式；官方模型表未标注视觉输入，因此不声明图片能力。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 384000,
+          "source": {
+            "url": "https://api-docs.deepseek.com/quick_start/pricing",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zhipu-coding-cn-chat": {
+      "presetId": "zhipu-coding-cn-chat",
+      "name": "智谱 GLM Coding Plan（国内 · Chat）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "host": "open.bigmodel.cn",
+      "protocols": [
+        "chat"
+      ],
+      "keyScope": "zhipu-coding-cn-chat",
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/coding-plan/tool/others",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "Coding Plan 的 chat 端点（/api/coding/paas/v4）与 responses 端点（/api/v1）是不同 Base URL，不能混用；用错端点无法扣减套餐额度。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "Coding Plan 的 key 与标准 API 的 key 分开管理、互不通用。",
+        "在 Claude Code（Anthropic 兼容）入口启用 1M 需要模型名后缀 [1m]，本目录使用 OpenAI 兼容端点，无需该后缀。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "glm-5.3-flash",
+          "label": "GLM-5.3-Flash",
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zhipu-coding-cn-responses": {
+      "presetId": "zhipu-coding-cn-responses",
+      "name": "智谱 GLM Coding Plan（国内 · Responses）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://open.bigmodel.cn/api/v1",
+      "host": "open.bigmodel.cn",
+      "protocols": [
+        "responses"
+      ],
+      "keyScope": "zhipu-coding-cn-responses",
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/coding-plan/latest-model",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "该 Base URL 只承载 OpenAI Responses 协议；chat 请求必须改用 /api/coding/paas/v4，混用无法扣减套餐额度。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "Coding Plan 的 key 与标准 API 的 key 分开管理、互不通用。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "glm-5.3-flash",
+          "label": "GLM-5.3-Flash",
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。",
+          "protocols": [
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zhipu-api-cn": {
+      "presetId": "zhipu-api-cn",
+      "name": "智谱开放平台（国内 · 按量）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "api",
+      "planName": "按量 API",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "host": "open.bigmodel.cn",
+      "protocols": [
+        "chat"
+      ],
+      "keyScope": "zhipu-api-cn",
+      "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "keySource": {
+        "url": "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.bigmodel.cn/cn/api/introduction",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "按量计费使用标准 API Base URL 与标准 API key，与 Coding Plan 的端点和 key 都不通用。",
+        "模型能力与上限取自智谱模型概览；未在该页声明的能力不写入目录。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "glm-5.3-flash",
+          "label": "GLM-5.3-Flash",
+          "description": "原生多模态版本，支持图片输入；1M 上下文 / 128K 输出。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zai-coding-global-chat": {
+      "presetId": "zai-coding-global-chat",
+      "name": "Z.AI GLM Coding Plan（海外 · Chat）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "regionName": "海外",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://api.z.ai/api/coding/paas/v4",
+      "host": "api.z.ai",
+      "protocols": [
+        "chat"
+      ],
+      "keyScope": "zai-coding-global-chat",
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "Coding Plan 的 chat 端点与 responses 端点（https://api.z.ai/api/v1）是不同 Base URL，不能混用。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "z.ai 的 devpack 文档只公布了 glm-5.3 的 1M 上下文；其它模型是否在该套餐内未证实，因此未列入预设。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zai-coding-global-responses": {
+      "presetId": "zai-coding-global-responses",
+      "name": "Z.AI GLM Coding Plan（海外 · Responses）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "regionName": "海外",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://api.z.ai/api/v1",
+      "host": "api.z.ai",
+      "protocols": [
+        "responses"
+      ],
+      "keyScope": "zai-coding-global-responses",
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "该 Base URL 是 Coding Plan 的 Responses 专用入口；chat 请求必须改用 https://api.z.ai/api/coding/paas/v4。",
+        "Coding Plan 只允许在官方支持的指定工具与产品环境中使用，超出范围可能被暂停或吊销；本目录不伪造客户端标识。",
+        "z.ai 的 devpack 文档只公布了 glm-5.3 的 1M 上下文；其它模型是否在该套餐内未证实，因此未列入预设。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "zai-api-global": {
+      "presetId": "zai-api-global",
+      "name": "Z.AI 开放平台（海外 · 按量）",
+      "family": "glm",
+      "familyName": "GLM",
+      "region": "global",
+      "regionName": "海外",
+      "plan": "api",
+      "planName": "按量 API",
+      "baseURL": "https://api.z.ai/api/paas/v4",
+      "host": "api.z.ai",
+      "protocols": [
+        "chat"
+      ],
+      "keyScope": "zai-api-global",
+      "keyUrl": "https://z.ai/manage-apikey/apikey-list",
+      "keySource": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://docs.z.ai/devpack/tool/codex",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "按量计费使用标准 API Base URL 与标准 API key，与 Coding Plan 的端点和 key 都不通用。",
+        "模型能力与上限取自智谱模型概览，端点取自 z.ai 开发文档。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "glm-5.3",
+          "label": "GLM-5.3",
+          "description": "旗舰文本编码模型，1M 上下文 / 128K 输出；思考默认 max 档，官方建议显式传 max。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": false,
+          "inputModalities": [
+            "text"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "contextWindow": 1048576,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "qwen-coding": {
+      "presetId": "qwen-coding",
+      "name": "千问 Coding Plan（百炼）",
+      "family": "qwen",
+      "familyName": "千问",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "coding",
+      "planName": "Coding Plan",
+      "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
+      "host": "coding.dashscope.aliyuncs.com",
+      "protocols": [
+        "chat"
+      ],
+      "keyScope": "qwen-coding",
+      "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan",
+      "keySource": {
+        "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://help.aliyun.com/en/model-studio/coding-plan",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "Coding Plan 必须使用 sk-sp- 开头的套餐专用 key 与该专用 Base URL；和按量 key（sk-）或按量 Base URL 混用会按量额外计费。",
+        "官方条款只允许在受支持的交互式编程工具中使用，禁止自动化脚本、应用后端等非交互场景，也禁止账号共享。",
+        "仅预置官方列出的确切模型版本；Anthropic 兼容入口 https://coding.dashscope.aliyuncs.com/apps/anthropic 不在本目录的 chat/responses 范围内。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "qwen3.7-plus",
+          "label": "Qwen3.7-Plus",
+          "description": "旗舰均衡多模态模型，1M 上下文 / 128K 输出，支持图片与视频输入、函数调用与结构化输出。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "qwen3.6-plus",
+          "label": "Qwen3.6-Plus",
+          "description": "上一代 Plus 多模态模型，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 65536,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-6-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "qwen3.5-plus",
+          "label": "Qwen3.5-Plus",
+          "description": "Coding Plan 仍列出的更早版本，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "protocols": [
+            "chat"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 65536,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-5-plus",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "qwen-api": {
+      "presetId": "qwen-api",
+      "name": "千问百炼（按量）",
+      "family": "qwen",
+      "familyName": "千问",
+      "region": "cn",
+      "regionName": "国内",
+      "plan": "api",
+      "planName": "按量 API",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "host": "dashscope.aliyuncs.com",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "keyScope": "qwen-api",
+      "keyUrl": "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key",
+      "keySource": {
+        "url": "https://help.aliyun.com/zh/model-studio/get-api-key",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "按量计费使用 sk- key；API key 与地域绑定，跨地域调用会返回 401。",
+        "官方推荐改用业务空间专属域名 https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1；此处保留仍可用的旧域名 dashscope.aliyuncs.com。",
+        "Responses 与 Chat Completions 都支持流式；各模型 reasoning 档位不同，未列出的档位不能假定可用。",
+        "官方兼容性文档同时说明：未列入 Responses 支持列表的模型只保证基础兼容，Agent 能力有限。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "qwen3.8-max",
+          "label": "Qwen3.8-Max",
+          "description": "旗舰 2.4T MoE 模型，1M 上下文 / 128K 输出；思考档位为 none/low/medium/xhigh，high 与 max 会映射到 xhigh。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "xhigh"
+          ],
+          "contextWindow": 1000000,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "qwen3.7-plus",
+          "label": "Qwen3.7-Plus",
+          "description": "旗舰均衡多模态模型，1M 上下文 / 128K 输出，支持图片与视频输入、函数调用与结构化输出。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 131072,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "qwen3.6-plus",
+          "label": "Qwen3.6-Plus",
+          "description": "上一代 Plus 多模态模型，1M 上下文 / 64K 输出，支持图片与视频输入。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": "unknown",
+          "contextWindow": 1000000,
+          "maxOutputTokens": 65536,
+          "source": {
+            "url": "https://help.aliyun.com/zh/model-studio/qwen3-6-plus",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    },
+    "openai": {
+      "presetId": "openai",
+      "name": "OpenAI",
+      "family": "openai",
+      "familyName": "OpenAI",
+      "region": null,
+      "regionName": null,
+      "plan": "api",
+      "planName": "按量 API",
+      "baseURL": "https://api.openai.com/v1",
+      "host": "api.openai.com",
+      "protocols": [
+        "chat",
+        "responses"
+      ],
+      "keyScope": "openai",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "keySource": {
+        "url": "https://developers.openai.com/api/docs/quickstart",
+        "checkedAt": "2026-11-09"
+      },
+      "source": {
+        "url": "https://developers.openai.com/api/docs/models",
+        "checkedAt": "2026-11-02"
+      },
+      "notes": [
+        "按量计费：按官方模型页公布的每百万 tokens 单价结算。",
+        "模型 ID 与上限取自官方模型页当前展示的 GPT-6 系列；未在该页声明的能力不写入目录。",
+        "输入超过 272K tokens 的请求按官方价格规则加收费用（2 倍输入、1.5 倍输出）。"
+      ],
+      "models": [
+        {
+          "upstreamModelId": "gpt-6-astra",
+          "label": "GPT-6 Astra",
+          "description": "旗舰推理与编码模型；输入超过 272K tokens 的请求按官方规则按 2 倍输入价格计费。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "source": {
+            "url": "https://developers.openai.com/api/docs/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "gpt-6.1-sol",
+          "label": "GPT-6.1 Sol",
+          "description": "接近 Astra 的复杂任务能力，价格更低。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "source": {
+            "url": "https://developers.openai.com/api/docs/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "gpt-6.1-terra",
+          "label": "GPT-6.1 Terra",
+          "description": "偏视觉推理、计算机操作与写作的高效模型。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "source": {
+            "url": "https://developers.openai.com/api/docs/models",
+            "checkedAt": "2026-11-02"
+          }
+        },
+        {
+          "upstreamModelId": "gpt-6-luna",
+          "label": "GPT-6 Luna",
+          "description": "高吞吐、低成本模型。",
+          "protocols": [
+            "chat",
+            "responses"
+          ],
+          "tools": true,
+          "reasoning": true,
+          "imageInput": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "reasoningEfforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "contextWindow": 1050000,
+          "maxOutputTokens": 128000,
+          "source": {
+            "url": "https://developers.openai.com/api/docs/models",
+            "checkedAt": "2026-11-02"
+          }
+        }
+      ]
+    }
+  }
+}

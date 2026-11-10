@@ -1,0 +1,1708 @@
+{
+  "schemaVersion": 1,
+  "implementation": "legacy-0.12.1",
+  "scenarios": [
+    {
+      "name": "deepseek-ok-then-fail",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "not_configured",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "工作账号",
+                "billingIdentity": "deepseek:工作账号",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "credential_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "connection:conn-a",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "not_configured",
+                    "errorReason": "credential_missing"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "connection:conn-a",
+                "accountLabel": "工作账号",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:01.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:01.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "not_configured",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "工作账号",
+                "billingIdentity": "deepseek:工作账号",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:01.000Z",
+                "errorReason": "credential_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "connection:conn-a",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "not_configured",
+                    "errorReason": "credential_missing"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "connection:conn-a",
+                "accountLabel": "工作账号",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "deepseek-first-failure",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "error",
+                "errorReason": "auth_rejected",
+                "httpStatus": 403
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://api.deepseek.com/user/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "error",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-c2881064",
+                "billingIdentity": "deepseek:acct-c2881064",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "auth_rejected",
+                "available": null,
+                "parts": [],
+                "credentialRef": "deepseek:default",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "error",
+                    "errorReason": "auth_rejected"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "error",
+                "errorReason": "auth_rejected"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "deepseek:default",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "no-credential",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "not_configured",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-5fdc43d4",
+                "billingIdentity": "deepseek:acct-5fdc43d4",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "credential_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "absent:default",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "not_configured",
+                    "errorReason": "credential_missing"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "absent:default",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "kimi-code-unsupported",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "kimi-code",
+                "status": "unsupported",
+                "errorReason": "unsupported_source"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "kimi-code",
+                "providerId": "kimi-code",
+                "sourceName": "Kimi Code 订阅额度",
+                "kind": "coding_plan",
+                "supported": false,
+                "status": "unsupported",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "主力账号",
+                "billingIdentity": "kimi-code:主力账号",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "unsupported_source",
+                "available": null,
+                "parts": [],
+                "credentialRef": "kimi-code:default",
+                "officialPage": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+                "consoleUrl": "https://www.kimi.com/code/console",
+                "records": [
+                  {
+                    "sourceId": "kimi-code",
+                    "kind": "coding_plan",
+                    "windowLabel": null,
+                    "unit": null,
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "unsupported",
+                    "errorReason": "unsupported_source"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "kimi-code",
+                "kind": "coding_plan",
+                "windowLabel": null,
+                "unit": null,
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "unsupported",
+                "errorReason": "unsupported_source"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "kimi-code",
+                "adapter": "kimi-code",
+                "providerId": "kimi-code",
+                "sourceName": "Kimi Code 订阅额度",
+                "kind": "coding_plan",
+                "unit": null,
+                "supported": false,
+                "credentialRef": "kimi-code:default",
+                "accountLabel": "主力账号",
+                "officialPage": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+                "consoleUrl": "https://www.kimi.com/code/console"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "custom-window",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "gateway-plan",
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "gateway-plan",
+                "providerId": "relay",
+                "sourceName": "自建网关 · Coding Plan",
+                "kind": "coding_plan",
+                "supported": true,
+                "status": "not_configured",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-af64ceb4",
+                "billingIdentity": "relay:acct-af64ceb4",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "credential_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "connection:conn-a",
+                "officialPage": null,
+                "consoleUrl": null,
+                "records": [
+                  {
+                    "sourceId": "gateway-plan",
+                    "kind": "coding_plan",
+                    "windowLabel": null,
+                    "unit": "tokens",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "not_configured",
+                    "errorReason": "credential_missing"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "gateway-plan",
+                "kind": "coding_plan",
+                "windowLabel": null,
+                "unit": "tokens",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "gateway-plan",
+                "adapter": "custom",
+                "providerId": "relay",
+                "sourceName": "自建网关 · Coding Plan",
+                "kind": "coding_plan",
+                "unit": "tokens",
+                "supported": true,
+                "credentialRef": "connection:conn-a",
+                "accountLabel": null,
+                "method": "GET",
+                "endpoint": "https://relay.example.test/api/quota",
+                "host": "relay.example.test",
+                "fields": {
+                  "used": "data.quota.used",
+                  "limit": "data.quota.limit",
+                  "resetAt": "data.quota.resetAt"
+                },
+                "auth": {
+                  "mode": "bearer"
+                },
+                "windowLabel": "5h",
+                "officialPage": null,
+                "consoleUrl": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "custom-used-only",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "spent-only",
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://relay.example.test/usage",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "spent-only",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "gateway_limit",
+                "supported": true,
+                "status": "ok",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-d773db7b",
+                "billingIdentity": "custom:acct-d773db7b",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": null,
+                "available": null,
+                "parts": [],
+                "credentialRef": "custom",
+                "officialPage": null,
+                "consoleUrl": null,
+                "records": [
+                  {
+                    "sourceId": "spent-only",
+                    "kind": "gateway_limit",
+                    "windowLabel": null,
+                    "unit": "requests",
+                    "limit": null,
+                    "used": 42,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": false,
+                    "status": "ok",
+                    "errorReason": null
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "spent-only",
+                "kind": "gateway_limit",
+                "windowLabel": null,
+                "unit": "requests",
+                "limit": null,
+                "used": 42,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": false,
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "spent-only",
+                "adapter": "custom",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "gateway_limit",
+                "unit": "requests",
+                "supported": true,
+                "credentialRef": "custom",
+                "accountLabel": null,
+                "method": "GET",
+                "endpoint": "https://relay.example.test/usage",
+                "host": "relay.example.test",
+                "fields": {
+                  "used": "data.used"
+                },
+                "auth": {
+                  "mode": "bearer"
+                },
+                "windowLabel": null,
+                "officialPage": null,
+                "consoleUrl": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "custom-shape-changed",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "relay",
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://relay.example.test/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "relay",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "ok",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-d773db7b",
+                "billingIdentity": "custom:acct-d773db7b",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": null,
+                "available": null,
+                "parts": [],
+                "credentialRef": "custom",
+                "officialPage": null,
+                "consoleUrl": null,
+                "records": [
+                  {
+                    "sourceId": "relay",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "USD",
+                    "limit": null,
+                    "used": null,
+                    "remaining": 12,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": false,
+                    "status": "ok",
+                    "errorReason": null
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "relay",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "USD",
+                "limit": null,
+                "used": null,
+                "remaining": 12,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": false,
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "relay",
+                "adapter": "custom",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "api_balance",
+                "unit": "USD",
+                "supported": true,
+                "credentialRef": "custom",
+                "accountLabel": null,
+                "method": "GET",
+                "endpoint": "https://relay.example.test/balance",
+                "host": "relay.example.test",
+                "fields": {
+                  "remaining": "data.remaining"
+                },
+                "auth": {
+                  "mode": "bearer"
+                },
+                "windowLabel": null,
+                "officialPage": null,
+                "consoleUrl": null
+              }
+            ]
+          }
+        },
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:01.000Z",
+            "results": [
+              {
+                "sourceId": "relay",
+                "status": "stale",
+                "errorReason": "value_missing"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://relay.example.test/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:01.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "relay",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "stale",
+                "stale": true,
+                "staleReason": "refresh_failed",
+                "accountRefMasked": "acct-d773db7b",
+                "billingIdentity": "custom:acct-d773db7b",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:01.000Z",
+                "errorReason": "value_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "custom",
+                "officialPage": null,
+                "consoleUrl": null,
+                "records": [
+                  {
+                    "sourceId": "relay",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "USD",
+                    "limit": null,
+                    "used": null,
+                    "remaining": 12,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": true,
+                    "status": "stale",
+                    "errorReason": "value_missing"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "relay",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "USD",
+                "limit": null,
+                "used": null,
+                "remaining": 12,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": true,
+                "status": "stale",
+                "errorReason": "value_missing"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "relay",
+                "adapter": "custom",
+                "providerId": "custom",
+                "sourceName": "自定义余额来源",
+                "kind": "api_balance",
+                "unit": "USD",
+                "supported": true,
+                "credentialRef": "custom",
+                "accountLabel": null,
+                "method": "GET",
+                "endpoint": "https://relay.example.test/balance",
+                "host": "relay.example.test",
+                "fields": {
+                  "remaining": "data.remaining"
+                },
+                "auth": {
+                  "mode": "bearer"
+                },
+                "windowLabel": null,
+                "officialPage": null,
+                "consoleUrl": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "freshness-ageing",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://api.deepseek.com/user/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 60000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "ok",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-c2881064",
+                "billingIdentity": "deepseek:acct-c2881064",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": null,
+                "available": true,
+                "parts": [],
+                "credentialRef": "deepseek:default",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": 5,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": false,
+                    "status": "ok",
+                    "errorReason": null
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": 5,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": false,
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "deepseek:default",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "state",
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 60000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "stale",
+                "stale": true,
+                "staleReason": "age",
+                "accountRefMasked": "acct-c2881064",
+                "billingIdentity": "deepseek:acct-c2881064",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": null,
+                "available": true,
+                "parts": [],
+                "credentialRef": "deepseek:default",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": 5,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": true,
+                    "status": "stale",
+                    "errorReason": null
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": 5,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": true,
+                "status": "stale",
+                "errorReason": null
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "deepseek:default",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "moonshot-regional",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "moonshot-cn",
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://api.moonshot.cn/v1/users/me/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "moonshot-cn",
+                "providerId": "moonshot-open-cn",
+                "sourceName": "Kimi 开放平台余额（国内）",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "ok",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-1def1197",
+                "billingIdentity": "moonshot-open-cn:acct-1def1197",
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": null,
+                "available": null,
+                "parts": [
+                  {
+                    "label": "代金券",
+                    "amount": 46.58893,
+                    "unit": "CNY"
+                  },
+                  {
+                    "label": "现金",
+                    "amount": 3.00001,
+                    "unit": "CNY"
+                  }
+                ],
+                "credentialRef": "moonshot:default",
+                "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+                "consoleUrl": "https://platform.moonshot.cn/",
+                "records": [
+                  {
+                    "sourceId": "moonshot-cn",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": 49.58894,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": "2026-11-09T04:00:00.000Z",
+                    "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                    "stale": false,
+                    "status": "ok",
+                    "errorReason": null
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "moonshot-cn",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": 49.58894,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": "2026-11-09T04:00:00.000Z",
+                "lastSuccessfulAt": "2026-11-09T04:00:00.000Z",
+                "stale": false,
+                "status": "ok",
+                "errorReason": null
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "moonshot-cn",
+                "adapter": "moonshot-cn",
+                "providerId": "moonshot-open-cn",
+                "sourceName": "Kimi 开放平台余额（国内）",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "moonshot:default",
+                "accountLabel": null,
+                "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+                "consoleUrl": "https://platform.moonshot.cn/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "two-sources-never-combine",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              },
+              {
+                "sourceId": "moonshot-cn",
+                "status": "error",
+                "errorReason": "auth_rejected"
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://api.moonshot.cn/v1/users/me/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "not_configured",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-af64ceb4",
+                "billingIdentity": "deepseek:acct-af64ceb4",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "credential_missing",
+                "available": null,
+                "parts": [],
+                "credentialRef": "connection:conn-a",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "not_configured",
+                    "errorReason": "credential_missing"
+                  }
+                ]
+              },
+              {
+                "sourceId": "moonshot-cn",
+                "providerId": "moonshot-open-cn",
+                "sourceName": "Kimi 开放平台余额（国内）",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "error",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-1def1197",
+                "billingIdentity": "moonshot-open-cn:acct-1def1197",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "auth_rejected",
+                "available": null,
+                "parts": [],
+                "credentialRef": "moonshot:default",
+                "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+                "consoleUrl": "https://platform.moonshot.cn/",
+                "records": [
+                  {
+                    "sourceId": "moonshot-cn",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "error",
+                    "errorReason": "auth_rejected"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "not_configured",
+                "errorReason": "credential_missing"
+              },
+              {
+                "sourceId": "moonshot-cn",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "error",
+                "errorReason": "auth_rejected"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "connection:conn-a",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              },
+              {
+                "sourceId": "moonshot-cn",
+                "adapter": "moonshot-cn",
+                "providerId": "moonshot-open-cn",
+                "sourceName": "Kimi 开放平台余额（国内）",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "moonshot:default",
+                "accountLabel": null,
+                "officialPage": "https://platform.moonshot.cn/docs/api/balance",
+                "consoleUrl": "https://platform.moonshot.cn/"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "auth-rejected-keeps-nothing",
+      "steps": [
+        {
+          "kind": "refresh",
+          "report": {
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "results": [
+              {
+                "sourceId": "deepseek",
+                "status": "error",
+                "errorReason": "auth_rejected",
+                "httpStatus": 401
+              }
+            ],
+            "cache": {
+              "enabled": false,
+              "lastReadAt": null,
+              "lastWriteAt": null,
+              "error": null
+            }
+          },
+          "calls": [
+            {
+              "url": "https://api.deepseek.com/user/balance",
+              "method": "GET",
+              "redirect": "error"
+            }
+          ],
+          "state": {
+            "combining": "never",
+            "refreshedAt": "2026-11-09T04:00:00.000Z",
+            "freshnessMs": 900000,
+            "cards": [
+              {
+                "sourceId": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "supported": true,
+                "status": "error",
+                "stale": false,
+                "staleReason": null,
+                "accountRefMasked": "acct-c2881064",
+                "billingIdentity": "deepseek:acct-c2881064",
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "lastAttemptAt": "2026-11-09T04:00:00.000Z",
+                "errorReason": "auth_rejected",
+                "available": null,
+                "parts": [],
+                "credentialRef": "deepseek:default",
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/",
+                "records": [
+                  {
+                    "sourceId": "deepseek",
+                    "kind": "api_balance",
+                    "windowLabel": null,
+                    "unit": "CNY",
+                    "limit": null,
+                    "used": null,
+                    "remaining": null,
+                    "periodStart": null,
+                    "resetAt": null,
+                    "observedAt": null,
+                    "lastSuccessfulAt": null,
+                    "stale": false,
+                    "status": "error",
+                    "errorReason": "auth_rejected"
+                  }
+                ]
+              }
+            ],
+            "records": [
+              {
+                "sourceId": "deepseek",
+                "kind": "api_balance",
+                "windowLabel": null,
+                "unit": "CNY",
+                "limit": null,
+                "used": null,
+                "remaining": null,
+                "periodStart": null,
+                "resetAt": null,
+                "observedAt": null,
+                "lastSuccessfulAt": null,
+                "stale": false,
+                "status": "error",
+                "errorReason": "auth_rejected"
+              }
+            ],
+            "sources": [
+              {
+                "sourceId": "deepseek",
+                "adapter": "deepseek",
+                "providerId": "deepseek",
+                "sourceName": "DeepSeek 余额",
+                "kind": "api_balance",
+                "unit": "CNY",
+                "supported": true,
+                "credentialRef": "deepseek:default",
+                "accountLabel": null,
+                "officialPage": "https://api-docs.deepseek.com/api/get-user-balance",
+                "consoleUrl": "https://platform.deepseek.com/"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "amount-parsing": [
+      110,
+      110,
+      3.00001,
+      null,
+      null,
+      null,
+      null
+    ],
+    "timestamp-parsing": [
+      1767225600000,
+      1767225600000,
+      1794268800000,
+      null,
+      null,
+      null
+    ],
+    "endpoint-gate": [
+      {
+        "ok": true,
+        "code": null
+      },
+      {
+        "ok": true,
+        "code": null
+      },
+      {
+        "ok": true,
+        "code": null
+      },
+      {
+        "ok": false,
+        "code": "insecure_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "insecure_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "blocked_target"
+      },
+      {
+        "ok": false,
+        "code": "invalid_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "invalid_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "invalid_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "invalid_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "inference_endpoint"
+      },
+      {
+        "ok": false,
+        "code": "inference_endpoint"
+      }
+    ],
+    "accountTag": "acct-c2881064"
+  }
+}
