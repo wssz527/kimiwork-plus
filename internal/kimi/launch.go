@@ -15,15 +15,13 @@ import (
 
 // LaunchOptions describes one managed Kimi process.
 //
-// This package never launches the user's own application: the caller must pass
-// a user-data directory it owns, and the child is started with
-// -remote-debugging-pipe so no listening port exists. Starting Kimi is a
-// product decision the panel makes; this type only carries out an explicit
-// request.
+// The controller selects an isolated profile or an explicitly authorized login
+// directory with a Work storage lease. The child uses -remote-debugging-pipe so
+// no listening port exists.
 type LaunchOptions struct {
 	// Installation is the discovered install to run.
 	Installation Installation
-	// UserDataDir is the isolated profile directory for this child.
+	// UserDataDir is the Electron profile selected by the controller.
 	UserDataDir string
 	// BundleDir, when set, is exported as DAIMON_BUNDLE_DIR. Callers must have
 	// confirmed the packaged build still honours it (LaunchResult "supported").
@@ -312,17 +310,16 @@ func childEnvironment(options LaunchOptions) []string {
 // explicitly allow force-stop so their own cleanup remains bounded.
 func (c *Child) Stop(timeout time.Duration) error {
 	c.mu.Lock()
-	if c.stopped {
-		c.mu.Unlock()
-		return nil
-	}
+	alreadyRequested := c.stopped
 	c.stopped = true
 	c.mu.Unlock()
 
 	if c.command.Process == nil {
 		return nil
 	}
-	requestChildStop(c)
+	if !alreadyRequested {
+		requestChildStop(c)
+	}
 	select {
 	case <-c.exitWait:
 		return nil

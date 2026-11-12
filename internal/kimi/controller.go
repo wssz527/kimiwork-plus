@@ -47,9 +47,12 @@ type ControllerSettings struct {
 	Installation Installation
 	// StateDir is this product's private state directory.
 	StateDir string
-	// UserDataDir is the isolated profile for the managed child. It must live
-	// inside StateDir; anything else is refused.
+	// UserDataDir contains this product's isolated Work data and, in isolated
+	// mode, the Electron profile. It must resolve inside StateDir.
 	UserDataDir string
+	// LoginDataDir is used only after explicit existing-login authorization.
+	// Work configuration remains under UserDataDir.
+	LoginDataDir string
 	// KimiHome optionally names the Work data directory. It is honoured only
 	// when it resolves inside UserDataDir.
 	KimiHome string
@@ -69,7 +72,7 @@ type ControllerSettings struct {
 	// permanently-on flag is exactly the behaviour this replaces.
 	AllowNativeImport bool
 	// ProfileMode selects the profile the managed child runs against. Empty means
-	// isolated, which is the only implemented mode.
+	// isolated. Existing-authorized retains login while isolating Work storage.
 	ProfileMode string
 	// Translation configures the renderer injection.
 	Translation TranslationSettings
@@ -135,11 +138,13 @@ type SurfaceSummary struct {
 
 // Controller manages one Kimi install.
 type Controller struct {
+	lifecycle   sync.Mutex
 	mu          sync.Mutex
 	settings    ControllerSettings
 	state       ControllerState
 	reason      string
 	child       *Child
+	isolation   *workIsolation
 	host        *Host
 	bridge      *BridgeHost
 	actions     PageActions
@@ -192,10 +197,16 @@ func (c *Controller) Settings() ControllerSettings {
 // catalog is applied on the next Reconcile; a change to the translation scope
 // re-injects on the next Tick.
 func (c *Controller) Configure(settings ControllerSettings) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	if settings.StateDir == "" || !filepath.IsAbs(settings.StateDir) {
 		return errors.New("controller_state_dir_invalid")
 	}
 	c.mu.Lock()
+	if (c.child != nil || c.isolation != nil) && (settings.profileMode() != c.settings.profileMode() || settings.LoginDataDir != c.settings.LoginDataDir || settings.UserDataDir != c.settings.UserDataDir || settings.StateDir != c.settings.StateDir) {
+		c.mu.Unlock()
+		return errors.New("profile_mode_change_requires_exit")
+	}
 	c.settings = settings
 	host := c.host
 	c.mu.Unlock()
@@ -290,6 +301,16 @@ func (c *Controller) NativeState(ctx context.Context) NativeState {
 // application the user started. It never sends a signal to that process: the
 // answer is `needs_user_close` and the user decides.
 func (c *Controller) Start(ctx context.Context) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.start(ctx)
+}
+
+func (c *Controller) start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.reapChildLocked()
 	c.mu.Lock()
 	settings := c.settings
 	c.mu.Unlock()
@@ -310,10 +331,6 @@ func (c *Controller) Start(ctx context.Context) error {
 		c.setState(StateFailed, "kimi_application_missing")
 		return errors.New("kimi_application_missing")
 	}
-	// A profile mode this build does not implement is refused before anything is
-	// started or written. `existing-authorized` needs ownership proof and a safe
-	// handover of the user's own tree; a soft link into it would be a way around
-	// state containment, not a feature.
 	if err := c.requireSupportedProfileMode(); err != nil {
 		c.setState(StateFailed, err.Error())
 		return err
@@ -337,10 +354,42 @@ func (c *Controller) Start(ctx context.Context) error {
 		return errors.New("kimi_process_state_unknown")
 	}
 
+	if err := c.restoreWorkIsolation(); err != nil {
+		c.setState(StateFailed, err.Error())
+		return err
+	}
+	launchProfile := settings.UserDataDir
+	if settings.profileMode() == ProfileModeExistingAuthorized {
+		home := c.kimiHome()
+		if home == "" {
+			return ErrKimiHomeUnresolved
+		}
+		lease, err := beginWorkIsolation(settings.LoginDataDir, settings.UserDataDir, filepath.Dir(home))
+		if err != nil {
+			c.setState(StateFailed, err.Error())
+			return err
+		}
+		c.mu.Lock()
+		c.isolation = lease
+		c.mu.Unlock()
+		if err := verifyExistingLoginStorage(settings.Installation); err != nil {
+			if restoreErr := c.restoreWorkIsolation(); restoreErr != nil {
+				c.setState(StateFailed, restoreErr.Error())
+				return restoreErr
+			}
+			c.setState(StateFailed, err.Error())
+			return err
+		}
+		launchProfile = settings.LoginDataDir
+	}
 	c.setState(StateStarting, "")
 	child, err := StartKimi(ctx, LaunchOptions{Installation: settings.Installation,
-		UserDataDir: settings.UserDataDir})
+		UserDataDir: launchProfile})
 	if err != nil {
+		if restoreErr := c.restoreWorkIsolation(); restoreErr != nil {
+			c.setState(StateFailed, restoreErr.Error())
+			return restoreErr
+		}
 		c.setState(StateFailed, "kimi_start_failed")
 		return err
 	}
@@ -433,6 +482,12 @@ func (c *Controller) checkManagedChild(ctx context.Context) error {
 // controller started is gone, so the state becomes `stopped` with the exit kind
 // as its reason. Nothing is signalled — the process is already gone.
 func (c *Controller) reapChild() bool {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.reapChildLocked()
+}
+
+func (c *Controller) reapChildLocked() bool {
 	c.mu.Lock()
 	child := c.child
 	c.mu.Unlock()
@@ -469,6 +524,10 @@ func (c *Controller) reapChild() bool {
 	c.mu.Lock()
 	c.translation = &status
 	c.mu.Unlock()
+	if err := c.restoreWorkIsolation(); err != nil {
+		c.setState(StateFailed, err.Error())
+		return true
+	}
 	c.setState(StateStopped, reason)
 	return true
 }
@@ -543,7 +602,14 @@ func (c *Controller) abortStart(child *Child, reason string, cause error) error 
 	// The child is this call's own; it never started successfully, so it is
 	// stopped here rather than reported as a running managed Kimi.
 	if err := child.Stop(5 * time.Second); err != nil {
+		c.mu.Lock()
+		c.child = child
+		c.mu.Unlock()
 		c.setState(StateFailed, "kimi_stop_failed")
+		return err
+	}
+	if err := c.restoreWorkIsolation(); err != nil {
+		c.setState(StateFailed, err.Error())
 		return err
 	}
 	c.setState(StateFailed, reason)
@@ -572,6 +638,8 @@ func (c *Controller) startNativeBridge(child *Child) string {
 
 // Stop ends the managed child. It never touches any other process.
 func (c *Controller) Stop(ctx context.Context) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
 	child := c.child
 	host := c.host
@@ -587,12 +655,17 @@ func (c *Controller) Stop(ctx context.Context) error {
 	if bridge != nil {
 		_ = bridge.Close()
 	}
-	if child == nil {
-		c.setState(StateStopped, "")
-		return nil
+	if child != nil {
+		if err := child.Stop(5 * time.Second); err != nil {
+			c.mu.Lock()
+			c.child = child
+			c.mu.Unlock()
+			c.setState(StateFailed, "kimi_stop_failed")
+			return err
+		}
 	}
-	if err := child.Stop(5 * time.Second); err != nil {
-		c.setState(StateFailed, "kimi_stop_failed")
+	if err := c.restoreWorkIsolation(); err != nil {
+		c.setState(StateFailed, err.Error())
 		return err
 	}
 	c.setState(StateStopped, "")

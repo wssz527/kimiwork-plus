@@ -192,6 +192,14 @@ func (n *Native) State() core.Document {
 }
 func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	action := core.String(in["action"])
+	profileMode := ""
+	if value, present := in["profileMode"]; present {
+		mode, valid := value.(string)
+		if !valid || action != "launch-kimi" || mode != kimi.ProfileModeExistingAuthorized {
+			return nil, errors.New("invalid_profile_mode")
+		}
+		profileMode = mode
+	}
 	if action == "check-upstream" {
 		connectionID := core.String(in["connectionId"])
 		if connectionID == "" {
@@ -232,7 +240,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		state := "done"
 		switch action {
 		case "launch-kimi":
-			err = n.controller.Start(deadline)
+			if profileMode == kimi.ProfileModeExistingAuthorized {
+				err = n.controller.StartWithExistingLogin(deadline)
+			} else {
+				err = n.controller.Start(deadline)
+			}
 			state = "starting"
 		case "connect-kimi", "prepare-native":
 			var imported kimi.ImportResult

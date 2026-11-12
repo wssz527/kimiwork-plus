@@ -209,8 +209,36 @@ controller.SetTranslationHandler(func(ctx context.Context, r kimi.TranslationRep
 returns `ErrUnmanagedKimiRunning` and `ControllerState == "needs_user_close"`.
 It does not attach, signal, or kill that process. If the process state cannot be
 determined, it fails with `kimi_process_state_unknown` rather than assuming it is
-not running. A managed child is only ever started into an isolated
-`UserDataDir`; the signed-in profile is refused outright.
+not running. By default, a managed child uses the isolated `UserDataDir`.
+
+On Mac, `StartWithExistingLogin(ctx)` is an explicit alternative. It reuses the
+current user's official `kimi-desktop` login profile without copying credentials.
+`UserDataDir` continues to identify the isolated Work data root inside `StateDir`;
+only the child launch uses `LoginDataDir`. A journaled `daimon-storage.json`
+pointer directs official Work storage into that isolated tree. A cross-process
+lock excludes other enhancement instances. The original pointer bytes and mode,
+or its original absence, are restored after the managed child exits. Concurrent
+pointer changes are preserved and reported as `work_storage_restore_conflict`.
+After interruption, the journal is recovered before another authorized launch;
+an existing official process must first exit normally. Login files and the
+original Work directory are never copied, imported, or migrated.
+
+`POST /api/actions` accepts `{"action":"launch-kimi","profileMode":"existing-authorized"}`
+for this alternative. Omit `profileMode` to retain the controller's current mode
+(the initial default remains isolated). Other supplied values are rejected as
+`invalid_profile_mode`. This action only starts a child; `connect-kimi` remains the
+separate explicit model-import action. `profile.canReuseLogin` reports whether
+the Mac login directory is available, not whether its account is authenticated.
+An unavailable or expired official login is still reported as waiting-login.
+Windows existing-login mode is unsupported. The Mac storage contract is bound to
+these reviewed official main-entry SHA-256 values:
+
+- Earlier reviewed build: `04556e91118cab7a2ead8e7e4aaf308ca3f8e0f7dfdb231ec512fb639a0ec5b6`.
+- Kimi 3.2.27: `581d239df2b6174651baae70cb2a694a8aecd8786600e3386df0059d6e3d6394`.
+
+A different official main process returns `work_storage_contract_unverified` and
+restores the pointer before launching any child; the original Kimi remains usable.
+Do not extend the allowlist without rechecking the storage reader and real isolation.
 
 ## 10. Native integration
 
@@ -276,9 +304,12 @@ permissions; it follows no redirect and uses no proxy.
 
 `NewCDPActions(pipe, kimiDir, kimiHome)` is the production `PageActions`. Every
 step is one `Runtime.evaluate` against an allowlisted desktop page
-(`app://localhost/{kimi-agent,desktopclaw,work-settings}.html`, no query, no
-fragment). No coordinate is driven, nothing is navigated, and no page content is
-returned to a caller.
+(`app://localhost/{kimi-agent,desktopclaw,work-settings}.html`). Official display
+query parameters are accepted; a different scheme, host, port, userinfo, pathname
+or a fragment is refused. Evaluation decodes the CDP RemoteObject value and rejects
+nested exceptionDetails. No coordinate is driven, nothing is navigated, and no
+page content is returned to a caller. Official BYOK availability remains a
+separate prerequisite; a feature-disabled response is never treated as an import.
 
 The expressions are the released build's own calls:
 

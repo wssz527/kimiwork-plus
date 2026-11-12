@@ -124,10 +124,11 @@ func (a *cdpActions) evaluate(ctx context.Context, sessionID, expression string)
 	if err != nil {
 		return nil, err
 	}
-	if len(result.ExceptionDetail) > 0 {
+	value, err := result.evaluatedValue()
+	if err != nil {
 		return nil, errors.New("native_bridge_contract_changed")
 	}
-	return result.Result["result"], nil
+	return value, nil
 }
 
 // targets returns the allowlisted page targets with a session each.
@@ -168,11 +169,9 @@ type actionTarget struct {
 	url       string
 }
 
-// desktopPath answers the page's pathname when the URL is one of the desktop's
-// own pages. A query, a fragment, a different host or a different scheme is not.
 func desktopPath(raw string) (string, bool) {
 	parsed, err := parseURL(raw)
-	if err != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.User != nil || parsed.Fragment != "" {
 		return "", false
 	}
 	if parsed.Scheme != "app" || parsed.Host != "localhost" {

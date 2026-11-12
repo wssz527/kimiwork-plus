@@ -86,6 +86,17 @@ type Result struct {
 	ExceptionDetail map[string]any `json:"exceptionDetails"`
 }
 
+func (r Result) evaluatedValue() (any, error) {
+	if len(r.ExceptionDetail) > 0 || r.Result["exceptionDetails"] != nil {
+		return nil, ErrRendererUnconfirmed
+	}
+	remote, ok := r.Result["result"].(map[string]any)
+	if !ok {
+		return nil, ErrRendererUnconfirmed
+	}
+	return remote["value"], nil
+}
+
 // Event is an unsolicited CDP message.
 type Event struct {
 	Method    string         `json:"method"`

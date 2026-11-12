@@ -104,7 +104,7 @@ func runFakeCDPChild() int {
 					result["identifier"] = "script-1"
 				case "Runtime.evaluate":
 					expression, _ := request.Params["expression"].(string)
-					result["result"] = fakeEvaluate(expression, request.SessionID)
+					result["result"] = map[string]any{"type": "object", "value": fakeEvaluate(expression, request.SessionID)}
 				}
 				sessionID := request.SessionID
 				if sessionID == "" {

@@ -143,6 +143,9 @@ func (p *fakePage) handle(write func(string)) func(string) {
 				result["result"] = nil
 			}
 		}
+		if request.Method == "Runtime.evaluate" {
+			result["result"] = map[string]any{"type": "object", "value": result["result"]}
+		}
 		response, _ := json.Marshal(map[string]any{"id": request.ID, "result": result, "sessionId": request.SessionID})
 		write(string(response))
 	}

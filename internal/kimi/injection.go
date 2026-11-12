@@ -290,10 +290,7 @@ func (h *Host) Evaluate(ctx context.Context, sessionID, expression string, conte
 	if err != nil {
 		return nil, err
 	}
-	if len(result.ExceptionDetail) > 0 {
-		return nil, ErrRendererUnconfirmed
-	}
-	return result.Result["result"], nil
+	return result.evaluatedValue()
 }
 
 // Targets lists the page targets this host may attach to. Everything else —

@@ -1832,8 +1832,24 @@ function syncState(data) {
     return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
       note: info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
   }
+  if (info.desktop?.state === 'failed' && /^(work_storage_|existing_login_|profile_mode_)/.test(info.desktop.reason || '')) {
+    return { code: 'conflict', tone: 'bad', word: '隔离启动未完成', note: nativeConnectionText(data) };
+  }
+  if (info.desktop?.state === 'needs_user_close') {
+    return { code: 'manual-exit', tone: 'warn', word: '等待完全退出 Kimi',
+      note: '请先正常退出当前官方 Kimi，再点击所选的启动按钮；不会强制结束现有进程。' };
+  }
   if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
+    if (data?.profile?.canReuseLogin === true && !has('account_changed', 'native_import_account_changed')) {
+      if (info.desktop?.state === 'ready' && data.profile.mode === 'existing-authorized') {
+        return { code: 'login', tone: 'warn', word: '尚未确认官方登录',
+          note: '请查看官方窗口。已有登录有效时无需扫码；当前尚未读到账号，模型接入还没有继续。' };
+      }
+      const opening = data.operation?.action === 'launch-kimi' && isInFlight(data.operation);
+      return { code: 'ready-launch', tone: opening ? 'warn' : 'neutral', word: opening ? '正在打开隔离会话' : '可沿用已有登录',
+        note: opening ? '正在沿用官方登录并打开独立 Work 数据目录，请等待启动完成。' : '点击「沿用登录，隔离 Work」，保留官方已有登录并使用独立的模型、工具与任务目录。' };
+    }
     return { code: 'login', tone: 'warn', word: '需要登录',
       note: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。' };
   }
@@ -1923,6 +1939,15 @@ function nativeConnectionText(data) {
   if (info.imported) return '原生接口已接受模型目录，等待目录、账号与地址读回。';
   const reason = info.nativeImport?.reason || info.desktop?.reason || info.reason;
   const reasons = {
+    work_storage_contract_unverified: '当前官方版本的不扫码隔离尚未验证，已恢复原数据位置。请先正常使用官方 Kimi，等待兼容更新。',
+    work_storage_target_conflict: '独立 Work 目录与原数据目录重叠，未更改原数据位置。请使用独立的增强服务数据目录。',
+    work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
+    work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
+    work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
+    work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
+    existing_login_profile_invalid: '无法安全使用已有的官方登录目录，已暂停启动。',
+    existing_login_profile_unavailable: '未找到可用的官方登录目录，请先正常打开官方 Kimi。',
+    profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
     native_bridge_unavailable: '正在等待 Kimi 接入通道，空闲后会自动恢复。',
     native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',
     native_bridge_waiting_launch: '等待 Kimi 启动并建立接入通道。',
@@ -2474,13 +2499,15 @@ function renderLaunch(data) {
   const running = isInFlight(data && data.operation) && data.operation.action === 'launch-kimi';
   const blocked = isInFlight(data && data.operation) && data.operation.action !== 'launch-kimi';
   const sync = syncState(data);
+  const reuseLogin = data?.profile?.canReuseLogin === true;
+  dom.onboardLaunch.dataset.profileMode = reuseLogin ? 'existing-authorized' : '';
   const alreadyRunning = data?.kimiProcess?.state === 'running';
   dom.onboardLaunch.hidden = false;
   dom.onboardLaunch.disabled = running || blocked || alreadyRunning;
-  setText(dom.onboardLaunch, alreadyRunning ? 'Kimi 已运行' : running ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
+  setText(dom.onboardLaunch, alreadyRunning ? 'Kimi 已运行' : running ? '正在打开 / 启动 Kimi…' : reuseLogin ? '沿用登录，隔离 Work' : '打开 / 启动 Kimi');
   dom.onboardLaunch.setAttribute('aria-busy', running ? 'true' : 'false');
   if (dom.onboardLaunchHint) {
-    const hint = alreadyRunning ? '检测到 Kimi 进程正在运行，无需重复启动。' : recoveryCopy(sync);
+    const hint = alreadyRunning ? '检测到 Kimi 进程正在运行，无需重复启动。' : reuseLogin ? '保留官方已有登录，模型、工具与任务使用独立目录；退出 Kimi 后恢复原来的数据位置。' : recoveryCopy(sync);
     setHidden(dom.onboardLaunchHint, !hint);
     setText(dom.onboardLaunchHint, hint || '');
   }
@@ -2962,12 +2989,14 @@ function renderActions(data) {
   const launching = isInFlight(data?.operation) && data.operation.action === 'launch-kimi';
   for (const button of actionButtons) {
     const action = button.dataset.action;
+    const reuseLogin = button.dataset.profileMode === 'existing-authorized';
+    if (reuseLogin) setHidden(button, data?.profile?.canReuseLogin !== true);
     /* 更新按钮的可安装判断依赖 updates 与待重启版本，交给 renderUpdateButtons 统一处理。 */
     if (UPDATE_ACTIONS.has(action)) continue;
     const needsReady = action === 'launch-kimi';
     const pending = state.pendingAction === action;
     button.disabled = busy || (needsReady && (!ready || alreadyRunning));
-    if (needsReady) setText(button, alreadyRunning ? 'Kimi 已运行' : launching ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
+    if (needsReady) setText(button, alreadyRunning ? 'Kimi 已运行' : launching ? '正在打开 / 启动 Kimi…' : reuseLogin ? '沿用登录，隔离 Work' : '打开 / 启动 Kimi');
     button.classList.toggle('is-busy', pending);
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
   }
@@ -5778,7 +5807,7 @@ function actionUUID() {
   return hex() + '-' + hex() + '-' + hex() + '-' + hex();
 }
 
-async function runAction(action) {
+async function runAction(action, profileMode) {
   const data = state.data;
   if (!data || state.pendingAction) return;
   if (isInFlight(data.operation)) {
@@ -5815,7 +5844,7 @@ async function runAction(action) {
   renderUpdateButtons(data);
 
   try {
-    const res = await request(API.actions, { method: 'POST', body: { id: actionUUID(), at: Date.now(), action } });
+    const res = await request(API.actions, { method: 'POST', body: { id: actionUUID(), at: Date.now(), action, ...(profileMode ? { profileMode } : {}) } });
     const op = res && res.operation ? res.operation : null;
     const opId = op && op.id ? op.id : null;
     if (op) {
@@ -6585,7 +6614,7 @@ function bindEvents() {
   });
 
   document.querySelectorAll('[data-action]').forEach((button) => {
-    button.addEventListener('click', () => runAction(button.dataset.action));
+    button.addEventListener('click', () => runAction(button.dataset.action, button.dataset.profileMode));
   });
 
   /* 原生搜索与抓取服务 */

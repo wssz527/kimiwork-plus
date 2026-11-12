@@ -1,50 +1,30 @@
 package kimi
 
 import (
+	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 )
 
-// Which profile a managed Kimi runs against is a product decision with a
-// security boundary behind it, so it is named rather than inferred.
-//
-//	isolated            this product's own profile under StateDir. It is the
-//	                    default and the only mode that is implemented.
-//	existing-authorized the user's signed-in profile. It is refused, not
-//	                    half-done: reading or writing the user's real Kimi tree
-//	                    needs ownership proof and a safe handover that this
-//	                    package does not have, and a soft link or a copied
-//	                    cookie would be a way around state containment rather
-//	                    than a feature.
 const (
 	ProfileModeIsolated           = "isolated"
 	ProfileModeExistingAuthorized = "existing-authorized"
 )
 
-// ErrProfileModeUnsupported is returned when a caller asks for the existing
-// profile. It is a stated limitation, not a failure to try harder.
 var ErrProfileModeUnsupported = errors.New("profile_mode_existing_authorized_unsupported")
 
-// ProfileStatus is the renderable profile report. It carries the mode and two
-// digests, never a path: a UI can show that the profile changed without learning
-// where the user's data lives.
 type ProfileStatus struct {
-	Mode string `json:"mode"`
-	// Implemented is false for a mode that is recognised but not available.
-	Implemented bool `json:"implemented"`
-	// Reason explains a refused or incomplete mode.
-	Reason string `json:"reason,omitempty"`
-	// ProfileDigest identifies the profile directory the child uses.
+	Mode          string `json:"mode"`
+	Implemented   bool   `json:"implemented"`
+	CanReuseLogin bool   `json:"canReuseLogin"`
+	Reason        string `json:"reason,omitempty"`
 	ProfileDigest string `json:"profileDigest,omitempty"`
-	// ScopeDigest identifies the account scope the profile was read for.
-	ScopeDigest string `json:"scopeDigest,omitempty"`
-	// ModeDigest is a stable digest of mode + profile, so a UI can tell "the
-	// profile changed" from "the mode changed" without either path.
-	ModeDigest string `json:"modeDigest,omitempty"`
+	ScopeDigest   string `json:"scopeDigest,omitempty"`
+	ModeDigest    string `json:"modeDigest,omitempty"`
 }
 
-// profileMode answers the configured mode, defaulting to isolated. An empty
-// value is the isolated mode, not "whatever is convenient".
 func (s ControllerSettings) profileMode() string {
 	if s.ProfileMode == "" {
 		return ProfileModeIsolated
@@ -52,20 +32,33 @@ func (s ControllerSettings) profileMode() string {
 	return s.ProfileMode
 }
 
-// ProfileStatus reports the profile mode without exposing the profile path.
+func existingLoginDirectory() (string, error) {
+	if runtime.GOOS != "darwin" {
+		return "", ErrProfileModeUnsupported
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", errors.New("existing_login_profile_unavailable")
+	}
+	path := filepath.Join(home, "Library", "Application Support", "kimi-desktop")
+	if _, err := existingProfileIdentity(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func (c *Controller) ProfileStatus() ProfileStatus {
 	c.mu.Lock()
 	settings := c.settings
 	account := settings.AccountScope
 	c.mu.Unlock()
-
+	_, available := existingLoginDirectory()
 	mode := settings.profileMode()
-	status := ProfileStatus{Mode: mode, Implemented: mode == ProfileModeIsolated}
-	if mode == ProfileModeExistingAuthorized {
+	implemented := mode == ProfileModeIsolated || (mode == ProfileModeExistingAuthorized && runtime.GOOS == "darwin" && settings.LoginDataDir != "")
+	status := ProfileStatus{Mode: mode, Implemented: implemented, CanReuseLogin: available == nil}
+	if !implemented {
 		status.Reason = ErrProfileModeUnsupported.Error()
 	}
-	// The digest is of the cleaned profile name only, so it identifies a profile
-	// across calls while a renderer cannot reconstruct where it is.
 	if settings.UserDataDir != "" {
 		status.ProfileDigest = sha256Hex(filepath.Clean(settings.UserDataDir))
 	}
@@ -75,14 +68,74 @@ func (c *Controller) ProfileStatus() ProfileStatus {
 	return status
 }
 
-// requireSupportedProfileMode refuses a mode this build does not implement,
-// before any process is started or any file is written.
 func (c *Controller) requireSupportedProfileMode() error {
 	c.mu.Lock()
-	mode := c.settings.profileMode()
+	settings := c.settings
 	c.mu.Unlock()
-	if mode != ProfileModeIsolated {
-		return ErrProfileModeUnsupported
+	if settings.profileMode() == ProfileModeIsolated {
+		return nil
 	}
+	if settings.profileMode() == ProfileModeExistingAuthorized && runtime.GOOS == "darwin" && settings.LoginDataDir != "" {
+		return nil
+	}
+	return ErrProfileModeUnsupported
+}
+
+func (c *Controller) StartWithExistingLogin(ctx context.Context) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	profile, err := existingLoginDirectory()
+	if err != nil {
+		return err
+	}
+	c.reapChildLocked()
+	c.mu.Lock()
+	if c.isolation != nil && c.child == nil {
+		c.mu.Unlock()
+		return errWorkStorageConflict
+	}
+	if c.child != nil && c.settings.profileMode() != ProfileModeExistingAuthorized {
+		c.mu.Unlock()
+		return errors.New("profile_mode_change_requires_exit")
+	}
+	c.settings.ProfileMode = ProfileModeExistingAuthorized
+	c.settings.LoginDataDir = profile
+	c.mu.Unlock()
+	return c.start(ctx)
+}
+
+func (c *Controller) restoreWorkIsolation() error {
+	c.mu.Lock()
+	lease := c.isolation
+	child := c.child
+	c.mu.Unlock()
+	if lease != nil && child != nil {
+		select {
+		case <-child.Exit():
+		default:
+			return errors.New("work_storage_restore_requires_exit")
+		}
+	}
+	if err := lease.Restore(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.isolation == lease {
+		c.isolation = nil
+	}
+	c.mu.Unlock()
 	return nil
+}
+
+// The storage pointer must be reviewed again when the official main process changes.
+func verifyExistingLoginStorage(installation Installation) error {
+	source, err := ReadAsarEntry(installation.Archive, EntryPath)
+	if err == nil {
+		switch sha256Hex(source) {
+		case "04556e91118cab7a2ead8e7e4aaf308ca3f8e0f7dfdb231ec512fb639a0ec5b6",
+			"581d239df2b6174651baae70cb2a694a8aecd8786600e3386df0059d6e3d6394":
+			return nil
+		}
+	}
+	return errors.New("work_storage_contract_unverified")
 }
