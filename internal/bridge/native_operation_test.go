@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +11,53 @@ import (
 	"kimiworkplus.local/migration/internal/core"
 	"kimiworkplus.local/migration/internal/kimi"
 )
+
+func TestNativeCheckUpstreamReturnsNamedConnectionResult(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer synthetic" {
+			t.Error("unexpected upstream request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"alpha"}]}`))
+	}))
+	defer upstream.Close()
+	store, err := core.Open(t.TempDir() + "/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rev, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = store.Update(rev, func(d core.Document) error {
+		_, err := core.MergeConnections(d, []any{core.Document{"id": "named", "name": "Named", "baseURL": upstream.URL + "/v1"}})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := CacheKeys(testKeys{"KIMI_WORK_NAMED_KEY": "synthetic"})
+	n := &Native{service: &Service{Store: store, Keys: keys}}
+	result, err := n.Action(context.Background(), core.Document{"action": "check-upstream", "connectionId": "named"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := core.Object(result.(core.Document)["operation"])
+	if operation["state"] != "passed" || operation["connectionId"] != "named" || operation["modelCount"] != 1 || operation["httpStatus"] != 200 {
+		t.Fatalf("operation %+v", operation)
+	}
+	if _, ok := operation["models"]; ok {
+		t.Fatal("operation returned the catalog")
+	}
+	if _, err = n.Action(context.Background(), core.Document{"action": "check-upstream", "connectionId": "missing"}); err == nil || err.Error() != "connection_unavailable" {
+		t.Fatalf("unknown connection: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("upstream requests %d", requests)
+	}
+}
 
 func TestNativeOperationConcurrentStateRead(t *testing.T) {
 	n := &Native{controller: &kimi.Controller{}}

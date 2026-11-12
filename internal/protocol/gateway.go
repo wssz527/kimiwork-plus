@@ -551,7 +551,6 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		delete(g.inflight, entry)
 		g.mu.Unlock()
 	}()
-	defer cancel()
 
 	models, err := g.Catalog(ctx)
 	if err != nil {
@@ -761,9 +760,20 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 			}
 		}
 		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) && record != nil {
-				record.Status = 499
-				record.Error = "request_cancelled"
+			if !errors.Is(readErr, io.EOF) {
+				if record != nil {
+					if ctx.Err() != nil {
+						record.Status = 499
+						record.Error = "request_cancelled"
+					} else {
+						status := upstream.Status
+						record.TransportStatus = &status
+						record.Status = http.StatusBadGateway
+						record.Error = "response_stream_interrupted"
+						record.Side = SideConnection
+						record.Outcome = string(OutcomeFailed)
+					}
+				}
 				return usageContext
 			}
 			break

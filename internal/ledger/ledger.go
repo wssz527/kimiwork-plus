@@ -343,6 +343,7 @@ type Ledger struct {
 	index        map[string]*Record
 	appended     int
 	bytes        int64
+	lines        int
 	skippedLines int
 	readFailed   bool
 	writeIssue   string
@@ -442,6 +443,7 @@ func (l *Ledger) load() {
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), int(l.maxFileBytes))
 	for scanner.Scan() {
+		l.lines++
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
@@ -768,11 +770,20 @@ func (l *Ledger) append(record *Record) {
 	}
 	l.bytes += int64(len(line))
 	l.appended++
+	l.lines++
 	stamp := time.UnixMilli(l.now()).UTC().Format("2006-01-02T15:04:05.000Z")
 	l.lastWriteAt = &stamp
 	l.writeIssue = ""
-	if l.appended >= l.compactEvery || l.bytes >= l.maxFileBytes {
+	if l.bytes >= l.maxFileBytes {
 		l.compact()
+		return
+	}
+	if l.appended >= l.compactEvery {
+		if l.lines > len(l.records) {
+			l.compact()
+		} else {
+			l.appended = 0
+		}
 	}
 }
 
@@ -813,6 +824,7 @@ func (l *Ledger) compact() {
 	}
 	l.appended = 0
 	l.bytes = int64(body.Len())
+	l.lines = len(l.records)
 	stamp := time.UnixMilli(l.now()).UTC().Format("2006-01-02T15:04:05.000Z")
 	l.lastWriteAt = &stamp
 	l.writeIssue = ""

@@ -186,6 +186,53 @@ func TestThreeRequestsAggregateOnlyWhatWasObserved(t *testing.T) {
 	}
 }
 
+func TestPeriodicCompactionSkipsCleanHistory(t *testing.T) {
+	file := workspace(t)
+	first := open(t, file)
+	mustRecord(t, first, ledger.Entry{OperationID: "op-a", At: "2026-11-08T02:00:00.000Z", Status: "completed"})
+	instance, err := ledger.New(ledger.Options{File: file, CompactEvery: 1})
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRecord(t, instance, ledger.Entry{OperationID: "op-b", At: "2026-11-08T03:00:00.000Z", Status: "completed"})
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("clean history was rewritten")
+	}
+}
+
+func TestPeriodicCompactionRemovesMergedHistory(t *testing.T) {
+	file := workspace(t)
+	first := open(t, file)
+	mustRecord(t, first, ledger.Entry{OperationID: "op-a", At: "2026-11-08T02:00:00.000Z", Status: "started"})
+	instance, err := ledger.New(ledger.Options{File: file, CompactEvery: 1})
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRecord(t, instance, ledger.Entry{OperationID: "op-a", At: "2026-11-08T02:00:00.000Z", Status: "completed"})
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("merged history was not compacted")
+	}
+	if records := open(t, file).Records(); len(records) != 1 || records[0].Status != "completed" {
+		t.Fatalf("compacted history %+v", records)
+	}
+}
+
 func TestRepeatedTerminalReceiptIsMergedNotCountedTwice(t *testing.T) {
 	file := workspace(t)
 	instance := open(t, file)

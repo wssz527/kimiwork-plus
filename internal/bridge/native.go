@@ -192,6 +192,24 @@ func (n *Native) State() core.Document {
 }
 func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	action := core.String(in["action"])
+	if action == "check-upstream" {
+		connectionID := core.String(in["connectionId"])
+		if connectionID == "" {
+			return nil, errors.New("connection_unavailable")
+		}
+		checked, err := n.service.discover(ctx, core.Document{"connectionId": connectionID})
+		if err != nil {
+			return nil, err
+		}
+		result := checked.(core.Document)
+		operation := core.Document{"id": core.String(in["id"]), "action": action, "connectionId": connectionID, "state": result["state"]}
+		for _, key := range []string{"reason", "httpStatus", "modelCount"} {
+			if value, ok := result[key]; ok {
+				operation[key] = value
+			}
+		}
+		return core.Document{"operation": operation}, nil
+	}
 	switch action {
 	case "launch-kimi", "connect-kimi", "prepare-native", "check-translation", "apply-connections":
 	default:

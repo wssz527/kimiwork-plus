@@ -2798,6 +2798,25 @@ function renderRoutingFacts(data) {
   }
 }
 
+function requestErrorText(row) {
+  const code = row?.error || row?.failure?.reason || '';
+  const status = row?.failure?.status ?? row?.status;
+  const side = row?.failure?.side ?? row?.side;
+  const type = row?.upstreamErrorType || row?.failure?.upstreamType || '';
+  const upstream = side === 'upstream' || code.startsWith('upstream_');
+  let text = '';
+  if (type === 'insufficient_quota' || code === 'upstream_rate_limited' || (upstream && status === 429)) {
+    text = '上游限流或账户额度不足，请稍后重试或检查账户额度';
+  } else if (code === 'upstream_unauthorized' || code === 'upstream_forbidden' || (upstream && (status === 401 || status === 403))) {
+    text = '上游 API 密钥无效、已过期或无权访问，请重新保存连接密钥';
+  } else if (code === 'upstream_connection_failed' || code === 'upstream_timeout' || code === 'response_stream_interrupted' || side === 'connection') {
+    text = '无法连接上游或响应中断，请检查连接地址、网络和服务状态';
+  } else if (upstream && status >= 500) {
+    text = '上游服务暂时异常，请稍后重试';
+  }
+  return text && code ? text + '（' + code + '）' : code;
+}
+
 let recentSignature = '';
 
 function renderRecent(recent) {
@@ -2851,10 +2870,10 @@ function renderRecent(recent) {
     requestContext.className = 'num mono col-reqctx';
     requestContext.textContent = requestContextText(row && row.context);
     requestContext.setAttribute('title', requestContextText(row && row.context));
-    if (row && row.error) {
+    if (row && (row.error || row.failure?.reason)) {
       const error = document.createElement('span');
       error.className = 'cell-error';
-      error.textContent = row.error;
+      error.textContent = requestErrorText(row);
       status.append(error);
     }
     tr.append(time, model, protocol, status, firstByte, total, rate, usage, requestContext);
