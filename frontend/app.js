@@ -26,7 +26,7 @@ const UPDATE_ACTIONS = new Set(['check-update', 'install-update', 'rollback-upda
 const UPDATE_RELEASE_PREFIX = 'https://github.com/wssz527/kimi-work-gateway/releases/tag/';
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-/* 上下文预算预设：256K/350K/600K 是固定 token 数，"完整"取已知真实上限。
+/* 上下文窗口预设：256K/350K/600K 是固定 token 数，"完整"取已知真实上限。
    任何预设都不得把套餐上限抬高，因此上限未知时只作手填起点并明确标注。 */
 const BUDGET_PRESETS = [
   { id: '256k', label: '256K', tokens: 262144 },
@@ -125,14 +125,14 @@ const RUNTIME_STATE = {
   unavailable: { tone: 'bad', word: '不可用', note: '运行时当前不可用。' },
   unsupported: { tone: 'bad', word: '启动接口不支持', note: '当前应用无法确认适配副本的加载能力；主模型 BYOK 与普通翻译可独立使用。' },
   'scope-conflict': { tone: 'bad', word: '作用域不匹配', note: '实际运行时与策略所属的 Kimi 目录不一致。' },
-  outdated: { tone: 'warn', word: '版本过旧', note: '运行时版本与当前内核不一致。' },
+  outdated: { tone: 'warn', word: '版本过旧', note: '当前 Kimi 版本与已保存配置不兼容。' },
   conflict: { tone: 'bad', word: '冲突', note: '运行时与配置存在冲突，未被覆盖。' },
-  'file-applied': { tone: 'ok', word: '配置已写入', note: 'secondaryModel 配置文件已更新，等待 Kimi 内核热加载；是否采用以内核为准。' },
-  'waiting-config': { tone: 'warn', word: '配置待写入', note: 'native-config 通道尚未把当前策略写入本机配置文件。' },
+  'file-applied': { tone: 'ok', word: '配置已写入', note: '子代理配置文件已更新，等待 Kimi 重新载入；是否采用以 Kimi 为准。' },
+  'waiting-config': { tone: 'warn', word: '配置待写入', note: '当前目标尚未写入本机配置文件。' },
   restored: { tone: 'neutral', word: '已恢复原状', note: '本面板管理的配置已撤销，Kimi 恢复自身配置。' },
-  inherit: { tone: 'neutral', word: '未接管', note: 'native-config 通道未接管子代理模型，Kimi 使用自己的配置。' },
+  inherit: { tone: 'neutral', word: '未接管', note: '子代理模型未被接管，Kimi 使用自己的配置。' },
   blocked: { tone: 'bad', word: '已阻止', note: '子代理策略处于阻止状态，子代理请求会被拒绝。' },
-  unverified: { tone: 'warn', word: '未验证', note: '无法确认当前内核支持模型池配置；尚未写入任何配置。' },
+  unverified: { tone: 'warn', word: '未验证', note: '无法确认当前 Kimi 版本支持模型池配置；尚未写入任何配置。' },
 };
 
 const DIAG_REASON = {
@@ -357,6 +357,7 @@ const dom = {
   mConnectionHint: $('m-connection-hint'),
   mCandidates: $('m-candidates'),
   mSourceField: $('m-source-field'),
+  mAdvanced: $('m-advanced'),
   mProtocolHint: $('m-protocol-hint'),
   mContextHint: $('m-context-hint'),
   mBudgetGroup: $('m-budget-group'),
@@ -399,6 +400,7 @@ const dom = {
   onboardId: $('ob-id'),
   onboardDiscover: $('ob-discover'),
   onboardRecommended: $('ob-recommended'),
+  onboardRecommendedHint: $('ob-recommended-hint'),
   onboardDiscoverState: $('ob-discover-state'),
   onboardCatalogue: $('ob-catalogue'),
   onboardCatalogueCount: $('ob-catalogue-count'),
@@ -997,7 +999,7 @@ function buildModel(input) {
     contextLimit = Number(limitText);
     if (!Number.isSafeInteger(contextLimit) || contextLimit <= 0) errors.push('已知上下文上限必须是正整数，或留空表示未知。');
     else if (Number.isSafeInteger(contextWindow) && contextWindow > contextLimit) {
-      errors.push('上下文预算 ' + fmtTokens(contextWindow) + ' 超过已知上限 ' + fmtTokens(contextLimit) + '，不能保存。');
+      errors.push('上下文窗口 ' + fmtTokens(contextWindow) + ' 超过已知上限 ' + fmtTokens(contextLimit) + '，不能保存。');
     }
   }
 
@@ -2324,7 +2326,7 @@ function onboardProblems({ models = [] } = {}) {
   }
   const missingContext = models.filter(row => !(Number(row.contextWindow) > 0));
   if (missingContext.length) {
-    problems.push('请为这些模型填写实际上下文窗口；接口没有返回时不能用猜测值：'
+    problems.push('请为这些模型填写上下文窗口；接口没有返回时不能用猜测值：'
       + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
   /* 连接限制是保存前已知的真实约束：路由会按所选协议生成，但请求最终会被
@@ -2489,7 +2491,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     if (!choices.length) {
       const conflict = document.createElement('span');
       conflict.className = 'field__hint onboard__route';
-      conflict.textContent = '连接不允许该上游声明的协议；请先在「连接」页调整允许的协议。';
+      conflict.textContent = '连接不允许该上游声明的协议；请先在「连接」页调整允许的接口协议。';
       protocolField.append(conflict);
     }
     if (connectionId && row.upstreamModelId) {
@@ -2613,7 +2615,18 @@ function renderOnboard() {
     setText(dom.onboardDiscover, draft.busy ? '正在读取…' : '读取模型');
   }
   if (dom.onboardRecommended) {
-    dom.onboardRecommended.disabled = !ready || busy || !state.providers?.details?.[dom.onboardPreset?.value]?.models?.length;
+    const presetId = dom.onboardPreset?.value || '';
+    const recommended = state.providers?.details?.[presetId]?.models || [];
+    const available = recommended.length > 0;
+    dom.onboardRecommended.disabled = !ready || busy || !available;
+    setHidden(dom.onboardRecommended, !available);
+    dom.onboardRecommended.title = busy ? '请等待当前读取完成。' : ready ? '' : '配置当前不可读，暂时不能使用推荐模型。';
+    if (dom.onboardRecommendedHint) {
+      setHidden(dom.onboardRecommendedHint, available);
+      setText(dom.onboardRecommendedHint, presetId
+        ? '这个预设没有内置推荐目录，请填写地址和 Key 后读取模型。'
+        : '自定义连接没有内置推荐目录，请填写地址和 Key 后读取模型。');
+    }
   }
   renderLaunch(data);
 }
@@ -2694,26 +2707,72 @@ function openOnboardWizard() {
   dom.onboardPreset?.focus({ preventScroll: true });
 }
 
+function discoveryBody(values, saved, revision) {
+  if (!values.baseURL) return { error: '请先填写上游地址。' };
+  const base = normalizeBaseURL(values.baseURL);
+  if (base.error) return { error: base.error };
+
+  /* 读取只需要地址与 Key。只有地址不变的已保存连接才可省略 Key；
+     新连接或改过地址的连接不能借用旧凭据。 */
+  const sameEndpoint = Boolean(saved && saved.baseURL === base.value);
+  const typedKey = String(values.apiKey || '').trim();
+  if (!typedKey && !sameEndpoint) {
+    return { error: '请填写该上游的 API Key：读取只使用这一次填写的 Key，不会复用其它连接的凭据。' };
+  }
+  const body = { revision, baseURL: base.value };
+  if (typedKey) body.apiKey = typedKey;
+  if (values.providerPresetId) body.presetId = values.providerPresetId;
+  if (sameEndpoint) body.connectionId = saved.id;
+  return { body, sameEndpoint };
+}
+
+async function discoverConnectionEditorModels() {
+  const editing = state.conns.editing;
+  const data = state.data;
+  if (!editing || !data || editing.discovering) return null;
+  readConnectionEditor();
+  const saved = editing.originalId
+    ? (connectionRowsOf(data) || []).find(row => !row.legacy && row.id === editing.originalId) || null
+    : null;
+  const target = discoveryBody(editing.draft, saved, data.revision);
+  if (target.error) { showToast(target.error, 'error'); return null; }
+  editing.discovering = true;
+  renderConnectionEditor();
+  try {
+    const res = await request(API.discovery, { method: 'POST', body: target.body });
+    if (state.conns.editing !== editing) return null;
+    const discovery = res && res.discovery;
+    if (!discovery || !Array.isArray(discovery.models)) {
+      showToast('上游目录读取结果格式不被接受。', 'error');
+      return null;
+    }
+    if (discovery.state !== 'passed') {
+      showToast('读取上游目录失败：' + (discoveryReasonText(discovery.reason) || '请稍后再试')
+        + (Number.isInteger(discovery.httpStatus) ? '（HTTP ' + discovery.httpStatus + '）' : ''), 'error');
+      return discovery;
+    }
+    showToast('连接可达，读到 ' + fmtCount(discovery.modelCount) + ' 个模型；读取不会保存连接或更改已有 Key。', 'ok');
+    return discovery;
+  } catch (error) {
+    if (state.conns.editing === editing) showToast(discoveryReasonText(error.code) || error.message || '读取上游目录失败。', 'error');
+    return null;
+  } finally {
+    if (state.conns.editing === editing) {
+      editing.discovering = false;
+      renderConnectionEditor();
+    }
+  }
+}
+
 async function discoverOnboardModels() {
   const data = state.data;
   if (!data || state.onboard.busy) return null;
   setHidden(dom.onboardErrors, true);
   const values = onboardConnectionValues();
-  if (!values.baseURL) { showToast('请先填写上游地址。', 'error'); return null; }
-  const base = normalizeBaseURL(values.baseURL);
-  if (base.error) { showToast(base.error, 'error'); return null; }
-  if (!values.id || !CONNECTION_ID_PATTERN.test(values.id)) { showToast('请先填写连接标识。', 'error'); return null; }
-
-  /* 读取只需要地址与 Key，不需要先把连接写进配置：新连接在保存前就能看到上游
-     真正提供了什么。已保存且地址完全相同的连接可以省略 Key，由服务端读它自己的
-     凭据；任何别的地址都必须带上这次的 Key，页面绝不把旧 Key 转给新 host。 */
   const saved = savedOnboardRow(values.id);
-  const sameEndpoint = Boolean(saved && saved.baseURL === base.value);
-  const typedKey = values.apiKey.trim();
-  if (!typedKey && !sameEndpoint) {
-    showToast('请填写该上游的 API Key：读取只使用这一次填写的 Key，不会复用其它连接的凭据。', 'error');
-    return null;
-  }
+  const target = discoveryBody(values, saved, data.revision);
+  if (target.error) { showToast(target.error, 'error'); return null; }
+  const { body, sameEndpoint } = target;
 
   const key = syncOnboardEndpoint();
   const token = (state.onboard.seq || 0) + 1;
@@ -2721,12 +2780,6 @@ async function discoverOnboardModels() {
   state.onboard.busy = true;
   if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, '正在请求上游模型目录…');
   renderOnboard();
-  const body = { revision: data.revision, baseURL: base.value };
-  if (typedKey) body.apiKey = typedKey;
-  if (values.providerPresetId) body.presetId = values.providerPresetId;
-  /* 只有指向同名已保存连接时才带 id：新连接没有已保存行，带上它只会得到
-     connection_unavailable，而不是一次真实的上游读取。 */
-  if (sameEndpoint) body.connectionId = saved.id;
   try {
     const res = await request(API.discovery, { method: 'POST', body });
     /* 迟到的回包不属于当前端点：地址、预设或连接已被改过，这份目录不能再写进
@@ -3060,7 +3113,7 @@ function rateText(rate) {
   return (value >= 100 ? String(Math.round(value)) : value.toFixed(1)) + ' tok/s';
 }
 
-/* `context.limitTokens` 是这条模型**已设定的上下文预算**，不是上游硬上限
+/* `context.limitTokens` 是这条模型**已设定的上下文窗口**，不是上游硬上限
    `contextLimit`：所以这里只说「占预算多少」，不写成「距上限还剩多少」。
    比例优先用后端算好的值，缺失时才用两个实测数相除。 */
 function requestContextText(context) {
@@ -3598,12 +3651,14 @@ function pickCandidate(upstreamId) {
   }
   editor.serverErrors = [];
   editor.budgetNote = null;
+  if (!chosen && dom.mAdvanced) dom.mAdvanced.open = true;
   fillEditorFields();
   state.picker.open = false;
   renderPicker();
   renderEditor();
   renderModels();
-  if (dom.mId && dom.mId.focus) dom.mId.focus();
+  const focusTarget = chosen ? dom.mName : dom.mId;
+  if (focusTarget && focusTarget.focus) focusTarget.focus();
 }
 
 /* 显式切换协议：只重写路由 ID 的家族前缀，上游 ID 原样保留。
@@ -3853,6 +3908,7 @@ function modelDraftFrom(model) {
 
 function openEditor(model) {
   state.deleteId = null;
+  if (dom.mAdvanced) dom.mAdvanced.open = false;
   state.editor = {
     originalId: model ? model.id : null,
     baseRevision: state.data?.revision ?? null,
@@ -3938,9 +3994,9 @@ function editorDirty() {
 }
 
 const MODEL_DIFF_FIELDS = {
-  id: '模型 ID', name: '名称', contextWindow: '上下文预算', maxOutputTokens: '最大输出', tools: '工具能力',
+  id: '模型 ID', name: '名称', contextWindow: '上下文窗口', maxOutputTokens: '最大输出', tools: '工具能力',
   reasoning: '思考能力', inputModalities: '图片输入', reasoningEfforts: '思考档位', defaultEffort: '默认档位',
-  connectionId: '所属连接', upstreamModelId: '上游模型 ID', upstreamProtocol: '上游协议',
+  connectionId: '所属连接', upstreamModelId: '上游模型 ID', upstreamProtocol: '上游 API 格式',
   contextLimit: '上游上下文上限', metadataSource: '元数据来源',
 };
 const diffValue = value => value === undefined ? '（未声明）' : JSON.stringify(value);
@@ -4011,7 +4067,7 @@ function validateEditor(editor) {
   return { model, errors };
 }
 
-/* 上下文预算只做三种可信换算：固定预设、已知上限、手填。
+/* 上下文窗口只做三种可信换算：固定预设、已知上限、手填。
    上限未知时「完整」不可用，避免把猜测当成上游真实能力。 */
 function budgetStateFor(draft) {
   const contextLimit = Number(draft && draft.contextLimit) > 0 ? Number(draft.contextLimit) : null;
@@ -4500,7 +4556,7 @@ function evaluateBinding(data) {
       return { tone: 'ok', word: '继承已生效', note: '运行时以继承模式加载，跟随主模型。' };
     }
     if (runtimeState === 'file-applied' && policy.mode === 'inherit') {
-      return { tone: 'ok', word: '继承已下发', note: '继承策略已写入本机配置文件；是否被内核采用以它自己的重载为准。' };
+      return { tone: 'ok', word: '继承已下发', note: '继承设置已写入本机配置文件；是否采用以 Kimi 重新载入的结果为准。' };
     }
     return { tone: info.tone, word: info.word, note: info.note };
   }
@@ -4508,25 +4564,25 @@ function evaluateBinding(data) {
   if (runtimeState === 'file-applied' || runtimeState === 'waiting-config' || runtimeState === 'unverified') {
     const target = saved.mode === 'pool' ? '模型池（' + saved.models.length + ' 个候选）' : '固定模型';
     if (observed) {
-      return { tone: saved.mode === 'pool' ? 'ok' : 'warn', word: '工具定义已观察',
-        note: target + '已出现在 Kimi 发来的工具定义里；这只证明工具结构已更新，'
-          + '内核实际选用哪个模型仍以运行时为准，不等于已生效。' };
+      return { tone: saved.mode === 'pool' ? 'ok' : 'warn', word: '工具配置已识别',
+        note: target + '已出现在 Kimi 的子代理工具配置中；这表示结构已更新，'
+          + '实际选用哪个模型仍由 Kimi 决定。' };
     }
     if (runtimeState !== 'file-applied') {
       return { tone: 'warn', word: info.word,
-        note: '本次目标尚未确认写入本机配置：' + (info.note || '等待内核兼容检查完成。') };
+        note: '本次目标尚未确认写入本机配置：' + (info.note || '等待 Kimi 完成兼容性检查。') };
     }
-    return { tone: 'warn', word: '已写入待内核采用',
-      note: target + '已写入本机配置文件；Kimi 内核重载后工具定义与实际选用才反映新目标。' };
+    return { tone: 'warn', word: '已写入，待 Kimi 采用',
+      note: target + '已写入本机配置文件；Kimi 重新载入后，工具配置和实际选用才会反映新目标。' };
   }
   if (runtimeState === 'inherit' || runtimeState === 'restored') {
-    return { tone: 'warn', word: '尚未接管', note: 'native-config 通道还没有写入本次目标；保存后等待配置文件更新。' };
+    return { tone: 'warn', word: '尚未接管', note: '本次目标尚未写入本机配置；保存后请等待配置更新。' };
   }
   if (runtimeState === 'loaded' && runtime.mode === saved.mode) {
-    return { tone: observed ? 'ok' : 'warn', word: observed ? '运行时已加载' : '待内核采用',
+    return { tone: observed ? 'ok' : 'warn', word: observed ? 'Kimi 已加载目标' : '待 Kimi 采用',
       note: observed
-        ? '运行时已加载与保存目标一致的模式，且工具定义已真实观察到池结构；具体选用以运行时为准。'
-        : '运行时已加载策略，但尚未观察到工具定义含池结构，不能写已生效。' };
+        ? 'Kimi 已加载与保存目标一致的模式，且已识别子代理工具中的模型池；具体选用仍以 Kimi 为准。'
+        : 'Kimi 已加载配置，但尚未识别子代理工具中的模型池，不能确认已生效。' };
   }
   return { tone: info.tone, word: info.word, note: info.note };
 }
@@ -5343,8 +5399,9 @@ function renderConnectionEditor() {
     dom.ceKey.placeholder = editing.originalId ? '留空保持现有 Key' : 'sk-…';
   }
   if (dom.connEditorTest) {
-    dom.connEditorTest.disabled = !editing.originalId;
-    setHidden(dom.connEditorTest, !editing.originalId);
+    dom.connEditorTest.disabled = editing.discovering === true;
+    setText(dom.connEditorTest, editing.discovering ? '正在读取…' : '读取上游目录');
+    setHidden(dom.connEditorTest, false);
   }
 }
 
@@ -6613,14 +6670,7 @@ function bindEvents() {
   if (dom.connEditorClose) dom.connEditorClose.addEventListener('click', closeConnectionEditor);
   if (dom.connEditorCancel) dom.connEditorCancel.addEventListener('click', closeConnectionEditor);
   if (dom.connEditorApply) dom.connEditorApply.addEventListener('click', applyConnectionEditor);
-  if (dom.connEditorTest) dom.connEditorTest.addEventListener('click', async () => {
-    const editing = state.conns.editing;
-    if (!editing || !editing.originalId) return;
-    const discovery = await runDiscovery(editing.originalId);
-    if (discovery && discovery.state === 'passed') {
-      showToast('连接可达，读到 ' + discovery.modelCount + ' 个模型；已保存的凭据未改变。', 'ok');
-    }
-  });
+  if (dom.connEditorTest) dom.connEditorTest.addEventListener('click', () => { void discoverConnectionEditorModels(); });
   if (dom.cePreset) dom.cePreset.addEventListener('change', () => {
     if (!state.conns.editing) return;
     applyProviderPreset(dom.cePreset.value);
@@ -6854,6 +6904,7 @@ function adoptLocationKey() {
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
   state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '' };
   if (dom.onboardKey) dom.onboardKey.value = '';
+  if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
   state.applyUnsupported = false;
   state.applyRefusal = null;
   state.providers = null;
@@ -6883,6 +6934,7 @@ async function loadProviders() {
     if (res && Array.isArray(res.presets)) {
       state.providers = res;
       renderConnectionEditor();
+      fillOnboardPresets();
       refreshSavedProtocolDeclarations();
     }
   } catch {

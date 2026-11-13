@@ -5,8 +5,9 @@ import test from 'node:test';
 const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
 
 function sourceFunction(name) {
-  const start = source.indexOf('\nfunction ' + name + '(');
-  assert.notEqual(start, -1, 'missing source function: ' + name);
+  const declaration = ['\nfunction ', '\nasync function '].map(prefix => prefix + name + '(').find(token => source.includes(token));
+  assert.notEqual(declaration, undefined, 'missing source function: ' + name);
+  const start = source.indexOf(declaration);
   const end = source.indexOf('\n}', start);
   assert.notEqual(end, -1, 'unterminated source function: ' + name);
   return source.slice(start, end + 2);
@@ -207,6 +208,24 @@ test('batch context changes only selected rows and rejects unknown values', () =
   assert.match(messages.at(-1), /正整数/);
 });
 
+test('late provider loading refreshes wizard options without changing typed fields', async () => {
+  const state = { key: 'session-key', providers: null, onboard: { touched: true } };
+  const dom = { onboardPreset: { value: '' }, onboardPresetHint: null, onboardKey: { value: 'sk-user-just-typed' } };
+  const options = [];
+  const code = [
+    ...['providerPresets', 'providerPresetLabel', 'providerPresetOptions', 'fillOnboardPresets', 'loadProviders'].map(sourceFunction),
+    'return loadProviders;',
+  ].join('\n');
+  const load = new Function('state', 'dom', 'API', 'request', 'setText', 'fmtCount', 'syncSelectOptions', 'renderConnectionEditor', 'refreshSavedProtocolDeclarations', code)(
+    state, dom, { providers: '/api/providers' }, async () => ({ presets: [{ id: 'deepseek', name: 'DeepSeek' }] }),
+    () => {}, String, (select, rows, current) => { select.value = current; options.push(...rows); }, () => {}, () => {},
+  );
+  await load();
+  assert.deepEqual(options.map(option => option.value), ['', 'deepseek']);
+  assert.equal(dom.onboardKey.value, 'sk-user-just-typed');
+  assert.equal(state.onboard.touched, true);
+});
+
 test('the shared wizard opens at provider choice without discarding a dirty editor', () => {
   const calls = [];
   const state = { editor: null };
@@ -230,4 +249,70 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   state.editor = { dirty: true };
   open();
   assert.deepEqual(calls, ['models', '请先保存或取消正在编辑的模型，再打开添加向导。']);
+});
+
+test('catalogue reads require only address and key and never borrow a key for a changed endpoint', () => {
+  const code = [
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    sourceFunction('normalizeBaseURL'), sourceFunction('discoveryBody'), 'return discoveryBody;'
+  ].join('\n');
+  const build = new Function(code)();
+  const saved = { id: 'saved', baseURL: 'https://api.example.com/v1', apiKeySet: true };
+  const anonymous = build({ id: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new', providerPresetId: '' }, null, 'rev');
+  assert.equal(anonymous.error, undefined);
+  assert.deepEqual(anonymous.body, { revision: 'rev', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new' });
+  const reused = build({ id: 'saved', baseURL: 'https://api.example.com/v1', apiKey: '' }, saved, 'rev');
+  assert.deepEqual(reused.body, { revision: 'rev', baseURL: 'https://api.example.com/v1', connectionId: 'saved' });
+  assert.equal(reused.body.apiKey, undefined);
+  const changed = build({ id: 'saved', baseURL: 'https://other.example.com/v1', apiKey: '' }, saved, 'rev');
+  assert.match(changed.error, /请填写该上游的 API Key/);
+  assert.equal(changed.body, undefined);
+});
+
+test('a new connection editor reads its current endpoint and key before an ID or saved row exists', async () => {
+  const editing = { originalId: null, discovering: false, draft: { id: '', baseURL: 'http://127.0.0.1:39001/v1', apiKey: 'local-acceptance-key', providerPresetId: '' } };
+  const state = { data: { revision: 'rev' }, conns: { editing } };
+  const calls = [];
+  const messages = [];
+  const code = [
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    ...['normalizeBaseURL', 'discoveryBody', 'discoverConnectionEditorModels'].map(sourceFunction),
+    'const readConnectionEditor = () => {};',
+    'const connectionRowsOf = () => [];',
+    'const renderConnectionEditor = () => {};',
+    'const discoveryReasonText = code => code || "";',
+    'const fmtCount = value => String(value);',
+    'const showToast = message => messages.push(message);',
+    'return discoverConnectionEditorModels;',
+  ].join('\n');
+  const discover = new Function('state', 'API', 'request', 'calls', 'messages', code)(
+    state, { discovery: '/api/discovery' }, async (path, options) => {
+      calls.push({ path, body: options.body });
+      return { discovery: { state: 'passed', models: [{}], modelCount: 1 } };
+    }, calls, messages,
+  );
+  const result = await discover();
+  assert.equal(result.state, 'passed');
+  assert.deepEqual(calls, [{ path: '/api/discovery', body: { revision: 'rev', baseURL: 'http://127.0.0.1:39001/v1', apiKey: 'local-acceptance-key' } }]);
+  assert.equal(editing.discovering, false);
+  assert.match(messages.at(-1), /读到 1 个模型/);
+});
+
+test('switching the private panel session clears the visible catalogue query and key', () => {
+  const state = { key: 'old-session', onboard: { advanced: false, query: 'vision' } };
+  const dom = { onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
+  const code = [
+    'let modelSignature = "", recentSignature = "", saModelSignature = "", saEffortSignature = "";',
+    sourceFunction('adoptLocationKey'),
+    'return adoptLocationKey;',
+  ].join('\n');
+  const rotate = new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', code)(
+    state, dom, { location: { hash: '#key=new-session', pathname: '/', search: '' } },
+    { setItem: () => {} }, { replaceState: () => {} }, 'panel-key', () => {}, () => {}, () => {}, () => {}, async () => true, () => {},
+  );
+  assert.equal(rotate(), true);
+  assert.equal(state.key, 'new-session');
+  assert.equal(state.onboard.query, '');
+  assert.equal(dom.onboardModelQuery.value, '');
+  assert.equal(dom.onboardKey.value, '');
 });

@@ -16,6 +16,7 @@ const escapeMap = {
   translation_http_error: '翻译服务返回错误，请检查地址、Key 和模型。',
   native_mcp_test_failed: '连接未成功；请检查命令、地址和服务日志。',
   native_mcp_timeout: '原生 MCP 操作超时，未自动重试。',
+  native_mcp_test_requires_kernel_runtime: '当前版本暂不支持连接测试；仍可管理已有服务配置。',
 };
 
 function errorText(error) {
@@ -46,7 +47,7 @@ function mountLegacy() {
   body.className = 'growth-disclosure__body';
   body.innerHTML = '<p>已只读核对 Kimi Work 3.2.25 当前内核：coder、plan、explore 等 profile 决定提示词与工具权限，profile 接口没有 model、modelAlias 或 thinking 默认字段。模型由单次显式参数、全局池默认或调用方继承决定。</p><p>因此本轮不实现角色默认或强制角色模型，不添加无效下拉框。单次指定模型不等同于已接管所有官方自动子代理；实际契约与版本摘要见交付的 ROLE_CONTRACT.txt。</p><p>日常子代理继续使用上面的“继承主模型”基线，本页不会借角色调查重新启用全局模型池。</p>';
   roles.append(summaryRole, body);
-  $('sa-runtime-panel').after(roles);
+  $('sa-diagnostics-body').append(roles);
 }
 
 function fieldFromDraft(draft) {
@@ -373,7 +374,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   function renderMcp(data) {
     const tools = data.tools || { available: false, servers: [] };
     text('mcp-state', tools.available ? `原生接口可用，共 ${tools.servers.length} 个服务。读取列表不会启动服务。`
-      : `原生 MCP 当前不可用：${tools.reason || '等待原生接口'}。其他功能不受影响。`);
+      : `MCP 配置当前不可读取：${tools.reason ? errorText({ code: tools.reason }) : '等待原生接口'}。其他功能不受影响。`);
     const list = $('mcp-list');
     const signature = JSON.stringify([tools.available, tools.reason, tools.servers, local.busy]);
     if (local.mcpKey === signature) return;
@@ -399,7 +400,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
         button.dataset.mcpAction = action;
         button.dataset.mcpName = server.name;
         button.disabled = local.busy || (action === 'test' && tools.probe?.available === false);
-        if (action === 'test' && tools.probe?.available === false) button.title = '当前实验版尚未接入 Kimi 内核探测运行时；配置管理仍可使用。';
+        if (action === 'test' && tools.probe?.available === false) button.title = '当前版本暂不支持连接测试；配置管理仍可使用。';
         actions.append(button);
       }
       row.append(title, detail, meta, actions);
@@ -506,7 +507,8 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     hidden('web-key-field', $('web-provider').value !== 'tavily');
     text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
     text('web-state', local.webResult?.message || web.message || `当前方式：${web.provider || 'official'}。测试与当前会话采用分开报告。`);
-    hidden('svc-panel', $('web-provider').value !== 'native');
+    hidden('native-search-details', $('web-provider').value !== 'native');
+    hidden('svc-panel', false);
     text('web-draft', local.webResult
       ? `搜索：${local.webResult.search?.state || '—'}；正文读取：${local.webResult.fetch?.state || '—'}。这不是当前会话已重新加载的证明。`
       : local.webDraft && local.webDraft !== web.provider ? '服务方式有未保存修改。'
