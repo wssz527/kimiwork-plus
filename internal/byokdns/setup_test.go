@@ -112,6 +112,13 @@ func TestSetupMapsFailures(t *testing.T) {
 	}
 }
 
+func TestDarwinAdministratorPreservesShellOperators(t *testing.T) {
+	command := darwinAdministratorCommand("printf %s resolver_conflict >&2\n")
+	if !strings.Contains(command, `>&2`) || strings.Contains(command, `\u003e`) || strings.Contains(command, `\u0026`) {
+		t.Fatalf("shell operators were escaped: %s", command)
+	}
+}
+
 func TestProbeChecksFlagAndCachesDNS(t *testing.T) {
 	flag := filepath.Join(t.TempDir(), "byok-availability.json")
 	if err := os.WriteFile(flag, []byte(`{"revealed":true}`), 0o600); err != nil {

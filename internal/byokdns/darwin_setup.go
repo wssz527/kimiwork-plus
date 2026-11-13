@@ -40,9 +40,16 @@ func ResolverScript(action, source, target string, flush bool) string {
 	return script
 }
 
+func darwinAdministratorCommand(script string) string {
+	var encoded strings.Builder
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(script)
+	return "do shell script " + strings.TrimSuffix(encoded.String(), "\n") + " with administrator privileges"
+}
+
 func darwinAdministrator(ctx context.Context, script, _ string) error {
-	encoded, _ := json.Marshal(script)
-	command := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", "do shell script "+string(encoded)+" with administrator privileges")
+	command := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", darwinAdministratorCommand(script))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return errors.New(strings.TrimSpace(string(output)) + " " + err.Error())
