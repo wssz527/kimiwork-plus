@@ -2624,7 +2624,9 @@ function renderOnboard() {
     if (dom.onboardRecommendedHint) {
       setHidden(dom.onboardRecommendedHint, available);
       setText(dom.onboardRecommendedHint, presetId
-        ? '这个预设没有内置推荐目录，请填写地址和 Key 后读取模型。'
+        ? state.providers === null
+          ? '推荐目录尚未加载，请稍候。'
+          : '这个预设没有内置推荐目录，请填写地址和 Key 后读取模型。'
         : '自定义连接没有内置推荐目录，请填写地址和 Key 后读取模型。');
     }
   }
@@ -6935,6 +6937,7 @@ async function loadProviders() {
       state.providers = res;
       renderConnectionEditor();
       fillOnboardPresets();
+      renderOnboard();
       refreshSavedProtocolDeclarations();
     }
   } catch {

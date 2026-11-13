@@ -29,13 +29,6 @@ function relocate(id, parent) {
 }
 
 function mountLegacy() {
-  relocate('svc-panel', $('view-tools'));
-  const advanced = document.createElement('details');
-  advanced.className = 'growth-disclosure';
-  const summary = document.createElement('summary');
-  summary.textContent = '高级：原生搜索与抓取端点';
-  $('svc-panel').before(advanced);
-  advanced.append(summary, $('svc-panel'));
   relocate('native-panel', $('view-maintenance'));
   relocate('update-panel', $('view-maintenance'));
   const roles = document.createElement('details');
@@ -508,7 +501,6 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
     text('web-state', local.webResult?.message || web.message || `当前方式：${web.provider || 'official'}。测试与当前会话采用分开报告。`);
     hidden('native-search-details', $('web-provider').value !== 'native');
-    hidden('svc-panel', false);
     text('web-draft', local.webResult
       ? `搜索：${local.webResult.search?.state || '—'}；正文读取：${local.webResult.fetch?.state || '—'}。这不是当前会话已重新加载的证明。`
       : local.webDraft && local.webDraft !== web.provider ? '服务方式有未保存修改。'

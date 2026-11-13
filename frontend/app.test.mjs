@@ -3,14 +3,23 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
+
+function extractFunction(text, name, indent = '') {
+  const declaration = [`\n${indent}function `, `\n${indent}async function `].map(prefix => prefix + name + '(').find(token => text.includes(token));
+  assert.notEqual(declaration, undefined, 'missing source function: ' + name);
+  const start = text.indexOf(declaration);
+  const end = text.indexOf(`\n${indent}}`, start);
+  assert.notEqual(end, -1, 'unterminated source function: ' + name);
+  return text.slice(start, end + indent.length + 2);
+}
 
 function sourceFunction(name) {
-  const declaration = ['\nfunction ', '\nasync function '].map(prefix => prefix + name + '(').find(token => source.includes(token));
-  assert.notEqual(declaration, undefined, 'missing source function: ' + name);
-  const start = source.indexOf(declaration);
-  const end = source.indexOf('\n}', start);
-  assert.notEqual(end, -1, 'unterminated source function: ' + name);
-  return source.slice(start, end + 2);
+  return extractFunction(source, name);
+}
+
+function growthFunction(name, indent = '') {
+  return extractFunction(growthSource, name, indent);
 }
 
 function makeProblems() {
@@ -212,18 +221,20 @@ test('late provider loading refreshes wizard options without changing typed fiel
   const state = { key: 'session-key', providers: null, onboard: { touched: true } };
   const dom = { onboardPreset: { value: '' }, onboardPresetHint: null, onboardKey: { value: 'sk-user-just-typed' } };
   const options = [];
+  const renders = [];
   const code = [
     ...['providerPresets', 'providerPresetLabel', 'providerPresetOptions', 'fillOnboardPresets', 'loadProviders'].map(sourceFunction),
     'return loadProviders;',
   ].join('\n');
-  const load = new Function('state', 'dom', 'API', 'request', 'setText', 'fmtCount', 'syncSelectOptions', 'renderConnectionEditor', 'refreshSavedProtocolDeclarations', code)(
+  const load = new Function('state', 'dom', 'API', 'request', 'setText', 'fmtCount', 'syncSelectOptions', 'renderConnectionEditor', 'refreshSavedProtocolDeclarations', 'renderOnboard', code)(
     state, dom, { providers: '/api/providers' }, async () => ({ presets: [{ id: 'deepseek', name: 'DeepSeek' }] }),
-    () => {}, String, (select, rows, current) => { select.value = current; options.push(...rows); }, () => {}, () => {},
+    () => {}, String, (select, rows, current) => { select.value = current; options.push(...rows); }, () => {}, () => {}, () => renders.push('onboard'),
   );
   await load();
   assert.deepEqual(options.map(option => option.value), ['', 'deepseek']);
   assert.equal(dom.onboardKey.value, 'sk-user-just-typed');
   assert.equal(state.onboard.touched, true);
+  assert.deepEqual(renders, ['onboard']);
 });
 
 test('the shared wizard opens at provider choice without discarding a dirty editor', () => {
@@ -315,4 +326,59 @@ test('switching the private panel session clears the visible catalogue query and
   assert.equal(state.onboard.query, '');
   assert.equal(dom.onboardModelQuery.value, '');
   assert.equal(dom.onboardKey.value, '');
+});
+
+test('native search stays inside its single existing disclosure', () => {
+  const nodes = {};
+  const makeNode = (id = '') => ({
+    id,
+    children: [],
+    parent: null,
+    append(...children) {
+      for (const child of children) {
+        if (child.parent) child.parent.children.splice(child.parent.children.indexOf(child), 1);
+        child.parent = this;
+        this.children.push(child);
+      }
+    },
+    before(child) {
+      const index = this.parent.children.indexOf(this);
+      this.parent.children.splice(index, 0, child);
+      child.parent = this.parent;
+    },
+  });
+  for (const id of ['view-tools', 'view-maintenance', 'native-search-details', 'native-search-settings', 'svc-panel', 'native-panel', 'update-panel', 'sa-diagnostics-body']) nodes[id] = makeNode(id);
+  nodes['native-search-settings'].append(nodes['svc-panel']);
+  nodes['native-search-details'].append(nodes['native-search-settings']);
+  nodes['view-tools'].append(nodes['native-search-details'], nodes['native-panel'], nodes['update-panel']);
+  const document = { getElementById: id => nodes[id] || null, createElement: () => makeNode() };
+  const code = [
+    'const $ = id => document.getElementById(id);',
+    growthFunction('relocate'), growthFunction('mountLegacy'), 'return mountLegacy;',
+  ].join('\n');
+  new Function('document', code)(document)();
+  assert.equal(nodes['svc-panel'].parent, nodes['native-search-settings']);
+  assert.deepEqual(nodes['view-tools'].children.map(node => node.id), ['native-search-details']);
+  assert.equal(nodes['sa-diagnostics-body'].children[0].id, 'role-contract');
+});
+
+test('web provider selection controls the real native search disclosure', () => {
+  const elements = new Proxy({ 'web-provider': { value: '' } }, {
+    get(target, id) { return target[id] ||= {}; },
+  });
+  const local = { webDraft: null, webResult: null };
+  const code = growthFunction('renderWeb', '  ') + '\nreturn renderWeb;';
+  const render = new Function('$', 'text', 'hidden', 'local', code)(
+    id => elements[id],
+    (id, value) => { elements[id].textContent = value; },
+    (id, value) => { elements[id].hidden = value; },
+    local,
+  );
+  const data = { webTools: { provider: 'official', keySet: false } };
+  render(data);
+  assert.equal(elements['native-search-details'].hidden, true);
+  assert.notEqual(elements['svc-panel'].hidden, false);
+  local.webDraft = 'native';
+  render(data);
+  assert.equal(elements['native-search-details'].hidden, false);
 });
