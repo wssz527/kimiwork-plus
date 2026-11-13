@@ -60,7 +60,7 @@ func TestNativeCheckUpstreamReturnsNamedConnectionResult(t *testing.T) {
 }
 
 func TestNativeOperationConcurrentStateRead(t *testing.T) {
-	n := &Native{controller: &kimi.Controller{}}
+	n := newBYOKTestNative(t)
 	stop := make(chan struct{})
 	var readers sync.WaitGroup
 	for range 8 {

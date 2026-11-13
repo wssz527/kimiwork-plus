@@ -240,6 +240,32 @@ A different official main process returns `work_storage_contract_unverified` and
 restores the pointer before launching any child; the original Kimi remains usable.
 Do not extend the allowlist without rechecking the storage reader and real isolation.
 
+### BYOK availability preparation
+
+The reviewed official build requires both `kimi-agent/byok-availability.json` with
+`revealed=true` in the selected Electron profile and a private-address lookup of
+`dev.msh.team`. `prepare-native` performs the following explicit operation before
+calling `ImportModelsAuthorized`:
+
+1. On Mac, bind the single-domain UDP DNS service to `127.0.0.1:53535`. It answers
+   only an A query for `dev.msh.team` with `10.255.255.254`; AAAA receives an empty
+   success response and other names receive REFUSED. A bind failure is reported as
+   `native_byok_dns_unavailable` without stopping the panel or gateway.
+2. Install `/etc/resolver/dev.msh.team` through the system administrator prompt.
+   The resolver bytes are exactly the reviewed Node configuration, including its
+   ownership header. Existing identical bytes are idempotent; different bytes or
+   symlinks return `resolver_conflict` and are never overwritten. Windows instead
+   inserts only the marked hosts pair, preserving original bytes and line endings.
+3. Preserve other valid flag fields while setting `revealed=true`, invalidate the
+   probe cache, and require a fresh private-address result before importing.
+
+`POST /api/actions` also accepts `{"action":"remove-dns"}`. It removes only the
+exact owned resolver or marked hosts pair and stops the Mac DNS listener. The
+official reveal flag is intentionally retained. Administrator preparation and
+removal have a 180-second bound. `setup` in panel state is a live report with
+`revealed`, `flag`, `intranet.{passed,address,error}` and a platform-specific `dns`
+state. DNS failures do not block unrelated gateway or desktop functions.
+
 ## 10. Native integration
 
 `NativeIntegration.Reconcile` is the Go port of the released build's

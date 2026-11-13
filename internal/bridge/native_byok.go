@@ -1,0 +1,113 @@
+package bridge
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"runtime"
+
+	"kimiworkplus.local/migration/internal/byokdns"
+	"kimiworkplus.local/migration/internal/core"
+	"kimiworkplus.local/migration/internal/kimi"
+)
+
+type byokDNS interface {
+	Start(int) error
+	Close() error
+	Port() int
+}
+
+func (n *Native) initBYOK() {
+	n.dns = &byokdns.Server{}
+	n.probe = &byokdns.Probe{}
+	if runtime.GOOS == "darwin" {
+		if err := n.dns.Start(byokdns.DNSPort); err != nil {
+			n.dnsReason = core.ErrorCode(err)
+		}
+	}
+}
+
+func (n *Native) closeBYOK() {
+	if n.dns != nil {
+		_ = n.dns.Close()
+	}
+}
+
+func (n *Native) byokFlagFile() string {
+	settings := n.controller.Settings()
+	profile := settings.UserDataDir
+	if settings.ProfileMode == kimi.ProfileModeExistingAuthorized && settings.LoginDataDir != "" {
+		profile = settings.LoginDataDir
+	}
+	return filepath.Join(profile, "kimi-agent", "byok-availability.json")
+}
+
+func (n *Native) byokSetup() *byokdns.Setup {
+	return &byokdns.Setup{FlagFile: n.byokFlagFile(), Admin: n.admin}
+}
+
+func (n *Native) byokState() core.Document {
+	n.mu.Lock()
+	dnsReason := n.dnsReason
+	n.mu.Unlock()
+	status := byokdns.Status{Flag: "missing", Intranet: byokdns.ProbeResult{}}
+	if n.probe != nil {
+		status = n.probe.Check(context.Background(), n.byokFlagFile())
+	}
+	out := core.Document{}
+	raw, _ := json.Marshal(status)
+	_ = json.Unmarshal(raw, &out)
+	dns := core.Document{"state": "hosts"}
+	if runtime.GOOS == "darwin" {
+		dns["state"] = "stopped"
+		if n.dns != nil && n.dns.Port() != 0 {
+			dns["state"] = "ready"
+		}
+		if dnsReason != "" {
+			dns["state"] = "unavailable"
+			dns["reason"] = dnsReason
+		}
+	}
+	out["dns"] = dns
+	return out
+}
+
+func (n *Native) prepareBYOK(ctx context.Context) error {
+	if runtime.GOOS == "darwin" {
+		if err := n.dns.Start(byokdns.DNSPort); err != nil {
+			n.mu.Lock()
+			n.dnsReason = core.ErrorCode(err)
+			n.mu.Unlock()
+			return err
+		}
+		n.mu.Lock()
+		n.dnsReason = ""
+		n.mu.Unlock()
+	}
+	if err := n.byokSetup().Run(ctx, "prepare"); err != nil {
+		return err
+	}
+	n.probe.Invalidate()
+	status := n.probe.Check(ctx, n.byokFlagFile())
+	if !status.Revealed {
+		return errors.New("native_byok_reveal_failed")
+	}
+	if !status.Intranet.Passed {
+		return errors.New("native_byok_intranet_unavailable")
+	}
+	return nil
+}
+
+func (n *Native) removeBYOK(ctx context.Context) error {
+	if err := n.byokSetup().Run(ctx, "remove-dns"); err != nil {
+		return err
+	}
+	n.probe.Invalidate()
+	if runtime.GOOS == "darwin" && n.dns != nil {
+		if err := n.dns.Close(); err != nil {
+			return errors.New("native_byok_dns_stop_failed")
+		}
+	}
+	return nil
+}

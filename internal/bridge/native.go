@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"kimiworkplus.local/migration/internal/byokdns"
 	"kimiworkplus.local/migration/internal/core"
 	"kimiworkplus.local/migration/internal/kimi"
 	"kimiworkplus.local/migration/internal/platform"
@@ -28,6 +29,10 @@ type Native struct {
 	web        *webService
 	webKeys    *webKey
 	mcp        *kimi.MCPManager
+	dns        byokDNS
+	probe      *byokdns.Probe
+	admin      byokdns.Administrator
+	dnsReason  string
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -51,6 +56,7 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 		return nil, e
 	}
 	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, jobs: make(chan struct{}, 2)}
+	n.initBYOK()
 	controller.SetTranslationHandler(n.translate)
 	d, _, e := s.Store.Read()
 	if e != nil {
@@ -108,6 +114,7 @@ func (n *Native) Configure(d core.Document) error {
 	return n.policies.Configure(d)
 }
 func (n *Native) watch(ctx context.Context) {
+	defer n.closeBYOK()
 	defer n.web.Close()
 	defer n.mcp.Close(context.Background())
 	native := n.controller.NativeState(ctx)
@@ -151,7 +158,6 @@ func processView(state kimi.RunningState) core.Document {
 }
 func (n *Native) State() core.Document {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	status := n.controller.Status(context.Background())
 	process := core.Document{}
 	for k, v := range n.process {
@@ -172,6 +178,8 @@ func (n *Native) State() core.Document {
 		}
 	}
 	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components()}}
+	n.mu.Unlock()
+	out["setup"] = n.byokState()
 	if d, _, e := n.service.Store.Read(); e == nil {
 		for k, v := range n.policies.State(d) {
 			out[k] = v
@@ -219,7 +227,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "connect-kimi", "prepare-native", "check-translation", "apply-connections":
+	case "launch-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections":
 	default:
 		return nil, errors.New("native_preview_unavailable")
 	}
@@ -233,7 +241,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	initial := core.Document{"id": id, "action": action, "state": "running"}
 	n.mu.Unlock()
 	go func() {
-		deadline, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		timeout := 45 * time.Second
+		if action == "prepare-native" || action == "remove-dns" {
+			timeout = 180 * time.Second
+		}
+		deadline, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		var err error
 		var result any
@@ -246,7 +258,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = n.controller.Start(deadline)
 			}
 			state = "starting"
-		case "connect-kimi", "prepare-native":
+		case "connect-kimi":
 			var imported kimi.ImportResult
 			imported, err = n.controller.ImportModelsAuthorized(deadline)
 			if err == nil {
@@ -257,6 +269,23 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				state = "prepared"
 			}
 			result = imported
+		case "prepare-native":
+			err = n.prepareBYOK(deadline)
+			var imported kimi.ImportResult
+			if err == nil {
+				imported, err = n.controller.ImportModelsAuthorized(deadline)
+			}
+			if err == nil {
+				err = importResultError(imported)
+			}
+			state = imported.State
+			if state == "" || state == "accepted" || state == "applied" {
+				state = "prepared"
+			}
+			result = imported
+		case "remove-dns":
+			err = n.removeBYOK(deadline)
+			state = "removed"
 		case "apply-connections":
 			n.service.mutation.Lock()
 			d, _, e := n.service.Store.Read()
