@@ -560,7 +560,7 @@ const state = {
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存并接入」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,
@@ -2089,7 +2089,6 @@ function fillOnboardForm() {
     }
   }
   fillOnboardPresets();
-  if (dom.onboardKey) dom.onboardKey.value = '';
 }
 
 function onboardModelRows() {
@@ -2285,11 +2284,17 @@ function onboardProblems({ models = [] } = {}) {
   const built = [];
   for (const row of models) {
     const model = buildOnboardRow({ ...row, connectionId: values.id });
-    if (ids.has(model.id)) problems.push('模型路由 ID 重复：' + model.id + '。');
-    ids.add(model.id);
+    if (model.id && ids.has(model.id)) problems.push('模型路由 ID 重复：' + model.id + '。');
+    if (model.id) ids.add(model.id);
     built.push(model);
   }
   return { problems, built, values };
+}
+
+function mergeOnboardModels(existing, built, connectionId) {
+  const replacements = new Map(built.map((model) => [model.id, model]));
+  const retained = existing.filter((model) => !(model && model.connectionId === connectionId && replacements.has(model.id)));
+  return [...retained, ...built];
 }
 
 function renderOnboardModels(rows, { connectionId = '' } = {}) {
@@ -2720,6 +2725,7 @@ async function saveOnboard() {
       throw new ApiError('连接保存没有返回状态', 'STATE', 200);
     }
     if (dom.onboardKey) dom.onboardKey.value = '';
+    state.onboard.touched = false;
     adoptState(savedRes.state);
     state.lastSync = Date.now();
     state.conns.base = savedConnectionsSignature(state.data);
@@ -2727,8 +2733,8 @@ async function saveOnboard() {
 
     /* 模型目录必须在连接保存之后提交：模型引用的是保存后的连接 id。 */
     const existing = Array.isArray(state.data.models) ? state.data.models : [];
-    const kept = existing.filter((model) => !(model && model.connectionId === values.id));
-    const catalogue = [...kept, ...built];
+    /* 当前连接里未被替换的模型继续保留；勾选行按路由 ID 更新或追加。 */
+    const catalogue = mergeOnboardModels(existing, built, values.id);
     const modelRes = await request(API.models, { method: 'POST', body: { revision: state.data.revision, models: catalogue } });
     if (!modelRes || !modelRes.state) throw new ApiError('模型目录保存没有返回状态', 'STATE', 200);
     adoptState(modelRes.state);
@@ -2758,6 +2764,7 @@ async function saveOnboard() {
 /* 预设只填地址与已知协议，绝不猜 Key、也绝不覆盖用户已经改过的地址以外字段。 */
 function applyOnboardPreset(presetId) {
   if (!dom.onboardBase) return;
+  state.onboard.touched = true;
   const preset = providerPreset(presetId);
   const previous = dom.onboardPreset.dataset.presetId || '';
   if (previous !== presetId && dom.onboardKey) dom.onboardKey.value = '';
@@ -5540,10 +5547,8 @@ function adoptState(next, { initial = false, external = false } = {}) {
   settlePending(next);
 }
 
-/* 表单里已有的内容说明用户已经动过它；此时轮询不得重写。 */
 function onboardTouched() {
-  const id = dom.onboardId ? String(dom.onboardId.value || '') : '';
-  return Boolean(id);
+  return state.onboard?.touched === true;
 }
 
 function settlePending(next) {
@@ -6615,11 +6620,13 @@ function bindEvents() {
   [dom.onboardBase, dom.onboardId, dom.onboardName].forEach((field) => {
     if (!field) return;
     field.addEventListener('input', () => {
+      state.onboard.touched = true;
       setHidden(dom.onboardErrors, true);
       renderOnboard();
     });
   });
   if (dom.onboardKey) dom.onboardKey.addEventListener('input', () => {
+    state.onboard.touched = true;
     if (dom.onboardId && !dom.onboardId.value) {
       const saved = savedOnboardTarget();
       if (saved && saved.id) dom.onboardId.value = saved.id;
@@ -6734,7 +6741,8 @@ function adoptLocationKey() {
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
-  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true };
+  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false };
+  if (dom.onboardKey) dom.onboardKey.value = '';
   state.applyUnsupported = false;
   state.applyRefusal = null;
   state.providers = null;
