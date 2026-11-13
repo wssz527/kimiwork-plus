@@ -404,6 +404,12 @@ const dom = {
   onboardCatalogueCount: $('ob-catalogue-count'),
   onboardCatalogueNote: $('ob-catalogue-note'),
   onboardModels: $('ob-models'),
+  onboardModelQuery: $('ob-model-q'),
+  onboardSelectAll: $('ob-select-all'),
+  onboardModelsEmpty: $('ob-models-empty'),
+  onboardBatchChat: $('ob-batch-chat'),
+  onboardBatchContext: $('ob-batch-context'),
+  onboardBatchContextApply: $('ob-batch-context-apply'),
   onboardErrors: $('ob-errors'),
   onboardDraft: $('ob-draft'),
   onboardSave: $('ob-save'),
@@ -560,7 +566,7 @@ const state = {
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存并接入」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '' },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,
@@ -2100,6 +2106,13 @@ function selectedOnboardModels() {
   return onboardModelRows().filter((row) => row && row.selected === true);
 }
 
+function filteredOnboardModels() {
+  const query = String(state.onboard.query || '').trim().toLowerCase();
+  if (!query) return onboardModelRows();
+  return onboardModelRows().filter((row) => [row.id, row.name, row.description]
+    .some((value) => String(value || '').toLowerCase().includes(query)));
+}
+
 /* 两个协议是本产品唯一支持的两种接口；可选集合按这个顺序展示，与首设页一致。 */
 const PROTOCOL_CHOICES = ['chat', 'responses'];
 
@@ -2145,20 +2158,68 @@ function protocolChoicesFor(declared, allowed) {
 
 /* 用户显式确认协议：只写回这一行的 protocol，真实的 upstreamModelId 与上游 ID
    都不动；本机路由按既有 route-id 规则在构建时重算。 */
+function assignOnboardProtocol(target, protocol) {
+  if (!target) return false;
+  if (protocol !== 'chat' && protocol !== 'responses') {
+    target.protocol = null;
+    return true;
+  }
+  const choices = Array.isArray(target.protocolOptions)
+    ? target.protocolOptions
+    : Array.isArray(target.protocols) && target.protocols.length ? target.protocols : PROTOCOL_CHOICES;
+  if (!choices.includes(protocol)) return false;
+  target.protocol = protocol;
+  return true;
+}
+
 function chooseOnboardProtocol(id, protocol) {
   const target = onboardModelRows().find((entry) => entry.id === id);
-  if (!target) return;
-  if (protocol !== 'chat' && protocol !== 'responses') target.protocol = null;
-  else if (Array.isArray(target.protocolOptions)) {
-    /* 可选项已经把真实声明与连接限制算进去了，范围外的一律不接受。 */
-    if (!target.protocolOptions.includes(protocol)) return;
-    target.protocol = protocol;
-  } else if (Array.isArray(target.protocols) && target.protocols.length) {
-    /* 上游声明过协议时只能在声明范围内确认，不能改成一个它没声明的协议。 */
-    if (!target.protocols.includes(protocol)) return;
-    target.protocol = protocol;
-  } else target.protocol = protocol;
+  if (!assignOnboardProtocol(target, protocol)) return;
+  state.onboard.touched = true;
   renderOnboard();
+}
+
+function toggleFilteredOnboardModels() {
+  const rows = filteredOnboardModels();
+  if (!rows.length) return;
+  const selected = !rows.every((row) => row.selected === true);
+  rows.forEach((row) => { row.selected = selected; });
+  state.onboard.touched = true;
+  renderOnboard();
+}
+
+function applyOnboardBatchProtocol(protocol) {
+  const rows = selectedOnboardModels();
+  let changed = 0;
+  rows.forEach((row) => {
+    if (assignOnboardProtocol(row, protocol)) changed++;
+  });
+  if (!changed) {
+    showToast('已选模型都不允许这个接口协议；请按各行声明调整。', 'error');
+    return;
+  }
+  state.onboard.touched = true;
+  renderOnboard();
+  const skipped = rows.length - changed;
+  showToast('已为 ' + fmtCount(changed) + ' 个已选模型选择 ' + protocolLabel(protocol)
+    + (skipped ? '；' + fmtCount(skipped) + ' 个因声明或连接限制未改动。' : '。'), skipped ? 'error' : 'ok');
+}
+
+function applyOnboardBatchContext() {
+  const value = Number(dom.onboardBatchContext?.value || '');
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    showToast('请输入正整数的上下文窗口；不知道时请留空并向上游确认。', 'error');
+    return;
+  }
+  const rows = selectedOnboardModels();
+  if (!rows.length) return;
+  rows.forEach((row) => {
+    row.contextWindow = value;
+    row.metadataKind = 'manual';
+  });
+  state.onboard.touched = true;
+  renderOnboard();
+  showToast('已将 ' + fmtCount(rows.length) + ' 个已选模型的上下文窗口设为 ' + fmtTokens(value) + '。', 'ok');
 }
 
 /* 目录属于一个确切的端点：地址或预设一变，上一轮读到的模型就不再是同一个上游的
@@ -2259,14 +2320,12 @@ function onboardProblems({ models = [] } = {}) {
   const blocked = models.filter((row) => !row.protocol);
   if (blocked.length) {
     problems.push('这些模型的上游没有声明协议，请为它们各选一个接口协议：'
-      + blocked.slice(0, 3).map((row) => row.upstreamModelId).join('、')
-      + (blocked.length > 3 ? ' 等' : '') + '。');
+      + blocked.map((row) => row.upstreamModelId).join('、') + '。');
   }
   const missingContext = models.filter(row => !(Number(row.contextWindow) > 0));
   if (missingContext.length) {
     problems.push('请为这些模型填写实际上下文窗口；接口没有返回时不能用猜测值：'
-      + missingContext.slice(0, 3).map(row => row.upstreamModelId).join('、')
-      + (missingContext.length > 3 ? ' 等' : '') + '。');
+      + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
   /* 连接限制是保存前已知的真实约束：路由会按所选协议生成，但请求最终会被
      连接拒绝，所以这里先按同一个限制拦下，不等到保存后才发现。 */
@@ -2275,9 +2334,9 @@ function onboardProblems({ models = [] } = {}) {
     const conflicts = models.filter((row) => row.protocol && !limits.includes(row.protocol));
     if (conflicts.length) {
       problems.push('连接「' + (saved.name || saved.id) + '」只允许 ' + limits.map(protocolLabel).join('/')
-        + '；' + conflicts.slice(0, 3).map((row) => row.upstreamModelId
+        + '；' + conflicts.map((row) => row.upstreamModelId
           + ' 当前为 ' + protocolLabel(row.protocol)).join('、')
-        + (conflicts.length > 3 ? ' 等' : '') + ' 不在允许范围内。');
+        + ' 不在允许范围内。');
     }
   }
   const ids = new Set();
@@ -2299,8 +2358,14 @@ function mergeOnboardModels(existing, built, connectionId) {
 
 function renderOnboardModels(rows, { connectionId = '' } = {}) {
   if (!dom.onboardModels) return;
-  const signature = JSON.stringify([rows, connectionId]);
+  const attachedIds = new Set((Array.isArray(state.data?.models) ? state.data.models : [])
+    .filter((model) => model && model.connectionId === connectionId)
+    .map((model) => model.upstreamModelId || model.id));
+  const signature = JSON.stringify([rows, connectionId, [...attachedIds]]);
   if (dom.onboardModels.dataset.signature === signature) return;
+  const active = document.activeElement;
+  const focusModel = active?.dataset?.onboardModel || '';
+  const focusControl = active?.dataset?.onboardFocus || '';
   dom.onboardModels.dataset.signature = signature;
   if (!rows.length) {
     dom.onboardModels.replaceChildren();
@@ -2315,9 +2380,11 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     box.type = 'checkbox';
     box.checked = row.selected === true;
     box.dataset.onboardModel = row.id;
+    box.dataset.onboardFocus = 'selected';
     box.addEventListener('change', () => {
       const target = onboardModelRows().find((entry) => entry.id === row.id);
       if (target) target.selected = box.checked === true;
+      state.onboard.touched = true;
       renderOnboard();
     });
     const body = document.createElement('span');
@@ -2333,6 +2400,13 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       name.className = 'onboard__model-name';
       name.textContent = row.name;
       head.append(name);
+    }
+    const attached = attachedIds.has(row.upstreamModelId || row.id);
+    if (attached) {
+      const badge = document.createElement('span');
+      badge.className = 'onboard__model-name';
+      badge.textContent = '已接入';
+      head.append(badge);
     }
     const facts = document.createElement('span');
     facts.className = 'onboard__model-facts';
@@ -2352,6 +2426,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     }
     label.append(box, body);
     li.append(label);
+    if (row.selected !== true) return li;
 
     const budget = document.createElement('div');
     budget.className = 'onboard__budget';
@@ -2372,7 +2447,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       input.value = Number(row[key]) > 0 ? String(row[key]) : '';
       input.dataset.onboardBudget = key;
       input.dataset.onboardModel = row.id;
-      input.disabled = row.selected !== true;
+      input.dataset.onboardFocus = key;
       input.addEventListener('change', () => {
         const target = onboardModelRows().find(entry => entry.id === row.id);
         if (target) {
@@ -2397,6 +2472,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     const select = document.createElement('select');
     select.dataset.onboardProtocol = row.id;
     select.dataset.onboardModel = row.id;
+    select.dataset.onboardFocus = 'protocol';
     const choices = Array.isArray(row.protocolOptions)
       ? row.protocolOptions
       : (declared.length ? declared : PROTOCOL_CHOICES);
@@ -2406,7 +2482,6 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       options.push({ value: row.protocol, label: protocolLabel(row.protocol) + '（已保存）' });
     }
     syncSelectOptions(select, options, row.protocol || '');
-    select.disabled = row.selected !== true;
     select.addEventListener('change', () => {
       chooseOnboardProtocol(row.id, select.value);
     });
@@ -2435,9 +2510,10 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = row[key] === true;
-      input.disabled = disabled || row.selected !== true;
+      input.disabled = disabled;
       input.dataset.onboardCap = key;
       input.dataset.onboardModel = row.id;
+      input.dataset.onboardFocus = key;
       input.addEventListener('change', () => {
         const target = onboardModelRows().find((entry) => entry.id === row.id);
         if (target) target[key] = input.checked === true;
@@ -2453,6 +2529,11 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     return li;
   });
   dom.onboardModels.replaceChildren(...nodes);
+  if (focusControl) {
+    const target = Array.from(dom.onboardModels.querySelectorAll('[data-onboard-focus]')).find((node) =>
+      node.dataset.onboardModel === focusModel && node.dataset.onboardFocus === focusControl);
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 
 function renderOnboard() {
@@ -2463,14 +2544,26 @@ function renderOnboard() {
      每次渲染前对齐一次，旧目录不会随新地址继续显示。 */
   syncOnboardEndpoint();
   const rows = onboardModelRows();
+  const visibleRows = filteredOnboardModels();
   const selected = selectedOnboardModels();
   const ready = configReady(data);
   const busy = draft.busy || draft.saving;
   setHidden(dom.onboardCatalogue, rows.length === 0);
   if (rows.length) {
-    setText(dom.onboardCatalogueCount, '已勾选 ' + fmtCount(selected.length) + ' / ' + fmtCount(rows.length));
+    setText(dom.onboardCatalogueCount, '已勾选 ' + fmtCount(selected.length) + ' / ' + fmtCount(rows.length)
+      + (draft.query ? '；当前显示 ' + fmtCount(visibleRows.length) : ''));
   }
-  renderOnboardModels(rows, { connectionId: onboardConnectionValues().id });
+  renderOnboardModels(visibleRows, { connectionId: onboardConnectionValues().id });
+  setHidden(dom.onboardModelsEmpty, !rows.length || visibleRows.length > 0);
+  if (dom.onboardSelectAll) {
+    const allVisible = visibleRows.length > 0 && visibleRows.every((row) => row.selected === true);
+    dom.onboardSelectAll.disabled = busy || !visibleRows.length;
+    dom.onboardSelectAll.setAttribute('aria-pressed', allVisible ? 'true' : 'false');
+    setText(dom.onboardSelectAll, allVisible ? '取消全选当前结果' : '全选当前结果');
+  }
+  if (dom.onboardBatchChat) dom.onboardBatchChat.disabled = busy || !selected.length;
+  if (dom.onboardBatchContext) dom.onboardBatchContext.disabled = busy || !selected.length;
+  if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.disabled = busy || !selected.length;
 
   const preview = selected.length ? onboardProblems({ models: selected }).problems : [];
   const blocking = preview.filter((text) => !text.startsWith('至少勾选'));
@@ -2584,6 +2677,21 @@ function mountedSavedModels(data, connection) {
   if (!connection) return false;
   const models = Array.isArray(data.models) ? data.models : [];
   return models.some((model) => model && model.connectionId === connection.id);
+}
+
+function openOnboardWizard() {
+  setView('models');
+  if (state.editor && editorDirty()) {
+    showToast('请先保存或取消正在编辑的模型，再打开添加向导。', 'error');
+    return;
+  }
+  closeEditor(true);
+  if (dom.onboardDisclosure) {
+    dom.onboardDisclosure.open = true;
+    dom.onboardDisclosure.dataset.initialized = 'true';
+    dom.onboardDisclosure.scrollIntoView({ block: 'start' });
+  }
+  dom.onboardPreset?.focus({ preventScroll: true });
 }
 
 async function discoverOnboardModels() {
@@ -6380,7 +6488,7 @@ function bindEvents() {
     onModelFilter('all');
     if (dom.modelQ && dom.modelQ.focus) dom.modelQ.focus();
   });
-  if (dom.modelNew) dom.modelNew.addEventListener('click', () => openEditor(null));
+  if (dom.modelNew) dom.modelNew.addEventListener('click', openOnboardWizard);
 
   if (dom.modelBody) dom.modelBody.addEventListener('click', (event) => {
     const node = event.target && event.target.closest ? event.target.closest('button') : null;
@@ -6465,11 +6573,7 @@ function bindEvents() {
   });
 
   /* 命名连接 */
-  if (dom.connsAdd) dom.connsAdd.addEventListener('click', () => {
-    setView('models');
-    if (dom.onboardDisclosure) dom.onboardDisclosure.open = true;
-    dom.onboardPreset?.focus();
-  });
+  if (dom.connsAdd) dom.connsAdd.addEventListener('click', openOnboardWizard);
   if (dom.connsReset) dom.connsReset.addEventListener('click', () => {
     state.conns.draft = connectionDraftFrom(state.data);
     state.conns.base = savedConnectionsSignature(state.data);
@@ -6636,6 +6740,13 @@ function bindEvents() {
   });
   if (dom.onboardDiscover) dom.onboardDiscover.addEventListener('click', () => { void discoverOnboardModels(); });
   if (dom.onboardRecommended) dom.onboardRecommended.addEventListener('click', useRecommendedOnboardModels);
+  if (dom.onboardModelQuery) dom.onboardModelQuery.addEventListener('input', () => {
+    state.onboard.query = dom.onboardModelQuery.value;
+    renderOnboard();
+  });
+  if (dom.onboardSelectAll) dom.onboardSelectAll.addEventListener('click', toggleFilteredOnboardModels);
+  if (dom.onboardBatchChat) dom.onboardBatchChat.addEventListener('click', () => applyOnboardBatchProtocol('chat'));
+  if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.addEventListener('click', applyOnboardBatchContext);
   if (dom.onboardSave) dom.onboardSave.addEventListener('click', () => { void saveOnboard(); });
   if (dom.onboardRetryApply) dom.onboardRetryApply.addEventListener('click', () => { void applyConnections(); });
   if (dom.applyButton) dom.applyButton.addEventListener('click', () => { void applyConnections(); });
@@ -6741,7 +6852,7 @@ function adoptLocationKey() {
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
-  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false };
+  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '' };
   if (dom.onboardKey) dom.onboardKey.value = '';
   state.applyUnsupported = false;
   state.applyRefusal = null;
