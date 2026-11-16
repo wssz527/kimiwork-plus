@@ -94,6 +94,10 @@ func main() {
 		}
 		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
 	})
+	installAccountTray(app, tray, trayMenu, *dir, func() {
+		openWindow()
+		window.ExecJS("document.getElementById('nav-maintenance')?.click()")
+	})
 	trayMenu.AddSeparator()
 	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })
 	tray.SetMenu(trayMenu)

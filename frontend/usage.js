@@ -52,6 +52,7 @@
         <button id="usage-tab-requests" type="button" role="tab" data-usage-tab="requests" aria-selected="true">请求消耗</button>
         <button id="usage-tab-quotas" type="button" role="tab" data-usage-tab="quotas" aria-selected="false">额度总览</button>
         <button id="usage-tab-sources" type="button" role="tab" data-usage-tab="sources" aria-selected="false">账户与数据来源</button>
+        <button id="usage-tab-budget" type="button" role="tab" data-usage-tab="budget" aria-selected="false">预算保护</button>
       </div>
       <p class="errors usage-error" id="usage-error" role="alert" hidden></p>
       <section class="usage-pane" id="usage-pane-requests" role="tabpanel" aria-labelledby="usage-tab-requests">
@@ -106,7 +107,8 @@
         <div class="band__head"><div><h2>账户与数据来源</h2><p>每个来源单独标明数据类型、凭据是否就绪、最后成功时间和失败原因。不会读取浏览器 Cookie。</p></div><button class="btn btn--outline" id="quota-add" type="button">添加余额来源</button></div>
         <div id="quota-source-editor"></div>
         <div class="usage-source-list" id="quota-source-list"></div>
-      </section>`;
+      </section>
+      <section class="usage-pane" id="usage-pane-budget" role="tabpanel" aria-labelledby="usage-tab-budget" hidden></section>`;
   }
 
   function showError(error) {
@@ -157,8 +159,8 @@
   function selectTab(tab) {
     state.tab = tab;
     document.querySelectorAll('[data-usage-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.usageTab === tab)));
-    for (const name of ['requests', 'quotas', 'sources']) hide('usage-pane-' + name, name !== tab);
-    if (tab !== 'requests' && !state.quota) void loadQuota();
+    for (const name of ['requests', 'quotas', 'sources', 'budget']) hide('usage-pane-' + name, name !== tab);
+    if (['quotas', 'sources'].includes(tab) && !state.quota) void loadQuota();
   }
 
   const filterViews = {

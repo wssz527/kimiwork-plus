@@ -1,5 +1,6 @@
 const API = {
   state: '/api/state',
+  workspace: '/api/workspace',
   models: '/api/models',
   connection: '/api/connection',
   connections: '/api/connections',
@@ -22,9 +23,6 @@ const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 const ENV_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const LOOPBACK = new Set(['127.0.0.1', '[::1]', 'localhost', '::1']);
-const UPDATE_ACTIONS = new Set(['check-update', 'install-update', 'rollback-update']);
-const UPDATE_RELEASE_PREFIX = 'https://github.com/wssz527/kimi-work-gateway/releases/tag/';
-const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 /* 上下文窗口预设：256K/350K/600K 是固定 token 数，"完整"取已知真实上限。
    任何预设都不得把套餐上限抬高，因此上限未知时只作手填起点并明确标注。 */
@@ -54,21 +52,67 @@ const UPSTREAM_REASON = {
 
 let renderGrowth = () => {};
 let usagePanel = { show() {}, reload: async () => {} };
+let plusPanel = { render() {}, refresh: async () => {} };
 
 const VIEW_COPY = {
-  overview: { title: '首页', lede: '打开 / 启动 Kimi 并查看真实同步状态。' },
-  models: { title: '模型', lede: '从厂商与连接开始，维护真实上游模型、能力和预算。' },
-  connection: { title: '连接', lede: '管理 API 地址、私有凭据和实际应用状态。' },
-  usage: { title: '用量与额度', lede: '分别查看本机可观察的 Token、订阅窗口、Coding Plan 与 API 余额。' },
-  enhancements: { title: '增强工具', lede: '思考翻译、网页搜索与阅读、MCP 和长对话整理。' },
-  translation: { title: '思考翻译', lede: '翻译可见思考文字，分别确认设置、试译与实际运行状态。' },
-  tools: { title: '网页与 MCP', lede: '管理网页搜索、正文阅读和 Kimi 原生 MCP 服务。' },
-  subagents: { title: '子代理', lede: '保留日用继承基线，分别核对保存与运行时。' },
-  maintenance: { title: '其他与设置', lede: '接入恢复、运行记录与软件更新。' },
-  settings: { title: '长对话整理', lede: '设置长对话整理，分别确认保存和实际生效状态。' },
+  overview: { title: '总览', lede: '网关、Kimi Work 接入、当前账号与今日用量。' },
+  models: { title: '模型', lede: '在这里管理服务商与模型，保存后同步到 Kimi Work。' },
+  usage: { title: '用量', lede: '查看真实请求、服务商余额与 Kimi Code 额度。' },
+  work: { title: 'Work 能力', lede: '管理子代理、并行、MCP、联网与长对话整理。' },
+  extensions: { title: '扩展', lede: '独立管理思考翻译，关闭扩展不会影响网关与 Work。' },
+  maintenance: { title: '设置', lede: '账号管理、后台服务、版本与 Kimi 接入诊断。' },
 };
 
-const VIEW_ALIASES = {};
+const VIEW_ALIASES = { connection: 'models', enhancements: 'work', subagents: 'work', tools: 'work', settings: 'work', translation: 'extensions' };
+
+/* 旧的单页区块在 HTML 里仍按功能分组，但一级导航已经合并：这里把已有 section
+   物理移动到目标视图，避免同一份标记维护两处。移动只做一次，重复调用是幂等的。 */
+function mountWorkspace() {
+  const move = (from, to) => {
+    const source = $('view-' + from);
+    const target = $(to);
+    if (!source || !target) return;
+    target.append(...source.children);
+    source.remove();
+  };
+  $('models-services-body')?.append($('connections-panel'));
+  $('view-maintenance')?.append($('restart-panel'));
+  for (const view of ['subagents', 'tools', 'settings']) move(view, 'view-work');
+  move('translation', 'view-extensions');
+  $('view-connection')?.remove();
+  /* 被合并的旧视图各自带一个 sr-only 标题；视图已经没有 aria-labelledby，
+     留在页面里会让读屏读到三个属于别处的标题。 */
+  for (const id of ['subagents-heading', 'tools-heading', 'settings-heading']) $(id)?.remove();
+  mountUsageRequests();
+}
+
+/* 用量面板整体重写 #usage-root，因此「最近请求」只能在面板 mount 之后
+   移入它的请求页；按父节点判断，重复调用不会产生第二份表。 */
+function mountUsageRequests() {
+  const pane = $('usage-pane-requests');
+  const section = $('recent-table')?.closest('section');
+  if (!pane || !section || section.parentElement === pane) return;
+  pane.append(section);
+}
+
+/* Work 能力页的分类入口：目标可能在折叠区里（MCP 面板就在 mcp-details 内），
+   只展开目标本身不够，祖先 details 必须依次打开，否则滚动会落在隐藏节点上。 */
+function revealWorkspaceSection(id) {
+  const target = id ? $(id) : null;
+  if (!target) return null;
+  if (target.tagName === 'DETAILS') target.open = true;
+  for (let node = target.parentElement; node; node = node.parentElement) {
+    if (node.tagName === 'DETAILS') node.open = true;
+  }
+  target.scrollIntoView({ block: 'start' });
+  /* 快捷入口也把焦点交给区块标题，键盘用户才不会停在页首。 */
+  const heading = target.querySelector('h2, h3, summary') || target;
+  if (typeof heading.focus === 'function') {
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: true });
+  }
+  return target;
+}
 
 const ACTION_LABEL = {
   'launch-kimi': '打开 / 启动 Kimi',
@@ -78,9 +122,6 @@ const ACTION_LABEL = {
   'connect-kimi': '重新准备接入',
   'check-upstream': '上游检查',
   'apply-connections': '应用连接',
-  'check-update': '检查更新',
-  'install-update': '下载并更新',
-  'rollback-update': '回退版本',
 };
 
 const ACTION_STATE = {
@@ -104,10 +145,6 @@ const ACTION_STATE = {
   failed: '失败',
   interrupted: '已中断',
   'not-checked': '尚未检查',
-  checking: '正在检查',
-  current: '已是最新',
-  available: '有新版本',
-  staged: '已下载，待重启',
 };
 
 const CONFIG_STATE = {
@@ -168,63 +205,6 @@ const DIAG_REASON = {
   existing_login_profile_invalid: '官方登录目录不可用。请先正常打开官方 Kimi，再从面板重新启动。',
   existing_login_profile_unavailable: '未找到官方登录目录。请先正常打开官方 Kimi。',
 };
-
-const UPDATE_STATE = {
-  'not-checked': { tone: 'neutral', word: '尚未检查', note: '还没有检查过更新。点击「检查更新」读取最新正式发布。' },
-  checking: { tone: 'warn', word: '正在检查', note: '正在读取 GitHub 上的正式发布。' },
-  current: { tone: 'ok', word: '已是最新', note: '当前运行的就是最新稳定版本。' },
-  available: { tone: 'warn', word: '有新版本', note: '发现可用的稳定版本。下载后需要重启网关才会运行新版本。' },
-  staged: { tone: 'warn', word: '已下载，待重启', note: '新版本已下载完成；重启网关后才会生效，当前运行版本不变。' },
-  failed: { tone: 'bad', word: '失败', note: '上一次更新操作没有完成，请查看原因后重试。' },
-};
-
-const UPDATE_REASON = {
-  update_network_error: '无法连接 GitHub，可能是离线、代理或防火墙拦截。',
-  update_timeout: '连接 GitHub 超时，请稍后重试。',
-  update_release_http_error: 'GitHub 返回了错误状态，稍后再试或手动查看发布页。',
-  update_rate_limited: 'GitHub 限制了请求频率，请稍后重试。',
-  update_redirect_rejected: '下载地址被重定向到了不受信任的站点，已中止。',
-  update_release_invalid: 'GitHub 返回的发布信息格式不被接受，未采用其中的任何数据。',
-  update_release_not_found: '没有找到可用的正式发布版本。',
-  update_release_unstable: '最新发布是草稿或预发行版本，不会被安装。',
-  update_release_version_invalid: '发布版本号不是规范的稳定版本号，不会被安装。',
-  update_release_asset_missing: '发布中没有对应版本的安装包。',
-  update_release_asset_invalid: '发布的安装包信息不被接受，未下载。',
-  update_response_too_large: 'GitHub 返回的数据超出预期大小，已中止。',
-  update_sums_invalid: '校验文件格式不被接受，未安装。',
-  update_checksum_unavailable: '发布中没有可用的 SHA-256 校验值，未安装。',
-  update_checksum_mismatch: '安装包的 SHA-256 与发布记录不符，已丢弃。',
-  update_size_mismatch: '安装包大小与发布记录不符，已丢弃。',
-  update_package_too_large: '安装包超出允许的大小上限，未安装。',
-  update_package_archive_unsafe: '安装包内含不安全的路径或链接，未安装。',
-  update_package_corrupt: '安装包内容损坏或结构异常，未安装。',
-  update_package_invalid: '安装包内容与声明的版本不一致，未安装。',
-  update_package_extract_failed: '安装包解压失败，未安装。',
-  update_write_failed: '写入更新目录失败，当前版本保持不变。',
-  update_lock_timeout: '另一个更新进程占用中，请稍后重试。',
-  update_directory_invalid: '更新目录不可用，当前版本保持不变。',
-  update_active_invalid: '本地更新记录损坏，请检查更新目录。',
-  update_baseline_invalid: '原始安装目录已变化，无法记录回退版本。',
-  update_version_invalid: '当前版本号异常，无法比较更新。',
-  update_config_invalid: '更新配置无效。',
-  update_clock_invalid: '系统时间异常，无法记录更新。',
-  update_rollback_unavailable: '没有可回退的旧版本。',
-  update_rollback_target_invalid: '回退目标已损坏或被改动，已中止回退。',
-  update_git_unavailable: '本机 git 不可用，已改用 GitHub 接口查询。',
-  update_state_invalid: '读取更新状态失败。',
-  update_unsupported_platform: '当前系统或安装方式不支持从面板更新。',
-  update_not_available: '没有可安装的新版本，请先检查更新。',
-  update_busy: '另一个更新操作正在进行。',
-  update_staged_mismatch: '待重启的版本与当前记录不一致，请重新检查更新。',
-  update_no_rollback: '没有可回退的旧版本。',
-  update_rollback_failed: '回退失败，当前版本保持不变。',
-  update_unknown: '更新操作未能完成，请查看网关日志。',
-};
-
-function updateReasonText(code) {
-  if (typeof code !== 'string' || !code) return '';
-  return UPDATE_REASON[code] || UPDATE_REASON['update_' + code] || code;
-}
 
 const ERROR_HINT = {
   configuration_conflict: '配置在别处被修改，已刷新状态；你的编辑仍然保留，请确认后重新保存。',
@@ -307,8 +287,10 @@ const dom = {
 
   navOverview: $('nav-overview'),
   navModels: $('nav-models'),
-  navSubagents: $('nav-subagents'),
-  navConnection: $('nav-connection'),
+  navUsage: $('nav-usage'),
+  navWork: $('nav-work'),
+  navExtensions: $('nav-extensions'),
+  navMaintenance: $('nav-maintenance'),
   navModelCount: $('nav-model-count'),
 
   railGatewayDot: $('rail-gateway-dot'),
@@ -389,6 +371,13 @@ const dom = {
   mUpstreamProtocolField: $('m-upstream-protocol-field'),
   mUpstreamProtocolGroup: $('m-upstream-protocol-group'),
   mDefault: $('m-default'),
+  mPriceInput: $('m-price-input'),
+  mPriceOutput: $('m-price-output'),
+  mPriceCached: $('m-price-cached'),
+  mPriceWrite: $('m-price-write'),
+  mFailoverRows: $('m-failover-rows'),
+  mFailoverAdd: $('m-failover-add'),
+  mFailoverCount: $('m-failover-count'),
   modelErrors: $('model-errors'),
   modelCancel: $('model-cancel'),
   modelSave: $('model-save'),
@@ -545,23 +534,8 @@ const dom = {
   nativeRemoteWord: $('native-remote-word'),
   nativeRemoteNote: $('native-remote-note'),
 
-  updUnavailable: $('upd-unavailable'),
   updCurrent: $('upd-current'),
   updCurrentSub: $('upd-current-sub'),
-  updLatest: $('upd-latest'),
-  updLatestSub: $('upd-latest-sub'),
-  updChecked: $('upd-checked'),
-  updCheckedSub: $('upd-checked-sub'),
-  updRelease: $('upd-release'),
-  updPending: $('upd-pending'),
-  updVerdictDot: $('upd-verdict-dot'),
-  updVerdictWord: $('upd-verdict-word'),
-  updVerdictNote: $('upd-verdict-note'),
-  updCheck: $('upd-check'),
-  updInstall: $('upd-install'),
-  updRollback: $('upd-rollback'),
-  updHint: $('upd-hint'),
-
 
   toast: $('toast'),
 };
@@ -580,7 +554,7 @@ const state = {
   picker: { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
-     直到用户点「保存并接入」才写配置；轮询不得覆盖正在输入的 Key。 */
+     直到用户点「保存」才写配置；轮询不得覆盖正在输入的 Key。 */
   onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '' },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
@@ -778,7 +752,7 @@ function initView() {
   } catch {
     stored = null;
   }
-  setView(VIEW_COPY[stored] ? stored : 'overview', { persist: false });
+  setView(VIEW_COPY[VIEW_ALIASES[stored] || stored] ? stored : 'overview', { persist: false });
 }
 
 function setView(view, { persist = true } = {}) {
@@ -806,10 +780,9 @@ function setView(view, { persist = true } = {}) {
         /* 忽略 */
       }
     }
-    if (view === 'models') renderModels();
-    if (view === 'subagents') renderSubagents();
-    if (view === 'connection') renderConnection();
-    if (view === 'usage') usagePanel.show();
+    if (view === 'models') { renderModels(); renderConnection(); }
+    if (view === 'work') renderSubagents();
+    if (view === 'usage') { usagePanel.show(); void plusPanel.refresh(); }
   };
   apply();
 }
@@ -980,6 +953,28 @@ function canonicalModel(model) {
     model.contextLimit || 0,
     JSON.stringify(model.metadataSource || null),
     model.upstreamProtocol || '',
+    JSON.stringify(canonicalPrice(model.pricing)),
+    JSON.stringify(canonicalFailover(model.failover)),
+  ]);
+}
+
+/* 价格与备用连接按固定顺序展开再比较：对象键序不该让「同样的一行」看起来像
+   改过，否则每次打开编辑器都会被判成脏的。 */
+function canonicalPrice(pricing) {
+  if (!pricing || typeof pricing !== 'object') return null;
+  const out = {};
+  for (const field of PRICE_FIELDS) {
+    const value = pricing[field];
+    if (typeof value === 'number' && Number.isFinite(value)) out[field] = value;
+  }
+  return out.inputPerMillion === undefined && out.outputPerMillion === undefined
+    && out.cachedInputPerMillion === undefined && out.cacheWritePerMillion === undefined ? null : out;
+}
+
+function canonicalFailover(failover) {
+  if (!Array.isArray(failover)) return null;
+  return failover.filter((row) => row && typeof row === 'object' && row.connectionId).map((row) => [
+    row.connectionId, row.upstreamModelId || '', row.upstreamProtocol === 'anthropic' ? 'anthropic' : '',
   ]);
 }
 
@@ -1042,6 +1037,8 @@ function buildModel(input) {
   if (upstreamModelId && /[\u0000-\u001f]/.test(upstreamModelId)) errors.push('上游模型 ID 不能包含控制字符。');
   if (upstreamModelId.length > 2048) errors.push('上游模型 ID 过长。');
   const metadata = metadataSourceOf(input.metadataSource) || metadataSourceOf(input.baseEntity?.metadataSource);
+  const priced = buildPrice(input.pricing, errors);
+  const standbys = buildFailover(input.failover, connectionId, errors);
   const candidate = {
     id,
     ...(String(input.name || '').trim() ? { name: String(input.name).trim() } : {}),
@@ -1058,6 +1055,8 @@ function buildModel(input) {
     ...(input.upstreamProtocol === 'anthropic' ? { upstreamProtocol: 'anthropic' } : {}),
     ...(contextLimit ? { contextLimit } : {}),
     ...(metadata ? { metadataSource: metadata } : {}),
+    ...(priced ? { pricing: priced } : {}),
+    ...(standbys.length ? { failover: standbys } : {}),
   };
 
   const base = input.baseEntity && typeof input.baseEntity === 'object' && !Array.isArray(input.baseEntity)
@@ -1075,6 +1074,8 @@ function buildModel(input) {
     upstreamProtocol: input.upstreamProtocol === 'anthropic' ? 'anthropic' : null,
     contextLimit: contextLimit ?? null,
     metadataSource: metadata,
+    pricing: priced,
+    failover: standbys.length ? standbys : null,
   };
   const touched = new Set(input.touched instanceof Set ? input.touched : Array.isArray(input.touched) ? input.touched : []);
   if (base) {
@@ -1116,6 +1117,81 @@ function metadataSourceOf(value) {
   if (typeof value.url === 'string' && /^https?:\/\//.test(value.url)) source.url = value.url;
   if (typeof value.checkedAt === 'string' && value.checkedAt) source.checkedAt = value.checkedAt;
   return source;
+}
+
+/* 定价是用户自填的花费表，四条价格都要么是有限的非负数要么为空。输入与输出
+   必须成对：只有一半的价格无法给一次请求定价，留一半会让预算把请求当成免费。 */
+function buildPrice(input, errors) {
+  const price = {};
+  let declared = false;
+  for (const field of PRICE_FIELDS) {
+    const raw = input && input[field];
+    const text = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (!text) continue;
+    const value = Number(text);
+    if (!Number.isFinite(value) || value < 0) {
+      errors.push('定价的每百万 token 价格必须是非负数，或留空。');
+      return null;
+    }
+    if (value > 1e6) {
+      errors.push('定价超出允许范围（每百万 token 最多 1000000）。');
+      return null;
+    }
+    price[field] = value;
+    declared = true;
+  }
+  if (!declared) return null;
+  if (price.inputPerMillion === undefined || price.outputPerMillion === undefined) {
+    errors.push('定价必须同时填写输入与输出价格；只有一半无法估算花费。');
+    return null;
+  }
+  return price;
+}
+
+/* 备用连接最多 8 条，各自必须指向一条真实连接；指向主连接的备用项没有意义，
+   等于把同一个上游试两次。重复的备用项也只保留第一条。 */
+function buildFailover(input, primaryId, errors) {
+  if (!Array.isArray(input)) return [];
+  const rows = [];
+  const seen = new Set();
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const connectionId = String(raw.connectionId || '').trim();
+    if (!connectionId) {
+      if (String(raw.upstreamModelId || '').trim() || String(raw.upstreamProtocol || '').trim()) {
+        errors.push('备用连接必须选择一条连接。');
+      }
+      continue;
+    }
+    if (!CONNECTION_ID_PATTERN.test(connectionId)) {
+      errors.push('备用连接标识格式无效，请重新选择。');
+      continue;
+    }
+    if (primaryId && connectionId === primaryId) {
+      errors.push('备用连接不能与主连接相同。');
+      continue;
+    }
+    if (seen.has(connectionId)) continue;
+    seen.add(connectionId);
+    const upstream = String(raw.upstreamModelId || '').trim();
+    if (upstream && /[\u0000-\u001f]/.test(upstream)) {
+      errors.push('备用连接的服务商模型 ID 不能包含控制字符。');
+      continue;
+    }
+    if (upstream.length > 2048) {
+      errors.push('备用连接的服务商模型 ID 过长。');
+      continue;
+    }
+    const row = { connectionId };
+    if (upstream) row.upstreamModelId = upstream;
+    if (raw.upstreamProtocol === 'anthropic') row.upstreamProtocol = 'anthropic';
+    rows.push(row);
+    if (rows.length > 8) {
+      errors.push('备用连接最多 8 条。');
+      return [];
+    }
+  }
+  return rows;
 }
 
 /* `metadataSource` 只描述 contextWindow 这一个字段的真实出处：保存预算时原样
@@ -2374,10 +2450,20 @@ function onboardProblems({ models = [] } = {}) {
   return { problems, built, values };
 }
 
+/* 向导只会重新声明连接与模型能力，不会谈定价与备用连接。用向导重存一条已有
+   模型时，这两项属于用户自己的配置：原样带回，否则一次向导保存就把它们抹掉。 */
 function mergeOnboardModels(existing, built, connectionId) {
   const replacements = new Map(built.map((model) => [model.id, model]));
   const retained = existing.filter((model) => !(model && model.connectionId === connectionId && replacements.has(model.id)));
-  return [...retained, ...built];
+  const merged = built.map((model) => {
+    const previous = existing.find((row) => row && row.id === model.id && row.connectionId === connectionId);
+    if (!previous) return model;
+    const next = { ...model };
+    if (!next.pricing && previous.pricing) next.pricing = previous.pricing;
+    if (!next.failover && Array.isArray(previous.failover) && previous.failover.length) next.failover = previous.failover;
+    return next;
+  });
+  return [...retained, ...merged];
 }
 
 function renderOnboardModels(rows, { connectionId = '' } = {}) {
@@ -2606,7 +2692,7 @@ function renderOnboard() {
     dom.onboardRetryApply.disabled = !canApply || busy;
   }
   dom.onboardSave.disabled = !ready || busy || !rows.length || !selected.length || blocking.length > 0;
-  setText(dom.onboardSave, draft.saving ? '正在保存并接入…' : '保存并接入');
+  setText(dom.onboardSave, draft.saving ? '正在保存…' : '保存');
   setText(dom.onboardDraft, rows.length
     ? (selected.length ? '将保存 ' + fmtCount(selected.length) + ' 个模型' : '尚未勾选模型')
     : '先读取模型，再勾选要接入的模型');
@@ -2873,6 +2959,14 @@ function useRecommendedOnboardModels() {
 async function saveOnboard() {
   const data = state.data;
   if (!data || state.onboard.saving) return false;
+  /* 与模型保存同一条规则：连接抽屉里的输入先并入草稿，否则整组提交会把它丢掉。 */
+  if (state.conns.editing) {
+    applyConnectionEditor();
+    if (state.conns.editing) {
+      showToast('还有一条连接没有通过校验。请先在连接编辑器里修正或取消，再保存。', 'error');
+      return false;
+    }
+  }
   const selected = selectedOnboardModels();
   const { problems, built, values } = onboardProblems({ models: selected });
   if (problems.length) {
@@ -2901,37 +2995,18 @@ async function saveOnboard() {
         others.push(...connectionPayload([connectionDraftRow(row)]));
       }
     }
-    const tokenEnv = connectionSource(state.data) ? connectionSource(state.data).tokenEnv : undefined;
-    const body = { revision: state.data.revision, connections: [...others, connection] };
-    if (typeof tokenEnv === 'string' && tokenEnv) body.tokenEnv = tokenEnv;
-
-    const savedRes = await request(API.connections, { method: 'POST', body });
-    if (!savedRes || !savedRes.state) {
-      throw new ApiError('连接保存没有返回状态', 'STATE', 200);
-    }
+    const existing = Array.isArray(state.data.models) ? state.data.models : [];
+    const catalogue = mergeOnboardModels(existing, built, values.id);
+    const result = await request(API.workspace, { method: 'POST', body: {
+      revision: state.data.revision, connections: [...others, connection], models: catalogue,
+    } });
+    if (!result?.state) throw new ApiError('保存没有返回状态', 'STATE', 200);
     if (dom.onboardKey) dom.onboardKey.value = '';
     state.onboard.touched = false;
-    adoptState(savedRes.state);
-    state.lastSync = Date.now();
-    state.conns.base = savedConnectionsSignature(state.data);
-    state.conns.draft = connectionDraftFrom(state.data);
-
-    /* 模型目录必须在连接保存之后提交：模型引用的是保存后的连接 id。 */
-    const existing = Array.isArray(state.data.models) ? state.data.models : [];
-    /* 当前连接里未被替换的模型继续保留；勾选行按路由 ID 更新或追加。 */
-    const catalogue = mergeOnboardModels(existing, built, values.id);
-    const modelRes = await request(API.models, { method: 'POST', body: { revision: state.data.revision, models: catalogue } });
-    if (!modelRes || !modelRes.state) throw new ApiError('模型目录保存没有返回状态', 'STATE', 200);
-    adoptState(modelRes.state);
+    adoptState(result.state, { external: true });
     state.lastSync = Date.now();
     renderAll();
-    showToast('已保存 ' + fmtCount(built.length) + ' 个模型；接下来由后台服务应用到 Kimi Work。', 'ok');
-
-    /* 保存后立即请求应用：这是唯一让连接在新进程里生效的路径。 */
-    if (applyAvailability(state.data) === 'pending') await applyConnections();
-    else if (applyAvailability(state.data) === 'unsupported') {
-      showToast('连接与模型已保存，当前网关尚未应用；自动应用不可用。', 'error');
-    }
+    showToast('已保存 ' + fmtCount(built.length) + ' 个模型和服务商。请按同步状态同步到 Work。', 'ok');
     return true;
   } catch (error) {
     state.onboard.saving = false;
@@ -3174,8 +3249,6 @@ function operationNote(op) {
   }
   const code = op && typeof op.reason === 'string' && op.reason ? op.reason : '';
   if (!code) return '';
-  /* 更新操作的原因是 update_* 代码，与诊断原因表不共享命名空间。 */
-  if (UPDATE_ACTIONS.has(op.action) || code.startsWith('update_')) return updateReasonText(code);
   return reasonText(code);
 }
 
@@ -3210,8 +3283,6 @@ function renderActions(data) {
     }
     const action = button.dataset.action;
     if (reuseLogin) setHidden(button, data?.profile?.canReuseLogin !== true);
-    /* 更新按钮的可安装判断依赖 updates 与待重启版本，交给 renderUpdateButtons 统一处理。 */
-    if (UPDATE_ACTIONS.has(action)) continue;
     const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
     const pending = state.pendingAction === action;
     button.disabled = busy || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
@@ -3903,6 +3974,29 @@ function iconUse(name) {
 
 /* ---------- render: editor ---------- */
 
+/* 定价与故障转移是模型行上的两个可选对象。草稿必须原样带上它们：少了任何
+   一项，一次与它们无关的编辑保存就会把已保存的值抹掉。 */
+const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
+
+function priceDraftFrom(pricing) {
+  const draft = {};
+  for (const field of PRICE_FIELDS) {
+    const value = pricing && typeof pricing[field] === 'number' && Number.isFinite(pricing[field]) && pricing[field] >= 0
+      ? pricing[field] : null;
+    draft[field] = value === null ? '' : String(value);
+  }
+  return draft;
+}
+
+function failoverDraftFrom(failover) {
+  if (!Array.isArray(failover)) return [];
+  return failover.slice(0, 8).filter((row) => row && typeof row === 'object').map((row) => ({
+    connectionId: typeof row.connectionId === 'string' ? row.connectionId : '',
+    upstreamModelId: typeof row.upstreamModelId === 'string' ? row.upstreamModelId : '',
+    upstreamProtocol: row.upstreamProtocol === 'anthropic' ? 'anthropic' : '',
+  }));
+}
+
 function modelDraftFrom(model) {
   const draft = model ? {
     id: model.id,
@@ -3920,14 +4014,18 @@ function modelDraftFrom(model) {
     upstreamProtocolChoices: upstreamProtocolSupported(state.data) ? ['', 'anthropic'] : null,
     contextLimit: model.contextLimit ? String(model.contextLimit) : '',
     metadataSource: model.metadataSource || null,
+    pricing: priceDraftFrom(model.pricing),
+    failover: failoverDraftFrom(model.failover),
   } : {
     id: '', name: '', context: '', output: '', tools: undefined, reasoning: false, vision: false,
     efforts: [], defaultEffort: '', connectionId: defaultConnectionId(), upstreamModelId: '', upstreamProtocol: '',
     upstreamProtocolChoices: upstreamProtocolSupported(state.data) ? ['', 'anthropic'] : null,
     contextLimit: '', metadataSource: null,
+    pricing: priceDraftFrom(null), failover: [],
   };
   draft.baseEntity = model ? { ...model, inputModalities: model.inputModalities?.slice(),
-    reasoningEfforts: model.reasoningEfforts?.slice() } : null;
+    reasoningEfforts: model.reasoningEfforts?.slice(), pricing: model.pricing || null,
+    failover: failoverDraftFrom(model.failover) } : null;
   draft.touched = new Set();
   return draft;
 }
@@ -3982,6 +4080,11 @@ function fillEditorFields() {
   if (dom.mReasoning) dom.mReasoning.checked = draft.reasoning;
   if (dom.mVision) dom.mVision.checked = draft.vision;
   if (dom.mEfforts) dom.mEfforts.value = draft.efforts.join(', ');
+  const price = draft.pricing || priceDraftFrom(null);
+  if (dom.mPriceInput) dom.mPriceInput.value = price.inputPerMillion;
+  if (dom.mPriceOutput) dom.mPriceOutput.value = price.outputPerMillion;
+  if (dom.mPriceCached) dom.mPriceCached.value = price.cachedInputPerMillion;
+  if (dom.mPriceWrite) dom.mPriceWrite.value = price.cacheWritePerMillion;
 }
 
 function readEditorFields() {
@@ -4004,6 +4107,10 @@ function readEditorFields() {
   draft.vision = Boolean(dom.mVision && dom.mVision.checked);
   draft.efforts = dom.mEfforts ? parseEfforts(dom.mEfforts.value).list : draft.efforts;
   draft.defaultEffort = dom.mDefault ? dom.mDefault.value : draft.defaultEffort;
+  if (dom.mPriceInput) draft.pricing.inputPerMillion = dom.mPriceInput.value;
+  if (dom.mPriceOutput) draft.pricing.outputPerMillion = dom.mPriceOutput.value;
+  if (dom.mPriceCached) draft.pricing.cachedInputPerMillion = dom.mPriceCached.value;
+  if (dom.mPriceWrite) draft.pricing.cacheWritePerMillion = dom.mPriceWrite.value;
   buildModel(draft);
 }
 
@@ -4024,6 +4131,7 @@ const MODEL_DIFF_FIELDS = {
   reasoning: '思考能力', inputModalities: '图片输入', reasoningEfforts: '思考档位', defaultEffort: '默认档位',
   connectionId: '所属连接', upstreamModelId: '上游模型 ID', upstreamProtocol: '上游 API 格式',
   contextLimit: '上游上下文上限', metadataSource: '元数据来源',
+  pricing: '定价', failover: '备用连接',
 };
 const diffValue = value => value === undefined ? '（未声明）' : JSON.stringify(value);
 function modelThreeWayDiff(editor) {
@@ -4150,6 +4258,85 @@ function renderEffortChoices(list) {
   });
 }
 
+/* 备用连接行只渲染选择的连接与两项可选覆盖：服务商模型 ID、上游格式。行自己
+   不复制主模型的能力，因为故障转移后仍然是同一个本地模型在服务调用方。 */
+function renderFailoverRows(editor) {
+  if (!dom.mFailoverRows) return;
+  const draft = editor.draft;
+  const rows = Array.isArray(draft.failover) ? draft.failover : [];
+  const connections = (connectionRowsOf(state.data) || []).filter((row) => row && !row.legacy);
+  const nodes = rows.map((row, index) => {
+    const li = document.createElement('div');
+    li.className = 'failover-row';
+    li.dataset.failoverIndex = String(index);
+
+    const id = document.createElement('label');
+    id.className = 'field';
+    const idLabel = document.createElement('span');
+    idLabel.className = 'field__label';
+    idLabel.textContent = '备用 ' + (index + 1);
+    const select = document.createElement('select');
+    select.dataset.failoverField = 'connectionId';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '选择连接';
+    select.append(blank);
+    connections.forEach((connection) => {
+      if (connection.id === draft.connectionId) return;
+      const option = document.createElement('option');
+      option.value = connection.id;
+      option.textContent = connection.name && connection.name !== connection.id
+        ? connection.name + ' · ' + connection.id : connection.id;
+      select.append(option);
+    });
+    select.value = row.connectionId || '';
+    id.append(idLabel, select);
+
+    const upstream = document.createElement('label');
+    upstream.className = 'field';
+    const upstreamLabel = document.createElement('span');
+    upstreamLabel.className = 'field__label';
+    upstreamLabel.textContent = '服务商模型 ID（可选）';
+    const input = document.createElement('input');
+    input.className = 'mono';
+    input.dataset.failoverField = 'upstreamModelId';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = '与该连接上的模型相同';
+    input.value = row.upstreamModelId || '';
+    upstream.append(upstreamLabel, input);
+
+    const protocol = document.createElement('label');
+    protocol.className = 'field';
+    const protocolLabelNode = document.createElement('span');
+    protocolLabelNode.className = 'field__label';
+    protocolLabelNode.textContent = '上游格式（可选）';
+    const protocolSelect = document.createElement('select');
+    protocolSelect.dataset.failoverField = 'upstreamProtocol';
+    for (const [value, label] of [['', '与主连接相同'], ['anthropic', 'Anthropic Messages']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      protocolSelect.append(option);
+    }
+    protocolSelect.value = row.upstreamProtocol === 'anthropic' ? 'anthropic' : '';
+    protocol.append(protocolLabelNode, protocolSelect);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'iconbtn';
+    remove.dataset.failoverRemove = String(index);
+    remove.setAttribute('aria-label', '移除第 ' + (index + 1) + ' 条备用连接');
+    remove.append(iconUse('i-x'));
+
+    li.append(id, upstream, protocol, remove);
+    return li;
+  });
+  dom.mFailoverRows.replaceChildren(...nodes);
+  if (dom.mFailoverCount) dom.mFailoverCount.textContent = rows.length + ' / 8';
+  if (dom.mFailoverAdd) dom.mFailoverAdd.disabled = rows.length >= 8;
+}
+
 function toggleEffortChoice(value) {
   const editor = state.editor;
   if (!editor || state.modelsSaving) return;
@@ -4238,6 +4425,7 @@ function renderEditor() {
 
   renderEffortChoices(parsed.list);
   renderUpstreamProtocol(editor);
+  renderFailoverRows(editor);
 
   syncDefaultOptions(parsed.list, editor.draft.defaultEffort);
 
@@ -4287,9 +4475,9 @@ function renderEditor() {
   }
 
   if (dom.modelSave) dom.modelSave.disabled = errors.length > 0 || !ready || !dirty || state.modelsSaving || protocolPending;
-  if (dom.modelSave) setText(dom.modelSave, state.modelsSaving ? '正在保存…' : '保存目录');
+  if (dom.modelSave) setText(dom.modelSave, state.modelsSaving ? '正在保存…' : '保存');
   if (dom.modelCancel) setText(dom.modelCancel, editor.confirmClose ? '继续编辑' : '取消');
-  setText(dom.modelSaveNote, dirty ? '保存会提交整个模型目录，服务端立即应用。' : '没有未保存的修改。');
+  setText(dom.modelSaveNote, dirty ? '保存会提交整个模型目录并写入本机网关；之后按顶部同步状态同步到 Kimi Work。' : '没有未保存的修改。');
 }
 
 /* 路由区：连接下拉 + 上游 ID + 由两者推导的建议路由 ID。
@@ -5211,7 +5399,6 @@ function renderConnection() {
 
   renderConnections();
   renderServices(data);
-  renderUpdates(data);
 }
 
 /* ---------- render: named connections ---------- */
@@ -5248,7 +5435,7 @@ function renderConnections() {
 
   if (dom.connsSave) {
     dom.connsSave.disabled = !dirty || state.connsSaving || blocked;
-    setText(dom.connsSave, state.connsSaving ? '正在保存…' : '保存连接');
+    setText(dom.connsSave, state.connsSaving ? '正在保存…' : '保存');
   }
   if (dom.connsAdd) dom.connsAdd.disabled = state.connsSaving || blocked;
   if (dom.connsReset) dom.connsReset.disabled = !dirty || state.connsSaving;
@@ -5484,208 +5671,6 @@ function renderConnectionsDiff() {
   dom.connsDiff.replaceChildren(title, list);
 }
 
-/* ---------- render: updates ---------- */
-
-function updatePayload(data) {
-  const value = data && data.updates;
-  return value && typeof value === 'object' ? value : null;
-}
-
-function updatesAvailable(data) {
-  return updatePayload(data) !== null;
-}
-
-function versionText(value) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  /* 仓库标签带 v 前缀，接口字段按契约是裸 semver；两种写法都归一后比较。 */
-  const bare = /^[vV]/.test(text) ? text.slice(1) : text;
-  return SEMVER_PATTERN.test(bare) ? bare : '';
-}
-
-/* 只比较 X.Y.Z 数字段：比较只服务于「本地是否不低于远端」的展示措辞，
-   下载与门槛判断仍完全由更新管理器决定。 */
-function versionOrder(left, right) {
-  const a = versionText(left);
-  const b = versionText(right);
-  if (!a || !b) return null;
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let index = 0; index < 3; index++) {
-    if (pa[index] !== pb[index]) return pa[index] < pb[index] ? -1 : 1;
-  }
-  return 0;
-}
-
-function releaseURLFor(payload) {
-  const candidate = payload && typeof payload.releaseURL === 'string' ? payload.releaseURL.trim() : '';
-  if (!candidate.startsWith(UPDATE_RELEASE_PREFIX)) return null;
-  const tail = candidate.slice(UPDATE_RELEASE_PREFIX.length);
-  /* 只接受单段合法 semver（允许仓库惯例的 v 前缀），拒绝额外路径、查询参数与片段。 */
-  const tag = /^[vV]/.test(tail) ? tail.slice(1) : tail;
-  if (!tag || tail.includes('/') || !SEMVER_PATTERN.test(tag)) return null;
-  return UPDATE_RELEASE_PREFIX + tail;
-}
-
-function updateStateWord(state) {
-  return UPDATE_STATE[state] || { tone: 'neutral', word: state || '未知', note: '' };
-}
-
-function evaluateUpdate(data) {
-  const payload = updatePayload(data);
-  if (!payload) {
-    return {
-      tone: 'neutral',
-      word: '版本未知',
-      note: '当前面板服务没有提供更新状态，无法确认运行版本或安装新版本。',
-      current: '',
-      latest: '',
-      pending: '',
-      state: null,
-    };
-  }
-  const state = typeof payload.state === 'string' ? payload.state : 'not-checked';
-  const info = updateStateWord(state);
-  const current = versionText(payload.currentVersion);
-  const latest = versionText(payload.latestVersion);
-  const pending = versionText(payload.pendingVersion);
-  const reason = updateReasonText(payload.reason);
-  let note = info.note;
-  let word = info.word;
-  /* 「current」只说明远端没有比本地更新的稳定版；本地版本更高时不能说
-     「当前运行的就是最新稳定版本」，要如实说「无需更新」。 */
-  const ahead = state === 'current' && current && latest && versionOrder(current, latest) > 0;
-  if (state === 'failed') note = reason || info.note;
-  else if (state === 'staged' && pending) note = '版本 ' + pending + ' 已下载；重启网关后才会生效，当前运行版本不变。';
-  else if (state === 'available' && latest) note = '版本 ' + latest + ' 可以下载；下载后需重启网关才会生效。';
-  else if (ahead) {
-    word = '无需更新';
-    note = '本地版本 ' + current + ' 高于最新稳定版 ' + latest + '；不需要更新。';
-  }
-  else if (reason && state !== 'current') note = reason;
-  return { tone: info.tone, word, note, state, current, latest, pending, ahead: ahead === true };
-}
-
-function renderUpdates(data) {
-  const payload = updatePayload(data);
-  const available = payload !== null;
-  setHidden(dom.updUnavailable, available);
-
-  if (!available) {
-    setText(dom.updCurrent, '当前版本未知');
-    setText(dom.updCurrentSub, '面板服务没有提供更新状态。');
-    setText(dom.updLatest, '—');
-    setText(dom.updLatestSub, '无法读取发布信息。');
-    setText(dom.updChecked, '—');
-    setText(dom.updCheckedSub, '尚未检查。');
-    setText(dom.updRelease, '仅使用 GitHub Releases 的正式发布。');
-    setHidden(dom.updPending, true);
-    setDot(dom.updVerdictDot, 'neutral');
-    setText(dom.updVerdictWord, '版本未知');
-    setText(dom.updVerdictNote, '无法确认运行版本；下载与回退不可用。');
-    setText(dom.updHint, '升级到提供更新状态的面板服务后，这里会显示当前版本与可用版本。');
-    renderUpdateButtons(data);
-    return;
-  }
-
-  const verdict = evaluateUpdate(data);
-  const current = verdict.current;
-  const latest = verdict.latest;
-
-  setText(dom.updCurrent, current || '未知');
-  setText(dom.updCurrentSub, current
-    ? '本机正在运行的网关版本'
-    : '面板服务未报告当前版本。');
-  setText(dom.updLatest, latest || '未获取');
-  const latestRaw = typeof payload.latestVersion === 'string' ? payload.latestVersion.trim() : '';
-  setText(dom.updLatestSub, latest
-    ? (current && latest === current ? '与运行版本相同'
-      : verdict.ahead ? '低于本地运行版本' : 'GitHub 上的最新正式发布')
-    : (latestRaw
-      ? '返回的版本号格式不被接受，已忽略'
-      : (verdict.state === 'checking' ? '正在读取…' : '检查后显示')));
-
-  const checkedAt = payload.checkedAt;
-  setText(dom.updChecked, checkedAt === null || checkedAt === undefined ? '—' : fmtTime(checkedAt));
-  setText(dom.updCheckedSub, checkedAt === null || checkedAt === undefined
-    ? '本次进程还没有检查过'
-    : '最近一次检查完成的时间');
-
-  const link = releaseURLFor(payload);
-  if (link && dom.updRelease) {
-    const anchor = document.createElement('a');
-    anchor.className = 'mono upd__link';
-    anchor.href = link;
-    anchor.textContent = '查看发布页';
-    anchor.rel = 'noreferrer noopener';
-    anchor.target = '_blank';
-    dom.updRelease.replaceChildren(anchor);
-  } else if (dom.updRelease) {
-    const note = document.createElement('span');
-    note.textContent = '仅使用 GitHub Releases 的正式发布。';
-    dom.updRelease.replaceChildren(note);
-  }
-
-  const pending = verdict.pending;
-  if (pending) {
-    setHidden(dom.updPending, false);
-    setText(dom.updPending, '版本 ' + pending + ' 已下载，等待重启网关。重启前仍运行版本 '
-      + (current || '未知') + '，正在进行的会话不会被结束。');
-  } else {
-    setHidden(dom.updPending, true);
-  }
-
-  setDot(dom.updVerdictDot, verdict.tone);
-  setText(dom.updVerdictWord, verdict.word);
-  setText(dom.updVerdictNote, verdict.note);
-  setText(dom.updHint, updateHint(data, verdict));
-  renderUpdateButtons(data);
-}
-
-function updateHint(data, verdict) {
-  if (!updatesAvailable(data)) return '升级到提供更新状态的面板服务后，这里会显示当前版本与可用版本。';
-  if (verdict.state === 'staged') return '重启网关后新版本才会运行；本面板不会自动重启。';
-  if (verdict.state === 'available') return '下载不会结束正在运行的会话；重启网关后才切换到新版本。';
-  if (verdict.state === 'checking') return '检查只读取 GitHub 的正式发布信息，不下载安装包。';
-  if (verdict.state === 'failed') return '失败不会改变正在运行的版本；可重试或到 GitHub 手动下载。';
-  if (verdict.state === 'current') {
-    return verdict.ahead
-      ? '本地版本不低于最新稳定版；无需更新，需要时可再次检查或回退。'
-      : '当前已是最新稳定版本；需要时可再次检查，或回退到更早的版本。';
-  }
-  return '检查、下载与回退都需要点击；本面板不会静默升级。';
-}
-
-function renderUpdateButtons(data) {
-  const payload = updatePayload(data);
-  const running = payload ? payload.state === 'checking' : false;
-  const opRunning = isInFlight(data && data.operation);
-  const pending = state.pendingAction;
-  const idle = Boolean(payload) && !running && !opRunning && !pending;
-  const current = payload ? versionText(payload.currentVersion) : '';
-  const latest = payload ? versionText(payload.latestVersion) : '';
-  const pendingVersion = payload ? versionText(payload.pendingVersion) : '';
-  const canRollback = Boolean(payload) && Boolean(versionText(payload.rollbackVersion));
-
-  if (dom.updCheck) {
-    dom.updCheck.disabled = !payload || running || opRunning;
-  }
-  if (dom.updInstall) {
-    const upgradable = Boolean(payload) && !pendingVersion && Boolean(latest) && latest !== current;
-    dom.updInstall.disabled = !idle || !upgradable;
-  }
-  if (dom.updRollback) {
-    dom.updRollback.disabled = !idle || !canRollback;
-  }
-
-  [[dom.updCheck, 'check-update'], [dom.updInstall, 'install-update'], [dom.updRollback, 'rollback-update']]
-    .forEach(([button, action]) => {
-      if (!button) return;
-      const busy = pending === action;
-      button.classList.toggle('is-busy', busy);
-      button.setAttribute('aria-busy', busy ? 'true' : 'false');
-    });
-}
-
 /* ---------- state ---------- */
 
 function adoptState(next, { initial = false, external = false } = {}) {
@@ -5748,8 +5733,22 @@ function settlePending(next) {
   state.pendingAction = null;
   void confirmActionResult(action, op.id);
 }
+function renderWorkspaceSync(data) {
+  const integration = data.integration || {};
+  const models = Array.isArray(data.models) ? data.models : [];
+  const imported = Object.keys(integration.aliases || {}).sort();
+  const saved = models.map(model => model.id).sort();
+  const matches = JSON.stringify(imported) === JSON.stringify(saved);
+  const restart = matches && integration.applied && !integration.adopted;
+  const synced = matches && integration.adopted;
+  setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Work' : restart ? '需要重启 Kimi' : '待同步到 Work');
+  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced ? '已读回当前模型配置，可在 Work 的模型选择器中使用。' : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '本机网关已保存模型。点击「同步到 Work」更新官方模型选择器。');
+  setHidden($('workspace-restart'), !restart);
+}
+
 function renderAll() {
   if (!state.data) return;
+  renderWorkspaceSync(state.data);
   renderShell(state.data);
   renderOverview(state.data);
   renderOnboard();
@@ -5760,6 +5759,7 @@ function renderAll() {
   renderPicker();
   renderActions(state.data);
   renderGrowth(state.data);
+  plusPanel.render(state.data);
   renderPreviewLifecycle(state.data);
 }
 
@@ -5803,7 +5803,7 @@ async function trackServiceOperation(id, action, initial) {
   try {
     while (!operation || !['succeeded', 'failed'].includes(operation.phase)) {
       if (Date.now() >= deadline) {
-        showToast('后台操作尚未完成，请稍后从维护页读回结果；配置与账本未删除。', 'error');
+        showToast('后台操作尚未完成，请稍后从设置页读回结果；配置与账本未删除。', 'error');
         return;
       }
       await new Promise(resolve => setTimeout(resolve, 250));
@@ -5820,7 +5820,7 @@ async function trackServiceOperation(id, action, initial) {
     }
     applyPreviewServiceResult({ operation });
     if (operation.phase === 'failed') {
-      showToast('后台操作未完成，请在维护页查看诊断并核对实际状态；未确认的更改不会显示为成功。', 'error');
+      showToast('后台操作未完成，请在设置页查看诊断并核对实际状态；未确认的更改不会显示为成功。', 'error');
       return;
     }
     if (action === 'enable-login-service' || action === 'disable-login-service') {
@@ -5848,7 +5848,7 @@ async function previewServiceAction(action) {
         if (await loadState({ silent: true })) return;
       } catch {}
       if (Date.now() >= deadline) {
-        showToast('后台未在限定时间内恢复；请查看维护页诊断，原配置与账本未删除。', 'error');
+        showToast('后台未在限定时间内恢复；请查看设置页诊断，原配置与账本未删除。', 'error');
         return;
       }
     }
@@ -6034,34 +6034,9 @@ async function runAction(action, profileMode) {
     showToast('已有操作正在进行，等待它结束后再试。', 'error');
     return;
   }
-  if (action === 'check-update' && !updatesAvailable(data)) {
-    showToast('面板服务未提供更新状态，无法检查更新。', 'error');
-    return;
-  }
-  if (action === 'install-update' || action === 'rollback-update') {
-    const payload = updatePayload(data);
-    if (!payload) {
-      showToast('面板服务未提供更新状态，无法安装或回退。', 'error');
-      return;
-    }
-    const latest = versionText(payload.latestVersion);
-    const current = versionText(payload.currentVersion);
-    const staged = versionText(payload.pendingVersion);
-    if (action === 'install-update' && (!latest || staged || latest === current)) {
-      showToast(staged
-        ? '版本 ' + staged + ' 已下载，请重启网关；重复下载不会改变已暂存的版本。'
-        : '没有可安装的新版本，请先点「检查更新」。', 'error');
-      return;
-    }
-    if (action === 'rollback-update' && !versionText(payload.rollbackVersion)) {
-      showToast('没有可回退的旧版本。', 'error');
-      return;
-    }
-  }
 
   state.pendingAction = action;
   renderActions(data);
-  renderUpdateButtons(data);
 
   try {
     const res = await request(API.actions, { method: 'POST', body: { id: actionUUID(), at: Date.now(), action, ...(profileMode ? { profileMode } : {}) } });
@@ -6072,19 +6047,12 @@ async function runAction(action, profileMode) {
       adoptState({ ...state.data, operation: op }, { external: true });
       renderOperation(state.data);
       renderActions(state.data);
-      renderUpdateButtons(state.data);
     }
-    const submitted = action === 'check-update'
-          ? '检查更新已提交，正在读取 GitHub 上的正式发布。'
-          : action === 'install-update'
-            ? '下载请求已提交；下载完成后重启网关才会生效。'
-            : action === 'rollback-update'
-              ? '回退请求已提交；重启网关后运行回退前的版本。'
-              : action === 'launch-kimi'
-                ? '启动请求已提交，等待运行时状态。'
-                : action === 'restart-kimi'
-                  ? '已请求正常退出 Kimi，等待退出完成后受管重启。'
-                : '操作已提交，等待结果。';
+    const submitted = action === 'launch-kimi'
+      ? '启动请求已提交，等待运行时状态。'
+      : action === 'restart-kimi'
+        ? '已请求正常退出 Kimi，等待退出完成后受管重启。'
+        : '操作已提交，等待结果。';
     showToast(submitted, 'ok');
     /* 终态由 settlePending 在轮询读取到匹配 operation 时确认，避免重复提示。 */
     await loadState({ silent: true });
@@ -6110,10 +6078,7 @@ async function runAction(action, profileMode) {
     await loadState({ silent: true });
   } finally {
     if (state.pendingAction === action) state.pendingAction = null;
-    if (state.data) {
-      renderActions(state.data);
-      renderUpdateButtons(state.data);
-    }
+    if (state.data) renderActions(state.data);
   }
 }
 
@@ -6149,35 +6114,6 @@ async function confirmActionResult(action, opId) {
     return;
   }
 
-  if (action === 'check-update' || action === 'install-update' || action === 'rollback-update') {
-    const payload = updatePayload(state.data) || {};
-    const reason = updateReasonText(op.reason).replace(/[。；]+$/, '');
-    if (failed) {
-      showToast((ACTION_LABEL[action] || action) + '未完成：' + (reason || '更新服务未返回原因') + '。', 'error');
-      return;
-    }
-    if (action === 'check-update') {
-      const latest = versionText(payload.latestVersion);
-      const current = versionText(payload.currentVersion);
-      if (latest && current && latest !== current) showToast('发现新版本 ' + latest + '（当前 ' + current + '）。', 'ok');
-      else if (latest && current && versionOrder(current, latest) > 0) showToast('本地版本 ' + current + ' 高于最新稳定版 ' + latest + '；无需更新。', 'ok');
-      else if (latest) showToast('已是最新版本 ' + latest + '。', 'ok');
-      else showToast('检查已完成，未读到可比较的稳定版本。', 'ok');
-      return;
-    }
-    const pending = versionText(payload.pendingVersion);
-    if (pending) {
-      showToast('版本 ' + pending + ' 已准备好，重启网关后生效；当前会话不受影响。', 'ok');
-      return;
-    }
-    if (action === 'rollback-update') {
-      showToast('回退已完成；重启网关后运行回退前的版本。', 'ok');
-      return;
-    }
-    showToast('更新已提交，但状态里还没有待重启的版本；请刷新后再确认。', 'error');
-    return;
-  }
-
   if (failed) {
     showToast((ACTION_LABEL[action] || action) + '未完成：' + (ACTION_STATE[op.state] || op.state) + (op.reason ? '（' + reasonText(op.reason) + '）' : ''), 'error');
     return;
@@ -6190,12 +6126,21 @@ async function confirmActionResult(action, opId) {
 
 /* ---------- saving ---------- */
 
-async function saveCatalogue(models, { close = true, message = '模型目录已保存并应用。' } = {}) {
+async function saveCatalogue(models, { close = true, message = '已保存。请按同步状态同步到 Work。' } = {}) {
   const data = state.data;
   if (!data || state.modelsSaving) return false;
   if (!configReady(data)) {
     showToast('配置当前不是就绪状态，无法保存模型目录。请先重启面板。', 'error');
     return false;
+  }
+  /* 连接抽屉开着时，里面的输入还没有并入草稿。模型保存要整组提交连接，
+     因此先把抽屉结算掉：校验失败就停在抽屉里，绝不静默丢弃用户输入。 */
+  if (state.conns.editing) {
+    applyConnectionEditor();
+    if (state.conns.editing) {
+      showToast('还有一条连接没有通过校验。请先在连接编辑器里修正或取消，再保存模型。', 'error');
+      return false;
+    }
   }
 
   state.modelsSaving = true;
@@ -6208,7 +6153,9 @@ async function saveCatalogue(models, { close = true, message = '模型目录已�
 
   try {
     const revision = state.editor?.baseRevision ?? data.revision;
-    const res = await request(API.models, { method: 'POST', body: { revision, models } });
+    const res = await request(API.workspace, { method: 'POST', body: {
+      revision, models, connections: connectionPayload(state.conns.draft),
+    } });
     if (!current()) return false;
     if (res && res.state) {
       state.modelsSaving = false;
@@ -6249,8 +6196,8 @@ async function saveConnections() {
     return;
   }
   if (state.conns.editing) {
-    showToast('还有一条连接没有加入草稿。先点「加入草稿」或取消。', 'error');
-    return;
+    applyConnectionEditor();
+    if (state.conns.editing) return;
   }
   const payload = connectionPayload(state.conns.draft);
   if (!payload.length) {
@@ -6276,10 +6223,8 @@ async function saveConnections() {
   renderActions(data);
 
   try {
-    const tokenEnv = connectionSource(data) ? connectionSource(data).tokenEnv : undefined;
-    const body = { revision: state.conns.baseRevision ?? data.revision, connections: payload };
-    if (typeof tokenEnv === 'string' && tokenEnv) body.tokenEnv = tokenEnv;
-    const res = await request(API.connections, { method: 'POST', body });
+    const body = { revision: state.conns.baseRevision ?? data.revision, connections: payload, models: data.models };
+    const res = await request(API.workspace, { method: 'POST', body });
     if (!current()) return;
     if (res && res.state) {
       state.connsSaving = false;
@@ -6291,13 +6236,7 @@ async function saveConnections() {
       state.conns.draft = connectionDraftFrom(state.data);
       state.conns.dirty = false;
       renderAll();
-      /* 保存只证明文件写好了。能否自动应用取决于本机是否有受管服务；
-         没有时如实说明「已保存、尚未应用」，绝不写成已生效。 */
-      const mode = applyAvailability(state.data);
-      showToast(mode === 'pending'
-        ? '连接已保存。点「应用已保存的连接」由后台服务安全应用。'
-        : '连接已保存，当前网关尚未应用；自动应用不可用。', mode === 'pending' ? 'ok' : 'error');
-      if (mode === 'pending') void applyConnections();
+      showToast('已保存。请按同步状态同步到 Work。', 'ok');
     } else {
       state.connsSaving = false;
       await loadState({ silent: true });
@@ -6435,13 +6374,13 @@ function bindEvents() {
     if (button) button.addEventListener('click', () => setView(view));
   });
 
-  if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => setView('connection'));
+  if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => setView('models'));
   $('overview-details')?.addEventListener('click', () => setView('maintenance'));
   $('quick-models')?.addEventListener('click', () => setView('models'));
   $('quick-usage')?.addEventListener('click', () => setView('usage'));
   $('conns-usage')?.addEventListener('click', () => setView('usage'));
-  document.querySelectorAll('[data-enhancement]').forEach(button => {
-    button.addEventListener('click', () => setView(button.dataset.enhancement));
+  document.querySelectorAll('[data-section]').forEach(button => {
+    button.addEventListener('click', () => revealWorkspaceSection(button.dataset.section));
   });
   const brandHome = $('brand-home');
   if (brandHome) brandHome.addEventListener('click', () => setView('overview'));
@@ -6607,6 +6546,56 @@ function bindEvents() {
     }
     closeEditor(false);
   });
+  if (dom.mFailoverAdd) {
+    dom.mFailoverAdd.addEventListener('click', () => {
+      const editor = state.editor;
+      if (!editor) return;
+      const rows = editor.draft.failover;
+      if (rows.length >= 8) return;
+      rows.push({ connectionId: '', upstreamModelId: '', upstreamProtocol: '' });
+      editor.draft.touched.add('failover');
+      renderFailoverRows(editor);
+      renderEditor();
+      const last = dom.mFailoverRows && dom.mFailoverRows.querySelector('.failover-row:last-child select');
+      if (last && last.focus) last.focus();
+    });
+  }
+  if (dom.mFailoverRows) {
+    dom.mFailoverRows.addEventListener('change', (event) => {
+      const control = event.target;
+      if (!control || !control.dataset || !control.dataset.failoverField) return;
+      const editor = state.editor;
+      if (!editor) return;
+      const host = control.closest('[data-failover-index]');
+      if (!host) return;
+      const index = Number(host.dataset.failoverIndex);
+      const row = editor.draft.failover[index];
+      if (!row) return;
+      row[control.dataset.failoverField] = control.value;
+      editor.draft.touched.add('failover');
+      renderEditor();
+    });
+    dom.mFailoverRows.addEventListener('input', (event) => {
+      const control = event.target;
+      if (!control || !control.dataset || control.dataset.failoverField !== 'upstreamModelId') return;
+      const editor = state.editor;
+      if (!editor) return;
+      const host = control.closest('[data-failover-index]');
+      if (!host) return;
+      const row = editor.draft.failover[Number(host.dataset.failoverIndex)];
+      if (row) row.upstreamModelId = control.value;
+    });
+    dom.mFailoverRows.addEventListener('click', (event) => {
+      const remove = event.target && event.target.closest ? event.target.closest('[data-failover-remove]') : null;
+      if (!remove) return;
+      const editor = state.editor;
+      if (!editor) return;
+      editor.draft.failover.splice(Number(remove.dataset.failoverRemove), 1);
+      editor.draft.touched.add('failover');
+      renderFailoverRows(editor);
+      renderEditor();
+    });
+  }
   if (dom.modelForm) {
     const fields = {
       mId: 'id', mName: 'name', mContext: 'contextWindow', mOutput: 'maxOutputTokens',
@@ -6695,7 +6684,7 @@ function bindEvents() {
   });
   if (dom.connEditorClose) dom.connEditorClose.addEventListener('click', closeConnectionEditor);
   if (dom.connEditorCancel) dom.connEditorCancel.addEventListener('click', closeConnectionEditor);
-  if (dom.connEditorApply) dom.connEditorApply.addEventListener('click', applyConnectionEditor);
+  if (dom.connEditorApply) dom.connEditorApply.addEventListener('click', saveConnections);
   if (dom.connEditorTest) dom.connEditorTest.addEventListener('click', () => { void discoverConnectionEditorModels(); });
   if (dom.cePreset) dom.cePreset.addEventListener('change', () => {
     if (!state.conns.editing) return;
@@ -7003,6 +6992,12 @@ function boot() {
   }
   if (typeof globalThis.KimiWorkUsage?.mount === 'function') {
     usagePanel = globalThis.KimiWorkUsage.mount({ request, notify: showToast });
+  }
+  mountWorkspace();
+  /* plus 追加的容器要落在 mountWorkspace 搬完板块之后：它把旧的子页面整体移进
+     view-work，先挂载会被一起搬走或与搬移目标交叉。 */
+  if (typeof globalThis.KimiWorkPlus?.mount === 'function') {
+    plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data) });
   }
   initView();
   bindEvents();

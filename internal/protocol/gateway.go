@@ -84,6 +84,18 @@ type Record struct {
 	Context           *Context `json:"context,omitempty"`
 	Rate              *Rate    `json:"rate,omitempty"`
 	Failure           *Failure `json:"failure,omitempty"`
+
+	// Attempts is how many upstream candidates were tried; 1 means no failover
+	// was involved. FailoverFrom names the connection that was abandoned, so a
+	// user can see which route is broken without reading a log.
+	Attempts     int     `json:"attempts,omitempty"`
+	FailoverFrom *string `json:"failoverFrom,omitempty"`
+
+	// PriceSource and EstimatedCost are what the budget table made of this
+	// request. Both stay nil when it could not be priced, which is a fact the
+	// panel reports instead of showing a zero.
+	PriceSource   *string  `json:"priceSource,omitempty"`
+	EstimatedCost *float64 `json:"estimatedCost,omitempty"`
 }
 
 // LedgerStatus is the ledger's own vocabulary for a finished request. A request
@@ -206,6 +218,10 @@ type Config struct {
 	// BeforeRequest may refuse a request before anything is forwarded. A nil
 	// hook allows everything.
 	BeforeRequest func(route string, payload *Document) *Refusal
+	// Budget may refuse a request for spend or price it after it finishes. A nil
+	// gate keeps the behaviour of every release before budget support: nothing
+	// is refused and no cost is written.
+	Budget BudgetGate
 	// Now is injectable for tests.
 	Now func() time.Time
 }
@@ -362,35 +378,68 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		g.observe(record, r, operationID, "started", nil)
 	}
 	var usageContext *UsageContext
+	var admission budgetAdmission
 	defer func() {
-		if record == nil {
-			return
-		}
-		finishRecord(record, w, started, g.config.Now())
-		if usageContext != nil {
-			applyUsageContext(record, usageContext)
-		}
-		if rate := RateOf(record.Status, record.Error != "", record.Usage, record.MS); rate != nil {
-			record.Rate = rate
-		}
-		record.Failure = FailureOf(record)
-		if g.config.RecordRequests {
-			g.mu.Lock()
-			g.metrics.Requests++
-			if record.Status >= 400 || record.Outcome == string(OutcomeFailed) {
-				g.metrics.Failures++
-			}
-			g.metrics.Recent = append([]*Record{record}, g.metrics.Recent...)
-			if len(g.metrics.Recent) > 20 {
-				g.metrics.Recent = g.metrics.Recent[:20]
-			}
-			g.mu.Unlock()
-		}
-		if operationID != "" {
-			g.observe(record, r, operationID, record.LedgerStatus(), usageContext)
+		g.finish(record, r, operationID, w, started, usageContext, admission.prices)
+		// A serialising budget slot is released only after the request's own cost
+		// is in the ledger, which is the whole point of serialising: the next
+		// request's admission has to see what this one spent.
+		if admission.release != nil {
+			admission.release()
 		}
 	}()
-	usageContext = g.forward(w, r, record)
+	usageContext = g.forwardWithAdmission(w, r, record, &admission)
+}
+
+// budgetAdmission is what the gate handed this request: the price table it was
+// admitted under, and the slot to free once its cost is written.
+type budgetAdmission struct {
+	prices  *PriceTable
+	release func()
+}
+
+// finish settles one request: it measures it, prices it, publishes it to the
+// panel window and writes its last ledger receipt. It runs before a serialising
+// slot is released, so the next admission reads a ledger that already holds this
+// request's cost.
+func (g *Gateway) finish(record *Record, r *http.Request, operationID string, w http.ResponseWriter,
+	started time.Time, usageContext *UsageContext, prices *PriceTable) {
+	if record == nil {
+		return
+	}
+	finishRecord(record, w, started, g.config.Now())
+	if usageContext != nil {
+		applyUsageContext(record, usageContext)
+	}
+	if rate := RateOf(record.Status, record.Error != "", record.Usage, record.MS); rate != nil {
+		record.Rate = rate
+	}
+	// Pricing happens once per finished request, against the model that was asked
+	// for, the usage the upstream reported, and the table this request was
+	// admitted under. A request that reported no usage stays unpriced rather than
+	// becoming a free one.
+	if g.config.Budget != nil {
+		cost, source := g.config.Budget.Settle(BudgetSettlement{Route: record.Protocol,
+			Model: record.Model, At: record.At, Usage: record.Usage, Prices: prices})
+		record.EstimatedCost = cost
+		record.PriceSource = source
+	}
+	record.Failure = FailureOf(record)
+	if g.config.RecordRequests {
+		g.mu.Lock()
+		g.metrics.Requests++
+		if record.Status >= 400 || record.Outcome == string(OutcomeFailed) {
+			g.metrics.Failures++
+		}
+		g.metrics.Recent = append([]*Record{record}, g.metrics.Recent...)
+		if len(g.metrics.Recent) > 20 {
+			g.metrics.Recent = g.metrics.Recent[:20]
+		}
+		g.mu.Unlock()
+	}
+	if operationID != "" {
+		g.observe(record, r, operationID, record.LedgerStatus(), usageContext)
+	}
 }
 
 func finishRecord(record *Record, w http.ResponseWriter, started, finished time.Time) {
@@ -460,14 +509,20 @@ func (g *Gateway) observe(record *Record, r *http.Request, operationID, status s
 		entry.HTTPStatus = &status
 		entry.ErrorCode = record.Error
 		entry.Usage = record.Usage
+		entry.PriceSource = record.PriceSource
+		entry.EstimatedCost = record.EstimatedCost
 	}
 	if context != nil {
 		entry.ProviderID = context.ProviderID
 		entry.Account = context.Account
 		entry.APIKeyID = context.APIKeyID
 		entry.ConversationID = context.ConversationID
-		entry.PriceSource = context.PriceSource
-		entry.EstimatedCost = context.EstimatedCost
+		if entry.PriceSource == nil {
+			entry.PriceSource = context.PriceSource
+		}
+		if entry.EstimatedCost == nil {
+			entry.EstimatedCost = context.EstimatedCost
+		}
 		if entry.ConnectionID == nil {
 			entry.ConnectionID = context.ConnectionID
 		}
@@ -505,9 +560,19 @@ func isCatalogRoute(method, path string) bool {
 	return method == http.MethodGet && (path == "/v1/models" || path == "/v1/models/api.json")
 }
 
+// forwardWithAdmission is the whole request path plus the budget admission the
+// request took, which the caller settles and releases.
+func (g *Gateway) forwardWithAdmission(w http.ResponseWriter, r *http.Request, record *Record,
+	admission *budgetAdmission) *UsageContext {
+	return g.forward(w, r, record, admission)
+}
+
 // forward is the whole request path. It returns the usage context the resolver
-// produced, if any, so the deferred ledger write can carry it.
-func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record) *UsageContext {
+// produced, if any, so the deferred ledger write can carry it. When the budget
+// gate admits the request, *admission receives the table it was admitted under
+// and the slot to free; the caller releases that slot only after this request's
+// cost is in the ledger.
+func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record, admission *budgetAdmission) *UsageContext {
 	refuse := func(status int, code string) {
 		if record != nil {
 			if record.Side == "" {
@@ -636,6 +701,35 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 			return nil
 		}
 	}
+	// The budget gate is asked once per request, after the request is known to be
+	// one this gateway will serve. A refusal here spends nothing upstream.
+	if g.config.Budget != nil {
+		decision, unlock := g.config.Budget.Admit(ctx, BudgetRequest{Route: route,
+			Model: selected.ID, At: g.config.Now().UnixMilli()})
+		if decision.Refusal != nil {
+			if unlock != nil {
+				unlock()
+			}
+			if decision.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfter))
+			}
+			if window := budgetRefusalWindow(decision); window != "" {
+				w.Header().Set(BudgetWindowHeader, window)
+			}
+			refuse(decision.Refusal.Status, decision.Refusal.Code)
+			return nil
+		}
+		// The slot is held until this request's cost is written to the ledger, not
+		// until its last byte is forwarded: the caller releases it after
+		// settlement, which is what makes serialising actually bound the total.
+		// The table is captured here so the settlement is priced in the unit this
+		// request was admitted under, even if the panel changes the currency while
+		// it is in flight.
+		admission.prices, admission.release = decision.Prices, unlock
+		if warning := budgetWarning(decision); warning != "" {
+			w.Header().Set(BudgetWarningHeader, warning)
+		}
+	}
 	// The legacy gateway called this whenever a rules file was configured, so a
 	// history left with a managed message is cleaned even when the file is now
 	// missing. A nil provider keeps the older static-text behaviour.
@@ -659,59 +753,58 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 			return nil
 		}
 	}
-	// The local id is Kimi's route; the upstream receives the exact model it
-	// declared. A route without an upstream id keeps its own id.
-	document.SetString("model", selected.UpstreamID())
-	payload := document.Bytes()
-
+	// The local id is Kimi's route; each candidate receives the exact model name
+	// it declared, and tryCandidates writes that name per attempt.
 	headers := map[string]string{}
 	for _, name := range g.config.ForwardHeaders {
 		if value := r.Header.Get(name); value != "" {
 			headers[name] = value
 		}
 	}
-	var usageContext *UsageContext
-	if g.config.UsageSink != nil && g.config.ResolveUsageContext != nil {
-		sessionHeaders := map[string]string{}
-		for _, name := range g.config.ForwardHeaders {
-			if value := r.Header.Get(name); value != "" {
-				sessionHeaders[name] = value
-			}
-		}
-		promptCacheKey := ""
-		if raw, ok := document.Get("prompt_cache_key"); ok {
-			_ = json.Unmarshal(raw, &promptCacheKey)
-		}
-		request := UsageContextRequest{Protocol: route, Model: selected.ID, ModelID: selected.UpstreamID(),
-			ConnectionID: selected.ConnectionID, UpstreamProtocol: selected.UpstreamProtocol, PromptCacheKey: promptCacheKey,
-			Headers: sessionHeaders, At: g.config.Now().UnixMilli()}
-		func() {
-			defer func() { _ = recover() }()
-			if context, err := g.config.ResolveUsageContext(request); err == nil {
-				usageContext = &context
-			}
-		}()
+	promptCacheKey := ""
+	if raw, ok := document.Get("prompt_cache_key"); ok {
+		_ = json.Unmarshal(raw, &promptCacheKey)
 	}
-	if selected.ConnectionID != nil && !g.config.Backend.Has(selected.ConnectionID) {
-		refuse(http.StatusServiceUnavailable, "connection_unavailable")
-		return usageContext
+	chosen := g.tryCandidates(ctx, route, document, selected, headers, promptCacheKey)
+	usageContext := chosen.usage
+	if record != nil {
+		record.Attempts = chosen.tried
+		if chosen.tried > 0 {
+			record.ConnectionID = chosen.connectionID
+			record.UpstreamModelID = optionalString(chosen.upstreamID)
+			record.UpstreamProtocol = chosen.upstreamWire
+		}
+		record.FailoverFrom = chosen.failoverFrom
 	}
-	upstream, err := g.config.Backend.Request(ctx, route, payload, RequestOptions{
-		Headers: headers, ConnectionID: selected.ConnectionID, Model: selected})
-	if err != nil {
+	if chosen.response == nil {
+		failure := chosen.failure
+		if failure == nil {
+			failure = ErrConnectionUnavailable
+		}
 		switch {
-		case errors.Is(err, ErrInvalidProtocol), errors.Is(err, ErrInvalidRequest),
-			errors.Is(err, ErrInvalidThinkingBudget), errors.Is(err, ErrThinkingToolRoundtrip):
-			refuse(http.StatusBadRequest, err.Error())
+		case errors.Is(failure, ErrInvalidProtocol), errors.Is(failure, ErrInvalidRequest),
+			errors.Is(failure, ErrInvalidThinkingBudget), errors.Is(failure, ErrThinkingToolRoundtrip):
+			refuse(http.StatusBadRequest, failure.Error())
+		case chosen.unavailable:
+			refuse(http.StatusServiceUnavailable, "connection_unavailable")
 		default:
-			g.connectionFailure(w, record, err, ctx)
+			g.connectionFailure(w, record, failure, ctx)
+		}
+		// A request that lost every candidate is reported as that outcome, not as
+		// the last candidate's own error, so the panel can say what happened.
+		if record != nil && chosen.tried > 1 {
+			record.Error = "all_connections_failed"
 		}
 		return usageContext
 	}
+	upstream := chosen.response
 	defer func() { _ = upstream.Body.Close() }()
 	if record != nil {
 		record.Side = SideUpstream
 		record.Status = upstream.Status
+		if chosen.exhausted {
+			record.Error = "all_connections_failed"
+		}
 	}
 	for _, name := range []string{"Content-Type", "Retry-After", "X-Request-Id", "Request-Id"} {
 		if value := upstream.Header.Get(name); value != "" {

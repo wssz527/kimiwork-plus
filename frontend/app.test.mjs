@@ -395,3 +395,328 @@ test('web provider selection controls the real native search disclosure', () => 
   render(data);
   assert.equal(elements['native-search-details'].hidden, false);
 });
+
+/* ---------- 阶段 2：视图合并与整组保存 ---------- */
+
+function makeDomTree() {
+  const byId = new Map();
+  const makeNode = (id = '', tag = 'SECTION') => {
+    const node = {
+      id, tagName: tag, children: [], parent: null, open: false, hidden: false, focused: false,
+      attributes: {}, scrolled: false,
+      append(...nodes) {
+        for (const child of nodes) {
+          if (!child) continue;
+          if (child.parent) child.parent.children.splice(child.parent.children.indexOf(child), 1);
+          child.parent = this;
+          this.children.push(child);
+        }
+      },
+      remove() {
+        if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1);
+        this.parent = null;
+        /* 真实 DOM 里被移除的节点不再能从 getElementById 取到。 */
+        if (this.id && byId.get(this.id) === this) byId.delete(this.id);
+      },
+      querySelector(selector) {
+        const tags = selector.split(',').map(part => part.trim().toUpperCase());
+        const walk = node => {
+          for (const child of node.children) {
+            if (tags.includes(child.tagName)) return child;
+            const found = walk(child);
+            if (found) return found;
+          }
+          return null;
+        };
+        return walk(this);
+      },
+      closest(tag) {
+        for (let node = this; node; node = node.parent) {
+          if (node.tagName === tag.toUpperCase()) return node;
+        }
+        return null;
+      },
+      scrollIntoView() { this.scrolled = true; },
+      focus() { this.focused = true; },
+      hasAttribute(name) { return Object.hasOwn(this.attributes, name); },
+      setAttribute(name, value) { this.attributes[name] = value; },
+    };
+    Object.defineProperty(node, 'parentElement', { get() { return this.parent; } });
+    if (id) byId.set(id, node);
+    return node;
+  };
+  const document = {
+    getElementById: id => byId.get(id) || null,
+    createElement: () => makeNode('', 'DIV'),
+  };
+  return { byId, makeNode, document };
+}
+
+test('mounting the merged views is idempotent and keeps one recent-requests table', () => {
+  const { byId, makeNode, document } = makeDomTree();
+  const root = (id, tag) => makeNode(id, tag);
+  const modelsBody = root('models-services-body');
+  const connectionsPanel = root('connections-panel');
+  const maintenance = root('view-maintenance');
+  const restartPanel = root('restart-panel');
+  const work = root('view-work');
+  const extensions = root('view-extensions');
+  const subagentHeading = root('subagents-heading', 'H2');
+  const subagentView = root('view-subagents');
+  subagentView.append(subagentHeading, root('sa-target-panel'));
+  const settingsView = root('view-settings');
+  settingsView.append(root('settings-heading', 'H2'), root('context-panel'));
+  const toolsView = root('view-tools');
+  toolsView.append(root('tools-heading', 'H2'), root('web-panel'));
+  const translationView = root('view-translation');
+  translationView.append(root('translation-panel'));
+  const usagePane = root('usage-pane-requests');
+  const recentSection = root('recent-section');
+  const recentTable = root('recent-table', 'TABLE');
+  recentSection.append(recentTable);
+  const records = root('overview-records');
+  records.append(recentSection);
+
+  const code = [
+    'const $ = id => document.getElementById(id);',
+    sourceFunction('mountUsageRequests'),
+    sourceFunction('mountWorkspace'),
+    'return mountWorkspace;',
+  ].join('\n');
+  const mount = new Function('document', code)(document);
+
+  mount();
+  assert.equal(connectionsPanel.parent, modelsBody);
+  assert.equal(restartPanel.parent, maintenance);
+  assert.equal(byId.get('view-subagents'), undefined);
+  assert.equal(byId.get('sa-target-panel').parent, work);
+  assert.equal(byId.get('context-panel').parent, work);
+  assert.equal(byId.get('web-panel').parent, work);
+  assert.equal(byId.get('translation-panel').parent, extensions);
+  assert.equal(byId.get('subagents-heading'), undefined);
+
+  mount();
+  mount();
+  assert.deepEqual(usagePane.children.sort((a, b) => a.id.localeCompare(b.id)).map(node => node.id).filter(id => id === 'recent-section'), ['recent-section']);
+  assert.equal(work.children.filter(node => node.id === 'context-panel').length, 1);
+});
+
+test('section links open every collapsed ancestor before scrolling to the panel', () => {
+  const { makeNode, document } = makeDomTree();
+  const details = makeNode('mcp-details', 'DETAILS');
+  const panel = makeNode('mcp-panel');
+  const heading = makeNode('mcp-heading', 'H2');
+  panel.append(heading);
+  details.append(panel);
+  const view = makeNode('view-work');
+  view.append(details);
+  const code = [
+    'const $ = id => document.getElementById(id);',
+    sourceFunction('revealWorkspaceSection'),
+    'return revealWorkspaceSection;',
+  ].join('\n');
+  const reveal = new Function('document', code)(document);
+  assert.equal(details.open, false);
+  const target = reveal('mcp-panel');
+  assert.equal(target, panel);
+  assert.equal(details.open, true);
+  assert.equal(panel.scrolled, true);
+  assert.equal(heading.focused, true);
+  assert.equal(heading.attributes.tabindex, '-1');
+});
+
+function makeSaveEnv({ applySucceeds = true } = {}) {
+  const calls = [];
+  const state = {
+    key: 'session', stateReadEpoch: 0, modelsSaving: false, lastSync: 0,
+    data: { revision: 'rev-1', configuration: { state: 'ready' }, models: [], connections: { saved: [], restartRequired: false } },
+    editor: { baseRevision: 'rev-1' },
+    conns: {
+      editing: { draft: { id: 'draft-conn', name: '草稿连接', baseURL: 'https://api.example.com/v1' }, errors: [] },
+      draft: [{ id: 'saved-conn', name: '已保存', baseURL: 'https://saved.example.com/v1' }],
+    },
+  };
+  const dom = {};
+  const code = [
+    sourceFunction('saveCatalogue'),
+    sourceFunction('connectionPayload'),
+    'const configReady = data => data.configuration?.state === "ready";',
+    'const applyConnectionEditor = () => {',
+    '  if (!applySucceeds) { state.conns.editing.errors = ["草稿无效"]; return; }',
+    '  state.conns.draft = [...state.conns.draft, {...state.conns.editing.draft}];',
+    '  state.conns.editing = null;',
+    '};',
+    'const showToast = (message, tone) => calls.push({ message, tone });',
+    'const renderEditor = () => {};',
+    'const renderModels = () => {};',
+    'const renderActions = () => {};',
+    'const adoptState = next => { state.data = next; };',
+    'const renderAll = () => {};',
+    'const handleSaveFailure = async error => calls.push({ message: error.message, tone: "error" });',
+    'return saveCatalogue;',
+  ].join('\n');
+  const save = new Function('state', 'dom', 'API', 'request', 'calls', 'applySucceeds', code)(
+    state, dom, { workspace: '/api/workspace' },
+    async (path, options) => { calls.push({ path, body: options.body }); return { state: { ...state.data, revision: 'rev-2' } }; },
+    calls, applySucceeds,
+  );
+  return { save, state, calls };
+}
+
+test('saving a model aborts when the connection drawer still has an invalid draft', async () => {
+  const env = makeSaveEnv({ applySucceeds: false });
+  const ok = await env.save([{ id: 'model-a' }]);
+  assert.equal(ok, false);
+  assert.equal(env.calls.some(call => call.path), false);
+  assert.equal(env.state.conns.editing.errors.length, 1);
+  assert.match(env.calls.at(-1).message, /连接编辑器/);
+});
+
+test('saving a model folds a valid connection draft into the same transaction', async () => {
+  const env = makeSaveEnv({ applySucceeds: true });
+  const ok = await env.save([{ id: 'model-a' }]);
+  assert.equal(ok, true);
+  const request = env.calls.find(call => call.path === '/api/workspace');
+  assert.equal(request.body.revision, 'rev-1');
+  assert.deepEqual(request.body.models, [{ id: 'model-a' }]);
+  assert.deepEqual(request.body.connections.map(row => row.id), ['saved-conn', 'draft-conn']);
+});
+
+/* --- pricing and failover survive every save path ------------------------- */
+
+/* buildModel 是模型行唯一的构造函数。定价与备用连接必须能从草稿一路带到
+   提交的目录，否则「改个名字」就会把用户的定价与故障转移配置清空。 */
+function makeModelDraft() {
+  const code = [
+    'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+    "const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];",
+    'const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;',
+    'const MAX_EFFORTS = 12;',
+    ...['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf',
+      'priceDraftFrom', 'failoverDraftFrom', 'buildPrice', 'buildFailover',
+      'buildModel', 'canonicalPrice', 'canonicalFailover', 'canonicalModel'].map(sourceFunction),
+    'return { buildModel, canonicalModel, priceDraftFrom, failoverDraftFrom };',
+  ].join('\n');
+  return new Function(code)();
+}
+
+/* 定价与备用连接有两条保存路径，两条都必须保住它们：
+
+   1. 编辑器保存已有模型：未改动的字段不进提交行，由 core.MergeModels 按
+      originalId 合并保留；改动过的字段随行提交，清空则显式提交 null 删除。
+   2. 向导重存同一条模型：行是重建的，mergeOnboardModels 负责带回。
+
+   只要有一条路径漏掉，改个名字就会把用户的定价与故障转移配置清空。 */
+test('an untouched price is left out so the server merge keeps it', () => {
+  const { buildModel } = makeModelDraft();
+  const base = {
+    id: 'conn/resp/model-a', protocol: 'responses', contextWindow: 200000,
+    connectionId: 'conn', pricing: { inputPerMillion: 0.5, outputPerMillion: 1.5 },
+    failover: [{ connectionId: 'backup' }],
+  };
+  // 只改名字：草稿只带改名，定价与备用连接保持原值。
+  const draft = {
+    id: base.id, name: '新名字', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '',
+    connectionId: 'conn', upstreamModelId: '', upstreamProtocol: '',
+    contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '0.5', outputPerMillion: '1.5', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+    failover: [{ connectionId: 'backup', upstreamModelId: '', upstreamProtocol: '' }],
+    baseEntity: base, touched: new Set(['name']),
+  };
+  const { model, errors } = buildModel(draft);
+  assert.deepEqual(errors, []);
+  // 值没变，因此不进提交行：服务端合并时原值仍在。
+  assert.equal('pricing' in model, false);
+  assert.equal('failover' in model, false);
+  assert.deepEqual(model.name, '新名字');
+});
+
+test('a changed price and standby list are submitted with the row', () => {
+  const { buildModel } = makeModelDraft();
+  const base = {
+    id: 'conn/resp/model-a', protocol: 'responses', contextWindow: 200000,
+    connectionId: 'conn', pricing: { inputPerMillion: 0.5, outputPerMillion: 1.5 }, failover: [],
+  };
+  const draft = {
+    id: base.id, name: '', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '',
+    connectionId: 'conn', upstreamModelId: '', upstreamProtocol: '',
+    contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '2', outputPerMillion: '6', cachedInputPerMillion: '0.5', cacheWritePerMillion: '' },
+    failover: [{ connectionId: 'backup', upstreamModelId: 'backup-model', upstreamProtocol: 'anthropic' }],
+    baseEntity: base, touched: new Set(),
+  };
+  const { model, errors } = buildModel(draft);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(model.pricing, { inputPerMillion: 2, outputPerMillion: 6, cachedInputPerMillion: 0.5 });
+  assert.deepEqual(model.failover, [{ connectionId: 'backup', upstreamModelId: 'backup-model', upstreamProtocol: 'anthropic' }]);
+});
+
+test('clearing a price submits null so the stored price is removed', () => {
+  const { buildModel } = makeModelDraft();
+  const base = {
+    id: 'conn/resp/model-a', protocol: 'responses', contextWindow: 200000,
+    connectionId: 'conn', pricing: { inputPerMillion: 0.5, outputPerMillion: 1.5 }, failover: [],
+  };
+  const draft = {
+    id: base.id, name: '', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '',
+    connectionId: 'conn', upstreamModelId: '', upstreamProtocol: '',
+    contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '', outputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+    failover: [], baseEntity: base, touched: new Set(),
+  };
+  const { model, errors } = buildModel(draft);
+  assert.deepEqual(errors, []);
+  assert.equal(model.pricing, null);
+  assert.equal(model.failover, null);
+});
+
+test('a price with only one side is refused rather than half-priced', () => {
+  const { buildModel } = makeModelDraft();
+  const draft = {
+    id: 'conn/resp/model-a', name: '', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '', connectionId: 'conn',
+    upstreamModelId: '', upstreamProtocol: '', contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '1', outputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+    failover: [], baseEntity: null, touched: new Set(),
+  };
+  const { errors } = buildModel(draft);
+  assert.equal(errors.some(text => text.includes('同时填写输入与输出')), true);
+});
+
+test('a standby cannot duplicate the primary connection or exceed the limit', () => {
+  const { buildModel } = makeModelDraft();
+  const make = failover => ({
+    id: 'conn/resp/model-a', name: '', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '', connectionId: 'conn',
+    upstreamModelId: '', upstreamProtocol: '', contextLimit: '', metadataSource: null,
+    pricing: null, failover, baseEntity: null, touched: new Set(),
+  });
+  const same = buildModel(make([{ connectionId: 'conn', upstreamModelId: '' }]));
+  assert.equal(same.errors.some(text => text.includes('不能与主连接相同')), true);
+
+  const many = buildModel(make(Array.from({ length: 9 }, (_, index) => ({ connectionId: 'backup' + index }))));
+  assert.equal(many.errors.some(text => text.includes('最多 8 条')), true);
+
+  const duplicates = buildModel(make([{ connectionId: 'backup' }, { connectionId: 'backup' }]));
+  assert.deepEqual(duplicates.errors, []);
+  assert.equal(duplicates.model.failover.length, 1);
+});
+
+/* 向导保存只重新声明连接与模型能力，不该顺手清掉用户自己的定价。 */
+test('the add-a-provider wizard keeps existing pricing and failover', () => {
+  const code = [sourceFunction('mergeOnboardModels'), 'return mergeOnboardModels;'].join('\n');
+  const merge = new Function(code)();
+  const existing = [{
+    id: 'conn/resp/model-a', connectionId: 'conn', contextWindow: 200000,
+    pricing: { inputPerMillion: 2, outputPerMillion: 4 },
+    failover: [{ connectionId: 'backup' }],
+  }];
+  const built = [{ id: 'conn/resp/model-a', connectionId: 'conn', contextWindow: 200000, reasoning: true }];
+  const merged = merge(existing, built, 'conn');
+  assert.deepEqual(merged[0].pricing, { inputPerMillion: 2, outputPerMillion: 4 });
+  assert.deepEqual(merged[0].failover, [{ connectionId: 'backup' }]);
+  assert.equal(merged[0].reasoning, true);
+});

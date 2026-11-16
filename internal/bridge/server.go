@@ -118,19 +118,27 @@ func fail(w http.ResponseWriter, e error) {
 		status = 400
 	}
 	switch code {
-	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable":
+	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use":
 		status = 409
 	case "unauthorized":
 		status = 401
 	case "origin_refused":
 		status = 403
-	case "not_found":
+	case "not_found", "account_not_found":
 		status = 404
 	}
 	var quotaError *quota.PanelActionError
 	if errors.As(e, &quotaError) {
 		status = quotaError.Status
 		code = quotaError.Code
+	}
+	var codeUsageError *quota.CodeUsageError
+	if errors.As(e, &codeUsageError) {
+		status, code = codeUsageError.Status, codeUsageError.Code
+	}
+	var magpieError *quota.MagpieError
+	if errors.As(e, &magpieError) {
+		status, code = magpieError.Status, magpieError.Code
 	}
 	var webError *webtools.Error
 	if errors.As(e, &webError) {
@@ -149,6 +157,20 @@ func message(code string) string {
 		return "仍有模型使用此连接，请先修改模型。"
 	case "credentials_unavailable":
 		return "系统凭据存储不可用，密钥未保存。"
+	case "account_work_busy":
+		return "Work 仍有任务运行，请等待任务结束后再切换账号。"
+	case "account_work_state_unavailable":
+		return "无法确认 Work 是否空闲。请打开官方 Work 并刷新状态后重试。"
+	case "account_login_pending":
+		return "请先完成官方登录，或取消并恢复原账号。"
+	case "account_current_in_use":
+		return "当前账号或待恢复的账号不能移除，请先完成切换。"
+	case "account_identity_unverified", "account_identity_mismatch":
+		return "尚未确认官方页面与 Work 的账号一致，请检查官方登录状态后重试。"
+	case "account_credentials_rejected":
+		return "该账号的登录凭据已失效，请仅为该账号重新登录。"
+	case "account_switch_restore_failed":
+		return "切换失败且原账号尚未确认恢复，请在账号管理中恢复原账号。"
 	case "credential_keychain_locked":
 		return "登录钥匙串已锁定，请在 macOS 中解锁后从本窗口重新保存；密钥未写入。"
 	case "credential_keychain_unavailable":
@@ -265,9 +287,9 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 	}
 	if method == "POST" {
 		switch path {
-		case "/api/models", "/api/connections", "/api/subagents", "/api/translation":
+		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save":
 			return s.configure(path, in)
-		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools":
+		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie":
 			if s.Extra != nil {
 				return s.Extra(ctx, path, in)
 			}
@@ -301,7 +323,10 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 			return core.Document{"operation": core.Document{"action": "stop-daemon", "state": "stopping"}}, nil
 		}
 	}
-	expected := map[string]string{"/api/usage/query": "POST", "/api/usage/export": "GET", "/api/usage/clear": "POST", "/api/quota": "GET", "/api/quota/refresh": "POST", "/api/quota/sources": "POST"}
+	if method == "GET" && (path == "/api/quota/code" || path == "/api/quota/magpie" || path == "/api/accounts" || path == "/api/work/swarm") && s.Extra != nil {
+		return s.Extra(ctx, path, nil)
+	}
+	expected := map[string]string{"/api/usage/query": "POST", "/api/usage/export": "GET", "/api/usage/clear": "POST", "/api/quota": "GET", "/api/quota/refresh": "POST", "/api/quota/sources": "POST", "/api/budget": "GET"}
 	if want, ok := expected[path]; ok {
 		if method != want {
 			return nil, errors.New("not_found")
@@ -320,6 +345,24 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	defer s.mutation.Unlock()
 	d, rev, e := s.Store.Prepare(core.String(in["revision"]), func(d core.Document) error {
 		switch path {
+		case "/api/workspace":
+			if _, ok := in["models"].([]any); !ok {
+				return errors.New("invalid_models")
+			}
+			if _, ok := in["connections"].([]any); !ok {
+				return errors.New("invalid_connections")
+			}
+			if e := core.MergeModels(d, core.Rows(in["models"])); e != nil {
+				return e
+			}
+			changes, e := core.MergeConnections(d, core.Rows(in["connections"]))
+			if e != nil {
+				return e
+			}
+			if e = core.Validate(d); e != nil {
+				return e
+			}
+			return s.stageCredentials(d, changes)
 		case "/api/models":
 			if _, ok := in["models"].([]any); !ok {
 				return errors.New("invalid_models")
@@ -337,6 +380,11 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				return e
 			}
 			return s.stageCredentials(d, changes)
+		case "/api/budget/save":
+			if core.String(in["revision"]) == "" {
+				return core.ErrConflict
+			}
+			return core.MergeBudget(d, in["budget"])
 		case "/api/subagents":
 			policy, err := core.NormalizeSubagents(in, core.Rows(d["models"]))
 			if err != nil {

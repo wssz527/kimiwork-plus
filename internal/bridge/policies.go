@@ -11,13 +11,14 @@ import (
 )
 
 type nativePolicies struct {
-	mu         sync.Mutex
-	dir        string
-	home       string
-	subagents  *kimi.SubagentConfig
-	context    *kimi.ContextPolicyConfig
-	services   *kimi.ServicesConfig
-	configured core.Document
+	mu           sync.Mutex
+	dir          string
+	home         string
+	subagents    *kimi.SubagentConfig
+	context      *kimi.ContextPolicyConfig
+	services     *kimi.ServicesConfig
+	configured   core.Document
+	capabilities kimi.SubagentCapabilities
 }
 
 func newNativePolicies(dir, home string) (*nativePolicies, error) {
@@ -84,7 +85,7 @@ func (p *nativePolicies) Configure(d core.Document) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.configured = normalized
-	p.subagents.Update(nativeSubagentPolicy(normalized), kimi.SubagentCapabilities{})
+	p.subagents.Update(nativeSubagentPolicy(normalized), p.capabilities)
 	if value := d["context"]; value != nil {
 		var policy kimi.ContextPolicy
 		if decodeStrict(value, &policy) != nil {

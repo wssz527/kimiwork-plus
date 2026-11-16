@@ -17,9 +17,10 @@ type RequestOptions struct {
 	Headers map[string]string
 	// ConnectionID selects the endpoint; nil means the legacy single upstream.
 	ConnectionID *string
-	// Model is the catalog row the request resolved to. A row naming a Messages
+	// Model is the catalog row this attempt is served as. A row naming a Messages
 	// upstream is served from that conversion path; every other row keeps the
-	// OpenAI wire it always had.
+	// OpenAI wire it always had. A failover attempt passes a copy whose
+	// `UpstreamProtocol` is the candidate's own, so one model can span two wires.
 	Model *Model
 }
 

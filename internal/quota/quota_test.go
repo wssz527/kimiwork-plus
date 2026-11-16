@@ -42,7 +42,10 @@ func (r *recorder) client() *http.Client {
 		for name := range request.Header {
 			headers[name] = request.Header.Get(name)
 		}
-		body, _ := io.ReadAll(request.Body)
+		body := []byte{}
+		if request.Body != nil {
+			body, _ = io.ReadAll(request.Body)
+		}
 		entry := call{URL: request.URL.String(), Method: request.Method, Headers: headers, Body: string(body)}
 		r.calls = append(r.calls, entry)
 		status, payload := 200, "{}"

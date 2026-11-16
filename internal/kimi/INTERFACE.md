@@ -963,3 +963,44 @@ are not an established fallback for the DNS-gated native import flow.
 
 Windows runtime behavior remains unverified; a Mac result or a Windows cross
 build does not change that boundary.
+
+
+# Current account integration (2026-11-17)
+
+## 40. Read identity and busy state from the Work shell
+
+`AccountIdentity`, `CaptureAccount`, `AccountWorkBusy`, `BeginAccountLogin` and
+`ActivateAccount` use the managed private CDP pipe. Identity and credential
+surfaces are deliberately separate:
+
+- `app://localhost/kimi-agent.html` is the identity/busy surface. Official query
+  parameters are accepted; other app pages, fragments and userinfo are not.
+  `kimiAgentAPI.getUserProfile()` supplies the profile. When no user is available,
+  the official `collectEvent('getToken')` callback may supply `user_unique_id`.
+  Reading localStorage token-presence flags alone never verifies an identity.
+- Exact HTTPS origins `kimi.com` and `www.kimi.com` own the account Cookie and
+  localStorage state. Cookie/Storage writes and their reloads do not target the
+  Work shell. Login reset also reloads the shell to discard its cached profile.
+
+The installed Kimi 3.2.27 status getter returns
+`{statuses: Record<conversationKey, status>, failureIds: Record<conversationKey, string[]>}`.
+The account busy parser unwraps `statuses`; `running` is active, while
+`completed` and failure-backed `blocked` are inactive. Unrecognised states and
+unreadable or missing Work shells still prevent switching. The HTTPS credential
+page has no status API and is not queried as a second busy-state authority.
+
+`ActivateAccount` captures the original account before writing. Every Cookie and
+localStorage write must complete before target kernel credentials can be applied
+and a normal managed restart can begin. A shell identity mismatch after complete
+page writes is allowed to proceed to that restart; a write failure is not. The
+restarted page-reported target identity and kernel configuration must agree. It does not claim
+hot switching from file readback. A failed attempt restores the captured state;
+rotated credentials observed after restart are not overwritten by the older
+snapshot. The bridge stores restorable sessions only through its native
+credential vault and returns account summaries rather than tokens.
+
+The current Mac candidate has captured the real current identity and passed a
+same-account no-write operation after the busy-state fixes. This is not proof of
+switching accounts, kernel adoption under a different identity, or token lifetime.
+Two real accounts and five round trips are still required. Windows account
+runtime behaviour remains unverified.

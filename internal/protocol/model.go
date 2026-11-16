@@ -39,6 +39,10 @@ const (
 
 	maxTextChars = 2048
 	maxSafeInt   = 1<<53 - 1
+	// maxFailoverCandidates bounds one model's standby list. Failover is a
+	// hand-configured fallback, not a pool: a long list would turn one request
+	// into many upstream attempts.
+	maxFailoverCandidates = 8
 )
 
 // MetadataSource records where a model row's capabilities came from. A field
@@ -68,6 +72,22 @@ type Model struct {
 	InputModalities  *[]string       `json:"inputModalities,omitempty"`
 	ReasoningEfforts *[]string       `json:"reasoningEfforts,omitempty"`
 	DefaultEffort    *string         `json:"defaultEffort,omitempty"`
+	// Failover lists the standby connections this model may be served from when
+	// the primary one cannot answer. Absent means the model has exactly one
+	// upstream, which is the behaviour every earlier release had.
+	Failover []ModelFailover `json:"failover,omitempty"`
+	// Pricing is the user's own cost table for this model, in the budget
+	// currency. A model without it has no cost and therefore cannot be limited.
+	Pricing *ModelPrice `json:"pricing,omitempty"`
+}
+
+// ModelFailover is one explicitly configured standby connection. Only fields
+// the row itself does not already state are repeated here, so a standby on the
+// same upstream model needs one identifier and nothing else.
+type ModelFailover struct {
+	ConnectionID     string  `json:"connectionId"`
+	UpstreamModelID  *string `json:"upstreamModelId,omitempty"`
+	UpstreamProtocol *string `json:"upstreamProtocol,omitempty"`
 }
 
 // IsAnthropic reports whether this row is served from a Messages upstream.
@@ -81,6 +101,58 @@ func (m Model) UpstreamID() string {
 		return *m.UpstreamModelID
 	}
 	return m.ID
+}
+
+// Candidate is one upstream a request for this model may be sent to: a
+// connection, the model name that connection knows, and the wire it speaks.
+type Candidate struct {
+	ConnectionID *string
+	UpstreamID   string
+	// UpstreamProtocol is set only for a Messages upstream, matching the row.
+	UpstreamProtocol *string
+	// Standby is true for every candidate except the primary one, which is what
+	// the failure report uses to say a retry happened.
+	Standby bool
+}
+
+// Candidates is the ordered attempt list: the primary connection first, then
+// each configured standby exactly once. A model with no `failover` returns one
+// candidate, so the caller has a single code path.
+func (m Model) Candidates() []Candidate {
+	primary := Candidate{ConnectionID: m.ConnectionID, UpstreamID: m.UpstreamID(),
+		UpstreamProtocol: m.UpstreamProtocol}
+	out := []Candidate{primary}
+	seen := map[string]bool{m.candidateKey(primary): true}
+	for _, standby := range m.Failover {
+		candidate := Candidate{ConnectionID: &standby.ConnectionID, UpstreamID: m.UpstreamID(),
+			UpstreamProtocol: m.UpstreamProtocol, Standby: true}
+		if standby.UpstreamModelID != nil && *standby.UpstreamModelID != "" {
+			candidate.UpstreamID = *standby.UpstreamModelID
+		}
+		if standby.UpstreamProtocol != nil {
+			value := *standby.UpstreamProtocol
+			candidate.UpstreamProtocol = &value
+		}
+		key := m.candidateKey(candidate)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func (m Model) candidateKey(candidate Candidate) string {
+	connection := ""
+	if candidate.ConnectionID != nil {
+		connection = *candidate.ConnectionID
+	}
+	protocol := ""
+	if candidate.UpstreamProtocol != nil {
+		protocol = *candidate.UpstreamProtocol
+	}
+	return connection + "\x00" + candidate.UpstreamID + "\x00" + protocol
 }
 
 // jsLen is the JavaScript string length (UTF-16 code units), which is what the
@@ -308,163 +380,264 @@ func ValidateModels(rows []json.RawMessage) ([]Model, error) {
 		if !ok {
 			return nil, ErrInvalidModels
 		}
-		id := textOf(row["id"])
-		if id == "" {
-			return nil, ErrInvalidModels
+		model, err := validateModelRow(row, seen)
+		if err != nil {
+			return nil, err
 		}
-		if _, dup := seen[id]; dup {
-			return nil, ErrInvalidModels
+		out = append(out, model)
+	}
+	return out, nil
+}
+
+func validateModelRow(row map[string]json.RawMessage, seen map[string]struct{}) (Model, error) {
+	id := textOf(row["id"])
+	if id == "" {
+		return Model{}, ErrInvalidModels
+	}
+	if _, dup := seen[id]; dup {
+		return Model{}, ErrInvalidModels
+	}
+	seen[id] = struct{}{}
+	protocol, ok := rawString(row["protocol"])
+	if !ok || (protocol != ProtocolChat && protocol != ProtocolResponses) {
+		return Model{}, ErrInvalidModels
+	}
+	if ModelFamily(id) != protocol {
+		return Model{}, ErrProtocolConflict
+	}
+	window, ok := positive(row["contextWindow"])
+	if !ok {
+		return Model{}, ErrInvalidModels
+	}
+	model := Model{ID: id, Protocol: protocol, ContextWindow: window}
+
+	if present(row["maxOutputTokens"]) {
+		v, ok := positive(row["maxOutputTokens"])
+		if !ok {
+			return Model{}, ErrInvalidModels
 		}
-		seen[id] = struct{}{}
-		protocol, ok := rawString(row["protocol"])
-		if !ok || (protocol != ProtocolChat && protocol != ProtocolResponses) {
-			return nil, ErrInvalidModels
+		model.MaxOutputTokens = &v
+	}
+	if present(row["tools"]) {
+		v, ok := rawBool(row["tools"])
+		if !ok {
+			return Model{}, ErrInvalidModels
 		}
-		if ModelFamily(id) != protocol {
-			return nil, ErrProtocolConflict
+		model.Tools = &v
+	}
+	if present(row["reasoning"]) {
+		v, ok := rawBool(row["reasoning"])
+		if !ok {
+			return Model{}, ErrInvalidModels
 		}
-		window, ok := positive(row["contextWindow"])
+		model.Reasoning = &v
+	}
+	if present(row["inputModalities"]) {
+		values, ok := rawStrings(row["inputModalities"])
+		if !ok {
+			return Model{}, ErrInvalidModels
+		}
+		for _, value := range values {
+			if value != "text" && value != "image" {
+				return Model{}, ErrInvalidModels
+			}
+		}
+		values = dedupe(values)
+		model.InputModalities = &values
+	}
+	if present(row["reasoningEfforts"]) {
+		values, ok := rawStrings(row["reasoningEfforts"])
+		if !ok {
+			return Model{}, ErrInvalidModels
+		}
+		for _, value := range values {
+			// A level is a short, control-free token; anything else would be
+			// echoed into a UI that cannot render it.
+			if value == "" || jsLen(value) > 64 || hasControl(value) {
+				return Model{}, ErrInvalidModels
+			}
+		}
+		values = dedupe(values)
+		model.ReasoningEfforts = &values
+	}
+	if present(row["defaultEffort"]) {
+		effort, ok := rawString(row["defaultEffort"])
+		if !ok || jsLen(effort) > 64 {
+			return Model{}, ErrInvalidModels
+		}
+		allowed := false
+		if model.ReasoningEfforts != nil {
+			for _, value := range *model.ReasoningEfforts {
+				if value == effort {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			return Model{}, ErrInvalidModels
+		}
+		model.DefaultEffort = &effort
+	}
+	if present(row["contextLimit"]) {
+		limit, ok := positive(row["contextLimit"])
+		if !ok {
+			return Model{}, ErrInvalidModels
+		}
+		if model.ContextWindow > limit {
+			return Model{}, ErrContextWindowExceedsLimit
+		}
+		model.ContextLimit = &limit
+	}
+	if present(row["metadataSource"]) {
+		source, ok := rawObject(row["metadataSource"])
+		if !ok {
+			return Model{}, ErrInvalidModels
+		}
+		for key := range source {
+			if !metadataFields[key] {
+				return Model{}, ErrInvalidModels
+			}
+		}
+		kind, _ := rawString(source["kind"])
+		if !metadataKinds[kind] {
+			return Model{}, ErrInvalidModels
+		}
+		meta := MetadataSource{Kind: kind}
+		if present(source["url"]) {
+			url := textOf(source["url"])
+			if url == "" {
+				return Model{}, ErrInvalidModels
+			}
+			meta.URL = &url
+		}
+		if present(source["checkedAt"]) {
+			stamp, _ := rawString(source["checkedAt"])
+			if !checkedAtPattern(stamp) {
+				return Model{}, ErrInvalidModels
+			}
+			meta.CheckedAt = &stamp
+		}
+		model.MetadataSource = &meta
+	}
+	if present(row["connectionId"]) {
+		value, ok := rawString(row["connectionId"])
+		if !ok || !connectionIDPattern(value) {
+			return Model{}, ErrInvalidModels
+		}
+		model.ConnectionID = &value
+	}
+	if present(row["upstreamModelId"]) {
+		value := textOf(row["upstreamModelId"])
+		if value == "" {
+			return Model{}, ErrInvalidModels
+		}
+		model.UpstreamModelID = &value
+	}
+	if present(row["upstreamProtocol"]) {
+		value, _ := rawString(row["upstreamProtocol"])
+		if value != ProtocolAnthropic {
+			return Model{}, ErrInvalidModels
+		}
+		model.UpstreamProtocol = &value
+	}
+	if present(row["failover"]) {
+		standbys, err := validateFailover(row["failover"], model.ConnectionID)
+		if err != nil {
+			return Model{}, err
+		}
+		model.Failover = standbys
+	}
+	if present(row["pricing"]) {
+		var rawPrice any
+		if json.Unmarshal(row["pricing"], &rawPrice) != nil {
+			return Model{}, ErrInvalidPrice
+		}
+		price, err := ParseModelPrice(rawPrice)
+		if err != nil {
+			return Model{}, err
+		}
+		model.Pricing = price
+	}
+	if name := textOf(row["name"]); name != "" {
+		model.Name = &name
+	}
+	return model, nil
+}
+
+// validateFailover checks the explicitly configured standby connections. A
+// standby that repeats the primary connection is dropped rather than refused:
+// it is the shape an older UI would produce after a model was moved to another
+// connection, and it adds no authority the row does not already have.
+func validateFailover(raw json.RawMessage, primary *string) ([]ModelFailover, error) {
+	var rows []json.RawMessage
+	if json.Unmarshal(raw, &rows) != nil {
+		return nil, ErrInvalidModels
+	}
+	if len(rows) > maxFailoverCandidates {
+		return nil, ErrInvalidModels
+	}
+	out := make([]ModelFailover, 0, len(rows))
+	primaryKey := ""
+	if primary != nil {
+		primaryKey = *primary
+	}
+	for _, item := range rows {
+		row, ok := rawObject(item)
 		if !ok {
 			return nil, ErrInvalidModels
 		}
-		model := Model{ID: id, Protocol: protocol, ContextWindow: window}
-
-		if present(row["maxOutputTokens"]) {
-			v, ok := positive(row["maxOutputTokens"])
-			if !ok {
+		for key := range row {
+			switch key {
+			case "connectionId", "upstreamModelId", "upstreamProtocol":
+			default:
 				return nil, ErrInvalidModels
 			}
-			model.MaxOutputTokens = &v
 		}
-		if present(row["tools"]) {
-			v, ok := rawBool(row["tools"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			model.Tools = &v
+		connection, ok := rawString(row["connectionId"])
+		if !ok || !connectionIDPattern(connection) {
+			return nil, ErrInvalidModels
 		}
-		if present(row["reasoning"]) {
-			v, ok := rawBool(row["reasoning"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			model.Reasoning = &v
+		if connection == primaryKey {
+			continue
 		}
-		if present(row["inputModalities"]) {
-			values, ok := rawStrings(row["inputModalities"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			for _, value := range values {
-				if value != "text" && value != "image" {
-					return nil, ErrInvalidModels
-				}
-			}
-			values = dedupe(values)
-			model.InputModalities = &values
-		}
-		if present(row["reasoningEfforts"]) {
-			values, ok := rawStrings(row["reasoningEfforts"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			for _, value := range values {
-				// A level is a short, control-free token; anything else would be
-				// echoed into a UI that cannot render it.
-				if value == "" || jsLen(value) > 64 || hasControl(value) {
-					return nil, ErrInvalidModels
-				}
-			}
-			values = dedupe(values)
-			model.ReasoningEfforts = &values
-		}
-		if present(row["defaultEffort"]) {
-			effort, ok := rawString(row["defaultEffort"])
-			if !ok || jsLen(effort) > 64 {
-				return nil, ErrInvalidModels
-			}
-			allowed := false
-			if model.ReasoningEfforts != nil {
-				for _, value := range *model.ReasoningEfforts {
-					if value == effort {
-						allowed = true
-						break
-					}
-				}
-			}
-			if !allowed {
-				return nil, ErrInvalidModels
-			}
-			model.DefaultEffort = &effort
-		}
-		if present(row["contextLimit"]) {
-			limit, ok := positive(row["contextLimit"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			if model.ContextWindow > limit {
-				return nil, ErrContextWindowExceedsLimit
-			}
-			model.ContextLimit = &limit
-		}
-		if present(row["metadataSource"]) {
-			source, ok := rawObject(row["metadataSource"])
-			if !ok {
-				return nil, ErrInvalidModels
-			}
-			for key := range source {
-				if !metadataFields[key] {
-					return nil, ErrInvalidModels
-				}
-			}
-			kind, _ := rawString(source["kind"])
-			if !metadataKinds[kind] {
-				return nil, ErrInvalidModels
-			}
-			meta := MetadataSource{Kind: kind}
-			if present(source["url"]) {
-				url := textOf(source["url"])
-				if url == "" {
-					return nil, ErrInvalidModels
-				}
-				meta.URL = &url
-			}
-			if present(source["checkedAt"]) {
-				stamp, _ := rawString(source["checkedAt"])
-				if !checkedAtPattern(stamp) {
-					return nil, ErrInvalidModels
-				}
-				meta.CheckedAt = &stamp
-			}
-			model.MetadataSource = &meta
-		}
-		if present(row["connectionId"]) {
-			value, ok := rawString(row["connectionId"])
-			if !ok || !connectionIDPattern(value) {
-				return nil, ErrInvalidModels
-			}
-			model.ConnectionID = &value
-		}
+		standby := ModelFailover{ConnectionID: connection}
 		if present(row["upstreamModelId"]) {
 			value := textOf(row["upstreamModelId"])
 			if value == "" {
 				return nil, ErrInvalidModels
 			}
-			model.UpstreamModelID = &value
+			standby.UpstreamModelID = &value
 		}
 		if present(row["upstreamProtocol"]) {
 			value, _ := rawString(row["upstreamProtocol"])
 			if value != ProtocolAnthropic {
 				return nil, ErrInvalidModels
 			}
-			model.UpstreamProtocol = &value
+			standby.UpstreamProtocol = &value
 		}
-		if name := textOf(row["name"]); name != "" {
-			model.Name = &name
+		duplicate := false
+		for _, previous := range out {
+			if previous.ConnectionID == standby.ConnectionID &&
+				equalStringPtr(previous.UpstreamModelID, standby.UpstreamModelID) &&
+				equalStringPtr(previous.UpstreamProtocol, standby.UpstreamProtocol) {
+				duplicate = true
+				break
+			}
 		}
-		out = append(out, model)
+		if duplicate {
+			continue
+		}
+		out = append(out, standby)
 	}
 	return out, nil
+}
+
+func equalStringPtr(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // NativeCatalog renders the catalog Kimi's own model menu reads. The order of

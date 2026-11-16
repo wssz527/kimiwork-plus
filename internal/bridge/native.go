@@ -17,24 +17,30 @@ import (
 )
 
 type Native struct {
-	mu            sync.Mutex
-	profileMu     sync.Mutex
-	profileReason string
-	service       *Service
-	controller    *kimi.Controller
-	process       core.Document
-	contract      *kimi.ContractResult
-	operation     core.Document
-	jobs          chan struct{}
-	policies      *nativePolicies
-	web           *webService
-	webKeys       *webKey
-	mcp           *kimi.MCPManager
-	dns           byokDNS
-	probe         *byokdns.Probe
-	admin         byokdns.Administrator
-	dnsReason     string
-	resolverPath  string
+	mu                sync.Mutex
+	profileMu         sync.Mutex
+	profileReason     string
+	service           *Service
+	controller        *kimi.Controller
+	process           core.Document
+	contract          *kimi.ContractResult
+	operation         core.Document
+	jobs              chan struct{}
+	policies          *nativePolicies
+	web               *webService
+	webKeys           *webKey
+	mcp               *kimi.MCPManager
+	dns               byokDNS
+	probe             *byokdns.Probe
+	admin             byokdns.Administrator
+	dnsReason         string
+	resolverPath      string
+	workCapabilities  kimi.WorkCapabilities
+	quota             *nativeQuota
+	accounts          *accountManager
+	accountActivation core.Document
+	accountReason     string
+	swarm             kimi.SwarmSnapshot
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -65,7 +71,13 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	if e != nil {
 		return nil, e
 	}
-	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, jobs: make(chan struct{}, 2)}
+	capabilities := kimi.ProbeWorkCapabilities(install)
+	policies.capabilities = capabilities.Subagents
+	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, jobs: make(chan struct{}, 2), workCapabilities: capabilities}
+	n.quota = newNativeQuota(s, controller.KimiCodeKey, kimi.LocalKimiCodeKey)
+	if err := n.initAccounts(gateway); err != nil {
+		n.accountReason = core.ErrorCode(err)
+	}
 	n.initBYOK()
 	controller.SetTranslationHandler(n.translate)
 	d, _, e := s.Store.Read()
@@ -92,6 +104,12 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 			return n.toolsAction(ctx, in)
 		case "/api/web-tools":
 			return n.webAction(in)
+		case "/api/quota/code", "/api/quota/magpie":
+			return n.quota.Action(ctx, path, in)
+		case "/api/accounts":
+			return core.Document{"accounts": n.accountsState()}, nil
+		case "/api/work/swarm":
+			return n.readSwarm(ctx)
 		}
 		return gateway.Action(ctx, path, in)
 	}
@@ -163,6 +181,7 @@ func (n *Native) watch(ctx context.Context) {
 			if err := n.syncWorkHome(); err == nil {
 				configObserved = n.reconcile(configObserved)
 			}
+			n.observeAccounts(ctx)
 		}
 	}
 }
@@ -197,7 +216,19 @@ func (n *Native) State() core.Document {
 		}
 	}
 	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
+	out["workCapabilities"] = n.workCapabilities
+	if n.swarm.State == "" {
+		out["swarm"] = kimi.SwarmSnapshot{State: kimi.SwarmStateUnknown, Reason: "work_swarm_not_checked"}
+	} else {
+		out["swarm"] = n.swarm
+	}
 	n.mu.Unlock()
+	if n.quota != nil {
+		for key, value := range n.quota.State() {
+			out[key] = value
+		}
+	}
+	out["accounts"] = n.accountsState()
 	out["setup"] = n.byokState()
 	if d, _, e := n.service.Store.Read(); e == nil {
 		for k, v := range n.policies.State(d) {
@@ -227,6 +258,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		}
 		profileMode = mode
 	}
+	if action == "set-swarm" {
+		if _, ok := in["enabled"].(bool); !ok {
+			return nil, errors.New("invalid_swarm_mode")
+		}
+	}
 	if action == "check-upstream" {
 		connectionID := core.String(in["connectionId"])
 		if connectionID == "" {
@@ -246,7 +282,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections":
+	case "launch-kimi", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
 	default:
 		return nil, errors.New("native_preview_unavailable")
 	}
@@ -263,6 +299,8 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		timeout := 45 * time.Second
 		if action == "prepare-native" || action == "remove-dns" {
 			timeout = 180 * time.Second
+		} else if strings.HasPrefix(action, "account-") {
+			timeout = 90 * time.Second
 		}
 		deadline, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -270,6 +308,17 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		var result any
 		state := "done"
 		switch action {
+		case "set-swarm":
+			result, err = n.setSwarm(deadline, in["enabled"].(bool))
+		case "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove":
+			if n.accounts == nil {
+				err = errors.New("account_switch_unavailable")
+				break
+			}
+			result, err = n.accounts.Action(deadline, in)
+			if err == nil {
+				n.refreshAccountQuota(deadline)
+			}
 		case "launch-kimi":
 			if profileMode == kimi.ProfileModeExistingAuthorized {
 				err = n.controller.StartWithExistingLogin(deadline)

@@ -13,8 +13,14 @@ var envPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 var envReplace = regexp.MustCompile(`[^A-Z0-9]+`)
 var modelFields = map[string]bool{}
 
+// budgetFields is the writable set of the budget document. `prices` is not
+// here because a price belongs to the model it prices, so it round-trips through
+// the model row instead of being duplicated.
+var budgetFields = map[string]bool{"enabled": true, "currency": true, "timeZone": true,
+	"daily": true, "monthly": true, "serialize": true}
+
 func init() {
-	for _, k := range strings.Fields("id name connectionId upstreamModelId protocol upstreamProtocol contextWindow contextLimit maxOutputTokens tools reasoning inputModalities reasoningEfforts defaultEffort metadataSource") {
+	for _, k := range strings.Fields("id name connectionId upstreamModelId protocol upstreamProtocol contextWindow contextLimit maxOutputTokens tools reasoning inputModalities reasoningEfforts defaultEffort metadataSource failover pricing") {
 		modelFields[k] = true
 	}
 }
@@ -115,7 +121,54 @@ func Validate(d Document) error {
 		if m.ConnectionID != nil && connections[*m.ConnectionID] == nil {
 			return errors.New("connection_unavailable")
 		}
+		for _, standby := range m.Failover {
+			if connections[standby.ConnectionID] == nil {
+				return errors.New("connection_unavailable")
+			}
+		}
 	}
+	if err := validateBudgetDocument(d["budget"]); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateBudgetDocument checks the stored policy. The panel refuses an
+// unenforceable policy before saving; a hand-edited file is refused here so the
+// gateway never starts with a document it cannot read.
+func validateBudgetDocument(raw any) error {
+	if raw == nil {
+		return nil
+	}
+	if _, err := protocol.ParseBudget(raw); err != nil {
+		return errors.New("invalid_budget")
+	}
+	return nil
+}
+
+// MergeBudget replaces the budget document with the validated input. A nil or
+// empty input removes it, which is how the panel turns budgeting off again.
+func MergeBudget(d Document, input any) error {
+	if input == nil {
+		delete(d, "budget")
+		return nil
+	}
+	if object, ok := input.(map[string]any); ok && len(object) > 0 {
+		for key := range object {
+			if !budgetFields[key] {
+				return errors.New("invalid_budget")
+			}
+		}
+	}
+	normalized, err := NormalizeBudget(input)
+	if err != nil {
+		return err
+	}
+	if normalized == nil {
+		delete(d, "budget")
+		return nil
+	}
+	d["budget"] = normalized
 	return nil
 }
 
@@ -207,8 +260,10 @@ func MergeConnections(d Document, input []any) (map[string]*string, error) {
 		out = append(out, c)
 	}
 	for _, v := range Rows(d["models"]) {
-		if id := String(Object(v)["connectionId"]); id != "" && !ids[id] {
-			return nil, errors.New("connection_in_use")
+		for _, id := range modelConnections(Object(v)) {
+			if !ids[id] {
+				return nil, errors.New("connection_in_use")
+			}
 		}
 	}
 	d["connections"] = out

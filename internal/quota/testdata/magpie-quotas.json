@@ -1,0 +1,88 @@
+[
+  {
+    "provider": "kimi-for-coding",
+    "name": "Kimi Code",
+    "kind": "subscription",
+    "user": "Signed in",
+    "windows": [
+      {
+        "name": "Weekly",
+        "used": 20,
+        "remaining": 80,
+        "resetsAt": "2026-11-23T05:01:15.24Z"
+      },
+      {
+        "name": "5h",
+        "used": 0,
+        "remaining": 100,
+        "resetsAt": "2026-11-16T19:01:15.24Z"
+      }
+    ],
+    "readAt": "2026-11-16T22:38:22.020173+08:00"
+  },
+  {
+    "provider": "codearts",
+    "name": "CodeArts",
+    "kind": "subscription",
+    "plan": "体验版",
+    "user": "user-1",
+    "windows": [
+      {
+        "name": "总积分",
+        "used": 98.21428571428571,
+        "remaining": 1.7857142857142918,
+        "resetsAt": "2026-12-06T16:00:00Z",
+        "display": "5500 / 5600 · 100 即将过期",
+        "amount": 5500,
+        "limit": 5600,
+        "unit": "credits",
+        "runsOutAt": "2026-11-16T16:01:51.452Z",
+        "holdsWhy": "clock"
+      },
+      {
+        "name": "基础积分包",
+        "used": 100,
+        "remaining": 0,
+        "resetsAt": "2026-12-06T16:00:00Z",
+        "display": "500 / 500",
+        "amount": 500,
+        "limit": 500,
+        "unit": "credits"
+      },
+      {
+        "name": "赠送积分包",
+        "used": 98.0392156862745,
+        "remaining": 1.9607843137254974,
+        "display": "5000 / 5100 · 100 即将过期",
+        "amount": 5000,
+        "limit": 5100,
+        "unit": "credits",
+        "runsOutAt": "2026-11-16T16:01:51.452Z"
+      }
+    ],
+    "readAt": "2026-11-16T22:38:22.791738+08:00"
+  },
+  {
+    "provider": "bye-gpt",
+    "name": "BYE GPT",
+    "kind": "balance",
+    "windows": [],
+    "balance": "$19.18",
+    "readAt": "2026-11-16T22:38:25.421911+08:00"
+  },
+  {
+    "provider": "codex",
+    "name": "Codex",
+    "kind": "subscription",
+    "windows": [
+      {
+        "name": "Image generation",
+        "used": 0,
+        "remaining": 100,
+        "display": "Unknown",
+        "text": true,
+        "lane": "images"
+      }
+    ]
+  }
+]
