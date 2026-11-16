@@ -160,10 +160,10 @@
                 <label class="field" for="m-price-cached"><span class="field__label">缓存读取（可选）</span><input id="m-price-cached" type="number" min="0" step="any" inputmode="decimal" placeholder="未声明"></label>
                 <label class="field" for="m-price-write"><span class="field__label">缓存写入（可选）</span><input id="m-price-write" type="number" min="0" step="any" inputmode="decimal" placeholder="未声明"></label>
               </div>
-              <p class="field__hint">输入与输出必须同时填写才能估算花费；没有定价的模型不会被预算限制。这是你自填的估价，不是供应商账单。</p>
+              <p class="field__hint">输入与输出必须同时填写才能估算花费。缺少定价的新费用不会计入金额；已记录费用仍参与预算判断。这是你自填的估价，不是供应商账单。</p>
             </fieldset>
             <fieldset class="field field--group editor-section--wide" id="m-failover-field"><legend class="field__label">备用连接（可选，最多 8 条）</legend>
-              <p class="field__hint">主连接无法连接时才尝试备用连接；这里只按顺序改投，不会替上游重试同一请求。</p>
+              <p class="field__hint">主连接暂时不可用或服务繁忙时，按顺序尝试备用连接；响应开始后不会切换。</p>
               <div id="m-failover-rows" class="failover-rows"></div>
               <div class="action-line action-line--start"><button class="btn btn--quiet btn--sm" id="m-failover-add" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>添加备用连接</button><span class="mono" id="m-failover-count"></span></div>
             </fieldset>

@@ -896,7 +896,7 @@
     }
     if (textOf(status.warning) === 'unpriced_models_not_limited') {
       const unpricedModels = Array.isArray(status.unpricedModels) ? status.unpricedModels : [];
-      box.append(node('p', 'note note--warn', '这些模型没有定价，新费用不会计入金额：' + (unpricedModels.join('、') || '未列出') + '。在模型编辑器里补充定价后才会计入。已记录费用达到上限时仍会拒绝新请求。'));
+      box.append(node('p', 'note note--warn', '这些模型没有定价，新费用不会计入金额：' + (unpricedModels.join('、') || '未列出') + '。在模型编辑器里补充定价后才会计入。已记录费用仍参与预算判断。'));
     }
     if (Array.isArray(status.pricedModels) && status.pricedModels.length) {
       box.append(node('p', 'hint', '已定价、会被计入的模型：' + status.pricedModels.join('、')));

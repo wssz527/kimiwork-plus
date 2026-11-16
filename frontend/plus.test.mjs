@@ -316,7 +316,7 @@ test('the budget card never calls the estimate a provider hard limit', async () 
     assert.match(text, /未定价（未计入金额）/);
     assert.match(text, /在途（可能超出）/);
     assert.match(text, /model-b/);
-    assert.match(text, /已记录费用达到上限时仍会拒绝新请求/);
+    assert.match(text, /已记录费用仍参与预算判断/);
     assert.doesNotMatch(text, /不受预算限制/);
     assert.doesNotMatch(text, /硬上限[^。]*保证/);
   } finally { env.restore(); }
