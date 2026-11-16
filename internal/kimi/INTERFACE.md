@@ -851,7 +851,9 @@ probe := platform.Probe(store, key)
 ```
 
 `missing` and `access-denied` are separate states on purpose: the first is a
-first-run screen, the second is fixed only by re-saving the key. Merging them is
+first-run screen, while the second allows an explicit system-authorized read of
+an existing connection reference through `apply-connections`. Re-saving remains
+necessary when the credential is missing. Merging these states is
 how a user ends up with no idea why a working key stopped working. An
 access-denied read returns immediately — no retry, no wait — so a background
 status call cannot sit inside an authorisation prompt it is unable to show.
@@ -980,7 +982,14 @@ surfaces are deliberately separate:
   Reading localStorage token-presence flags alone never verifies an identity.
 - Exact HTTPS origins `kimi.com` and `www.kimi.com` own the account Cookie and
   localStorage state. Cookie/Storage writes and their reloads do not target the
-  Work shell. Login reset also reloads the shell to discard its cached profile.
+  Work shell. Writes notify `__KIMI_DESKTOP_BRIDGE.onLocalStorageChanged`
+  with the complete token pair and compare `getLocalStorageSnapshot()` before
+  mutating reactive localStorage. This avoids an expired access token clearing
+  the session before its refresh token arrives. Login reset uses
+  `kimiAgentAPI.accountV2.reauthenticate()`, which clears the main-process token
+  store locally without invalidating the saved server session through logout.
+  `getInitialAuthTokens()` distinguishes a signed-out shell from stale analytics
+  identity callbacks.
 
 The installed Kimi 3.2.27 status getter returns
 `{statuses: Record<conversationKey, status>, failureIds: Record<conversationKey, string[]>}`.
@@ -999,8 +1008,39 @@ rotated credentials observed after restart are not overwritten by the older
 snapshot. The bridge stores restorable sessions only through its native
 credential vault and returns account summaries rather than tokens.
 
-The current Mac candidate has captured the real current identity and passed a
-same-account no-write operation after the busy-state fixes. This is not proof of
+The current Mac candidate has captured the real current identity, passed a
+same-account no-write operation, and completed a real add/cancel cycle through
+the official QR/phone login page. Cancelling restored the original account after
+a normal restart with page and kernel identity agreement. This is not proof of
 switching accounts, kernel adoption under a different identity, or token lifetime.
 Two real accounts and five round trips are still required. Windows account
 runtime behaviour remains unverified.
+
+## 41. Explicit connection credential authorization
+
+`apply-connections` first reads each existing credential normally. Only a failed
+read requests visible system authorization for the same reference. It never
+exports, rewrites or replaces the saved key. All connection reads must succeed
+before runtime configuration changes. A refusal or cancellation leaves the
+previous runtime and saved configuration intact. Background state, discovery,
+quota and gateway reads remain noninteractive.
+
+The Mac connection-reauthorize candidate completed this explicit action through
+real system prompts and read back `apiKeySet=true` with applied runtime state.
+The authorization button itself still needs a verified GUI click; API and system
+prompt evidence do not establish that part of the interface.
+
+## 42. Current candidate Work and Swarm adoption
+
+On 2026-11-17, the connection-reauthorize candidate imported both named Magpie
+models through the official API and normally restarted Kimi. The official selector
+was then used to receive real DeepSeek and GLM replies through the candidate.
+A conversation-level Swarm enable was followed by a two-agent arithmetic task.
+The official UI showed both completed assistant cards and the final marker;
+the candidate ledger recorded two concurrent child requests between parent
+requests. The mode was then restored to off and read back.
+
+These requests share a conversation identifier. Their verified task sequence does
+not establish a reliable per-request caller-role field or an independent Swarm
+model pool. This evidence belongs to the tested candidate, not automatically to
+any later signed build.

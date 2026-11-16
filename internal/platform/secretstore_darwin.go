@@ -163,7 +163,7 @@ func (s StoreState) ScreenState() string {
 // testable without touching the user's keychain.
 type keychainSDK interface {
 	state() sdkState
-	read(service, account string) keychainRead
+	read(service, account string, interactive bool) keychainRead
 	write(service, account, secret string, interactive bool) keychainWrite
 	remove(service, account string, interactive bool) (int32, bool)
 }
@@ -248,15 +248,23 @@ func (k *keychain) State() StoreState {
 }
 
 func (k *keychain) Get(key string) (string, error) {
+	return k.get(key, false)
+}
+
+func (k *keychain) GetVisible(key string) (string, error) {
+	return k.get(key, true)
+}
+
+func (k *keychain) get(key string, interactive bool) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	// A read never permits interaction. A background daemon cannot show an
-	// authorization or unlock dialog, so it must answer with the state instead of
-	// blocking inside one.
 	interactionMu.Lock()
 	defer interactionMu.Unlock()
-	result := k.sdk.read(k.service, key)
+	if interactive && !k.sdk.state().hasVisibleSession() {
+		return "", &KeychainError{Code: CodeCredentialSessionUnavailable, Op: "read", Existed: -1}
+	}
+	result := k.sdk.read(k.service, key, interactive)
 	if !result.restored {
 		return "", k.notRestored("read", result.status, -1, "", false)
 	}
@@ -267,7 +275,7 @@ func (k *keychain) Get(key string) (string, error) {
 		}
 		return result.value, nil
 	}
-	return "", k.readError(result.status, false)
+	return "", k.readError(result.status, interactive)
 }
 
 func (k *keychain) Set(key, value string) error {

@@ -150,6 +150,26 @@ func TestAccountManagerPendingLoginSurvivesRestartAndCanCancel(t *testing.T) {
 	}
 }
 
+func TestAccountManagerFailedLoginShowsRecoveryInsteadOfWaiting(t *testing.T) {
+	f := newAccountManagerFixture(t)
+	f.manager.hooks.BeginLogin = func(context.Context) error {
+		f.active = ""
+		return errors.New("account_session_sign_out_incomplete")
+	}
+	f.failTarget = "first"
+	if err := f.action(t, "account-begin-add", ""); err == nil || err.Error() != "account_switch_restore_failed" {
+		t.Fatal("failed login did not preserve recovery", err)
+	}
+	if f.manager.State()["adding"] != false || f.manager.State()["restoreAccountId"] != accountID("first") {
+		t.Fatal("failed login still advertised a ready login window")
+	}
+	f.failTarget = ""
+	activations := f.activates
+	if err := f.action(t, "account-cancel-add", ""); err != nil || f.activates != activations {
+		t.Fatal("already restored identity was rewritten", err)
+	}
+}
+
 func TestAccountManagerDoesNotSwitchDuringWork(t *testing.T) {
 	f := newAccountManagerFixture(t)
 	f.busy = true

@@ -333,6 +333,27 @@ func (a *cdpActions) accountIdentity(ctx context.Context, page accountPage) (acc
 	return identity, nil
 }
 
+func (a *cdpActions) accountBeginLogin(ctx context.Context, page accountPage) error {
+	if page.credentials {
+		return errors.New(AccountErrUnsupported)
+	}
+	value, err := a.evaluate(ctx, page.sessionID, accountBeginLoginExpression)
+	if err != nil {
+		return errors.New(AccountErrPageTimeout)
+	}
+	if ok, _ := value.(bool); !ok {
+		return errors.New(AccountErrUnsupported)
+	}
+	return nil
+}
+
+const accountBeginLoginExpression = `(async function(){
+var api = globalThis.kimiAgentAPI;
+if (!api || !api.accountV2 || typeof api.accountV2.reauthenticate !== "function") return false;
+var result = await api.accountV2.reauthenticate();
+return Boolean(result && result.ok === true && result.data && result.data.confirmed === true);
+})()`
+
 func cookieSameSite(value string) string {
 	switch strings.ToLower(value) {
 	case "strict":
@@ -409,8 +430,21 @@ try {
   var profileCall = (api && typeof api.getUserProfile === "function")
     ? Promise.resolve(api.getUserProfile()).then(fromProfile, function(){ return false; })
     : Promise.resolve(false);
-  return profileCall.then(function(answered){
-    if (answered && out.userId) return out;
+  return profileCall.then(async function(answered){
+    if (api && typeof api.getInitialAuthTokens === "function") {
+      var tokens = await api.getInitialAuthTokens();
+      if (tokens && typeof tokens === "object" && Object.prototype.hasOwnProperty.call(tokens, "access_token")) {
+        out.accessToken = Boolean(tokens.access_token);
+        out.refresh = Boolean(tokens.refresh_token);
+        if (!out.accessToken) {
+          out.userId = "";
+          out.official = true;
+          out.anonymous = true;
+          return out;
+        }
+      }
+    }
+    if (answered || !out.accessToken) return out;
     return collectToken().then(function(){ return out; });
   });
 } catch (error) {}
@@ -443,7 +477,16 @@ try {
 // quoted by quoteJS, so a stored token cannot break out of the literal.
 func accountStorageWriteExpression(set map[string]string, remove []string) string {
 	var out strings.Builder
-	out.WriteString(`(function(){try{var store=globalThis.localStorage;if(!store)return false;`)
+	out.WriteString(`(async function(){try{var store=globalThis.localStorage;if(!store)return false;var changes={};var api=globalThis.__KIMI_DESKTOP_BRIDGE;if(!api||typeof api.onLocalStorageChanged!=="function"||typeof api.getLocalStorageSnapshot!=="function")return false;`)
+	for _, key := range sortedAccountKeys(set) {
+		out.WriteString(`changes[` + quoteJS(key) + `]=` + quoteJS(set[key]) + `;`)
+	}
+	for _, key := range remove {
+		if isAccountStorageKey(key) {
+			out.WriteString(`changes[` + quoteJS(key) + `]=null;`)
+		}
+	}
+	out.WriteString(`api.onLocalStorageChanged(changes);var snapshot=await api.getLocalStorageSnapshot();if(!Array.isArray(snapshot))return false;for(var key of ["access_token","refresh_token"]){if(!Object.prototype.hasOwnProperty.call(changes,key))continue;var item=snapshot.find(function(row){return row.key===key;});if((item?item.value:null)!==changes[key])return false;}`)
 	for _, key := range sortedAccountKeys(set) {
 		out.WriteString(`store.setItem(` + quoteJS(key) + `,` + quoteJS(set[key]) + `);`)
 	}

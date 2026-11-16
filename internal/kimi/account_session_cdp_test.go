@@ -388,6 +388,11 @@ func TestCDPAccountStorageExpressionsStayInsideTheAllowlist(t *testing.T) {
 			t.Fatalf("the expression touches %q: %s", forbidden, expression)
 		}
 	}
+	if !strings.Contains(expression, `globalThis.__KIMI_DESKTOP_BRIDGE`) ||
+		!strings.Contains(expression, `api.onLocalStorageChanged(changes)`) ||
+		!strings.Contains(expression, `await api.getLocalStorageSnapshot()`) {
+		t.Fatal("storage write did not synchronize and read back the official token store")
+	}
 	if !strings.Contains(expression, `store.removeItem("refresh_token")`) {
 		t.Fatalf("the stale token was not removed: %s", expression)
 	}
@@ -415,6 +420,23 @@ func TestCDPAccountStorageExpressionsStayInsideTheAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(expression, `a\"b`) {
 		t.Fatalf("the value is not a quoted literal: %s", expression)
+	}
+}
+
+func TestCDPAccountLoginUsesLocalReauthentication(t *testing.T) {
+	recorder := &cdpRecorder{evaluated: true}
+	actions := NewCDPActions(newCDPRecorderPipe(t, recorder), t.TempDir(), t.TempDir()).(*cdpActions)
+	page := accountPage{sessionID: "shell", origin: "app://localhost"}
+	if err := actions.accountBeginLogin(context.Background(), page); err != nil {
+		t.Fatal(err)
+	}
+	expression, _ := recorder.params[len(recorder.params)-1]["expression"].(string)
+	if !strings.Contains(expression, "accountV2.reauthenticate()") || strings.Contains(expression, ".logout(") {
+		t.Fatal("login invalidated the saved server session")
+	}
+	recorder.evaluated = false
+	if err := actions.accountBeginLogin(context.Background(), page); err == nil {
+		t.Fatal("unconfirmed reauthentication reported success")
 	}
 }
 
@@ -449,6 +471,22 @@ func TestCDPAccountIdentityPrefersTheOfficialProfileAPI(t *testing.T) {
 	}
 	if recorder.count("Page.reload") != 1 {
 		t.Fatal("the page was not reloaded")
+	}
+}
+
+func TestAccountStorageSyncsTokenPairBeforeReactivePageWrites(t *testing.T) {
+	expression := accountStorageWriteExpression(map[string]string{"access_token": "expired-access", "refresh_token": "refresh-current"}, []string{"anonymous_access_token"})
+	syncAt := strings.Index(expression, "api.onLocalStorageChanged(changes)")
+	readbackAt := strings.Index(expression, "await api.getLocalStorageSnapshot()")
+	for _, mutation := range []string{"store.setItem(", "store.removeItem("} {
+		if at := strings.Index(expression, mutation); syncAt < 0 || readbackAt <= syncAt || at <= readbackAt {
+			t.Fatalf("page mutation precedes the complete main-process credential pair: %s", mutation)
+		}
+	}
+	for _, field := range []string{`changes["access_token"]="expired-access"`, `changes["refresh_token"]="refresh-current"`} {
+		if at := strings.Index(expression, field); at < 0 || at >= syncAt {
+			t.Fatal("main-process snapshot is incomplete")
+		}
 	}
 }
 

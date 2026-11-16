@@ -29,9 +29,8 @@ package platform
 //     matched item, the session dictionary) is released exactly once. Borrowed
 //     kSec and kCF constants are never released.
 //
-// Reads are always non-interactive. Writes are non-interactive unless the caller
-// selected the visible path, and even then the process-wide switch is restored
-// to the value observed before the call.
+// Calls are non-interactive unless the caller selected the visible path. The
+// process-wide switch is restored to the value observed before the call.
 
 typedef OSStatus (*kimi_body)(void *context);
 
@@ -206,6 +205,7 @@ typedef struct {
 	uint8_t *out;
 	size_t capacity;
 	size_t length;
+	int32_t interactive;
 } kimi_read;
 
 static OSStatus kimi_read_body(void *opaque) {
@@ -223,7 +223,7 @@ static OSStatus kimi_read_body(void *opaque) {
 	keys[2] = kSecAttrAccount;            values[2] = read->account;
 	keys[3] = kSecReturnData;             values[3] = kCFBooleanTrue;
 	keys[4] = kSecMatchLimit;             values[4] = kSecMatchLimitOne;
-	keys[5] = kSecUseAuthenticationUI;    values[5] = kSecUseAuthenticationUIFail;
+	keys[5] = kSecUseAuthenticationUI;    values[5] = read->interactive ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail;
 
 	query = kimi_dictionary(keys, values, 6);
 	if (query == NULL) {
@@ -320,7 +320,7 @@ int32_t kimi_secret_write(const uint8_t *service, size_t serviceLength,
 
 int32_t kimi_secret_read(const uint8_t *service, size_t serviceLength,
                          const uint8_t *account, size_t accountLength,
-                         uint8_t *out, size_t capacity,
+                         uint8_t *out, size_t capacity, int32_t interactive,
                          size_t *outLength, int32_t *outRestored) {
 	kimi_read read;
 	OSStatus status;
@@ -332,12 +332,13 @@ int32_t kimi_secret_read(const uint8_t *service, size_t serviceLength,
 	read.out = out;
 	read.capacity = capacity;
 	read.length = 0;
+	read.interactive = interactive;
 	if (read.service == NULL || read.account == NULL) {
 		if (read.service) CFRelease(read.service);
 		if (read.account) CFRelease(read.account);
 		return errSecParam;
 	}
-	status = kimi_run(0, kimi_read_body, &read, outRestored);
+	status = kimi_run(interactive, kimi_read_body, &read, outRestored);
 	*outLength = read.length;
 	CFRelease(read.account);
 	CFRelease(read.service);
@@ -446,7 +447,7 @@ func (sdkKeychain) state() sdkState {
 	}
 }
 
-func (sdkKeychain) read(service, account string) keychainRead {
+func (sdkKeychain) read(service, account string, interactive bool) keychainRead {
 	servicePointer, serviceLength := cBytes(service)
 	accountPointer, accountLength := cBytes(account)
 	// The buffer is the documented largest value this store writes. A stored item
@@ -457,7 +458,7 @@ func (sdkKeychain) read(service, account string) keychainRead {
 	var restored C.int32_t = 1
 
 	status := C.kimi_secret_read(servicePointer, serviceLength, accountPointer, accountLength,
-		(*C.uint8_t)(unsafe.Pointer(&buffer[0])), C.size_t(len(buffer)), &length, &restored)
+		(*C.uint8_t)(unsafe.Pointer(&buffer[0])), C.size_t(len(buffer)), cInteractive(interactive), &length, &restored)
 	result := keychainRead{status: int32(status), restored: restored != 0}
 	if status == errSecSuccess && uint64(length) <= uint64(len(buffer)) {
 		result.value = string(buffer[:int(length)])

@@ -123,7 +123,7 @@ function allButtons(node, output = []) {
   return output;
 }
 
-function makePlus({ data = {}, routes = {} } = {}) {
+function makePlus({ data = {}, routes = {}, onAccounts } = {}) {
   const dom = makeDom();
   const calls = [];
   const notices = [];
@@ -148,7 +148,7 @@ function makePlus({ data = {}, routes = {} } = {}) {
   load();
   const api = globalThis.KimiWorkPlus;
   let state = data;
-  const panel = api.mount({ request, notify, getState: () => state, setState: (next) => { state = next; } });
+  const panel = api.mount({ request, notify, getState: () => state, setState: (next) => { state = next; }, onAccounts });
   const restore = () => { for (const [name, value] of Object.entries(previous)) globalThis[name] = value; };
   /* 挂载后新建的节点不在 registry 里：按真实 getElementById 的方式在树上找。 */
   const byId = (id) => dom.document.getElementById(id);
@@ -569,5 +569,85 @@ test('render() refreshes the account bar, overview and capabilities', () => {
     env.setState({ ...env.getState(), accounts: { state: 'ready', currentId: '', accounts: [] }, workCapabilities: null });
     env.panel.render(env.getState());
     assert.match(textOf(env.byId('plus-overview-account')), /当前账号未记录/);
+  } finally { env.restore(); }
+});
+
+
+test('the account bar opens account management even with no saved accounts', () => {
+  let opened = 0;
+  const env = makePlus({ data: { accounts: { state: 'ready', accounts: [] } }, onAccounts: () => { opened++; } });
+  try {
+    env.panel.render(env.getState());
+    const manage = findButton(env.byId('plus-account-bar'), '账号管理');
+    assert.ok(manage);
+    manage.listeners.click[0]();
+    assert.equal(opened, 1);
+  } finally { env.restore(); }
+});
+
+test('adding an account does not require manually saving the first account', async () => {
+  const env = makePlus({ data: { accounts: { state: 'ready', accounts: [] } }, routes: {
+    '/api/actions': body => { assert.equal(body.action, 'account-begin-add'); return {}; },
+  } });
+  try {
+    env.panel.render(env.getState());
+    const add = findButton(env.byId('plus-accounts-body'), '添加账号');
+    assert.ok(add);
+    await add.listeners.click[0]();
+    assert.equal(env.calls.filter(call => call.path === '/api/actions').length, 1);
+  } finally { env.restore(); }
+});
+
+test('a lost Work session stays visible and can restart before continuing account add', async () => {
+  const book = { state: 'ready', currentId: 'acct-a', adding: false, accounts: [{ id: 'acct-a', name: 'A' }] };
+  let count = 0;
+  let operation;
+  const actions = [];
+  const env = makePlus({ data: { accounts: book }, routes: {
+    '/api/actions': body => {
+      actions.push(body.action);
+      operation = { id: 'op-' + (++count), action: body.action, state: count === 1 ? 'failed' : 'done' };
+      if (count === 1) operation.reason = 'account_session_unavailable';
+      return { operation };
+    },
+    '/api/state': () => ({ accounts: { ...book, adding: count === 3, restoreAccountId: count === 3 ? 'acct-a' : '' }, operation }),
+  } });
+  try {
+    env.panel.render(env.getState());
+    await findButton(env.byId('plus-accounts-body'), '添加账号').listeners.click[0]();
+    const body = env.byId('plus-accounts-body');
+    assert.match(textOf(body), /未连接到 Kimi 的登录窗口/);
+    assert.doesNotMatch(textOf(body), /account_session_unavailable/);
+    const recover = findButton(body, '正常重启 Kimi 并继续添加');
+    assert.ok(recover);
+    assert.match(textOf(body), /先结束正在运行的任务/);
+    env.panel.render(env.getState());
+    assert.match(textOf(env.byId('plus-accounts-body')), /未连接到 Kimi 的登录窗口/);
+    await findButton(env.byId('plus-accounts-body'), '正常重启 Kimi 并继续添加').listeners.click[0]();
+    assert.deepEqual(actions, ['account-begin-add', 'restart-kimi', 'account-begin-add']);
+    assert.match(textOf(env.byId('plus-accounts-body')), /正在等你完成官方登录/);
+    assert.doesNotMatch(textOf(env.byId('plus-accounts-body')), /未连接到 Kimi 的登录窗口/);
+  } finally { env.restore(); }
+});
+
+test('a failed recovery restart never signs out or resubmits account add', async () => {
+  const book = { state: 'ready', currentId: 'acct-a', accounts: [{ id: 'acct-a', name: 'A' }] };
+  let operation;
+  const actions = [];
+  const env = makePlus({ data: { accounts: book }, routes: {
+    '/api/actions': body => {
+      actions.push(body.action);
+      operation = { id: String(actions.length), action: body.action, state: 'failed', reason: actions.length === 1 ? 'account_session_unavailable' : 'kimi_quit_timeout' };
+      return { operation };
+    },
+    '/api/state': () => ({ accounts: book, operation }),
+  } });
+  try {
+    env.panel.render(env.getState());
+    await findButton(env.byId('plus-accounts-body'), '添加账号').listeners.click[0]();
+    await findButton(env.byId('plus-accounts-body'), '正常重启 Kimi 并继续添加').listeners.click[0]();
+    assert.deepEqual(actions, ['account-begin-add', 'restart-kimi']);
+    assert.match(textOf(env.byId('plus-accounts-body')), /Kimi 尚未退出/);
+    assert.equal(env.getState().accounts.currentId, 'acct-a');
   } finally { env.restore(); }
 });

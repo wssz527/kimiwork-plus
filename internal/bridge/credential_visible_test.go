@@ -75,6 +75,63 @@ func TestVisibleCredentialFailureAndReadback(t *testing.T) {
 	}
 }
 
+type reauthorizeTestKeys struct {
+	visibleTestKeys
+	visibleReads int
+	visibleErr   error
+}
+
+func (k *reauthorizeTestKeys) GetVisible(ref string) (string, error) {
+	k.visibleReads++
+	if k.visibleErr != nil {
+		return "", k.visibleErr
+	}
+	return k.testKeys[ref], nil
+}
+
+func TestExplicitConnectionApplyReauthorizesUnreadableCredentials(t *testing.T) {
+	for _, denied := range []bool{false, true} {
+		t.Run(map[bool]string{false: "allowed", true: "denied"}[denied], func(t *testing.T) {
+			store := &reauthorizeTestKeys{visibleTestKeys: visibleTestKeys{testKeys: testKeys{"connection-fixture": "synthetic"}, readErr: errors.New("credential_authorization_failed")}}
+			if denied {
+				store.visibleErr = errors.New("credential_authorization_cancelled")
+			}
+			keys := CacheKeys(store)
+			connection := map[string]any{"id": "fixture", "apiKeyRef": "connection-fixture"}
+			service := &Service{Keys: keys}
+			err := service.authorizeConnectionCredentials(core.Document{"connections": []any{connection}})
+			if store.visibleReads != 1 || store.visibleWrites != 0 || store.plainWrites != 0 {
+				t.Fatal("explicit apply did not authorize the existing reference read-only")
+			}
+			if denied {
+				if err == nil || err.Error() != "credential_authorization_cancelled" {
+					t.Fatalf("denied authorization: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				value, err := credentialFor(connection, keys)
+				if err != nil || value != "synthetic" {
+					t.Fatal("authorized credential was not available to the runtime")
+				}
+			}
+			if connection["apiKeyRef"] != "connection-fixture" || store.testKeys["connection-fixture"] != "synthetic" {
+				t.Fatal("authorization changed the saved credential")
+			}
+		})
+	}
+}
+
+func TestConnectionAuthorizationDoesNotPromptForReadableCredentials(t *testing.T) {
+	store := &reauthorizeTestKeys{visibleTestKeys: visibleTestKeys{testKeys: testKeys{"connection-fixture": "synthetic"}}}
+	service := &Service{Keys: CacheKeys(store)}
+	err := service.authorizeConnectionCredentials(core.Document{"connections": []any{map[string]any{"apiKeyRef": "connection-fixture"}}})
+	if err != nil || store.visibleReads != 0 {
+		t.Fatal("readable credential requested unnecessary system authorization")
+	}
+}
+
 func TestCredentialRowRetainsDiagnosticCode(t *testing.T) {
 	store := &visibleTestKeys{testKeys: testKeys{}, readErr: errors.New("credential_keychain_locked")}
 	rows := connectionRows(map[string]any{"connections": []any{map[string]any{"id": "fixture", "apiKeyRef": "connection-fixture"}}}, store)

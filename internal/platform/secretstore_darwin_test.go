@@ -94,10 +94,11 @@ func (f *fakeSDK) state() sdkState {
 	return f.stateValue
 }
 
-func (f *fakeSDK) read(service, account string) keychainRead {
+func (f *fakeSDK) read(service, account string, interactive bool) keychainRead {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "read:"+account)
+	f.interactive = append(f.interactive, interactive)
 	return f.readResult
 }
 
@@ -125,6 +126,22 @@ func (f *fakeSDK) interactiveCalls() []bool {
 
 func fakeStore(sdk *fakeSDK) *keychain {
 	return &keychain{service: "dev.kimi-work-plus.preview.test", sdk: sdk}
+}
+
+func TestVisibleReadRequiresAVisibleSession(t *testing.T) {
+	sdk := newFakeSDK()
+	sdk.readResult = keychainRead{status: errSecSuccess, value: "saved-session", restored: true}
+	value, err := fakeStore(sdk).GetVisible("account-session")
+	if err != nil || value != "saved-session" || len(sdk.interactiveCalls()) != 1 || !sdk.interactiveCalls()[0] {
+		t.Fatal("visible read did not permit its authorization", err)
+	}
+	sdk.stateValue.onConsole = 0
+	if _, err := fakeStore(sdk).GetVisible("account-session"); err == nil {
+		t.Fatal("headless session attempted authorization")
+	}
+	if len(sdk.interactiveCalls()) != 1 {
+		t.Fatal("headless read reached the framework")
+	}
 }
 
 // A background read must never ask the framework for a dialog.

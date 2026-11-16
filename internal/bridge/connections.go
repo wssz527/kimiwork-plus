@@ -5,18 +5,34 @@ import (
 	"kimiworkplus.local/migration/internal/core"
 )
 
+func credentialReference(c map[string]any) string {
+	if ref, ok := c["apiKeyRef"]; ok {
+		return core.String(ref)
+	}
+	return core.String(c["apiKeyEnv"])
+}
+
 func credentialFor(c map[string]any, keys KeyStore) (string, error) {
 	if keys == nil {
 		return "", nil
 	}
-	ref := core.String(c["apiKeyEnv"])
-	if v, ok := c["apiKeyRef"]; ok {
-		ref = core.String(v)
-	}
+	ref := credentialReference(c)
 	if ref == "" {
 		return "", nil
 	}
 	return keys.Get(ref)
+}
+
+func (s *Service) authorizeConnectionCredentials(d core.Document) error {
+	for _, value := range core.Rows(d["connections"]) {
+		connection := core.Object(value)
+		if _, err := credentialFor(connection, s.Keys); err != nil {
+			if _, err := getVisibleCredential(s.Keys, credentialReference(connection)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func (s *Service) stageCredentials(d core.Document, changes map[string]*string) (err error) {
 	if len(changes) > 0 && s.Keys == nil {

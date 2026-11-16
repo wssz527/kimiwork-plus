@@ -122,6 +122,12 @@ const ACTION_LABEL = {
   'connect-kimi': '重新准备接入',
   'check-upstream': '上游检查',
   'apply-connections': '应用连接',
+  'account-capture': '保存当前账号',
+  'account-begin-add': '添加账号',
+  'account-complete-add': '保存新账号',
+  'account-cancel-add': '恢复原账号',
+  'account-switch': '切换账号',
+  'account-remove': '移除账号',
 };
 
 const ACTION_STATE = {
@@ -174,6 +180,16 @@ const RUNTIME_STATE = {
 };
 
 const DIAG_REASON = {
+  account_session_unavailable: '未连接到 Kimi 登录窗口，请在账号管理中正常重启并继续。',
+  account_session_page_timeout: 'Kimi 登录窗口没有及时响应，请在账号管理中重试。',
+  account_session_unsupported: '当前 Kimi 登录接口未能确认账号，请在账号管理中恢复原账号。',
+  account_session_sign_out_incomplete: '尚未确认 Kimi 已打开登录页，请先恢复原账号。',
+  account_switch_restore_failed: '添加或切换未完成，原账号仍待恢复，请在账号管理中继续。',
+  account_identity_unverified: '尚未确认当前登录，请在 Kimi 窗口完成登录后重试。',
+  account_session_work_busy: 'Work 正在执行任务，请结束任务后再操作账号。',
+  account_work_busy: 'Work 正在执行任务，请结束任务后再操作账号。',
+  account_login_pending: '已有账号添加流程，请先完成或取消。',
+  account_login_unchanged: '当前仍是原账号，请登录另一个账号后再保存。',
   upstream_http_error: '上游返回了错误状态。',
   upstream_connection_failed: '无法连接上游地址。',
   upstream_catalog_invalid: '上游 /models 返回的格式不被接受。',
@@ -5227,6 +5243,8 @@ const APPLY_COPY = {
   unsupported: { tone: 'bad', word: '自动应用不可用',
     note: '连接已保存，当前网关尚未应用；没有可自动应用的受管服务。' },
   failed: { tone: 'bad', word: '应用失败', note: '连接已保存，但应用未完成；可重试，不会结束正在运行的任务。' },
+  authorization: { tone: 'bad', word: '连接需要系统授权',
+    note: '当前预览无法读取已保存的 Key。点「重新授权并应用连接」并响应系统提示，不会显示或改写 Key。' },
 };
 
 const APPLY_REFUSAL = {
@@ -5256,6 +5274,10 @@ function applyAvailability(data) {
 
 /* 优先读 runner 写回的真实进展；没有时按本地可判断的事实降级。 */
 function applyState(data) {
+  if (data?.operation?.action === 'apply-connections' && isInFlight(data.operation)) return APPLY_COPY.applying;
+  if (data?.connections?.apply?.state === 'failed' && data.connections.apply.reason === 'credentials_unavailable') {
+    return APPLY_COPY.authorization;
+  }
   const code = applyAvailability(data);
   /* 后端明确拒绝过（缺受管 runner）：在真正落地之前不得改回“等待应用”，
      也不得因为随后一次没有 service 字段的渲染就翻成“已应用”。落地后
@@ -5301,9 +5323,10 @@ function renderApply(data) {
   const running = service && service.mode === 'service';
   const stateInfo = applyState(data);
   if (dom.restartHead) {
-    setText(dom.restartHead, running
-      ? '本面板由后台服务运行；保存连接后在这里应用，不需要终端命令。'
-      : '本面板不是由受管后台服务运行；连接保存后需要由受管服务应用。');
+    setText(dom.restartHead, stateInfo === APPLY_COPY.authorization
+      ? '由当前预览向系统申请读取已保存的连接凭据，后台不会自动弹出授权。'
+      : running ? '本面板由后台服务运行；保存连接后在这里应用，不需要终端命令。'
+        : '本面板不是由受管后台服务运行；连接保存后需要由受管服务应用。');
   }
   if (dom.applyVerdict) {
     setDot(dom.applyVerdictDot, stateInfo.tone);
@@ -5311,10 +5334,11 @@ function renderApply(data) {
     setText(dom.applyVerdictNote, stateInfo.note);
   }
   if (dom.applyButton) {
-    const pending = stateInfo === APPLY_COPY.pending || stateInfo === APPLY_COPY.failed;
+    const pending = stateInfo === APPLY_COPY.pending || stateInfo === APPLY_COPY.failed || stateInfo === APPLY_COPY.authorization;
     setHidden(dom.applyButton, !pending);
     dom.applyButton.disabled = !pending || Boolean(state.pendingAction);
-    setText(dom.applyButton, stateInfo === APPLY_COPY.failed ? '重试应用连接' : '应用已保存的连接');
+    setText(dom.applyButton, stateInfo === APPLY_COPY.authorization ? '重新授权并应用连接'
+      : stateInfo === APPLY_COPY.failed ? '重试应用连接' : '应用已保存的连接');
   }
 }
 
@@ -6997,7 +7021,8 @@ function boot() {
   /* plus 追加的容器要落在 mountWorkspace 搬完板块之后：它把旧的子页面整体移进
      view-work，先挂载会被一起搬走或与搬移目标交叉。 */
   if (typeof globalThis.KimiWorkPlus?.mount === 'function') {
-    plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data) });
+    plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data),
+      onAccounts: () => { setView('maintenance'); revealWorkspaceSection('plus-accounts-panel'); } });
   }
   initView();
   bindEvents();

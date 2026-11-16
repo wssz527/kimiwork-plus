@@ -508,7 +508,8 @@
     ready: '可用', unavailable: '账号切换不可用',
   };
 
-  const account = { busy: null, confirm: null, poll: null };
+  const account = { busy: null, confirm: null, error: null };
+  let openAccounts = () => {};
 
   function accountsOf(data) {
     const raw = data && data.accounts;
@@ -541,6 +542,7 @@
     if (!book || book.state !== 'ready') {
       slot.replaceChildren(node('span', 'plus-account-bar__label', '账号'));
       slot.append(node('span', 'plus-account-bar__hint', book && book.reason ? '账号切换不可用（' + book.reason + '）' : '账号切换不可用'));
+      slot.append(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
       return;
     }
     const current = book.accounts.find(row => textOf(row.id) === book.currentId);
@@ -571,6 +573,7 @@
     if (book.accounts.length > 1 || account.busy) {
       parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '切换会正常重启 Work'));
     }
+    parts.push(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
     slot.replaceChildren(...parts);
   }
 
@@ -583,17 +586,28 @@
   }
 
   async function runAccount(action, extra = {}) {
-    if (account.busy) return;
+    if (account.busy) return null;
     account.busy = action;
+    account.error = null;
     renderAccountsAll();
     try {
       const result = await request('/api/actions', { method: 'POST', body: { action, ...extra } });
       const operation = result && result.operation ? result.operation : null;
-      if (operation && operation.id) await followAccountOperation(operation.id, action);
+      if (operation && operation.id) return await followAccountOperation(operation.id, action);
     } catch (error) {
-      notify(error.message || '账号操作失败', 'error');
+      account.error = { action, reason: textOf(error.code), message: error.message || '账号操作失败，请刷新状态后重试。' };
+      notify(account.error.message, 'error');
       account.busy = null;
       renderAccountsAll();
+    }
+    return null;
+  }
+
+  async function restartAndContinueAccount() {
+    const restoring = Boolean(accountsOf(stateData())?.restoreAccountId);
+    const operation = await runAccount('restart-kimi');
+    if (operation && !['failed', 'unavailable', 'interrupted'].includes(textOf(operation.state))) {
+      await runAccount(restoring ? 'account-cancel-add' : 'account-begin-add');
     }
   }
 
@@ -612,22 +626,26 @@
       if (!op || op.id !== id) continue;
       if (op.state === 'running' || op.state === 'pending') continue;
       account.busy = null;
-      renderAccountsAll();
       reportAccountResult(action, op);
-      return;
+      renderAccountsAll();
+      return op;
     }
     account.busy = null;
+    account.error = { action, reason: 'account_operation_timeout', message: '账号操作仍未返回结果；请刷新状态确认，不要重复提交。' };
     renderAccountsAll();
-    notify('账号操作仍未返回结果；请刷新状态确认，不要重复提交。', 'error');
+    notify(account.error.message, 'error');
+    return null;
   }
 
   function reportAccountResult(action, op) {
     const failed = ['failed', 'unavailable', 'interrupted'].includes(textOf(op.state));
     const reason = textOf(op.reason);
     if (failed) {
-      notify((ACTION_WORD[action] || '账号操作') + '未完成：' + (ACCOUNT_REASON[reason] || reason || textOf(op.state)), 'error');
+      account.error = { action, reason, message: ACCOUNT_REASON[reason] || '账号操作未完成，请刷新状态或重新准备 Kimi 接入。' };
+      notify(account.error.message, 'error');
       return;
     }
+    account.error = null;
     notify(ACTION_WORD[action] || '账号操作', 'ok');
   }
 
@@ -638,9 +656,17 @@
     'account-cancel-add': '已取消添加并恢复原账号',
     'account-switch': '账号已切换',
     'account-remove': '账号已移除',
+    'restart-kimi': 'Kimi 已正常重启',
   };
 
   const ACCOUNT_REASON = {
+    account_session_unavailable: '未连接到 Kimi 的登录窗口，请正常重启 Kimi 后继续添加。',
+    account_session_page_timeout: 'Kimi 登录窗口没有及时响应，请正常重启 Kimi 后重试。',
+    account_identity_unverified: '还没有确认当前登录，请在 Kimi 窗口完成登录后重试。',
+    account_session_work_busy: 'Work 有任务正在运行，请先结束任务再添加或切换账号。',
+    account_work_busy: 'Work 有任务正在运行，请先结束任务再添加或切换账号。',
+    kimi_quit_timeout: 'Kimi 尚未退出，当前登录未被清除。请检查 Kimi 窗口后重试。',
+    unmanaged_kimi_running: '当前 Kimi 尚未接入，请正常重启 Kimi 后继续。',
     account_login_pending: '有一个添加流程还没结束，请先完成或取消它',
     account_login_not_pending: '当前没有进行中的添加流程',
     account_login_unchanged: '登录的还是同一个账号，没有新账号可保存',
@@ -695,6 +721,25 @@
     return node('small', 'plus-overview__meta', bits.join(' · '));
   }
 
+  function appendAccountError(wrap) {
+    if (!account.error) return;
+    const { action, reason, message } = account.error;
+    const box = node('div', 'plus-pending plus-pending--warn');
+    box.setAttribute('role', 'alert');
+    box.append(node('p', null, ACCOUNT_REASON[reason] || message));
+    if (['account-begin-add', 'account-capture', 'account-cancel-add'].includes(action)
+      && ['account_session_unavailable', 'account_session_page_timeout', 'unmanaged_kimi_running'].includes(reason)) {
+      const restoring = Boolean(accountsOf(stateData())?.restoreAccountId);
+      box.append(node('p', 'hint', restoring
+        ? '请先结束正在运行的任务。正常重启后会核对并恢复已保存的原账号。'
+        : '请先结束正在运行的任务。正常重启后会先保存当前登录，再打开另一个账号的登录页。'));
+      box.append(button(restoring ? '正常重启 Kimi 并恢复原账号' : '正常重启 Kimi 并继续添加', {
+        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: restartAndContinueAccount,
+      }));
+    }
+    wrap.append(box);
+  }
+
   function renderAccountsManagement(data) {
     const slot = $('plus-accounts-body');
     if (!slot) return;
@@ -703,11 +748,13 @@
     if (book.state !== 'ready') {
       const wrap = node('div');
       wrap.append(node('p', 'note note--warn', '账号切换不可用' + (book.reason ? '：' + (ACCOUNT_REASON[book.reason] || book.reason) : '') + '。'));
+      appendAccountError(wrap);
       wrap.append(accountActionLine(book));
       slot.replaceChildren(wrap);
       return;
     }
     const wrap = node('div');
+    appendAccountError(wrap);
 
     if (book.adding || book.restoreAccountId) {
       const pending = node('div', 'plus-pending');
@@ -786,13 +833,13 @@
   function accountActionLine(book) {
     const line = node('div', 'action-line action-line--start');
     if (!book.adding && !book.restoreAccountId) {
-      line.append(button(book.accounts.length ? '添加账号' : '保存当前账号', {
+      line.append(button('添加账号', {
         className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy),
-        onClick: () => runAccount(book.accounts.length ? 'account-begin-add' : 'account-capture'),
+        onClick: () => runAccount('account-begin-add'),
       }));
-      if (book.accounts.length) {
-        line.append(button('只保存当前登录', { disabled: Boolean(account.busy), onClick: () => runAccount('account-capture') }));
-      }
+      line.append(button(book.accounts.length ? '只保存当前登录' : '保存当前账号', {
+        disabled: Boolean(account.busy), onClick: () => runAccount('account-capture'),
+      }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));
     line.append(node('span', 'hint', '切换或添加会正常重启 Work。凭据仅保存在本机系统钥匙串，不上传或写入日志。'));
@@ -1200,6 +1247,7 @@
     notify = options.notify || notify;
     stateGet = options.getState || stateGet;
     stateSet = options.setState || stateSet;
+    openAccounts = options.onAccounts || openAccounts;
 
     mountUsage();
     mountAccountBar();

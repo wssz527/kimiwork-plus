@@ -34,6 +34,7 @@ type fakeAccountPage struct {
 	shellPage        string
 	refuseCookies    bool
 	refuseStorage    bool
+	refuseLogin      bool
 	ignoreActivation bool
 	// officialIdentity is what the shell page reports through kimiAgentAPI. When
 	// empty the shell answers with the id derived from storage, and only when
@@ -173,6 +174,24 @@ func (f *fakeAccountPage) accountWriteStorage(_ context.Context, page accountPag
 			delete(f.user, page.targetID)
 		}
 	}
+	return nil
+}
+
+func (f *fakeAccountPage) accountBeginLogin(context.Context, accountPage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("reauthenticate")
+	if f.refuseLogin {
+		return errors.New(AccountErrUnsupported)
+	}
+	for _, store := range f.storage {
+		for key := range store {
+			if isAccountStorageKey(key) {
+				delete(store, key)
+			}
+		}
+	}
+	f.user = map[string]string{}
 	return nil
 }
 
@@ -582,6 +601,23 @@ func TestActivateAccountDoesNotVerifyAgainstTheTokenStore(t *testing.T) {
 	}
 }
 
+func TestActivateAccountRestoresNativeOnlyTokensToThePage(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	target := AccountSession{SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{
+		"userId": "target", "accessToken": "native-access", "refreshToken": "native-refresh",
+	}}
+	restartAccountProcess = func(*Controller, context.Context) error { return nil }
+	result, err := harness.controller.ActivateAccount(context.Background(), target)
+	if err != nil || !result.Verified {
+		t.Fatal("native-only account was not restored", err)
+	}
+	if harness.page.storage["kimi-1"]["access_token"] != "native-access" ||
+		harness.page.storage["kimi-1"]["refresh_token"] != "native-refresh" {
+		t.Fatal("native credentials were not synchronized to the page")
+	}
+}
+
 func TestActivateAccountRefusesWhileAConversationRuns(t *testing.T) {
 	harness := newAccountHarness(t)
 	harness.writeConfig(t, accountConfigFixture("user-1", "access-1", "refresh-1"))
@@ -850,6 +886,9 @@ func TestBeginAccountLoginClearsBothCredentialEntriesAndRestores(t *testing.T) {
 	if err := harness.controller.BeginAccountLogin(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if harness.page.callsFor("reauthenticate") != 1 || harness.page.reloads != 0 {
+		t.Fatal("login did not use the official local reauthentication flow")
+	}
 	if _, ok := harness.page.storage["kimi-1"]["msh_user_id"]; ok {
 		t.Fatal("msh_user_id survived the sign-out")
 	}
@@ -891,6 +930,25 @@ func TestBeginAccountLoginClearsBothCredentialEntriesAndRestores(t *testing.T) {
 	}
 	if AccountScope(harness.home) != sha256Hex("user-1") {
 		t.Fatal("the saved account was not restored")
+	}
+}
+
+func TestBeginAccountLoginFailurePreservesCredentials(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("user-1", "access-1", "refresh-1"))
+	harness.page.put("kimi-1", "access_token", "access-1")
+	harness.page.put("kimi-1", "msh_user_id", "user-1")
+	harness.page.cookies = []AccountCookie{{Name: "kimi_session", Value: "session-1", Domain: ".kimi.com", Path: "/"}}
+	harness.page.refuseLogin = true
+
+	if err := harness.controller.BeginAccountLogin(context.Background()); err == nil || err.Error() != AccountErrUnsupported {
+		t.Fatalf("login result: %v", err)
+	}
+	if len(harness.page.cookies) != 1 || harness.page.callsFor("remove-cookies:kimi-1") != 0 {
+		t.Fatal("failed reauthentication removed the saved web session")
+	}
+	if harness.page.storage["kimi-1"]["access_token"] != "access-1" || !accountConfigMatches(harness.home, "user-1") {
+		t.Fatal("failed reauthentication changed account credentials")
 	}
 }
 

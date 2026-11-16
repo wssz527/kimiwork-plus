@@ -215,10 +215,11 @@ type AccountIdentity struct {
 
 // AccountActivation is the graded result of a switch. It names no secret.
 type AccountActivation struct {
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
-	UserID string `json:"userId,omitempty"`
-	Digest string `json:"digest,omitempty"`
+	State         string `json:"state"`
+	Reason        string `json:"reason,omitempty"`
+	FailureReason string `json:"failureReason,omitempty"`
+	UserID        string `json:"userId,omitempty"`
+	Digest        string `json:"digest,omitempty"`
 	// Hot means the page followed without a restart.
 	Hot bool `json:"hot"`
 	// Restarted means a normal exit and managed relaunch were used.
@@ -402,6 +403,7 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	}
 	result.RolledBack = rolledBack
 	result.Reason = reason
+	result.FailureReason = reason
 
 	if rolledBack {
 		// The previous account is back and verified: nothing changed for the user.
@@ -450,8 +452,23 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 	if busy, busyErr := accountWorkBusy(ctx, surface); busyErr != nil || busy {
 		return errors.New(AccountErrWorkBusy)
 	}
-	credentialPages := accountCredentialPages(pages)
-	for _, page := range credentialPages {
+	var shell *accountPage
+	for i := range pages {
+		if !pages[i].credentials {
+			shell = &pages[i]
+			break
+		}
+	}
+	if shell == nil {
+		return errors.New(AccountErrUnsupported)
+	}
+	if err := surface.accountBeginLogin(ctx, *shell); err != nil {
+		return err
+	}
+	if !waitAccountSignedOut(ctx, surface) {
+		return errors.New(AccountErrSignOutIncomplete)
+	}
+	for _, page := range accountCredentialPages(pages) {
 		existing, err := surface.accountCookies(ctx, page)
 		if err != nil {
 			return errors.New(AccountErrUnavailable)
@@ -463,38 +480,7 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 			return errors.New(AccountErrWriteFailed)
 		}
 	}
-	for _, page := range credentialPages {
-		current, err := surface.accountStorage(ctx, page)
-		if err != nil {
-			return errors.New(AccountErrWriteFailed)
-		}
-		remove := make([]string, 0, len(current))
-		for key := range current {
-			if isAccountStorageKey(key) {
-				remove = append(remove, key)
-			}
-		}
-		sort.Strings(remove)
-		if err := surface.accountWriteStorage(ctx, page, nil, remove); err != nil {
-			return errors.New(AccountErrWriteFailed)
-		}
-	}
-	// The shell page is reloaded too: its identity answer is bound at load, so a
-	// page that keeps answering from memory would look signed in to the user
-	// after the credentials were cleared.
-	if err := surface.accountReload(ctx, pages); err != nil {
-		return errors.New(AccountErrPageTimeout)
-	}
-	if err := clearAccountCredentials(home); err != nil {
-		return err
-	}
-	// The page must actually show the login state. An app that rewrites the
-	// cleared storage from memory would otherwise look signed out here and signed
-	// in to the user.
-	if !waitAccountSignedOut(ctx, surface) {
-		return errors.New(AccountErrSignOutIncomplete)
-	}
-	return nil
+	return clearAccountCredentials(home)
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +591,15 @@ func (c *Controller) applyPageState(ctx context.Context, surface accountSurface,
 		}
 	}
 	set := accountStorageMap(session.LocalStorage)
+	web, _ := accountConfigForSession(session)[AccountKimiWeb].(map[string]any)
+	for key, field := range map[string]string{"access_token": "accessToken", "refresh_token": "refreshToken"} {
+		if set[key] == "" {
+			if value, ok := web[field].(string); ok && value != "" {
+				set[key] = value
+			}
+		}
+	}
+	set["msh_user_id"] = session.UserID
 	for _, page := range credentialPages {
 		current, err := surface.accountStorage(ctx, page)
 		if err != nil {
@@ -1221,6 +1216,7 @@ type accountSurface interface {
 	accountReload(ctx context.Context, pages []accountPage) error
 	accountIdentity(ctx context.Context, page accountPage) (accountPageIdentity, error)
 	accountWorkBusy(ctx context.Context, page accountPage) (bool, error)
+	accountBeginLogin(ctx context.Context, page accountPage) error
 }
 
 // accountPage is one official surface this process may act on. The full URL is

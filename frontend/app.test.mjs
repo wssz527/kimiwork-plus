@@ -22,6 +22,32 @@ function growthFunction(name, indent = '') {
   return extractFunction(growthSource, name, indent);
 }
 
+test('unreadable connection credentials expose explicit system authorization even with no config changes', () => {
+  const copy = source.slice(source.indexOf('const APPLY_COPY ='), source.indexOf('\nconst APPLY_REFUSAL ='));
+  const state = { pendingAction: null, applyUnsupported: false };
+  const dom = { applyButton: {}, restartHead: {}, applyVerdict: {}, applyVerdictDot: {}, applyVerdictWord: {}, applyVerdictNote: {} };
+  const render = new Function('state', 'dom', `
+    ${copy}
+    const connectionsChanged = () => false;
+    const isInFlight = op => op?.state === 'running';
+    const setText = (element, text) => { element.textContent = text; };
+    const setHidden = (element, hidden) => { element.hidden = hidden; };
+    const setDot = () => {};
+    ${sourceFunction('applyAvailability')}
+    ${sourceFunction('applyState')}
+    ${sourceFunction('renderApply')}
+    return renderApply;
+  `)(state, dom);
+  const data = { connections: { restartRequired: false, apply: { state: 'failed', reason: 'credentials_unavailable' } } };
+  render(data);
+  assert.equal(dom.applyButton.hidden, false);
+  assert.equal(dom.applyButton.textContent, '重新授权并应用连接');
+  assert.equal(dom.applyVerdictWord.textContent, '连接需要系统授权');
+  render({ ...data, operation: { action: 'apply-connections', state: 'running' } });
+  assert.equal(dom.applyVerdictWord.textContent, '正在应用');
+  assert.equal(dom.applyButton.hidden, true);
+});
+
 function makeProblems() {
   const code = [
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',

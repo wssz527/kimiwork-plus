@@ -31,6 +31,26 @@ func (k *CachedKeys) Get(name string) (string, error) {
 	}
 	return v, e
 }
+func (k *CachedKeys) GetVisible(name string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if value, ok := k.values[name]; ok {
+		return value, nil
+	}
+	value, err := getVisibleCredential(k.store, name)
+	if err == nil {
+		k.values[name] = value
+	}
+	return value, err
+}
+
+func getVisibleCredential(keys KeyStore, name string) (string, error) {
+	if store, ok := keys.(interface{ GetVisible(string) (string, error) }); ok {
+		return store.GetVisible(name)
+	}
+	return keys.Get(name)
+}
+
 func (k *CachedKeys) Set(name, value string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()

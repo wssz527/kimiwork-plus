@@ -64,6 +64,12 @@ func (a *accountManager) capture(ctx context.Context) (accountCapture, AccountSu
 }
 
 func (a *accountManager) restore(ctx context.Context, id string) error {
+	if fresh, err := a.hooks.Capture(ctx); err == nil && accountID(fresh.UserID) == id {
+		if _, err := a.vault.capture(fresh); err != nil {
+			return err
+		}
+		return a.setRestore("", false)
+	}
 	session, err := a.vault.session(id)
 	if err != nil {
 		return err
@@ -119,6 +125,9 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 			return nil, err
 		}
 		if err := a.hooks.BeginLogin(ctx); err != nil {
+			if pendingErr := a.setRestore(row.ID, false); pendingErr != nil {
+				return nil, pendingErr
+			}
 			if a.restore(ctx, row.ID) != nil {
 				return nil, errors.New("account_switch_restore_failed")
 			}

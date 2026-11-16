@@ -371,7 +371,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			n.service.mutation.Lock()
 			d, _, e := n.service.Store.Read()
 			err = e
-			if e == nil {
+			if err == nil {
+				err = n.service.authorizeConnectionCredentials(d)
+			}
+			if err == nil {
 				err = n.service.OnConfig(d)
 			}
 			n.service.mutation.Unlock()
