@@ -26,7 +26,7 @@ func TestMissingWebKeyDoesNotBlockDaemonStartup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "web-tools-settings.json"), []byte(`{"schemaVersion":1,"provider":"tavily"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	policies, err := newNativePolicies(dir)
+	policies, err := newIsolatedTestPolicies(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

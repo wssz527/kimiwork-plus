@@ -36,7 +36,7 @@ func run() error {
 	if e != nil {
 		return e
 	}
-	dir := flag.String("state-dir", defaultDir, "isolated preview state directory")
+	dir := flag.String("state-dir", defaultDir, "preview state directory")
 	port := flag.String("port", "", "loopback port (empty preserves the preview address)")
 	stopDaemon := flag.Bool("stop-daemon", false, "stop this preview daemon after draining its HTTP requests")
 	flag.Parse()

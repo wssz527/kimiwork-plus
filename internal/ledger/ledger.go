@@ -524,15 +524,17 @@ func (l *Ledger) normalize(entry Entry) (*Record, error) {
 		if raw == nil {
 			return
 		}
-		value := identifier(*raw)
+		var value string
+		if redact {
+			value = *raw
+			if !digestPattern.MatchString(value) {
+				value = RedactIdentifier(value)
+			}
+		} else {
+			value = identifier(*raw)
+		}
 		if value == "" {
 			return
-		}
-		if redact && !digestPattern.MatchString(value) {
-			value = RedactIdentifier(value)
-			if value == "" {
-				return
-			}
 		}
 		copied := value
 		*target = &copied

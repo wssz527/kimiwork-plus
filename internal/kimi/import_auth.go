@@ -32,7 +32,7 @@ const (
 // ImportState is the coarse answer a panel renders. Several reason codes may map
 // to one state, and a state never claims more than the evidence supports.
 const (
-	// ImportStateWaitingLogin means the isolated profile has no account identity
+	// ImportStateWaitingLogin means the selected profile has no account identity
 	// yet. Only the user signing in to the official window produces one.
 	ImportStateWaitingLogin = "waiting-login"
 	// ImportStateWaitingWork means the Work view is not there to ask.
@@ -112,7 +112,7 @@ func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportR
 		return ImportResult{State: ImportStateWaitingWork, Reason: "native_bridge_unavailable"},
 			errors.New("native_bridge_unavailable")
 	}
-	// The account is read from the isolated profile's own files. A profile that
+	// The account is read from the selected profile's own files. A profile that
 	// has not signed in has no identity, and an import into "whatever account
 	// happens to be there" is exactly what this product must not do.
 	account, verified := c.profileAccount()
@@ -197,9 +197,9 @@ func importState(result ImportResult) string {
 	return ImportStateFailed
 }
 
-// profileAccount reads the account identity from the isolated profile only. The
-// path is the one this controller resolved for its own child, so an account is
-// never read from a directory the controller does not own.
+// profileAccount reads the account identity from the selected profile only. The
+// path is the one this controller resolved for its managed child, so an account
+// is never read from a directory outside that profile.
 func (c *Controller) profileAccount() (string, bool) {
 	home := c.kimiHome()
 	if home == "" {

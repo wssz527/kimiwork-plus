@@ -1,7 +1,9 @@
 package kimi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,5 +331,85 @@ func TestSubagentRecoversAReceiptThatOutranTheFile(t *testing.T) {
 	}
 	if got := readConfig(t, kimiHome); countOccurrences(got, subagentBlockBegin) != 1 {
 		t.Fatalf("the takeover duplicated the block:\n%s", got)
+	}
+}
+
+func preserveRestartProbes(t *testing.T) {
+	t.Helper()
+	list := listOfficialProcesses
+	identity := officialProcessIdentity
+	quit := requestOfficialQuit
+	t.Cleanup(func() {
+		listOfficialProcesses = list
+		officialProcessIdentity = identity
+		requestOfficialQuit = quit
+	})
+}
+
+func TestStopOfficialProcessesRequestsNormalQuitAndWaits(t *testing.T) {
+	preserveRestartProbes(t)
+	alive := true
+	quitCalls := 0
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return []int{42}, true, "" }
+	officialProcessIdentity = func(context.Context, int) ProcessIdentity {
+		if !alive {
+			return ProcessIdentity{Kind: IdentityNotFound}
+		}
+		return ProcessIdentity{Kind: IdentityDarwinLStart, Value: "start-42"}
+	}
+	requestOfficialQuit = func(context.Context, int) error {
+		quitCalls++
+		alive = false
+		return nil
+	}
+	if err := stopOfficialProcesses(context.Background(), "/Applications/Kimi.app/Contents/MacOS/Kimi"); err != nil {
+		t.Fatal(err)
+	}
+	if quitCalls != 1 {
+		t.Fatalf("quit calls = %d", quitCalls)
+	}
+}
+
+func TestStopOfficialProcessesRefusesUnknownIdentity(t *testing.T) {
+	preserveRestartProbes(t)
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return []int{42}, true, "" }
+	officialProcessIdentity = func(context.Context, int) ProcessIdentity { return ProcessIdentity{Kind: IdentityUnknown} }
+	quitCalls := 0
+	requestOfficialQuit = func(context.Context, int) error { quitCalls++; return nil }
+	if err := stopOfficialProcesses(context.Background(), "/Kimi"); !errors.Is(err, ErrIdentityUnknown) {
+		t.Fatalf("error = %v", err)
+	}
+	if quitCalls != 0 {
+		t.Fatal("quit was requested without a stable identity")
+	}
+}
+
+func TestStopOfficialProcessesAllowsPIDReuse(t *testing.T) {
+	preserveRestartProbes(t)
+	calls := 0
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return []int{42}, true, "" }
+	officialProcessIdentity = func(context.Context, int) ProcessIdentity {
+		calls++
+		if calls == 1 {
+			return ProcessIdentity{Kind: IdentityDarwinLStart, Value: "original"}
+		}
+		return ProcessIdentity{Kind: IdentityDarwinLStart, Value: "replacement"}
+	}
+	requestOfficialQuit = func(context.Context, int) error { return nil }
+	if err := stopOfficialProcesses(context.Background(), "/Kimi"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStopOfficialProcessesReportsTimeout(t *testing.T) {
+	preserveRestartProbes(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return []int{42}, true, "" }
+	officialProcessIdentity = func(context.Context, int) ProcessIdentity {
+		return ProcessIdentity{Kind: IdentityDarwinLStart, Value: "start-42"}
+	}
+	requestOfficialQuit = func(context.Context, int) error { cancel(); return nil }
+	if err := stopOfficialProcesses(ctx, "/Kimi"); err == nil || err.Error() != "kimi_quit_timeout" {
+		t.Fatalf("error = %v", err)
 	}
 }

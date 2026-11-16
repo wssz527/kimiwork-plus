@@ -1238,3 +1238,40 @@ func TestPanelActionFromJSONAcceptsABodyOrNone(t *testing.T) {
 		t.Fatalf("malformed body: %v", err)
 	}
 }
+
+func TestPanelRemovesOfficialAdapterBoundToUserConnection(t *testing.T) {
+	accounts := manager(t, quota.Options{Credentials: func(string) string { return deepSeekKey }})
+	connections := panelConnections()
+	state, err := accounts.PanelAction(context.Background(), quota.PanelPathSources, map[string]any{
+		"action": "upsert", "source": map[string]any{"adapter": "deepseek", "sourceId": "deepseek",
+			"sourceName": "DeepSeek 余额", "auth": map[string]any{"connectionId": "conn-a"}}}, connections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := state["sources"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["removable"] != true {
+		t.Fatalf("sources = %#v", rows)
+	}
+	state, err = accounts.PanelAction(context.Background(), quota.PanelPathSources,
+		map[string]any{"action": "remove", "sourceId": "deepseek"}, connections)
+	if err != nil || len(accounts.ListSources()) != 0 {
+		t.Fatalf("remove state=%#v err=%v", state, err)
+	}
+}
+
+func TestPanelKeepsDefaultAdapterWithoutUserConnection(t *testing.T) {
+	accounts := manager(t, quota.Options{Credentials: func(string) string { return deepSeekKey }})
+	if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "deepseek"}); err != nil {
+		t.Fatal(err)
+	}
+	state := accounts.PanelState(panelConnections())
+	rows, _ := state["sources"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["removable"] != false {
+		t.Fatalf("sources = %#v", rows)
+	}
+	_, err := accounts.PanelAction(context.Background(), quota.PanelPathSources,
+		map[string]any{"action": "remove", "sourceId": "deepseek"}, panelConnections())
+	if err == nil || err.Error() != "quota_source_not_removable" {
+		t.Fatalf("remove error = %v", err)
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,21 +17,24 @@ import (
 )
 
 type Native struct {
-	mu         sync.Mutex
-	service    *Service
-	controller *kimi.Controller
-	process    core.Document
-	contract   *kimi.ContractResult
-	operation  core.Document
-	jobs       chan struct{}
-	policies   *nativePolicies
-	web        *webService
-	webKeys    *webKey
-	mcp        *kimi.MCPManager
-	dns        byokDNS
-	probe      *byokdns.Probe
-	admin      byokdns.Administrator
-	dnsReason  string
+	mu            sync.Mutex
+	profileMu     sync.Mutex
+	profileReason string
+	service       *Service
+	controller    *kimi.Controller
+	process       core.Document
+	contract      *kimi.ContractResult
+	operation     core.Document
+	jobs          chan struct{}
+	policies      *nativePolicies
+	web           *webService
+	webKeys       *webKey
+	mcp           *kimi.MCPManager
+	dns           byokDNS
+	probe         *byokdns.Probe
+	admin         byokdns.Administrator
+	dnsReason     string
+	resolverPath  string
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -47,11 +49,19 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	if len(installs) > 0 {
 		install = installs[0]
 	}
-	controller, e := kimi.NewController(kimi.ControllerSettings{Installation: install, StateDir: s.StateDir, UserDataDir: filepath.Join(s.StateDir, "kimi-profile"), GatewayURL: s.Endpoint.URL + "/v1", GatewayToken: gateway.Token()})
+	profile, e := kimi.OfficialProfileDirectory()
 	if e != nil {
 		return nil, e
 	}
-	policies, e := newNativePolicies(s.StateDir)
+	controller, e := kimi.NewController(kimi.ControllerSettings{Installation: install, StateDir: s.StateDir, UserDataDir: profile, LoginDataDir: profile, ProfileMode: kimi.ProfileModeOfficial, GatewayURL: s.Endpoint.URL + "/v1", GatewayToken: gateway.Token()})
+	if e != nil {
+		return nil, e
+	}
+	home, e := controller.WorkHome()
+	if e != nil {
+		return nil, e
+	}
+	policies, e := newNativePolicies(s.StateDir, home)
 	if e != nil {
 		return nil, e
 	}
@@ -89,6 +99,9 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	return n, nil
 }
 func (n *Native) Configure(d core.Document) error {
+	if e := n.syncWorkHome(); e != nil {
+		return e
+	}
 	raw, _ := json.Marshal(d["models"])
 	var models []kimi.Model
 	if e := json.Unmarshal(raw, &models); e != nil {
@@ -116,7 +129,11 @@ func (n *Native) Configure(d core.Document) error {
 func (n *Native) watch(ctx context.Context) {
 	defer n.closeBYOK()
 	defer n.web.Close()
-	defer n.mcp.Close(context.Background())
+	defer func() {
+		n.profileMu.Lock()
+		defer n.profileMu.Unlock()
+		_ = n.mcp.Close(context.Background())
+	}()
 	native := n.controller.NativeState(ctx)
 	n.mu.Lock()
 	n.contract = native.Contract
@@ -143,7 +160,9 @@ func (n *Native) watch(ctx context.Context) {
 			n.controller.Tick(ctx)
 			n.controller.ReconcileWithReadback(ctx)
 			n.mu.Unlock()
-			configObserved = n.reconcile(configObserved)
+			if err := n.syncWorkHome(); err == nil {
+				configObserved = n.reconcile(configObserved)
+			}
 		}
 	}
 }
@@ -177,7 +196,7 @@ func (n *Native) State() core.Document {
 			operation[k] = v
 		}
 	}
-	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components()}}
+	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
 	n.mu.Unlock()
 	out["setup"] = n.byokState()
 	if d, _, e := n.service.Store.Read(); e == nil {
@@ -203,7 +222,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	profileMode := ""
 	if value, present := in["profileMode"]; present {
 		mode, valid := value.(string)
-		if !valid || action != "launch-kimi" || mode != kimi.ProfileModeExistingAuthorized {
+		if !valid || action != "launch-kimi" || (mode != kimi.ProfileModeOfficial && mode != kimi.ProfileModeExistingAuthorized) {
 			return nil, errors.New("invalid_profile_mode")
 		}
 		profileMode = mode
@@ -227,7 +246,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections":
+	case "launch-kimi", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections":
 	default:
 		return nil, errors.New("native_preview_unavailable")
 	}
@@ -255,7 +274,16 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if profileMode == kimi.ProfileModeExistingAuthorized {
 				err = n.controller.StartWithExistingLogin(deadline)
 			} else {
-				err = n.controller.Start(deadline)
+				err = n.controller.StartOfficial(deadline)
+			}
+			if err == nil {
+				err = n.syncWorkHome()
+			}
+			state = "starting"
+		case "restart-kimi":
+			err = n.controller.RestartOfficial(deadline)
+			if err == nil {
+				err = n.syncWorkHome()
 			}
 			state = "starting"
 		case "connect-kimi":
@@ -271,18 +299,22 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			result = imported
 		case "prepare-native":
 			err = n.prepareBYOK(deadline)
-			var imported kimi.ImportResult
+			var imported *kimi.ImportResult
 			if err == nil {
-				imported, err = n.controller.ImportModelsAuthorized(deadline)
+				value, importErr := n.controller.ImportModelsAuthorized(deadline)
+				imported = &value
+				err = importErr
 			}
-			if err == nil {
-				err = importResultError(imported)
+			if imported != nil {
+				if err == nil {
+					err = importResultError(*imported)
+				}
+				state = imported.State
+				if state == "" || state == "accepted" || state == "applied" {
+					state = "prepared"
+				}
+				result = *imported
 			}
-			state = imported.State
-			if state == "" || state == "accepted" || state == "applied" {
-				state = "prepared"
-			}
-			result = imported
 		case "remove-dns":
 			err = n.removeBYOK(deadline)
 			state = "removed"

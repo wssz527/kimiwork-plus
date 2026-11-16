@@ -12,7 +12,7 @@ func TestDeferredConfigReconcilesWhenCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := newNativePolicies(dir)
+	p, err := newIsolatedTestPolicies(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

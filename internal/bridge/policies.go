@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"sync"
 
 	"kimiworkplus.local/migration/internal/core"
@@ -13,22 +12,17 @@ import (
 
 type nativePolicies struct {
 	mu         sync.Mutex
+	dir        string
+	home       string
 	subagents  *kimi.SubagentConfig
 	context    *kimi.ContextPolicyConfig
 	services   *kimi.ServicesConfig
 	configured core.Document
 }
 
-func newNativePolicies(dir string) (*nativePolicies, error) {
-	home, err := kimi.ResolveKimiHome(filepath.Join(dir, "kimi-profile"), "")
-	if err != nil {
-		return nil, err
-	}
-	relative, err := filepath.Rel(dir, home)
-	if err != nil || relative == ".." || (len(relative) > 3 && relative[:3] == ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return nil, errors.New("native_profile_outside_state")
-	}
-	p := &nativePolicies{}
+func newNativePolicies(dir, home string) (*nativePolicies, error) {
+	p := &nativePolicies{dir: dir, home: home}
+	var err error
 	p.subagents, err = kimi.NewSubagentConfig(dir, home)
 	if err != nil {
 		return nil, err
@@ -39,6 +33,31 @@ func newNativePolicies(dir string) (*nativePolicies, error) {
 	}
 	p.services, err = kimi.NewServicesConfig(dir, home)
 	return p, err
+}
+
+func (p *nativePolicies) setHome(home string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.home == home {
+		return false, nil
+	}
+	subagents, err := kimi.NewSubagentConfig(p.dir, home)
+	if err != nil {
+		return false, err
+	}
+	contextPolicy, err := kimi.NewContextPolicyConfig(p.dir, home)
+	if err != nil {
+		return false, err
+	}
+	services, err := kimi.NewServicesConfig(p.dir, home)
+	if err != nil {
+		return false, err
+	}
+	p.home = home
+	p.subagents = subagents
+	p.context = contextPolicy
+	p.services = services
+	return true, nil
 }
 func decodeStrict(in any, out any) error {
 	raw, err := json.Marshal(in)

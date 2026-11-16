@@ -44,7 +44,7 @@ func (n *Native) byokFlagFile() string {
 }
 
 func (n *Native) byokSetup() *byokdns.Setup {
-	return &byokdns.Setup{FlagFile: n.byokFlagFile(), Admin: n.admin}
+	return &byokdns.Setup{FlagFile: n.byokFlagFile(), Admin: n.admin, Probe: n.probe, ResolverPath: n.resolverPath}
 }
 
 func (n *Native) byokState() core.Document {
@@ -74,16 +74,20 @@ func (n *Native) byokState() core.Document {
 }
 
 func (n *Native) prepareBYOK(ctx context.Context) error {
+	n.probe.Invalidate()
 	if runtime.GOOS == "darwin" {
 		if err := n.dns.Start(byokdns.DNSPort); err != nil {
 			n.mu.Lock()
 			n.dnsReason = core.ErrorCode(err)
 			n.mu.Unlock()
-			return err
+			if !n.probe.DNS(ctx).Passed {
+				return err
+			}
+		} else {
+			n.mu.Lock()
+			n.dnsReason = ""
+			n.mu.Unlock()
 		}
-		n.mu.Lock()
-		n.dnsReason = ""
-		n.mu.Unlock()
 	}
 	if err := n.byokSetup().Run(ctx, "prepare"); err != nil {
 		return err

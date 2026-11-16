@@ -10,13 +10,18 @@ import (
 	"testing"
 )
 
+func newIsolatedTestPolicies(dir string) (*nativePolicies, error) {
+	home := filepath.Join(dir, "kimi-profile", "daimon-share", "daimon")
+	return newNativePolicies(dir, home)
+}
+
 func TestNativeSettingsStayIsolated(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	store, e := core.Open(dir)
 	if e != nil {
 		t.Fatal(e)
 	}
-	p, e := newNativePolicies(dir)
+	p, e := newIsolatedTestPolicies(dir)
 	if e != nil {
 		t.Fatal(e)
 	}

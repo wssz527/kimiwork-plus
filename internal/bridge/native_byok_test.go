@@ -47,7 +47,8 @@ func newBYOKTestNative(t *testing.T) *Native {
 		probe: &byokdns.Probe{Lookup: func(context.Context, string) (string, error) {
 			return "10.1.2.3", nil
 		}},
-		admin: func(context.Context, string, string) error { return nil },
+		admin:        func(context.Context, string, string) error { return nil },
+		resolverPath: filepath.Join(directory, "resolver", byokdns.Domain),
 	}
 }
 
@@ -103,7 +104,10 @@ func TestNativePrepareRejectsFailedPrerequisites(t *testing.T) {
 		mutate func(*Native)
 		reason string
 	}{
-		{name: "dns", mutate: func(n *Native) { n.dns = &fakeBYOKDNS{err: byokdns.ErrUnavailable} }, reason: "native_byok_dns_unavailable"},
+		{name: "dns", mutate: func(n *Native) {
+			n.dns = &fakeBYOKDNS{err: byokdns.ErrUnavailable}
+			n.probe = &byokdns.Probe{Lookup: func(context.Context, string) (string, error) { return "8.8.8.8", nil }}
+		}, reason: "native_byok_dns_unavailable"},
 		{name: "public address", mutate: func(n *Native) {
 			n.probe = &byokdns.Probe{Lookup: func(context.Context, string) (string, error) { return "8.8.8.8", nil }}
 		}, reason: "native_byok_intranet_unavailable"},
@@ -121,6 +125,9 @@ func TestNativePrepareRejectsFailedPrerequisites(t *testing.T) {
 			if operation["state"] != "failed" || operation["reason"] != test.reason {
 				t.Fatalf("operation = %+v", operation)
 			}
+			if operation["result"] != nil {
+				t.Fatalf("failed preparation contained a zero-value import result: %+v", operation)
+			}
 		})
 	}
 }
@@ -133,7 +140,7 @@ func TestNativeStateDoesNotHoldGlobalLockDuringDNSProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policies, err := newNativePolicies(stateDir)
+	policies, err := newIsolatedTestPolicies(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}

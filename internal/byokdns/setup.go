@@ -1,6 +1,7 @@
 package byokdns
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ type Setup struct {
 	ResolverPath string
 	HostsPath    string
 	Admin        Administrator
+	Probe        *Probe
 }
 
 func (s *Setup) Run(ctx context.Context, action string) error {
@@ -44,6 +46,23 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 		}
 		if _, _, err := readFlag(s.FlagFile); err != nil {
 			return err
+		}
+	}
+	if action == "prepare" && platform == "darwin" {
+		resolverPath := s.ResolverPath
+		if resolverPath == "" {
+			resolverPath = "/etc/resolver/" + Domain
+		}
+		configuration, err := ResolverConfiguration(DNSPort, resolverPath)
+		if err != nil {
+			return err
+		}
+		ready, err := s.reuseResolver(ctx, resolverPath, configuration)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
 		}
 	}
 	temporary, err := os.MkdirTemp("", "kimi-work-byok-")
@@ -89,6 +108,12 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 		}
 	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errors.New("setup_timeout")
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return errors.New("setup_cancelled")
+		}
 		text := strings.ToLower(err.Error())
 		switch {
 		case strings.Contains(text, "resolver_conflict"), strings.Contains(text, "exit status 73"):
@@ -99,6 +124,8 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 			return errors.New("unsupported_hosts_encoding")
 		case strings.Contains(text, "hosts_verify_failed"):
 			return errors.New("hosts_verify_failed")
+		case strings.Contains(text, "(-60007)"), strings.Contains(text, "authorization_failed"), strings.Contains(text, "not authorized"), strings.Contains(text, "administrator name or password"), strings.Contains(text, "authentication_failed"):
+			return errors.New("setup_authorization_failed")
 		default:
 			return errors.New("native_setup_failed")
 		}
@@ -107,6 +134,18 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 		return RevealFlag(s.FlagFile)
 	}
 	return nil
+}
+
+func (s *Setup) reuseResolver(ctx context.Context, path, configuration string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(current, []byte(configuration)) || s.Probe == nil || !s.Probe.DNS(ctx).Passed {
+		return false, nil
+	}
+	return true, RevealFlag(s.FlagFile)
 }
 
 func RevealFlag(file string) error {

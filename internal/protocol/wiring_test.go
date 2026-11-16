@@ -92,6 +92,9 @@ func TestEndToEndRequestLandsInTheLedgerAndSurvivesARestart(t *testing.T) {
 			if _, leaked := request.Headers["authorization"]; leaked {
 				t.Errorf("the resolver was handed the gateway credential")
 			}
+			if request.PromptCacheKey != conversation {
+				t.Errorf("prompt cache key = %q", request.PromptCacheKey)
+			}
 			return protocol.UsageContext{ProviderID: &provider, Account: &account,
 				ConversationID: &conversation}, nil
 		}})
@@ -105,7 +108,7 @@ func TestEndToEndRequestLandsInTheLedgerAndSurvivesARestart(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	reply, body := post(t, url, "/chat/completions",
-		map[string]any{"model": "kimi-probe", "messages": []any{map[string]any{"role": "user",
+		map[string]any{"model": "kimi-probe", "prompt_cache_key": conversation, "messages": []any{map[string]any{"role": "user",
 			"content": "synthetic prompt"}}}, nil)
 	if reply.StatusCode != 200 {
 		t.Fatalf("status %d body %s", reply.StatusCode, body)

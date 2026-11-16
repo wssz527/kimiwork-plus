@@ -624,7 +624,7 @@ func TestStartStillRefusesAnUnmanagedKimi(t *testing.T) {
 	}
 	dir := t.TempDir()
 	controller, err := NewController(ControllerSettings{StateDir: dir,
-		UserDataDir: filepath.Join(dir, "profile"), Installation: *state.Installation})
+		UserDataDir: filepath.Join(dir, "profile"), ProfileMode: ProfileModeIsolated, Installation: *state.Installation})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,9 +696,9 @@ func TestTranslationToggleKeepsTheBridge(t *testing.T) {
 // ---------------------------------------------------------------------------
 // profile mode
 
-// TestProfileModeIsolatedIsTheDefault proves the default mode is the isolated
-// one and that its report carries no path.
-func TestProfileModeIsolatedIsTheDefault(t *testing.T) {
+// TestProfileModeOfficialIsTheDefault verifies the product default and that its
+// report carries no path.
+func TestProfileModeOfficialIsTheDefault(t *testing.T) {
 	stateDir := t.TempDir()
 	controller, err := NewController(ControllerSettings{StateDir: stateDir,
 		UserDataDir: filepath.Join(stateDir, "kimi-profile")})
@@ -706,7 +706,7 @@ func TestProfileModeIsolatedIsTheDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := controller.ProfileStatus()
-	if status.Mode != ProfileModeIsolated || !status.Implemented {
+	if status.Mode != ProfileModeOfficial || !status.Implemented {
 		t.Fatalf("status: %+v", status)
 	}
 	if status.ProfileDigest == "" || status.ModeDigest == "" {
@@ -721,7 +721,7 @@ func TestProfileModeIsolatedIsTheDefault(t *testing.T) {
 	}
 	// A renderer sees the same report through PublicState.
 	public := controller.PublicState(context.Background())
-	if public.Profile == nil || public.Profile.Mode != ProfileModeIsolated {
+	if public.Profile == nil || public.Profile.Mode != ProfileModeOfficial {
 		t.Fatalf("public profile: %+v", public.Profile)
 	}
 }

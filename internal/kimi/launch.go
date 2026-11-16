@@ -15,9 +15,9 @@ import (
 
 // LaunchOptions describes one managed Kimi process.
 //
-// The controller selects an isolated profile or an explicitly authorized login
-// directory with a Work storage lease. The child uses -remote-debugging-pipe so
-// no listening port exists.
+// The controller selects the official profile, a diagnostic isolated profile, or
+// an explicitly authorized login directory with a Work storage lease. The child
+// uses -remote-debugging-pipe so no listening port exists.
 type LaunchOptions struct {
 	// Installation is the discovered install to run.
 	Installation Installation
@@ -33,7 +33,7 @@ type LaunchOptions struct {
 	ProtectedEnvNames []string
 	// ExtraArgs are appended after the fixed arguments. Only a test sets this;
 	// production callers leave it empty so the child always sees exactly
-	// -remote-debugging-pipe plus its isolated profile.
+	// -remote-debugging-pipe plus its selected profile.
 	ExtraArgs []string
 }
 

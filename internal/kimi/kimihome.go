@@ -14,11 +14,10 @@ import (
 //	<profile>/daimon-storage.json   version 1, `shareDir` relocates Work data
 //	otherwise                       <profile>/daimon-share/daimon
 //
-// A managed child runs with `--user-data-dir=<isolated profile>`, so its profile
-// is that directory and nothing outside it may be used. A path that resolves
-// outside the managed profile — through `shareDir`, through a symlink, or through
-// an explicit override — is refused rather than trusted, because writing Kimi's
-// config outside the isolated tree would touch the user's real installation.
+// A managed child runs with `--user-data-dir=<selected profile>`. Its Work data
+// must stay inside that directory. A path that resolves outside it — through
+// `shareDir`, through a symlink, or through an explicit override — is refused
+// rather than trusted, so every mode writes only within its selected tree.
 
 const (
 	storageFileName   = "daimon-storage.json"
@@ -50,14 +49,9 @@ func ResolveKimiHome(profileDir, override string) (string, error) {
 	if err != nil {
 		return "", ErrKimiHomeUnresolved
 	}
-	realProfile, err := filepath.EvalSymlinks(profile)
+	realProfile, err := resolveAllowMissing(profile)
 	if err != nil {
-		// The profile may not exist yet; its parent must.
-		parent, parentErr := filepath.EvalSymlinks(filepath.Dir(profile))
-		if parentErr != nil {
-			return "", ErrKimiHomeUnresolved
-		}
-		realProfile = filepath.Join(parent, filepath.Base(profile))
+		return "", ErrKimiHomeUnresolved
 	}
 
 	if override != "" {

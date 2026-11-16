@@ -11,7 +11,7 @@ import (
 func TestWebCredentialCommitAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	keys := CacheKeys(testKeys{})
-	policies, err := newNativePolicies(dir)
+	policies, err := newIsolatedTestPolicies(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestWebCredentialCommitAndReopen(t *testing.T) {
 		t.Fatal("committed credential reference was not persisted")
 	}
 
-	reopenedPolicies, err := newNativePolicies(dir)
+	reopenedPolicies, err := newIsolatedTestPolicies(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

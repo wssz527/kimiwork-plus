@@ -111,7 +111,7 @@ func (r *Runtime) Apply(d core.Document) error {
 			protocols = append(protocols, core.String(p))
 		}
 		endpoints = append(endpoints, protocol.Endpoint{ID: id, BaseURL: core.String(c["baseURL"]), APIKey: key, Protocols: protocols})
-		contexts[id] = protocol.UsageContext{ConnectionID: optional(id), ProviderID: optional(core.String(c["providerPresetId"])), Account: optional(key), APIKeyID: optional(key)}
+		contexts[id] = protocol.UsageContext{ConnectionID: optional(id), ProviderID: optional(core.String(c["providerPresetId"])), Account: optional(id), APIKeyID: optional(key)}
 	}
 	backend, e := protocol.NewBackend(endpoints, models)
 	if e != nil {
@@ -125,6 +125,9 @@ func (r *Runtime) Apply(d core.Document) error {
 		session := q.Headers["x-session-id"]
 		if session == "" {
 			session = q.Headers["session_id"]
+		}
+		if session == "" {
+			session = q.PromptCacheKey
 		}
 		c.ConversationID = optional(session)
 		return c, nil

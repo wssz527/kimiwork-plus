@@ -58,8 +58,8 @@ var (
 //     caller that sends `[]` is asking for no work, not for all work.
 //   - `force` defaults to false, so a second click inside the throttle window is
 //     answered as `throttled` rather than sent again.
-//   - Only a `custom` source may be removed. The vendor presets are the
-//     product's own list.
+//   - A source bound to a user connection may be removed, including vendor
+//     adapters. Product defaults without a user connection are retained.
 //   - The panel names its credential by connection, not by reference: the body
 //     carries `auth.connectionId` and this method turns it into the
 //     `connection:<id>` reference AddSource stores.
@@ -127,9 +127,7 @@ func (a *Accounts) panelSources(input map[string]any,
 			return nil, panelError(400, "invalid_quota_source")
 		}
 		source := a.findSource(sourceID)
-		if source == nil || source.Adapter != "custom" {
-			// A vendor preset is the product's own entry; the panel cannot
-			// delete it, and saying so is more useful than a silent no-op.
+		if source == nil || !strings.HasPrefix(source.CredentialRef, "connection:") {
 			return nil, panelError(409, "quota_source_not_removable")
 		}
 		a.RemoveSource(sourceID)

@@ -178,7 +178,9 @@ skipped, not failed, when `KIMI_SKIP_LIVE=1`.
 controller, err := kimi.NewController(kimi.ControllerSettings{
     Installation: install,                 // from kimi.Detect
     StateDir:     stateDir,                // this product's private directory
-    UserDataDir:  isolatedProfile,         // must NOT be the signed-in profile
+    UserDataDir:  officialProfile,         // default: the official Kimi profile
+    LoginDataDir: officialProfile,
+    ProfileMode:  kimi.ProfileModeOfficial,
     GatewayURL:   "http://127.0.0.1:PORT/v1",
     GatewayToken: localToken,
     Models:       savedModels,
@@ -209,9 +211,10 @@ controller.SetTranslationHandler(func(ctx context.Context, r kimi.TranslationRep
 returns `ErrUnmanagedKimiRunning` and `ControllerState == "needs_user_close"`.
 It does not attach, signal, or kill that process. If the process state cannot be
 determined, it fails with `kimi_process_state_unknown` rather than assuming it is
-not running. By default, a managed child uses the isolated `UserDataDir`.
+not running. The default managed child uses the official `UserDataDir` and its real
+Work data; it does not copy login files or install a `daimon-storage.json` pointer.
 
-On Mac, `StartWithExistingLogin(ctx)` is an explicit alternative. It reuses the
+On Mac, `StartWithExistingLogin(ctx)` is an explicit diagnostic alternative. It reuses the
 current user's official `kimi-desktop` login profile without copying credentials.
 `UserDataDir` continues to identify the isolated Work data root inside `StateDir`;
 only the child launch uses `LoginDataDir`. A journaled `daimon-storage.json`
@@ -224,11 +227,13 @@ an existing official process must first exit normally. Login files and the
 original Work directory are never copied, imported, or migrated.
 
 `POST /api/actions` accepts `{"action":"launch-kimi","profileMode":"existing-authorized"}`
-for this alternative. Omit `profileMode` to retain the controller's current mode
-(the initial default remains isolated). Other supplied values are rejected as
-`invalid_profile_mode`. This action only starts a child; `connect-kimi` remains the
-separate explicit model-import action. `profile.canReuseLogin` reports whether
-the Mac login directory is available, not whether its account is authenticated.
+for the diagnostic alternative. Omitting `profileMode` selects the official profile.
+Other supplied values are rejected as `invalid_profile_mode`. The
+`restart-kimi` action uses `RestartOfficial`: it asks every matching official process
+to quit normally, verifies process identity while waiting, and starts a managed child
+against the official profile. It never force-kills an unmanaged process.
+`connect-kimi` remains the separate explicit model-import action.
+`profile.canReuseLogin` reports whether the Mac login directory is available, not whether its account is authenticated.
 An unavailable or expired official login is still reported as waiting-login.
 Windows existing-login mode is unsupported. The Mac storage contract is bound to
 these reviewed official main-entry SHA-256 values:
@@ -251,10 +256,10 @@ calling `ImportModelsAuthorized`:
    only an A query for `dev.msh.team` with `10.255.255.254`; AAAA receives an empty
    success response and other names receive REFUSED. A bind failure is reported as
    `native_byok_dns_unavailable` without stopping the panel or gateway.
-2. Install `/etc/resolver/dev.msh.team` through the system administrator prompt.
-   The resolver bytes are exactly the reviewed Node configuration, including its
-   ownership header. Existing identical bytes are idempotent; different bytes or
-   symlinks return `resolver_conflict` and are never overwritten. Windows instead
+2. Reuse `/etc/resolver/dev.msh.team` without elevation only when its bytes are
+   exactly the reviewed configuration and a fresh private-address probe passes.
+   Otherwise install it through the system administrator prompt. Different bytes
+   or symlinks return `resolver_conflict` and are never overwritten. Windows
    inserts only the marked hosts pair, preserving original bytes and line endings.
 3. Preserve other valid flag fields while setting `revealed=true`, invalidate the
    probe cache, and require a fresh private-address result before importing.
@@ -883,3 +888,78 @@ replace. There is still no plaintext fallback and no old-safeStorage decryption.
 - **Port retention across a restart** is available as an option but is not proven
   end to end: the daemon side that reuses a port and token is the main session's
   work.
+
+---
+
+# Current Phase 1 behavior (2026-11-16)
+
+## 37. Official profile, restart, and synchronization
+
+The desktop daemon constructs the controller with `ProfileModeOfficial` and the
+installed application's own profile. This is the default on macOS and Windows.
+It shares the official login and Work data deliberately; it does not copy
+credentials and does not redirect Work storage. `ProfileModeExistingAuthorized`
+and `ProfileModeIsolated` remain explicit diagnostic alternatives, not the normal
+launch path. Resolving the Work home also accepts a not-yet-created profile and
+missing parent directories, so first-use discovery does not block gateway startup.
+An unavailable official login is reported when the user starts Kimi.
+
+Profile changes serialize MCP reads and writes with manager replacement. Policy
+reconciliation follows the configuration mutation lock before the profile lock.
+A failed home synchronization is exposed as `diagnostics.profileReason`.
+
+`RestartOfficial` requests the normal application quit, waits for the original
+process identities to disappear, and then starts a new private-CDP managed child.
+The UI exposes this as `restart-kimi`. The controller reports only the process it
+actually started as managed. If another gateway relaunches Kimi, the old managed
+child exits and the panel reports that exit; the externally parented process is
+not adopted. Running the legacy Node gateway and this candidate against the same
+official profile is therefore unsupported during acceptance: both can rewrite the
+BYOK catalog and restart the same application.
+
+`prepare-native` reuses an identical resolver entirely in user space when the
+private-address probe passes. Administrator cancellation, authorization failure,
+and timeout are returned as `setup_cancelled`, `setup_authorization_failed`, and
+`setup_timeout`; a failed preparation does not synthesize an import result.
+Native import registers one gateway provider and the enabled concrete model IDs.
+Discovery preserves custom display names for saved models on the same connection
+and upstream model. The official selector has shown the Magpie DeepSeek and GLM
+names, and real replies have been received from both.
+
+## 38. Subagent and MCP evidence
+
+The subagent scanner accepts aliases declared by the official `[models."alias"]`
+tables as well as the legacy root forms. `force` writes the managed
+`[secondary_model]` block; `inherit` removes that block and restores the original
+bytes. On the real Work session, a forced GLM child ran between DeepSeek parent
+requests. In inherit mode, the equivalent child request used DeepSeek. The
+binding's file state alone is not evidence of model adoption; the real request
+sequence is.
+
+MCP `add`, `update`, and `remove` operate on the kernel's `mcp.json` file. The
+in-panel `test` action remains unavailable because it requires the kernel's MCP
+runtime. A temporary stdio server was configured through `/api/tools`, called by
+the real Work model, and returned its fixed marker; it was then removed through
+the same API. This proves the configured server can be used by Work, not that the
+panel's disabled probe has become available.
+
+## 39. Request identity and the direct-config probe
+
+Real Responses requests use `prompt_cache_key` with a `conv-…` value. The parent,
+child, and parent-completion requests in one task all carry the same value.
+`Runtime` therefore uses it as the ledger's `conversationId` when no explicit
+session header is present. It groups a Work conversation; it does not identify
+the caller role. No captured header distinguished the parent from the child.
+System-prompt hashes and lengths differed, but no stable semantic role field was
+established, so the ledger does not guess `main` or `subagent` from token counts,
+timing, or prompt size.
+
+The DNS fallback probe added a temporary provider/model entry directly to
+`config.json`, without adding it to the official BYOK provider catalog. The entry
+survived the initial restart readback but never appeared in the selector and was
+removed by subsequent catalog/config generation. No successful reply was claimed.
+On this installed version, direct `model.providers` / `model.models` writes alone
+are not an established fallback for the DNS-gated native import flow.
+
+Windows runtime behavior remains unverified; a Mac result or a Windows cross
+build does not change that boundary.

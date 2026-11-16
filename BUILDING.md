@@ -1,6 +1,6 @@
 # Go/Wails 实验实现
 
-本目录是 Kimi Work+ 当前唯一开发的 Go/Wails 增强套件源码，从 0.12.1 迁移而来。Node 网关与 Magpie 专用插件停止开发，保留历史候选。当前构建仍是独立预览，尚未通过完整官方采用验收，稳定安装继续保留。
+本目录是 Kimi Work+ 当前唯一开发的 Go/Wails 增强套件源码，从 0.12.1 迁移而来。Node 网关与 Magpie 专用插件停止开发，保留历史候选。当前构建是独立预览；阶段 1 的核心模型链路、子代理和 MCP 已进入真实官方数据验收，稳定安装继续保留。
 
 ## 工具链
 
@@ -72,6 +72,6 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags $flags -o ou
 
 协议、账本、额度、Tavily 测试包含旧实现的冻结观察值，不需要 Node/Bun 即可运行这些对照测试。`DUAL_RUN_REGEN=1` 是开发者重新执行旧 JS 的可选模式，需要原 0.12.1 源码和 Bun；独立回传源码没有捆绑完整旧仓库，普通测试不依赖它。
 
-`internal/kimi/INTERFACE.md` 记录原生契约与未支持能力。Go 写入配置文件、CDP fixture 或 JS 解析成功都不代表官方登录会话已经采用。MCP 原生测试、remote companion/updater、旧 safeStorage 解密、配置重协调的官方会话采用和生产账号导入仍有缺口，详见回传根目录 FEATURE_MATRIX.csv。
+`internal/kimi/INTERFACE.md` 记录原生契约、当前默认 profile 与未支持能力。阶段 1 已在真实官方账号和 Work 数据上验收模型选择、DeepSeek/GLM 回复、固定/继承子代理及 MCP 工具往返；账本记录真实 Token、耗时和 `conversationId`。真实请求没有可靠的主对话/子代理角色字段，不能据此声称账本已区分调用方。MCP 面板内的连接探测仍需要 kernel runtime；remote companion/updater、旧 safeStorage 解密、Windows 真机和生产级共存仍有缺口。功能分级以回传根目录 `FEATURE_MATRIX.md` 为准。
 
 前端保留现有 HTML/CSS/JavaScript，没有为迁移重新设计 UI。翻译注入脚本仍在官方 Kimi 的渲染上下文运行。新版包不携带 Node、Electron 或 Chromium。

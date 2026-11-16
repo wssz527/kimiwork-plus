@@ -92,6 +92,23 @@ func TestSubagentForceWritesAManagedBlock(t *testing.T) {
 	}
 }
 
+func TestSubagentAcceptsNativeModelDeclarations(t *testing.T) {
+	kimiHome, stateDir := nativeHome(t)
+	writeConfig(t, kimiHome, `[models."byok-kth-kimi/kimi-a"]
+provider = "byok-kth-kimi"
+model = "kimi-a"
+`)
+	config, _ := NewSubagentConfig(stateDir, kimiHome)
+	status := config.Update(SubagentPolicy{Mode: SubagentModeForce,
+		ModelAlias: "byok-kth-kimi/kimi-a"}, SubagentCapabilities{})
+	if status.State != NativeStateFileApplied || status.Mode != SubagentModeForce {
+		t.Fatalf("status: %+v", status)
+	}
+	if !strings.Contains(readConfig(t, kimiHome), `default_model = "byok-kth-kimi/kimi-a"`) {
+		t.Fatal("the native model alias was not applied")
+	}
+}
+
 func TestSubagentDropsForceKeyWhenTheKernelLacksIt(t *testing.T) {
 	kimiHome, stateDir := nativeHome(t)
 	writeConfig(t, kimiHome, baseConfig)

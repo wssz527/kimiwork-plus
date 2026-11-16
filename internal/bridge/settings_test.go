@@ -77,8 +77,8 @@ func TestQuotaUIAndTranslationSettings(t *testing.T) {
 	if strings.Contains(string(encoded), "synthetic") || !strings.Contains(string(encoded), "credentialSet") {
 		t.Fatal("quota panel response invalid")
 	}
-	if _, e = runtime.Action(context.Background(), "/api/quota/sources", core.Document{"action": "remove", "sourceId": "deepseek-local"}); e == nil {
-		t.Fatal("removed preset")
+	if _, e = runtime.Action(context.Background(), "/api/quota/sources", core.Document{"action": "remove", "sourceId": "deepseek-local"}); e != nil {
+		t.Fatal("connection-bound source was not removable", e)
 	}
 	result, e = runtime.Action(context.Background(), "/api/quota/refresh", core.Document{"sourceIds": []any{}})
 	if e != nil {

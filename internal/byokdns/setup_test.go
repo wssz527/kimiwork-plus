@@ -103,6 +103,8 @@ func TestSetupMapsFailures(t *testing.T) {
 		{errors.New("User canceled (-128)"), "setup_cancelled"},
 		{errors.New("OPERATION WAS CANCELED"), "setup_cancelled"},
 		{errors.New("Cancelled By The User"), "setup_cancelled"},
+		{context.DeadlineExceeded, "setup_timeout"},
+		{errors.New("administrator name or password was incorrect (-60007)"), "setup_authorization_failed"},
 		{errors.New("other"), "native_setup_failed"},
 	} {
 		setup := Setup{FlagFile: filepath.Join(profile, "kimi-agent", "byok-availability.json"), Platform: "darwin", Admin: func(context.Context, string, string) error { return test.failure }}
@@ -277,5 +279,59 @@ func TestWindowsScriptsCarryVerificationAndElevation(t *testing.T) {
 	elevated := elevationCommand("Write-Output 'done'")
 	if !strings.Contains(elevated, "-Verb RunAs") || !strings.Contains(elevated, "setup_cancelled") {
 		t.Fatalf("unexpected elevation script: %s", elevated)
+	}
+}
+
+func TestSetupReusesReadyResolverWithoutAdministrator(t *testing.T) {
+	profile := t.TempDir()
+	flag := filepath.Join(profile, "kimi-agent", "byok-availability.json")
+	if err := os.MkdirAll(filepath.Dir(flag), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolver := filepath.Join(t.TempDir(), Domain)
+	configuration, err := ResolverConfiguration(DNSPort, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resolver, []byte(configuration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	adminCalls := 0
+	probeCalls := 0
+	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver,
+		Admin: func(context.Context, string, string) error { adminCalls++; return nil },
+		Probe: &Probe{Lookup: func(context.Context, string) (string, error) {
+			probeCalls++
+			return "10.1.2.3", nil
+		}}}
+	if err := setup.Run(context.Background(), "prepare"); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := readFlag(flag)
+	if err != nil || state != "revealed" || adminCalls != 0 || probeCalls != 1 {
+		t.Fatalf("state=%s admin=%d probe=%d err=%v", state, adminCalls, probeCalls, err)
+	}
+}
+
+func TestSetupDoesNotReuseResolverWithoutPrivateProbe(t *testing.T) {
+	profile := t.TempDir()
+	flag := filepath.Join(profile, "kimi-agent", "byok-availability.json")
+	resolver := filepath.Join(t.TempDir(), Domain)
+	configuration, err := ResolverConfiguration(DNSPort, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resolver, []byte(configuration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	adminCalls := 0
+	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver,
+		Admin: func(context.Context, string, string) error { adminCalls++; return nil },
+		Probe: &Probe{Lookup: func(context.Context, string) (string, error) { return "8.8.8.8", nil }}}
+	if err := setup.Run(context.Background(), "prepare"); err != nil {
+		t.Fatal(err)
+	}
+	if adminCalls != 1 {
+		t.Fatalf("admin calls = %d", adminCalls)
 	}
 }

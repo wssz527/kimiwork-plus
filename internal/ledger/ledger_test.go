@@ -2,6 +2,7 @@ package ledger_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -599,5 +600,21 @@ func TestRedactionIsStableAndNotReversible(t *testing.T) {
 	}
 	if ledger.RedactIdentifier("") != "" || ledger.RedactIdentifier(strings.Repeat("x", 5000)) != "" {
 		t.Fatalf("an unusable value produced a digest")
+	}
+}
+
+func TestNormalizationRedactsBeforeIdentifierValidation(t *testing.T) {
+	instance := open(t, workspace(t))
+	account := strings.Repeat("account with spaces ", 20)
+	key := "sk-\n" + strings.Repeat("special:key ", 20)
+	record, err := instance.Normalize(ledger.Entry{OperationID: "op-redaction", Account: &account, APIKeyID: &key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record["account"] != ledger.RedactIdentifier(account) || record["apiKeyId"] != ledger.RedactIdentifier(key) {
+		t.Fatalf("redacted identifiers = %#v", record)
+	}
+	if strings.Contains(fmt.Sprint(record), account) || strings.Contains(fmt.Sprint(record), key) {
+		t.Fatal("raw identifiers survived normalization")
 	}
 }

@@ -160,6 +160,7 @@ type UsageContextRequest struct {
 	ModelID          string
 	ConnectionID     *string
 	UpstreamProtocol *string
+	PromptCacheKey   string
 	Headers          map[string]string
 	At               int64
 }
@@ -677,8 +678,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 				sessionHeaders[name] = value
 			}
 		}
+		promptCacheKey := ""
+		if raw, ok := document.Get("prompt_cache_key"); ok {
+			_ = json.Unmarshal(raw, &promptCacheKey)
+		}
 		request := UsageContextRequest{Protocol: route, Model: selected.ID, ModelID: selected.UpstreamID(),
-			ConnectionID: selected.ConnectionID, UpstreamProtocol: selected.UpstreamProtocol,
+			ConnectionID: selected.ConnectionID, UpstreamProtocol: selected.UpstreamProtocol, PromptCacheKey: promptCacheKey,
 			Headers: sessionHeaders, At: g.config.Now().UnixMilli()}
 		func() {
 			defer func() { _ = recover() }()

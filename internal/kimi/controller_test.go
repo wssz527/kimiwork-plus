@@ -275,6 +275,7 @@ func TestControllerRefusesAnUnmanagedKimi(t *testing.T) {
 	dir := t.TempDir()
 	controller, err := NewController(ControllerSettings{StateDir: dir,
 		UserDataDir:  filepath.Join(dir, "profile"),
+		ProfileMode:  ProfileModeIsolated,
 		Installation: *state.Installation})
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +302,7 @@ func TestControllerRejectsTheRealUserProfile(t *testing.T) {
 	}
 	realProfile := filepath.Join(home, "Library", "Application Support", "kimi-desktop")
 	controller, err := NewController(ControllerSettings{StateDir: t.TempDir(),
-		UserDataDir: realProfile, Installation: Installation{Application: "/bin/true", Archive: "/nonexistent"}})
+		UserDataDir: realProfile, ProfileMode: ProfileModeIsolated, Installation: Installation{Application: "/bin/true", Archive: "/nonexistent"}})
 	if err != nil {
 		t.Fatal(err)
 	}

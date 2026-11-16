@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"kimiworkplus.local/migration/internal/core"
+	"kimiworkplus.local/migration/internal/ledger"
 )
 
 type testKeys map[string]string
@@ -91,7 +92,11 @@ func TestControlGatewayLedgerRestart(t *testing.T) {
 		t.Fatal(code, result)
 	}
 	for _, id := range []string{"alpha", "beta", "unknown"} {
-		code, result = call("POST", "/v1/chat/completions", core.Document{"model": "kimi-" + id, "messages": []any{core.Document{"role": "user", "content": "synthetic"}}}, runtime.Token(), false)
+		body := core.Document{"model": "kimi-" + id, "messages": []any{core.Document{"role": "user", "content": "synthetic"}}}
+		if id == "alpha" {
+			body["prompt_cache_key"] = "conv-runtime"
+		}
+		code, result = call("POST", "/v1/chat/completions", body, runtime.Token(), false)
 		if code != 200 {
 			t.Fatal(code, result)
 		}
@@ -112,6 +117,22 @@ func TestControlGatewayLedgerRestart(t *testing.T) {
 	raw, _ := json.Marshal(result)
 	if strings.Contains(string(raw), "synthetic-key") {
 		t.Fatal("key leaked")
+	}
+	records := core.Rows(result["records"])
+	if len(records) != 3 {
+		t.Fatalf("records = %d", len(records))
+	}
+	for _, value := range records {
+		record := core.Object(value)
+		if record["account"] != ledger.RedactIdentifier("mock") || record["apiKeyId"] != ledger.RedactIdentifier("synthetic-key") || record["account"] == record["apiKeyId"] {
+			t.Fatalf("request identity = %#v", record)
+		}
+		if record["modelAlias"] == "kimi-alpha" && record["conversationId"] != "conv-runtime" {
+			t.Fatalf("cache-key conversation = %#v", record["conversationId"])
+		}
+		if record["modelAlias"] != "kimi-alpha" && record["conversationId"] != nil {
+			t.Fatalf("unexpected conversation = %#v", record["conversationId"])
+		}
 	}
 	if code, _ = call("GET", "/api/usage/clear", nil, s.Endpoint.Key, false); code != 404 {
 		t.Fatal("GET mutated ledger", code)

@@ -3,6 +3,10 @@ package bridge
 import "os"
 
 func (n *Native) reconcile(previous os.FileInfo) os.FileInfo {
+	n.service.mutation.Lock()
+	defer n.service.mutation.Unlock()
+	n.profileMu.Lock()
+	defer n.profileMu.Unlock()
 	path := n.policies.subagents.ConfigPath()
 	current, err := os.Stat(path)
 	if err != nil || !current.Mode().IsRegular() {
@@ -11,8 +15,6 @@ func (n *Native) reconcile(previous os.FileInfo) os.FileInfo {
 	if previous != nil && os.SameFile(previous, current) && previous.Size() == current.Size() && previous.ModTime() == current.ModTime() {
 		return previous
 	}
-	n.service.mutation.Lock()
-	defer n.service.mutation.Unlock()
 	d, _, err := n.service.Store.Read()
 	if err != nil || n.policies.Configure(d) != nil {
 		return previous

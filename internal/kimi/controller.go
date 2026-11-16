@@ -11,14 +11,11 @@ import (
 	"time"
 )
 
-// Controller is the one API the bridge calls. It owns the managed child, the
-// native integration, the CDP host and the translation surface state, and it
-// never touches an official Kimi it did not start.
-//
-// The hard rule this type enforces: an official Kimi that is already running and
-// was not started here is never attached to, never signalled and never killed.
-// `Start` reports `needs_user_close` instead, so the panel can ask the user to
-// quit their own application and try again.
+// Controller owns the managed child, native integration, CDP host and translation
+// surface state. Start never attaches to or signals an official Kimi it did not
+// start; it reports needs_user_close. RestartOfficial is the explicit action that
+// requests normal application exit before starting a managed child. It never
+// force-kills an unmanaged process.
 
 // ControllerState is the coarse state the panel renders.
 type ControllerState string
@@ -47,11 +44,12 @@ type ControllerSettings struct {
 	Installation Installation
 	// StateDir is this product's private state directory.
 	StateDir string
-	// UserDataDir contains this product's isolated Work data and, in isolated
-	// mode, the Electron profile. It must resolve inside StateDir.
+	// UserDataDir identifies the Work data root and, except in existing-authorized
+	// mode, the Electron profile. It must resolve inside StateDir unless ProfileMode
+	// is official.
 	UserDataDir string
-	// LoginDataDir is used only after explicit existing-login authorization.
-	// Work configuration remains under UserDataDir.
+	// LoginDataDir is the Electron profile in existing-authorized mode. Official
+	// mode sets it to the same official profile as UserDataDir.
 	LoginDataDir string
 	// KimiHome optionally names the Work data directory. It is honoured only
 	// when it resolves inside UserDataDir.
@@ -63,7 +61,7 @@ type ControllerSettings struct {
 	// Models is the catalog to import.
 	Models []Model
 	// AccountScope identifies the Kimi account, when known. It is only ever
-	// compared against the account read from the isolated profile; it never
+	// compared against the account read from the selected profile; it never
 	// supplies one.
 	AccountScope string
 	// AllowNativeImport is retained for callers that still set it, but it no
@@ -72,7 +70,7 @@ type ControllerSettings struct {
 	// permanently-on flag is exactly the behaviour this replaces.
 	AllowNativeImport bool
 	// ProfileMode selects the profile the managed child runs against. Empty means
-	// isolated. Existing-authorized retains login while isolating Work storage.
+	// official. Existing-authorized retains login while isolating Work storage.
 	ProfileMode string
 	// Translation configures the renderer injection.
 	Translation TranslationSettings
@@ -289,7 +287,7 @@ func (c *Controller) NativeState(ctx context.Context) NativeState {
 	return state
 }
 
-// Start launches a managed Kimi in an isolated profile.
+// Start launches a managed Kimi in the selected profile.
 //
 // It is idempotent for the child this controller already owns: when that child is
 // still running, Start checks it (the published bridge answers, or the host
@@ -335,7 +333,13 @@ func (c *Controller) start(ctx context.Context) error {
 		c.setState(StateFailed, err.Error())
 		return err
 	}
-	profile, err := c.validateProfile(settings.UserDataDir)
+	var profile string
+	var err error
+	if settings.profileMode() == ProfileModeOfficial {
+		profile, err = c.validateOfficialProfile(settings.UserDataDir)
+	} else {
+		profile, err = c.validateProfile(settings.UserDataDir)
+	}
 	if err != nil {
 		c.setState(StateFailed, err.Error())
 		return err
@@ -737,7 +741,7 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 
 // Reconcile runs the native integration against the configured catalog.
 //
-// It reads the account from the isolated profile first. A profile that has not
+// It reads the account from the selected profile first. A profile that has not
 // signed in is reported as `account-unverified` rather than reconciled against
 // whatever account happens to be there, because an import into the wrong account
 // is the one mistake that cannot be undone from here.
@@ -749,7 +753,7 @@ func (c *Controller) Reconcile() IntegrationResult {
 // read back the directory, the account, the URL and the config generation, and
 // grade the result from that evidence.
 //
-// The account is always taken from this controller's own isolated profile, never
+// The account is always taken from this controller's selected profile, never
 // from the caller's configuration and never from a directory outside it.
 func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
 	_ = ctx
@@ -889,24 +893,46 @@ func (c *Controller) setState(state ControllerState, reason string) {
 	c.mu.Unlock()
 }
 
-// kimiHome is the Work data directory the managed child uses, derived the same
+// WorkHome is the Work data directory the managed child uses, derived the same
 // way Kimi derives it: `daimon-storage.json` shareDir, else
-// <profile>/daimon-share/daimon. A resolution that leaves the managed profile
-// answers empty, so the integration refuses rather than writing the user's real
-// installation.
-func (c *Controller) kimiHome() string {
+// <profile>/daimon-share/daimon. A resolution that leaves the selected profile
+// returns an error, so the integration never writes outside the selected tree.
+func (c *Controller) WorkHome() (string, error) {
 	c.mu.Lock()
 	profile := c.settings.UserDataDir
 	override := c.settings.KimiHome
 	c.mu.Unlock()
 	if profile == "" {
-		return ""
+		return "", ErrKimiHomeUnresolved
 	}
-	home, err := ResolveKimiHome(profile, override)
+	return ResolveKimiHome(profile, override)
+}
+
+func (c *Controller) kimiHome() string {
+	home, err := c.WorkHome()
 	if err != nil {
 		return ""
 	}
 	return home
+}
+
+func (c *Controller) validateOfficialProfile(candidate string) (string, error) {
+	expected, err := OfficialProfileDirectory()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := resolveAllowMissing(candidate)
+	if err != nil {
+		return "", errors.New("user_data_dir_invalid")
+	}
+	official, err := resolveAllowMissing(expected)
+	if err != nil || resolved != official {
+		return "", errors.New("official_profile_mismatch")
+	}
+	if err := validateExistingProfileDirectory(official); err != nil {
+		return "", err
+	}
+	return filepath.Clean(candidate), nil
 }
 
 // validateProfile requires the managed profile to live inside this product's own

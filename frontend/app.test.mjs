@@ -145,6 +145,19 @@ test('onboard save merges selected models and retains unselected saved models', 
   assert.equal(merged.at(-1).name, 'updated');
 });
 
+test('discovery retains custom names for saved models on the same connection', () => {
+  const preserve = new Function(sourceFunction('preserveOnboardModelNames') + '\nreturn preserveOnboardModelNames;')();
+  const discovered = [{ upstreamModelId: 'model-a', name: 'Upstream A' }, { upstreamModelId: 'model-b', name: 'Upstream B' }];
+  const saved = [
+    { connectionId: 'myconn', upstreamModelId: 'model-a', name: 'My custom A' },
+    { connectionId: 'other', upstreamModelId: 'model-b', name: 'Other B' },
+  ];
+  assert.deepEqual(preserve(discovered, saved, 'myconn'), [
+    { upstreamModelId: 'model-a', name: 'My custom A' },
+    { upstreamModelId: 'model-b', name: 'Upstream B' },
+  ]);
+});
+
 test('onboard search matches upstream ID, name and description', () => {
   const state = { onboard: { query: 'VISION', discovery: { models: [
     makeRow('alpha'), makeRow('beta', { name: 'Vision model' }), makeRow('gamma', { description: 'vision capable' }),

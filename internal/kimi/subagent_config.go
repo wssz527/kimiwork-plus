@@ -100,8 +100,8 @@ type SubagentConfig struct {
 }
 
 // NewSubagentConfig prepares a writer. `kimiHome` is required and explicit: the
-// caller must say which isolated tree this is, so no default can silently target
-// the user's real installation.
+// caller must identify the exact selected home, so no default can silently target
+// a different installation.
 func NewSubagentConfig(stateDir, kimiHome string) (*SubagentConfig, error) {
 	if stateDir == "" || !isAbsPath(stateDir) {
 		return nil, errors.New("state_dir_required")
@@ -217,7 +217,8 @@ type subagentScan struct {
 }
 
 // scanConfig reads the file's structure: the managed block, the model aliases the
-// kernel declares, and whether a foreign `[secondary_model]` section exists.
+// kernel declares in [models.<alias>] tables, and whether a foreign
+// [secondary_model] section exists.
 func scanConfig(raw string) subagentScan {
 	lines := splitTOML(raw)
 	scan := subagentScan{raw: raw, lines: lines, declared: map[string]bool{}}
@@ -328,6 +329,9 @@ func scanConfig(raw string) subagentScan {
 			}
 			segments := tomlKeySegments(line.text, lead+1, close)
 			switch {
+			case len(segments) == 2 && segments[0] == "models" && segments[1] != "":
+				scan.declared[segments[1]] = true
+				table = ""
 			case len(segments) == 1 && segments[0] == "secondary_model":
 				scan.foreign = true
 				table = "secondary_model"

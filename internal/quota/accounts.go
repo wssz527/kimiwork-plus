@@ -1130,9 +1130,8 @@ func (a *Accounts) PanelState(connections []ConnectionView) map[string]any {
 		row["status"] = card.Status
 		row["credentialSet"] = credentialSet
 		row["errorReason"] = card.ErrorReason
-		// Only a user-supplied endpoint may be deleted: the vendor presets are
-		// the product's own list.
-		row["removable"] = source.Adapter == "custom"
+		// Sources bound to a user connection are removable regardless of adapter.
+		row["removable"] = strings.HasPrefix(source.CredentialRef, "connection:")
 		officialURL := ""
 		if source.ConsoleURL != nil {
 			officialURL = *source.ConsoleURL

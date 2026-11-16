@@ -22,3 +22,8 @@ func existingProfileIdentity(path string) (string, error) {
 	}
 	return fmt.Sprintf("%d:%d:%d", stat.Dev, stat.Ino, stat.Uid), nil
 }
+
+func validateExistingProfileDirectory(path string) error {
+	_, err := existingProfileIdentity(path)
+	return err
+}

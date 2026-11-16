@@ -117,7 +117,7 @@ func (n *Native) saveWebServices(block map[string]any) error {
 }
 
 func (n *Native) initEnhancements() error {
-	home := filepath.Dir(filepath.Dir(filepath.Dir(n.policies.subagents.HomeDir())))
+	home := n.policies.home
 	store, err := kimi.NewMCPFileStore(home)
 	if err != nil {
 		return err
@@ -144,6 +144,12 @@ func (n *Native) initEnhancements() error {
 }
 
 func (n *Native) toolsState(ctx context.Context) core.Document {
+	n.profileMu.Lock()
+	defer n.profileMu.Unlock()
+	return n.toolsStateLocked(ctx)
+}
+
+func (n *Native) toolsStateLocked(ctx context.Context) core.Document {
 	result := n.mcp.List(ctx)
 	servers := result.Servers
 	if servers == nil {
@@ -153,6 +159,8 @@ func (n *Native) toolsState(ctx context.Context) core.Document {
 }
 
 func (n *Native) toolsAction(ctx context.Context, in core.Document) (any, error) {
+	n.profileMu.Lock()
+	defer n.profileMu.Unlock()
 	var result kimi.MCPStatus
 	switch in["action"] {
 	case "add":
@@ -177,7 +185,7 @@ func (n *Native) toolsAction(ctx context.Context, in core.Document) (any, error)
 	if !result.OK {
 		return nil, errors.New(result.Reason)
 	}
-	return core.Document{"tools": n.toolsState(ctx), "result": result}, nil
+	return core.Document{"tools": n.toolsStateLocked(ctx), "result": result}, nil
 }
 
 func (n *Native) webAction(in core.Document) (any, error) {

@@ -42,8 +42,8 @@ type MCPFileStore struct {
 }
 
 // NewMCPFileStore opens the store for one explicit Kimi home. `kimiHome` is the
-// Work data directory; the kernel's own home is derived from it, so no default
-// can reach the user's real installation.
+// selected Work data directory; the kernel's own home is derived from it, so no
+// default can silently select a different installation.
 func NewMCPFileStore(kimiHome string) (*MCPFileStore, error) {
 	paths, err := newConfigPaths(kimiHome)
 	if err != nil {

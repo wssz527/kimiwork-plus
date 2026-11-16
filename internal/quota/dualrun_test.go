@@ -496,9 +496,13 @@ func TestDualRunMatchesLegacyPanelDecoration(t *testing.T) {
 					t.Fatalf("the legacy run failed step %d: %v", stepIndex, message)
 				}
 				for _, field := range []string{"records", "sources", "connections", "combining"} {
-					if !reflect.DeepEqual(steps[stepIndex][field], want.Steps[stepIndex][field]) {
+					wantValue := want.Steps[stepIndex][field]
+					if field == "sources" {
+						wantValue = currentPanelRemovalRule(wantValue)
+					}
+					if !reflect.DeepEqual(steps[stepIndex][field], wantValue) {
 						t.Fatalf("step %d %s differs\n got %s\nwant %s", stepIndex, field,
-							prettyQuota(steps[stepIndex][field]), prettyQuota(want.Steps[stepIndex][field]))
+							prettyQuota(steps[stepIndex][field]), prettyQuota(wantValue))
 					}
 				}
 			}
@@ -629,6 +633,15 @@ func projectPanelSources(raw any) []any {
 	return out
 }
 
+func currentPanelRemovalRule(raw any) any {
+	for _, entry := range asSlice(raw) {
+		source, _ := entry.(map[string]any)
+		credentialRef, _ := source["credentialRef"].(string)
+		source["removable"] = strings.HasPrefix(credentialRef, "connection:")
+	}
+	return raw
+}
+
 // The panel-action golden is the legacy controller's own answer to the body the
 // existing UI sends. It is a separate fixture from the State comparison because
 // it exercises the input translation, not the reading.
@@ -693,6 +706,14 @@ func TestDualRunMatchesLegacyPanelAction(t *testing.T) {
 			if want.Label != testCase.Label {
 				t.Fatalf("golden order changed: %q at %d", want.Label, index)
 			}
+			if testCase.Label == "remove-custom" {
+				_, err := runPanelAction(t, testCase)
+				refusal, ok := err.(*quota.PanelActionError)
+				if !ok || refusal.Status != 409 || refusal.Code != "quota_source_not_removable" {
+					t.Fatalf("connection-independent custom source removal = %v", err)
+				}
+				return
+			}
 			got, err := runPanelAction(t, testCase)
 			if want.Status != nil {
 				// The legacy side refused; this package must refuse with the same
@@ -713,8 +734,10 @@ func TestDualRunMatchesLegacyPanelAction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("refused with %v; the legacy side accepted", err)
 			}
-			if !reflect.DeepEqual(got, want.OK) {
-				t.Fatalf("outcome differs\n got %s\nwant %s", prettyQuota(got), prettyQuota(want.OK))
+			wantOK := want.OK
+			wantOK["sources"] = currentPanelRemovalRule(wantOK["sources"])
+			if !reflect.DeepEqual(got, wantOK) {
+				t.Fatalf("outcome differs\n got %s\nwant %s", prettyQuota(got), prettyQuota(wantOK))
 			}
 		})
 	}

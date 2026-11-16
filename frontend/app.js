@@ -72,6 +72,7 @@ const VIEW_ALIASES = {};
 
 const ACTION_LABEL = {
   'launch-kimi': '打开 / 启动 Kimi',
+  'restart-kimi': '正常退出并重启 Kimi',
   'prepare-native': '准备原生设置',
   'remove-dns': '移除单域名 DNS',
   'connect-kimi': '重新准备接入',
@@ -146,14 +147,26 @@ const DIAG_REASON = {
   native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。',
   native_byok_intranet_unavailable: '指定域名的私网解析尚未通过。',
   native_byok_reveal_failed: '官方功能标记未能写入或读回。',
+  setup_timeout: '原生接入准备超时；请检查系统授权窗口后重试。',
+  setup_authorization_failed: '系统管理员授权失败；尚未写入新的接入配置。',
+  setup_cancelled: '系统授权已取消；尚未继续原生接入。',
   invalid_setup_flag: '官方功能标记文件不可读或格式无效。',
   kimi_data_missing: '未找到官方 Kimi 数据目录，请先正常启动官方 Kimi。',
   setup_report_missing: '系统解析操作没有返回可验证的结果。',
   unsupported_hosts_encoding: '系统 hosts 文件编码不受支持，未修改原文件。',
   hosts_verify_failed: '系统 hosts 文件写入后校验失败。',
   resolver_conflict: '解析配置存在冲突，未覆盖外来内容。',
-  setup_cancelled: '系统管理员授权已取消。',
   native_setup_failed: '系统解析准备未完成。',
+  kimi_quit_refused: 'Kimi 未接受退出请求。请在官方窗口处理确认提示，然后重新启动。',
+  kimi_quit_unavailable: '系统无法发送正常退出请求。请先手动正常退出 Kimi，再从面板启动。',
+  kimi_quit_timeout: '等待 Kimi 正常退出超时。请检查官方窗口是否有任务或确认提示，再重试。',
+  process_identity_unknown: '无法确认当前 Kimi 进程身份。请先正常退出 Kimi，再从面板启动。',
+  official_profile_mismatch: '当前数据目录与官方 Kimi 目录不一致，启动已暂停。请检查诊断信息。',
+  work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请正常退出 Kimi，并核对数据位置。',
+  profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
+  kimi_application_missing: '未找到官方 Kimi 应用。请安装官方桌面版后重试。',
+  existing_login_profile_invalid: '官方登录目录不可用。请先正常打开官方 Kimi，再从面板重新启动。',
+  existing_login_profile_unavailable: '未找到官方登录目录。请先正常打开官方 Kimi。',
 };
 
 const UPDATE_STATE = {
@@ -1858,19 +1871,19 @@ function syncState(data) {
     return { code: 'conflict', tone: 'bad', word: '隔离启动未完成', note: nativeConnectionText(data) };
   }
   if (info.desktop?.state === 'needs_user_close') {
-    return { code: 'manual-exit', tone: 'warn', word: '等待完全退出 Kimi',
-      note: '请先正常退出当前官方 Kimi，再点击所选的启动按钮；不会强制结束现有进程。' };
+    return { code: 'manual-exit', tone: 'warn', word: '可以受管重启 Kimi',
+      note: '点击「正常退出并重启 Kimi」，产品会请求系统正常退出当前实例，再使用官方登录和真实 Work 数据受管启动。' };
   }
   if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
     if (data?.profile?.canReuseLogin === true && !has('account_changed', 'native_import_account_changed')) {
-      if (info.desktop?.state === 'ready' && data.profile.mode === 'existing-authorized') {
+      if (info.desktop?.state === 'ready' && (data.profile.mode === 'official' || data.profile.mode === 'existing-authorized')) {
         return { code: 'login', tone: 'warn', word: '尚未确认官方登录',
           note: '请查看官方窗口。已有登录有效时无需扫码；当前尚未读到账号，模型接入还没有继续。' };
       }
       const opening = data.operation?.action === 'launch-kimi' && isInFlight(data.operation);
-      return { code: 'ready-launch', tone: opening ? 'warn' : 'neutral', word: opening ? '正在打开隔离会话' : '可沿用已有登录',
-        note: opening ? '正在沿用官方登录并打开独立 Work 数据目录，请等待启动完成。' : '点击「沿用登录，隔离 Work」，保留官方已有登录并使用独立的模型、工具与任务目录。' };
+      return { code: 'ready-launch', tone: opening ? 'warn' : 'neutral', word: opening ? '正在打开官方 Work' : '可沿用已有登录',
+        note: opening ? '正在沿用官方登录和真实 Work 数据，请等待启动完成。' : '点击「打开 / 启动 Kimi」，沿用官方登录、对话、技能和已导入模型。' };
     }
     return { code: 'login', tone: 'warn', word: '需要登录',
       note: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。' };
@@ -2001,8 +2014,8 @@ function nativeConnectionText(data) {
     return '模型暂时还不能选择；后台会自动对齐，不用重复点击或重启桌面。';
   }
   if (reasons[reason]) return reasons[reason];
-  if (reason === 'waiting-login') return '请在刚打开的隔离 Kimi 窗口登录；本产品不会复制原账号 Cookie 或令牌。';
-  if (info.state === 'account-unverified') return '等待在隔离 Kimi 窗口登录并确认账号，再点「重新准备接入」。';
+  if (reason === 'waiting-login') return '请在刚打开的当前 Kimi 窗口登录；本产品不会复制原账号 Cookie 或令牌。';
+  if (info.state === 'account-unverified') return '等待在当前 Kimi 窗口登录并确认账号，再点「重新准备接入」。';
   if (info.state === 'pending') return '原生目录已接受，等待 Kimi 内核完成切换。';
   if (info.state === 'conflict') return '接入配置存在冲突，已保留当前内容；请检查配置后重试。';
   if (info.state === 'account-unverified') return '请登录 Kimi Work 并确认当前账户，然后点「打开 / 启动 Kimi」继续。';
@@ -2275,6 +2288,15 @@ function onboardRowFrom(candidate, { connection = null } = {}) {
     metadataKind: candidate.metadataSource?.kind || candidate.source?.kind || 'discovery',
     selected: false,
   };
+}
+
+function preserveOnboardModelNames(models, savedModels, connectionId) {
+  const names = new Map((Array.isArray(savedModels) ? savedModels : [])
+    .filter((model) => model && model.connectionId === connectionId && model.name)
+    .map((model) => [model.upstreamModelId, model.name]));
+  return models.map((row) => names.has(row.upstreamModelId)
+    ? { ...row, name: names.get(row.upstreamModelId) }
+    : row);
 }
 
 function buildOnboardRow(row) {
@@ -2601,7 +2623,7 @@ function renderOnboard() {
   }
   if (dom.handoff) {
     const operation = data.operation;
-    const activeAction = operation && ['launch-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
+    const activeAction = operation && ['launch-kimi', 'restart-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
     dom.handoff.dataset.state = (activeAction && isInFlight(operation)) || ['authorizing', 'busy', 'importing'].includes(sync.code) ? 'running' : 'idle';
     dom.handoff.dataset.tone = sync.tone;
   }
@@ -2635,18 +2657,18 @@ function renderOnboard() {
 
 function renderLaunch(data) {
   if (!dom.onboardLaunch) return;
-  const running = isInFlight(data && data.operation) && data.operation.action === 'launch-kimi';
-  const blocked = isInFlight(data && data.operation) && data.operation.action !== 'launch-kimi';
+  const running = isInFlight(data && data.operation) && ['launch-kimi', 'restart-kimi'].includes(data.operation.action);
+  const blocked = isInFlight(data && data.operation) && !['launch-kimi', 'restart-kimi'].includes(data.operation.action);
   const sync = syncState(data);
-  const reuseLogin = data?.profile?.canReuseLogin === true;
-  dom.onboardLaunch.dataset.profileMode = reuseLogin ? 'existing-authorized' : '';
-  const alreadyRunning = data?.kimiProcess?.state === 'running';
+  const alreadyRunning = data?.kimiProcess?.running === true;
+  dom.onboardLaunch.dataset.action = alreadyRunning ? 'restart-kimi' : 'launch-kimi';
+  dom.onboardLaunch.dataset.profileMode = '';
   dom.onboardLaunch.hidden = false;
-  dom.onboardLaunch.disabled = running || blocked || alreadyRunning;
-  setText(dom.onboardLaunch, alreadyRunning ? 'Kimi 已运行' : running ? '正在打开 / 启动 Kimi…' : reuseLogin ? '沿用登录，隔离 Work' : '打开 / 启动 Kimi');
+  dom.onboardLaunch.disabled = running || blocked;
+  setText(dom.onboardLaunch, alreadyRunning ? '正常退出并重启 Kimi' : running ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
   dom.onboardLaunch.setAttribute('aria-busy', running ? 'true' : 'false');
   if (dom.onboardLaunchHint) {
-    const hint = alreadyRunning ? '检测到 Kimi 进程正在运行，无需重复启动。' : reuseLogin ? '保留官方已有登录，模型、工具与任务使用独立目录；退出 Kimi 后恢复原来的数据位置。' : recoveryCopy(sync);
+    const hint = alreadyRunning ? '点击后会请求系统正常退出当前 Kimi，再沿用官方登录和真实 Work 数据受管重启；不会强制结束进程。' : recoveryCopy(sync);
     setHidden(dom.onboardLaunchHint, !hint);
     setText(dom.onboardLaunchHint, hint || '');
   }
@@ -2658,8 +2680,8 @@ function recoveryCopy(sync) {
     authorization: '需要一次系统授权；点「打开 / 启动 Kimi」继续，不会反复弹窗。',
     busy: 'Kimi 正在处理任务，空闲后会自动继续；现在不需要重复点击。',
     conflict: '检测到其他来源的接入，未覆盖；请先核对 Kimi 设置中的现有配置。',
-    'manual-exit': '只需从 Kimi 托盘完全退出一次；退出后会自动重拉并继续，不用再点一次。',
-    'waiting-quit': '退出请求已发出；关闭完成后会自动继续，不用再退出一次或重复点击。',
+    'manual-exit': '点击「正常退出并重启 Kimi」，由产品请求系统正常退出并受管重启。',
+    'waiting-quit': '退出请求已发出；关闭完成后会自动受管重启，请等待运行状态读回。',
     daimon: '模型暂时还不能在 Kimi 里选择；后台会自动对齐，不用重复点击或重启桌面。',
     synced: '已核对原生模型目录，不代表已选模或已回复；点「打开 / 启动 Kimi」即可打开 Kimi，不会额外跳到 Work 或设置页。',
     imported: '已导入模型目录，后台还会核对；需要时仍可点「打开 / 启动 Kimi」。',
@@ -2798,9 +2820,9 @@ async function discoverOnboardModels() {
     state.onboard.discovery = {
       checkedAt: discovery.checkedAt || null,
       modelCount: discovery.modelCount,
-      models: discovery.models.map((row) => onboardRowFrom(row, {
+      models: preserveOnboardModelNames(discovery.models.map((row) => onboardRowFrom(row, {
         connection: sameEndpoint ? saved : null,
-      })),
+      })), sameEndpoint ? state.data?.models : [], values.id),
     };
     if (discovery.state !== 'passed') {
       if (dom.onboardDiscoverState) {
@@ -3148,8 +3170,7 @@ function isInFlight(op) {
 
 function operationNote(op) {
   if (op && op.state === 'waiting-kimi-exit') {
-    const launch = op.action === 'launch-translated-kimi' ? '「从网关启动 Kimi」' : '「启动 Kimi」';
-    return 'Kimi 已在运行。请正常退出 Kimi，再点一次' + launch + '；本面板不会强制结束它。';
+    return '检测到另一个 Kimi 实例。点击「正常退出并重启 Kimi」后，产品会发送正常退出请求并完成受管重启。';
   }
   const code = op && typeof op.reason === 'string' && op.reason ? op.reason : '';
   if (!code) return '';
@@ -3181,18 +3202,21 @@ function renderActions(data) {
   const running = isInFlight(data && data.operation);
   const busy = running || state.modelsSaving || state.connsSaving;
   const ready = configReady(data);
-  const alreadyRunning = data?.kimiProcess?.state === 'running';
-  const launching = isInFlight(data?.operation) && data.operation.action === 'launch-kimi';
+  const alreadyRunning = data?.kimiProcess?.running === true;
   for (const button of actionButtons) {
-    const action = button.dataset.action;
     const reuseLogin = button.dataset.profileMode === 'existing-authorized';
+    if (!reuseLogin && ['launch-kimi', 'restart-kimi'].includes(button.dataset.action)) {
+      button.dataset.action = alreadyRunning ? 'restart-kimi' : 'launch-kimi';
+    }
+    const action = button.dataset.action;
     if (reuseLogin) setHidden(button, data?.profile?.canReuseLogin !== true);
     /* 更新按钮的可安装判断依赖 updates 与待重启版本，交给 renderUpdateButtons 统一处理。 */
     if (UPDATE_ACTIONS.has(action)) continue;
-    const needsReady = action === 'launch-kimi';
+    const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
     const pending = state.pendingAction === action;
-    button.disabled = busy || (needsReady && (!ready || alreadyRunning));
-    if (needsReady) setText(button, alreadyRunning ? 'Kimi 已运行' : launching ? '正在打开 / 启动 Kimi…' : reuseLogin ? '沿用登录，隔离 Work' : '打开 / 启动 Kimi');
+    button.disabled = busy || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
+    if (needsReady && !reuseLogin) setText(button, alreadyRunning ? '正常退出并重启 Kimi' : pending ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
+    if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
     button.classList.toggle('is-busy', pending);
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
   }
@@ -4989,12 +5013,10 @@ async function saveSubagentTarget() {
 
 /* ---------- render: connection ---------- */
 
-/* 重启说明按本进程的真实运行方式分流：state.service 只在后台服务场景给出
-   （service record 与本配置匹配时才认），此时教 service restart/status 找回；
-   前台终端运行的 panel 保留 Ctrl+C 三步。页面自身永远不执行重启。 */
+/* 重启说明区分受管后台与前台运行；页面不会猜测新会话密钥。
+   桌面窗口由托盘读取最新私有入口，Kimi 的正常退出与受管重启只由显式动作触发。 */
 /* 应用连接的主路径：先由用户点一次，之后由 M63 的 runner 在安全时应用。
-   页面自身从不重启、不结束 Kimi、不猜新会话密钥：窗口版读取私有入口换页，
-   浏览器版只如实说明“已保存、尚未应用”。
+   页面自身不猜新会话密钥：窗口版读取私有入口换页，浏览器版只如实说明连接状态。
 
    M63 的契约：POST /api/actions 返回 202 {operation:{state}}，state 只有
    requested / applied / waiting / failed；真实进展在 GET /api/state 的
@@ -5925,19 +5947,19 @@ const GATE_COPY = {
     retry: false,
   },
   missing: {
-    title: '需要从终端启动链接打开',
-    lede: '面板每次启动都会生成一次性会话密钥，只通过终端打印的链接传入。地址栏里的 #key=… 会在读取后立即移除，不会显示在页面上。',
-    note: '',
+    title: '请从应用窗口重新打开',
+    lede: '请使用 Kimi Work+ 桌面应用或菜单栏托盘打开面板；应用会自动读取当前本机地址和会话密钥。',
+    note: '如果窗口已打开但会话缺失，请从托盘选择「打开 Kimi Work+」刷新入口。',
   },
   expired: {
     title: '会话密钥已失效',
-    lede: '面板重启会生成新的会话密钥，旧链接随之失效。请从终端打印的最新链接重新打开。',
-    note: '若面板仍在运行，也可能是从别处打开了面板地址；请使用带 #key= 的完整链接。',
+    lede: '后台重启后旧会话会失效。请从菜单栏托盘选择「打开 Kimi Work+」，应用会读取最新入口。',
+    note: '不要手动猜测或复制其他会话的密钥。',
   },
   refused: {
     title: '无法确认面板会话',
-    lede: '服务拒绝了这次请求，可能是页面被其他来源打开，或服务已停止。',
-    note: '请从终端打印的链接重新打开；若持续出现，重启面板。',
+    lede: '服务拒绝了这次请求，可能是页面来源不正确，或后台服务已停止。',
+    note: '请从托盘重新打开；若持续出现，请在设置页检查后台服务和诊断信息。',
   },
 };
 
@@ -6060,6 +6082,8 @@ async function runAction(action, profileMode) {
               ? '回退请求已提交；重启网关后运行回退前的版本。'
               : action === 'launch-kimi'
                 ? '启动请求已提交，等待运行时状态。'
+                : action === 'restart-kimi'
+                  ? '已请求正常退出 Kimi，等待退出完成后受管重启。'
                 : '操作已提交，等待结果。';
     showToast(submitted, 'ok');
     /* 终态由 settlePending 在轮询读取到匹配 operation 时确认，避免重复提示。 */
@@ -6160,7 +6184,7 @@ async function confirmActionResult(action, opId) {
   }
 
   if (op.state === 'waiting-kimi-exit') {
-    showToast('Kimi 已在运行。请从托盘完全退出一次（只关窗口不算）；本软件会自动重拉并继续，不需要再点一次，也不会强制结束它。', 'error');
+    showToast('检测到另一个 Kimi 实例。请点击「正常退出并重启 Kimi」，由产品完成正常退出和受管重启。', 'error');
   }
 }
 

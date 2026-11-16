@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	ProfileModeOfficial           = "official"
 	ProfileModeIsolated           = "isolated"
 	ProfileModeExistingAuthorized = "existing-authorized"
 )
@@ -27,21 +28,36 @@ type ProfileStatus struct {
 
 func (s ControllerSettings) profileMode() string {
 	if s.ProfileMode == "" {
-		return ProfileModeIsolated
+		return ProfileModeOfficial
 	}
 	return s.ProfileMode
 }
 
-func existingLoginDirectory() (string, error) {
-	if runtime.GOOS != "darwin" {
+func OfficialProfileDirectory() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", errors.New("existing_login_profile_unavailable")
+		}
+		return filepath.Join(home, "Library", "Application Support", "kimi-desktop"), nil
+	case "windows":
+		root, err := os.UserConfigDir()
+		if err != nil {
+			return "", errors.New("existing_login_profile_unavailable")
+		}
+		return filepath.Join(root, "kimi-desktop"), nil
+	default:
 		return "", ErrProfileModeUnsupported
 	}
-	home, err := os.UserHomeDir()
+}
+
+func existingLoginDirectory() (string, error) {
+	path, err := OfficialProfileDirectory()
 	if err != nil {
-		return "", errors.New("existing_login_profile_unavailable")
+		return "", err
 	}
-	path := filepath.Join(home, "Library", "Application Support", "kimi-desktop")
-	if _, err := existingProfileIdentity(path); err != nil {
+	if err := validateExistingProfileDirectory(path); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -54,7 +70,9 @@ func (c *Controller) ProfileStatus() ProfileStatus {
 	c.mu.Unlock()
 	_, available := existingLoginDirectory()
 	mode := settings.profileMode()
-	implemented := mode == ProfileModeIsolated || (mode == ProfileModeExistingAuthorized && runtime.GOOS == "darwin" && settings.LoginDataDir != "")
+	implemented := mode == ProfileModeIsolated ||
+		(mode == ProfileModeOfficial && settings.UserDataDir != "" && (runtime.GOOS == "darwin" || runtime.GOOS == "windows")) ||
+		(mode == ProfileModeExistingAuthorized && runtime.GOOS == "darwin" && settings.LoginDataDir != "")
 	status := ProfileStatus{Mode: mode, Implemented: implemented, CanReuseLogin: available == nil}
 	if !implemented {
 		status.Reason = ErrProfileModeUnsupported.Error()
@@ -72,13 +90,47 @@ func (c *Controller) requireSupportedProfileMode() error {
 	c.mu.Lock()
 	settings := c.settings
 	c.mu.Unlock()
-	if settings.profileMode() == ProfileModeIsolated {
+	switch settings.profileMode() {
+	case ProfileModeIsolated:
 		return nil
-	}
-	if settings.profileMode() == ProfileModeExistingAuthorized && runtime.GOOS == "darwin" && settings.LoginDataDir != "" {
-		return nil
+	case ProfileModeOfficial:
+		if settings.UserDataDir != "" && (runtime.GOOS == "darwin" || runtime.GOOS == "windows") {
+			return nil
+		}
+	case ProfileModeExistingAuthorized:
+		if runtime.GOOS == "darwin" && settings.LoginDataDir != "" {
+			return nil
+		}
 	}
 	return ErrProfileModeUnsupported
+}
+
+func (c *Controller) StartOfficial(ctx context.Context) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.startOfficial(ctx)
+}
+
+func (c *Controller) startOfficial(ctx context.Context) error {
+	profile, err := existingLoginDirectory()
+	if err != nil {
+		return err
+	}
+	c.reapChildLocked()
+	c.mu.Lock()
+	if c.isolation != nil && c.child == nil {
+		c.mu.Unlock()
+		return errWorkStorageConflict
+	}
+	if c.child != nil && c.settings.profileMode() != ProfileModeOfficial {
+		c.mu.Unlock()
+		return errors.New("profile_mode_change_requires_exit")
+	}
+	c.settings.ProfileMode = ProfileModeOfficial
+	c.settings.UserDataDir = profile
+	c.settings.LoginDataDir = profile
+	c.mu.Unlock()
+	return c.start(ctx)
 }
 
 func (c *Controller) StartWithExistingLogin(ctx context.Context) error {
@@ -100,6 +152,7 @@ func (c *Controller) StartWithExistingLogin(ctx context.Context) error {
 	}
 	c.settings.ProfileMode = ProfileModeExistingAuthorized
 	c.settings.LoginDataDir = profile
+	c.settings.UserDataDir = ProfileDirectoryForManagedChild(c.settings.StateDir)
 	c.mu.Unlock()
 	return c.start(ctx)
 }
@@ -127,7 +180,6 @@ func (c *Controller) restoreWorkIsolation() error {
 	return nil
 }
 
-// The storage pointer must be reviewed again when the official main process changes.
 func verifyExistingLoginStorage(installation Installation) error {
 	source, err := ReadAsarEntry(installation.Archive, EntryPath)
 	if err == nil {
