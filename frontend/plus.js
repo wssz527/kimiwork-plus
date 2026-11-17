@@ -571,7 +571,7 @@
       parts.push(node('span', 'plus-account-bar__hint', '尚未保存任何账号'));
     }
     if (book.accounts.length > 1 || account.busy) {
-      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '切换会正常重启 Work'));
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '必要时重启 Work'));
     }
     parts.push(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
     slot.replaceChildren(...parts);
@@ -842,7 +842,7 @@
       }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));
-    line.append(node('span', 'hint', '切换或添加会正常重启 Work。凭据仅保存在本机系统钥匙串，不上传或写入日志。'));
+    line.append(node('span', 'hint', '切换时优先保持 Work 打开，必要时正常重启。添加账号会打开官方登录页。凭据仅保存在本机系统钥匙串，不上传或写入日志。'));
     return line;
   }
 
@@ -1340,7 +1340,7 @@
     const head = node('div', 'band__head');
     head.append(node('div'));
     head.firstChild.append(node('h2', null, '账号'));
-    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在系统凭据存储；切换会让 Work 正常重启以应用登录，不会强制结束正在运行的任务。'));
+    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在系统凭据存储；切换时优先保持 Work 打开，必要时正常重启。运行中的任务会阻止切换。'));
     section.append(head);
     const body = node('div');
     body.id = 'plus-accounts-body';

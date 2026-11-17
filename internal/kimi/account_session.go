@@ -45,18 +45,19 @@ const (
 	maxAccountCodeKeyBytes   = 256 << 10
 )
 
-// accountVerifyRetries and accountVerifyStep bound the readback wait. They are
-// variables so tests do not sleep for seconds.
+// Readback limits are variables so tests can use shorter waits.
 var (
-	accountVerifyRetries = 10
-	accountVerifyStep    = 300 * time.Millisecond
+	accountVerifyRetries  = 10
+	accountVerifyStep     = 300 * time.Millisecond
+	accountRuntimeRetries = 40
+	accountRuntimeTimeout = 12 * time.Second
 )
 
 // Activation states. `hot` and `restarted` claim an effect, and only after a
 // readback of the target identity.
 const (
-	// AccountStateHot means the live page reports the target account without a
-	// restart. It does not mean the kernel config was verified.
+	// AccountStateHot means the official shell and committed runtime adopted the
+	// target account without restarting the desktop process.
 	AccountStateHot = "hot"
 	// AccountStateRestarted means the hot path did not verify, the application
 	// exited normally and was relaunched, and the readback then passed.
@@ -323,12 +324,10 @@ func (c *Controller) CaptureAccount(ctx context.Context) (AccountSession, error)
 // ActivateAccount makes the target account the one the application is signed
 // into and the kernel reads.
 //
-// The order is page first (cookies, whitelisted storage, reload), config second,
-// a readback after each stage. When the page does not follow, the application is
-// closed normally and relaunched, which is how the official client itself reacts
-// to a credential rotation. Only a readback of the target identity from the page
-// and from the config the kernel loads is a success; anything else restores the
-// snapshot captured before the attempt.
+// The official token store initiates the account and kernel transition. A hot
+// switch requires its observed runtime transition, a successful runtime query,
+// and matching shell and config identities. Otherwise one normal desktop restart
+// may recover the switch. A failed attempt restores the previous snapshot.
 func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession) (AccountActivation, error) {
 	if err := session.validate(); err != nil {
 		return AccountActivation{State: AccountStateFailed, Reason: AccountErrSnapshotInvalid},
@@ -359,13 +358,22 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	original, originalErr := c.captureAccount(ctx, surface, home)
 	result := AccountActivation{UserID: session.UserID, Digest: sha256Hex(session.UserID)}
 
+	runtime, runtimePage, watching := watchAccountRuntime(ctx, surface)
+	if watching {
+		defer runtime.accountStopRuntimeWatch(context.WithoutCancel(ctx), runtimePage)
+	}
 	pageErr := c.applyPageState(ctx, surface, session)
-	// The shell can keep its old identity until restart. A failed credential
-	// write must not reach that restart or be masked by its later identity read.
 	pagePrepared := pageErr == nil || pageErr.Error() == AccountErrIdentityMismatch
+	if pagePrepared && watching && waitAccountRuntime(ctx, surface, runtime, runtimePage, home, session.UserID, true) {
+		result.State, result.Hot, result.Verified = AccountStateHot, true, true
+		return result, nil
+	}
 	configOK, restarted := false, false
-	if pagePrepared {
-		configOK = c.applyAccountConfig(home, session) == nil && accountConfigMatches(home, session.UserID)
+	if pagePrepared && ctx.Err() == nil {
+		configOK = watching && accountConfigMatches(home, session.UserID)
+		if !configOK {
+			configOK = c.applyAccountConfig(home, session) == nil && accountConfigMatches(home, session.UserID)
+		}
 		if configOK {
 			restarted = restartAccountProcess(c, ctx) == nil
 		}
@@ -377,6 +385,10 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 			surface = fresh
 			pageReadable = true
 			pageOK = waitAccountIdentity(ctx, surface, session.UserID)
+			if probe, page, ok := accountRuntimeTarget(ctx, surface); ok {
+				defer probe.accountStopRuntimeWatch(context.WithoutCancel(ctx), page)
+				pageOK = waitAccountRuntime(ctx, surface, probe, page, home, session.UserID, false)
+			}
 		}
 		configOK = accountConfigMatches(home, session.UserID)
 		if pageOK && configOK {
@@ -387,6 +399,8 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 
 	reason := AccountErrIdentityMismatch
 	switch {
+	case ctx.Err() != nil:
+		reason = AccountErrPageTimeout
 	case !pagePrepared:
 		reason = pageErr.Error()
 	case !configOK:
@@ -502,8 +516,11 @@ func (c *Controller) captureAccount(ctx context.Context, surface accountSurface,
 	// where the signed-in web session is.
 	credentialPages := accountCredentialPages(pages)
 	for _, page := range pages {
+		if page.credentials {
+			continue
+		}
 		identity, err := surface.accountIdentity(ctx, page)
-		if err != nil || identity.UserID == "" {
+		if err != nil || !identity.Official || identity.UserID == "" {
 			continue
 		}
 		// The page and the config naming different accounts means the app is
@@ -876,6 +893,61 @@ func applyAccountCodeKey(home string, content json.RawMessage) error {
 // ---------------------------------------------------------------------------
 // verification
 
+type accountRuntimeSurface interface {
+	accountWatchRuntime(context.Context, accountPage) error
+	accountRuntimeReady(context.Context, accountPage, bool) (bool, error)
+	accountStopRuntimeWatch(context.Context, accountPage) error
+}
+
+func accountRuntimeTarget(ctx context.Context, surface accountSurface) (accountRuntimeSurface, accountPage, bool) {
+	runtime, ok := surface.(accountRuntimeSurface)
+	if !ok {
+		return nil, accountPage{}, false
+	}
+	pages, err := surface.accountPages(ctx)
+	if err == nil {
+		for _, page := range pages {
+			if !page.credentials {
+				return runtime, page, true
+			}
+		}
+	}
+	return nil, accountPage{}, false
+}
+
+func watchAccountRuntime(ctx context.Context, surface accountSurface) (accountRuntimeSurface, accountPage, bool) {
+	runtime, page, ok := accountRuntimeTarget(ctx, surface)
+	if !ok || runtime.accountWatchRuntime(ctx, page) != nil {
+		return nil, accountPage{}, false
+	}
+	return runtime, page, true
+}
+
+func waitAccountRuntime(ctx context.Context, surface accountSurface, runtime accountRuntimeSurface, page accountPage, home, want string, transition bool) bool {
+	ctx, cancel := context.WithTimeout(ctx, accountRuntimeTimeout)
+	defer cancel()
+	for attempt := 0; attempt < accountRuntimeRetries; attempt++ {
+		if ctx.Err() != nil {
+			return false
+		}
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(accountVerifyStep):
+			}
+		}
+		ready, err := runtime.accountRuntimeReady(ctx, page, transition)
+		if err != nil || !ready || !accountConfigMatches(home, want) {
+			continue
+		}
+		if user, official := accountPageUser(ctx, surface); official && user == want {
+			return true
+		}
+	}
+	return false
+}
+
 // waitAccountIdentity waits for the official page to report want. It accepts
 // only a verified read: the token store alone is a copy of what this process
 // wrote, not evidence the page bound that account.
@@ -896,6 +968,9 @@ func waitAccountIdentity(ctx context.Context, surface accountSurface, want strin
 			continue
 		}
 		for _, page := range pages {
+			if page.credentials {
+				continue
+			}
 			identity, err := surface.accountIdentity(ctx, page)
 			if err != nil || !identity.Official {
 				continue
@@ -934,17 +1009,16 @@ func accountPageUser(ctx context.Context, surface accountSurface) (string, bool)
 	if err != nil {
 		return "", false
 	}
-	found := ""
-	official := false
 	for _, page := range pages {
-		identity, err := surface.accountIdentity(ctx, page)
-		if err != nil || identity.UserID == "" {
+		if page.credentials {
 			continue
 		}
-		found = identity.UserID
-		official = official || identity.Official
+		identity, err := surface.accountIdentity(ctx, page)
+		if err == nil && identity.Official && identity.UserID != "" {
+			return identity.UserID, true
+		}
 	}
-	return found, official
+	return "", false
 }
 
 // accountOfficialReadable reports whether any readable page answers the official

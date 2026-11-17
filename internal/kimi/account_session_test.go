@@ -47,9 +47,16 @@ type fakeAccountPage struct {
 	// busy is what the conversation status table reports.
 	busy bool
 	// busyUnknown makes the status read fail, which must not look idle.
-	busyUnknown bool
-	reloads     int
-	calls       []string
+	busyUnknown       bool
+	runtimeWatch      bool
+	runtimeTransition bool
+	runtimeChanged    bool
+	runtimeWatching   bool
+	runtimeUnready    bool
+	runtimeBlocking   bool
+	onActivation      func()
+	reloads           int
+	calls             []string
 }
 
 func newFakeAccountPage() *fakeAccountPage {
@@ -173,7 +180,45 @@ func (f *fakeAccountPage) accountWriteStorage(_ context.Context, page accountPag
 			delete(f.user, f.shellPage)
 			delete(f.user, page.targetID)
 		}
+		if f.runtimeWatching && f.runtimeTransition {
+			f.runtimeChanged = true
+		}
+		if f.onActivation != nil {
+			f.onActivation()
+		}
 	}
+	return nil
+}
+
+func (f *fakeAccountPage) accountWatchRuntime(_ context.Context, page accountPage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("runtime-watch:" + page.targetID)
+	if !f.runtimeWatch || page.credentials {
+		return errors.New(AccountErrUnsupported)
+	}
+	f.runtimeWatching, f.runtimeChanged = true, false
+	return nil
+}
+
+func (f *fakeAccountPage) accountRuntimeReady(ctx context.Context, page accountPage, transition bool) (bool, error) {
+	f.mu.Lock()
+	f.record("runtime-ready:" + page.targetID)
+	blocking := transition && f.runtimeBlocking
+	ready := !page.credentials && !f.runtimeUnready && (!transition || (f.runtimeWatching && f.runtimeChanged))
+	f.mu.Unlock()
+	if blocking {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	return ready, nil
+}
+
+func (f *fakeAccountPage) accountStopRuntimeWatch(_ context.Context, page accountPage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("runtime-stop:" + page.targetID)
+	f.runtimeWatching = false
 	return nil
 }
 
@@ -314,10 +359,10 @@ func newAccountHarness(t *testing.T) *accountHarness {
 	}
 	page := newFakeAccountPage()
 	controller.actions = &accountActions{fakeAccountPage: page, fakeActions: &fakeActions{connected: true}}
-	previousRetries, previousStep := accountVerifyRetries, accountVerifyStep
-	accountVerifyRetries, accountVerifyStep = 3, time.Millisecond
+	previousRetries, previousStep, previousRuntimeRetries := accountVerifyRetries, accountVerifyStep, accountRuntimeRetries
+	accountVerifyRetries, accountVerifyStep, accountRuntimeRetries = 3, time.Millisecond, 3
 	t.Cleanup(func() {
-		accountVerifyRetries, accountVerifyStep = previousRetries, previousStep
+		accountVerifyRetries, accountVerifyStep, accountRuntimeRetries = previousRetries, previousStep, previousRuntimeRetries
 		restartAccountProcess = func(c *Controller, ctx context.Context) error { return c.restartOfficialLocked(ctx) }
 	})
 	return &accountHarness{controller: controller, page: page, home: home, stateDir: base}
@@ -385,6 +430,38 @@ func TestAccountActivationDoesNotOverwriteRotatedCredentialsAfterRestart(t *test
 	credentials := harness.readConfig(t)["credentials"].(map[string]any)["kimiWeb"].(map[string]any)
 	if credentials["accessToken"] != "rotated-after-start" || credentials["refreshToken"] != "rotated-refresh" {
 		t.Fatal("activation overwrote freshly rotated credentials")
+	}
+}
+
+func TestAccountIdentityUsesTheOfficialShellInEitherPageOrder(t *testing.T) {
+	for _, pages := range [][]string{{"work", "kimi-1"}, {"kimi-1", "work"}} {
+		t.Run(strings.Join(pages, "-"), func(t *testing.T) {
+			harness := newAccountHarness(t)
+			harness.writeConfig(t, accountConfigFixture("user-1", "access", "refresh"))
+			harness.page.pages = pages
+			harness.page.officialIdentity = "user-1"
+			harness.page.user["kimi-1"] = "stale-web-user"
+			identity, err := harness.controller.AccountIdentity(context.Background())
+			if err != nil || identity.UserID != "user-1" || !identity.PageVerified || identity.Source != "page+config" || identity.Reason != "" {
+				t.Fatalf("credential page displaced the official identity: %+v %v", identity, err)
+			}
+		})
+	}
+}
+
+func TestCaptureAccountUsesTheOfficialShellInEitherPageOrder(t *testing.T) {
+	for _, pages := range [][]string{{"work", "kimi-1"}, {"kimi-1", "work"}} {
+		t.Run(strings.Join(pages, "-"), func(t *testing.T) {
+			harness := newAccountHarness(t)
+			harness.writeConfig(t, accountConfigFixture("user-1", "access", "refresh"))
+			harness.page.pages = pages
+			harness.page.officialIdentity = "user-1"
+			harness.page.user["kimi-1"] = "stale-web-user"
+			session, err := harness.controller.CaptureAccount(context.Background())
+			if err != nil || session.UserID != "user-1" || session.CapturedVia != AccountSourcePage {
+				t.Fatalf("credential page displaced the captured identity: %+v %v", session, err)
+			}
+		})
 	}
 }
 
@@ -492,7 +569,134 @@ func TestCaptureAccountFallsBackToConfigIdentityWithoutAPage(t *testing.T) {
 	}
 }
 
-func TestActivateAccountRestartsEvenWhenThePageFollowed(t *testing.T) {
+func TestActivateAccountHotSwitchKeepsOfficiallyRotatedCredentials(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	harness.page.runtimeWatch, harness.page.runtimeTransition = true, true
+	harness.page.onActivation = func() {
+		harness.writeConfig(t, accountConfigFixture("target", "rotated-access", "rotated-refresh"))
+		if err := os.WriteFile(filepath.Join(harness.home, AccountCodeKey), []byte(`{"apiKey":"rotated-code"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restarts := 0
+	restartAccountProcess = func(*Controller, context.Context) error { restarts++; return nil }
+	target := AccountSession{SchemaVersion: 1, UserID: "target",
+		KimiWeb: map[string]any{"userId": "target", "accessToken": "snapshot-access"},
+		CodeKey: json.RawMessage(`{"apiKey":"snapshot-code"}`)}
+	result, err := harness.controller.ActivateAccount(context.Background(), target)
+	if err != nil || !result.Hot || !result.Verified || result.Restarted || restarts != 0 {
+		t.Fatalf("hot activation: %+v err=%v restarts=%d", result, err, restarts)
+	}
+	credentials := harness.readConfig(t)["credentials"].(map[string]any)
+	if credentials["kimiWeb"].(map[string]any)["accessToken"] != "rotated-access" {
+		t.Fatal("officially rotated token was overwritten by the snapshot")
+	}
+	key, err := os.ReadFile(filepath.Join(harness.home, AccountCodeKey))
+	if err != nil || string(key) != `{"apiKey":"rotated-code"}` {
+		t.Fatal("officially rotated Code key was overwritten")
+	}
+	if harness.page.runtimeWatching || harness.page.callsFor("runtime-stop:work") != 1 {
+		t.Fatal("runtime watch was not cleaned up")
+	}
+	watch, write := -1, -1
+	for i, call := range harness.page.calls {
+		if call == "runtime-watch:work" {
+			watch = i
+		}
+		if call == "write-storage:kimi-1" {
+			write = i
+		}
+	}
+	if watch < 0 || write < watch {
+		t.Fatal("runtime watch started after the credential change")
+	}
+}
+
+func TestActivateAccountDoesNotAcceptAStaleReadyRuntime(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	harness.page.runtimeWatch = true
+	harness.page.onActivation = func() {
+		harness.writeConfig(t, accountConfigFixture(harness.page.user["work"], "live-access", "live-refresh"))
+	}
+	restarts := 0
+	restartAccountProcess = func(*Controller, context.Context) error { restarts++; return nil }
+	result, err := harness.controller.ActivateAccount(context.Background(), AccountSession{
+		SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{"userId": "target", "accessToken": "target-access"},
+	})
+	if err != nil || result.Hot || !result.Restarted || !result.Verified || restarts != 1 {
+		t.Fatalf("stale ready result: %+v err=%v restarts=%d", result, err, restarts)
+	}
+	if harness.page.runtimeWatching || harness.page.callsFor("runtime-stop:work") != 2 {
+		t.Fatal("restart fallback did not clean up both runtime watches")
+	}
+}
+
+func TestActivateAccountBoundsHotWaitBeforeRestartFallback(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	harness.page.runtimeWatch, harness.page.runtimeBlocking = true, true
+	harness.page.onActivation = func() {
+		harness.writeConfig(t, accountConfigFixture(harness.page.user["work"], "live-access", "live-refresh"))
+	}
+	previousTimeout := accountRuntimeTimeout
+	accountRuntimeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { accountRuntimeTimeout = previousTimeout })
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	restarts := 0
+	restartAccountProcess = func(_ *Controller, ctx context.Context) error {
+		restarts++
+		return ctx.Err()
+	}
+	result, err := harness.controller.ActivateAccount(ctx, AccountSession{
+		SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{"userId": "target", "accessToken": "target-access"},
+	})
+	if err != nil || result.Hot || !result.Restarted || !result.Verified || restarts != 1 || ctx.Err() != nil {
+		t.Fatalf("bounded wait: %+v err=%v restarts=%d parent=%v", result, err, restarts, ctx.Err())
+	}
+}
+
+func TestActivateAccountCancellationDoesNotReportAWriteFailure(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	harness.page.onActivation = cancel
+	restarts := 0
+	restartAccountProcess = func(*Controller, context.Context) error { restarts++; return nil }
+	result, _ := harness.controller.ActivateAccount(ctx, AccountSession{
+		SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{"userId": "target", "accessToken": "target-access"},
+	})
+	if result.Reason != AccountErrPageTimeout || restarts != 0 {
+		t.Fatalf("cancelled activation: %+v restarts=%d", result, restarts)
+	}
+}
+
+func TestActivateAccountDoesNotVerifyAnUnreadyRuntime(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	harness.page.runtimeWatch, harness.page.runtimeTransition, harness.page.runtimeUnready = true, true, true
+	harness.page.onActivation = func() {
+		harness.writeConfig(t, accountConfigFixture(harness.page.user["work"], "live-access", "live-refresh"))
+	}
+	restarts := 0
+	restartAccountProcess = func(*Controller, context.Context) error { restarts++; return nil }
+	result, _ := harness.controller.ActivateAccount(context.Background(), AccountSession{
+		SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{"userId": "target", "accessToken": "target-access"},
+	})
+	if result.Hot || result.Verified || restarts != 1 {
+		t.Fatalf("unready runtime was adopted: %+v restarts=%d", result, restarts)
+	}
+}
+
+func TestActivateAccountRestartsWhenRuntimeTransitionIsUnsupported(t *testing.T) {
 	harness := newAccountHarness(t)
 	harness.writeConfig(t, accountConfigFixture("user-1", "access-1", "refresh-1"))
 	harness.page.put("kimi-1", "access_token", "access-1")
@@ -514,8 +718,7 @@ func TestActivateAccountRestartsEvenWhenThePageFollowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The page followed, but the kernel's own identity is only read after a
-	// relaunch, so this is a restart and never a "hot" claim.
+	// A shell identity alone cannot establish that the runtime adopted the account.
 	if result.Hot || !result.Restarted || !result.Verified || result.State != AccountStateRestarted {
 		t.Fatalf("result: %+v", result)
 	}

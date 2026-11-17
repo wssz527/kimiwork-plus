@@ -118,6 +118,40 @@ func TestAccountManagerRollsBackRejectedTargetOnly(t *testing.T) {
 	}
 }
 
+func TestAccountManagerDoesNotRepeatNativeFailureRecovery(t *testing.T) {
+	for _, restored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "restored"}[restored], func(t *testing.T) {
+			f := newAccountManagerFixture(t)
+			f.active = "second"
+			if err := f.action(t, "account-capture", ""); err != nil {
+				t.Fatal(err)
+			}
+			f.active = "first"
+			f.manager.hooks.RestoresOnFailure = true
+			f.manager.hooks.Activate = func(context.Context, json.RawMessage) (accountCapture, error) {
+				f.activates++
+				if restored {
+					f.active = "first"
+				} else {
+					f.active = ""
+				}
+				return accountCapture{}, errors.New("account_session_rollback_unverified")
+			}
+			err := f.action(t, "account-switch", accountID("second"))
+			if err == nil || err.Error() != "account_session_rollback_unverified" || f.activates != 1 {
+				t.Fatalf("native recovery was repeated: err=%v activates=%d", err, f.activates)
+			}
+			wantRestore := accountID("first")
+			if restored {
+				wantRestore = ""
+			}
+			if f.manager.State()["restoreAccountId"] != wantRestore {
+				t.Fatal("recovery state does not match the verified account")
+			}
+		})
+	}
+}
+
 func TestAccountManagerPendingLoginSurvivesRestartAndCanCancel(t *testing.T) {
 	f := newAccountManagerFixture(t)
 	if err := f.action(t, "account-begin-add", ""); err != nil {

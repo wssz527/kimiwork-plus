@@ -10,10 +10,11 @@ import (
 )
 
 type accountHooks struct {
-	Capture    func(context.Context) (accountCapture, error)
-	Activate   func(context.Context, json.RawMessage) (accountCapture, error)
-	BeginLogin func(context.Context) error
-	Busy       func(context.Context) error
+	Capture           func(context.Context) (accountCapture, error)
+	Activate          func(context.Context, json.RawMessage) (accountCapture, error)
+	BeginLogin        func(context.Context) error
+	Busy              func(context.Context) error
+	RestoresOnFailure bool
 }
 
 type accountManager struct {
@@ -63,12 +64,20 @@ func (a *accountManager) capture(ctx context.Context) (accountCapture, AccountSu
 	return snapshot, row, err
 }
 
+func (a *accountManager) confirmRestore(ctx context.Context, id string) (bool, error) {
+	fresh, err := a.hooks.Capture(ctx)
+	if err != nil || accountID(fresh.UserID) != id {
+		return false, nil
+	}
+	if _, err := a.vault.capture(fresh); err != nil {
+		return false, err
+	}
+	return true, a.setRestore("", false)
+}
+
 func (a *accountManager) restore(ctx context.Context, id string) error {
-	if fresh, err := a.hooks.Capture(ctx); err == nil && accountID(fresh.UserID) == id {
-		if _, err := a.vault.capture(fresh); err != nil {
-			return err
-		}
-		return a.setRestore("", false)
+	if restored, err := a.confirmRestore(ctx, id); restored || err != nil {
+		return err
 	}
 	session, err := a.vault.session(id)
 	if err != nil {
@@ -186,6 +195,12 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 		if switchErr != nil {
 			if code := core.ErrorCode(switchErr); code == "account_credentials_rejected" || code == "account_session_expired" {
 				_ = a.vault.mark(id, true)
+			}
+			if a.hooks.RestoresOnFailure {
+				if _, err := a.confirmRestore(ctx, original.ID); err != nil {
+					return nil, err
+				}
+				return nil, switchErr
 			}
 			if err := a.restore(ctx, original.ID); err != nil {
 				return nil, errors.New("account_switch_restore_failed")

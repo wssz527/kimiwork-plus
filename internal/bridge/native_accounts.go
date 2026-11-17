@@ -12,7 +12,8 @@ import (
 
 func (n *Native) initAccounts(gateway *Runtime) error {
 	manager, err := newAccountManager(newAccountVault(n.service.StateDir, n.service.Keys), accountHooks{
-		Capture: n.captureAccount,
+		Capture:           n.captureAccount,
+		RestoresOnFailure: true,
 		Activate: func(ctx context.Context, raw json.RawMessage) (accountCapture, error) {
 			var session kimi.AccountSession
 			if json.Unmarshal(raw, &session) != nil {

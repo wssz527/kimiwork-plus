@@ -998,23 +998,38 @@ The account busy parser unwraps `statuses`; `running` is active, while
 unreadable or missing Work shells still prevent switching. The HTTPS credential
 page has no status API and is not queried as a second busy-state authority.
 
-`ActivateAccount` captures the original account before writing. Every Cookie and
-localStorage write must complete before target kernel credentials can be applied
-and a normal managed restart can begin. A shell identity mismatch after complete
-page writes is allowed to proceed to that restart; a write failure is not. The
-restarted page-reported target identity and kernel configuration must agree. It does not claim
-hot switching from file readback. A failed attempt restores the captured state;
-rotated credentials observed after restart are not overwritten by the older
-snapshot. The bridge stores restorable sessions only through its native
-credential vault and returns account summaries rather than tokens.
+`ActivateAccount` captures the original account and installs a runtime watcher
+before writing. Every Cookie and localStorage write must complete. The official
+TokenStore then drives its own account/coordinator transition without exiting the
+desktop. A hot activation requires an observed non-ready transition followed by
+`kimiAgentAPI.getStatus().state === "ready"`, a successful permit-guarded
+`kimiAgentAPI.rpc("conversations.getKimiModelList")`, and matching Work shell and
+config identities. The official status facade suppresses ready for uncommitted
+runtime generations. A pre-existing ready value alone cannot verify a switch.
+Only the Work shell supplies identity; a credential web page cannot overwrite or
+contribute its identity-verification flag.
 
-The current Mac candidate has captured the real current identity, passed a
-same-account no-write operation, and completed a real add/cancel cycle through
-the official QR/phone login page. Cancelling restored the original account after
-a normal restart with page and kernel identity agreement. This is not proof of
-switching accounts, kernel adoption under a different identity, or token lifetime.
-Two real accounts and five round trips are still required. Windows account
-runtime behaviour remains unverified.
+Runtime verification has a 12-second total deadline, including query time, so a
+failed hot check leaves the parent operation time for recovery. When hot activation
+cannot be verified, one normal managed desktop restart may recover complete page
+writes. A write failure never reaches this fallback. After restart, the shell
+identity, runtime query and config must agree. A failed attempt
+restores the captured state, and the bridge does not start another automatic
+activation after the controller's recovery attempt. If restoration cannot be
+verified, its pending recovery entry remains available. Hot activation preserves
+officially rotated tokens and Code Key instead of writing the older snapshot over
+them. The bridge stores restorable sessions only through its native credential
+vault and returns account summaries rather than tokens.
+
+The Mac development candidate on `e6b1043` completed five round trips between two
+real accounts through the authenticated product API. Each switch verified the
+shell, committed runtime and config while the desktop PID remained unchanged;
+model, profile, tool and capability fingerprints also stayed unchanged. A further
+round trip with Work quota selected returned distinct account tags and matching
+usage windows. Opening the official QR/phone login page and cancelling restored
+the original account without a desktop restart. These observations belong to the
+development build; final artifact and GUI acceptance are tracked in the workspace
+handoff. Idle token lifetime and Windows account runtime behaviour remain unverified.
 
 ## 41. Explicit connection credential authorization
 

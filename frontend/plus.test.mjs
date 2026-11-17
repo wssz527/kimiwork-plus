@@ -400,7 +400,7 @@ test('switching accounts explains the restart once and does not double-confirm',
     const switchCall = env.calls.find(call => call.body && call.body.action === 'account-switch');
     assert.notEqual(switchCall, undefined);
     assert.equal(switchCall.body.accountId, 'acct-b');
-    // 只有一条「会重启」的信息提示，没有额外的确认步骤。
+    // 兼容回退只提示一次，不额外确认。
     const restartNotes = env.notices.filter(notice => /重启/.test(notice.message));
     assert.equal(restartNotes.length, 1);
     assert.equal(env.notices.filter(notice => notice.tone === 'error').length, 0);
