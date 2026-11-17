@@ -580,6 +580,8 @@ function makeSaveEnv({ applySucceeds = true } = {}) {
   const code = [
     sourceFunction('saveCatalogue'),
     sourceFunction('connectionPayload'),
+    ...['connectionRowsOf', 'connectionDraftRow', 'connectionDraftFrom',
+      'connectionsSignature', 'savedConnectionsSignature'].map(sourceFunction),
     'const configReady = data => data.configuration?.state === "ready";',
     'const applyConnectionEditor = () => {',
     '  if (!applySucceeds) { state.conns.editing.errors = ["草稿无效"]; return; }',
@@ -620,6 +622,124 @@ test('saving a model folds a valid connection draft into the same transaction', 
   assert.equal(request.body.revision, 'rev-1');
   assert.deepEqual(request.body.models, [{ id: 'model-a' }]);
   assert.deepEqual(request.body.connections.map(row => row.id), ['saved-conn', 'draft-conn']);
+});
+
+/* 模型保存会把连接草稿整组提交，返回状态里的连接就是已提交的基线。
+   这里用真实的 adoptState 与连接辅助函数，只替掉渲染、请求等外围依赖：
+   旧实现让 adoptState 走「脏草稿」分支，把 base/baseRevision 留在提交前，
+   界面继续显示「草稿尚未保存」，下一次连接保存还带旧 revision。 */
+function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
+  const calls = [];
+  const state = {
+    key: 'session', stateReadEpoch: 0, stateReadSeq: 0, modelsSaving: false, connsSaving: false, lastSync: 0,
+    data: {
+      revision: 'rev-1', configuration: { state: 'ready' },
+      models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM-5.3 Flash' }],
+      connections: {
+        saved: [
+          { id: 'glm', name: 'GLM 官方', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'], apiKeySet: true },
+          { id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true },
+        ],
+        restartRequired: false,
+      },
+    },
+    editor: { baseRevision: 'rev-1' },
+    draft: null, draftDirty: false, draftBaseEntity: null, draftBaseRevision: null,
+    conns: { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] },
+    services: { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '' },
+  };
+  const dom = {};
+  const code = [
+    ...['saveCatalogue', 'saveConnections', 'connectionPayload', 'connectionDraftFrom',
+      'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature',
+      'savedConnectionsSignature', 'connectionsDirty', 'adoptState'].map(sourceFunction),
+    'const configReady = data => data.configuration?.state === "ready";',
+    "const draftFromSaved = () => ({ mode: 'inherit', model: null, effort: null, models: [] });",
+    'const recomputeDraftDirty = () => {};',
+    'const onboardTouched = () => true;',
+    'const fillOnboardForm = () => {};',
+    'const searchAvailable = () => false;',
+    'const settlePending = () => {};',
+    'const setConnErrors = errors => { state.conns.errors = errors; };',
+    'const renderConnections = () => {};',
+    'const renderConnectionsDiff = () => {};',
+    'const renderAll = () => {};',
+    'const renderEditor = () => {};',
+    'const renderModels = () => {};',
+    'const renderActions = () => {};',
+    'const showToast = (message, tone) => calls.push({ message, tone });',
+    'const handleSaveFailure = async error => calls.push({ message: error.message, tone: "error" });',
+    'return { saveCatalogue, saveConnections, adoptState, connectionDraftFrom, savedConnectionsSignature };',
+  ].join('\n');
+  const api = new Function('state', 'dom', 'API', 'request', 'calls', code)(
+    state, dom, { workspace: '/api/workspace' },
+    async (path, options) => {
+      calls.push({ path, body: options.body });
+      if (onRequest) onRequest(state);
+      return { state: serverStates[Math.min(calls.filter(call => call.path).length - 1, serverStates.length - 1)] };
+    },
+    calls,
+  );
+  return { ...api, state, calls };
+}
+
+test('a model save adopts the committed connection baseline instead of keeping the draft dirty', async () => {
+  const committed = {
+    revision: 'rev-2', configuration: { state: 'ready' },
+    models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }],
+    connections: {
+      saved: [
+        { id: 'glm', name: 'GLM 新名', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'], apiKeySet: true },
+        { id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true },
+      ],
+      restartRequired: true,
+    },
+  };
+  const later = { ...committed, revision: 'rev-3' };
+  const env = makeCatalogueSaveEnv([committed, later]);
+  env.adoptState(env.state.data, { initial: true });
+  assert.equal(env.state.conns.baseRevision, 'rev-1');
+
+  /* 连接编辑器改过 name 并已并入草稿：草稿与已保存值不一致。 */
+  env.state.conns.draft = env.state.conns.draft.map(row => (row.id === 'glm' ? { ...row, name: 'GLM 新名' } : row));
+  env.state.conns.dirty = true;
+
+  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }]);
+  assert.equal(ok, true);
+  const sent = env.calls.find(call => call.path === '/api/workspace');
+  assert.equal(sent.body.revision, 'rev-1');
+  assert.equal(sent.body.connections.find(row => row.id === 'glm').name, 'GLM 新名');
+
+  assert.equal(env.state.conns.dirty, false);
+  assert.equal(env.state.conns.baseRevision, 'rev-2');
+  assert.equal(env.state.conns.base, env.savedConnectionsSignature(committed));
+  assert.deepEqual(env.state.conns.draft, env.connectionDraftFrom(committed));
+
+  /* 紧接着再改一条连接：提交必须带服务端最新 revision，失败时不带旧值。 */
+  env.state.conns.draft = env.state.conns.draft.map(row => (row.id === 'ds' ? { ...row, name: 'DeepSeek 新名' } : row));
+  await env.saveConnections();
+  const second = env.calls.filter(call => call.path === '/api/workspace').at(-1);
+  assert.equal(second.body.revision, 'rev-2');
+});
+
+/* 会话在请求途中被替换时，返回的状态属于旧会话：既不采纳新基线，
+   也不清掉用户正在编辑的草稿。 */
+test('a stale model save reply leaves the connection draft untouched', async () => {
+  const committed = {
+    revision: 'rev-2', configuration: { state: 'ready' }, models: [],
+    connections: { saved: [{ id: 'glm', name: 'GLM 新名', baseURL: 'https://open.bigmodel.cn/api/paas/v4' }] },
+  };
+  const env = makeCatalogueSaveEnv([committed], { onRequest: (state) => { state.key = 'other-session'; } });
+  env.adoptState(env.state.data, { initial: true });
+  const baseBefore = env.state.conns.base;
+  env.state.conns.draft = env.state.conns.draft.map(row => (row.id === 'glm' ? { ...row, name: '本地未保存' } : row));
+
+  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }]);
+  assert.notEqual(ok, true);
+  assert.equal(env.state.conns.baseRevision, 'rev-1');
+  assert.equal(env.state.conns.base, baseBefore);
+  assert.equal(env.state.conns.draft.find(row => row.id === 'glm').name, '本地未保存');
+  assert.equal(env.state.data.revision, 'rev-1');
 });
 
 /* --- pricing and failover survive every save path ------------------------- */

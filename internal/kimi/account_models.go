@@ -7,7 +7,13 @@ import (
 )
 
 type accountModelSurface interface {
-	accountModelAliases(context.Context, accountPage) ([]string, error)
+	accountModelConfig(context.Context, accountPage) (map[string]any, error)
+}
+
+type accountCatalogEntry struct {
+	alias    string
+	provider map[string]any
+	model    map[string]any
 }
 
 func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurface, home, user string) (string, string) {
@@ -44,15 +50,22 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
 			return "failed", NativeAccountChanged
 		}
-		aliases, pending, needsImport := native.accountCatalog(settings, scope)
+		catalog, pending, needsImport := native.accountCatalog(settings, scope)
 		if needsImport && !imported {
 			imported = true
+			runtime, page, watching := watchAccountRuntime(ctx, surface)
+			if watching {
+				defer runtime.accountStopRuntimeWatch(context.WithoutCancel(ctx), page)
+			}
 			result, err := c.ImportModelsAuthorized(ctx)
 			if err != nil || !result.OK {
 				return "failed", firstNonEmpty(result.Reason, "account_models_import_failed")
 			}
 			if result.State == ImportStateAccountChanged {
 				return "failed", NativeAccountChanged
+			}
+			if result.RequiresRestart && (!watching || !waitAccountRuntime(ctx, surface, runtime, page, home, user, true)) {
+				return "pending", "account_models_runtime_unverified"
 			}
 			reason = "native_profile_pending"
 			continue
@@ -65,7 +78,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			continue
 		}
 		reason = "account_models_runtime_unverified"
-		if !accountRuntimeHasModels(ctx, surface, aliases) {
+		if !accountDaemonHasModels(ctx, surface, catalog) {
 			continue
 		}
 		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
@@ -89,7 +102,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	return "pending", reason
 }
 
-func accountRuntimeHasModels(ctx context.Context, surface accountSurface, want []string) bool {
+func accountDaemonHasModels(ctx context.Context, surface accountSurface, want []accountCatalogEntry) bool {
 	models, ok := surface.(accountModelSurface)
 	if !ok {
 		return false
@@ -102,13 +115,16 @@ func accountRuntimeHasModels(ctx context.Context, surface accountSurface, want [
 		if page.credentials {
 			continue
 		}
-		aliases, err := models.accountModelAliases(ctx, page)
-		if err != nil {
+		config, err := models.accountModelConfig(ctx, page)
+		if err != nil || config == nil {
 			continue
 		}
+		providers, entries := section(config, "providers"), section(config, "models")
 		all := true
-		for _, alias := range want {
-			if !containsString(aliases, alias) {
+		for _, entry := range want {
+			provider, _ := providers[stringField(entry.model, "provider")].(map[string]any)
+			model, _ := entries[entry.alias].(map[string]any)
+			if !providerMatches(provider, entry.provider) || !modelMatches(model, entry.model) {
 				all = false
 				break
 			}
@@ -121,7 +137,7 @@ func accountRuntimeHasModels(ctx context.Context, surface accountSurface, want [
 }
 
 // Only the target account's exact profile can establish that an import is reusable.
-func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope string) ([]string, string, bool) {
+func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope string) ([]accountCatalogEntry, string, bool) {
 	store, storeErr := readJSONFile(filepath.Join(n.kimiDir, NativeWorkStore), maxStoreBytes)
 	if storeErr != "" {
 		return nil, "profile_store_" + storeErr, storeErr == "absent"
@@ -162,7 +178,8 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 	providers := section(section(config, "model"), "providers")
 	models := section(section(config, "model"), "models")
 	rows := profileRows(profile)
-	aliases := make([]string, 0, len(catalog))
+	entries := make([]accountCatalogEntry, 0, len(catalog))
+	seen := make(map[string]bool, len(catalog))
 	for _, entry := range catalog {
 		family := "responses"
 		if entry.protocol == "chat" {
@@ -178,16 +195,19 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		if provider == nil || model == nil {
 			return nil, "config_not_generated", false
 		}
-		if !providerMatches(provider, map[string]any{"type": providerType(row), "baseUrl": target, "credential": credentialRef}) {
+		wantProvider := map[string]any{"type": providerType(row), "baseUrl": target, "credential": credentialRef}
+		wantModel := modelEntry(row)
+		if !providerMatches(provider, wantProvider) {
 			return nil, "foreign_provider", false
 		}
-		if !modelMatches(model, modelEntry(row)) {
+		if !modelMatches(model, wantModel) {
 			return nil, "foreign_model", false
 		}
-		if containsString(aliases, alias) {
+		if seen[alias] {
 			return nil, "profile_invalid", false
 		}
-		aliases = append(aliases, alias)
+		seen[alias] = true
+		entries = append(entries, accountCatalogEntry{alias: alias, provider: wantProvider, model: wantModel})
 	}
-	return aliases, "", false
+	return entries, "", false
 }

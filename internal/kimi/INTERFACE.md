@@ -1076,11 +1076,18 @@ account-operation serialization while synchronizing an already-active gateway
 catalog. An absent target profile or changed catalog/credential uses one official
 import. A target profile with a foreign URL or conflicting generated entries is
 reported without replacement. Existing pending imports are awaited rather than
-resubmitted. Exact target profiles, credential equality, generated entries and
-all aliases from the ready runtime's `conversations.getKimiModelList` are required
-before reuse or adoption. The RPC row's `model` field is the alias; its other data
-never leaves the renderer. A config repair during reconciliation requires another
-runtime check before adoption.
+resubmitted. Exact target profiles, credential equality and generated entries
+must match. After the account's verified runtime transition, the ready daemon's
+`config.get({key:"model"})` reads back its model configuration. Provider type, URL,
+credential reference and each model declaration are compared with the same
+`providerMatches` / `modelMatches` rules used for generated files. Only BYOK
+provider/model declaration fields leave the renderer; keys and transport details
+do not. `conversations.getKimiModelList` lists native Kimi models and cannot verify
+BYOK aliases. `config.get` reads the daemon's config file, not an in-memory model
+registry, so it does not independently establish runtime adoption or successful
+inference. A config repair during reconciliation requires another daemon read
+before the generation can be recorded; final acceptance also requires real model
+selection and replies.
 
 The official importer schedules a Work kernel reload when `requiresRestart` is
 true. Catalog synchronization waits for that transition and never calls the desktop

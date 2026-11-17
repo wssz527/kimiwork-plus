@@ -6188,6 +6188,11 @@ async function saveCatalogue(models, { close = true, message = '已保存。请�
     if (res && res.state) {
       state.modelsSaving = false;
       adoptState(res.state, { external: true });
+      state.conns.base = savedConnectionsSignature(state.data);
+      state.conns.baseRevision = state.data.revision ?? null;
+      state.conns.baseEntity = connectionDraftFrom(state.data);
+      state.conns.draft = connectionDraftFrom(state.data);
+      state.conns.dirty = false;
       state.lastSync = Date.now();
       if (close) state.editor = null;
       state.deleteId = null;

@@ -10,12 +10,12 @@ import (
 type accountModelActions struct {
 	*fakeAccountPage
 	*changingImportActions
-	aliases  []string
+	config   map[string]any
 	modelErr error
 }
 
-func (a *accountModelActions) accountModelAliases(context.Context, accountPage) ([]string, error) {
-	return a.aliases, a.modelErr
+func (a *accountModelActions) accountModelConfig(context.Context, accountPage) (map[string]any, error) {
+	return a.config, a.modelErr
 }
 
 func accountModelsHarness(t *testing.T, targetProfile bool) (*accountHarness, *accountModelActions, *nativeFixture) {
@@ -57,8 +57,12 @@ func accountModelsHarness(t *testing.T, targetProfile bool) (*accountHarness, *a
 		store := f.readJSON(t, filepath.Join(h.home, NativeWorkStore))
 		store["profiles"].(map[string]any)[accounts.newKey] = map[string]any{"byok-kth": profileRow(url)}
 		f.writeJSON(t, filepath.Join(h.home, NativeWorkStore), store)
-		a.aliases = []string{"byok-kth-kimi/kimi-probe-model", "byok-kth-resp/gpt-probe-model"}
+		a.config = section(h.readConfig(t), "model")
+		a.mu.Lock()
+		a.runtimeChanged = true
+		a.mu.Unlock()
 	}
+	a.config = section(h.readConfig(t), "model")
 	h.controller.actions = a
 	bridge, err := StartBridgeHost(h.home, 1, a)
 	if err != nil {
@@ -98,7 +102,6 @@ func TestAccountModelsImportMissingCatalogOnceWithoutDesktopRestart(t *testing.T
 
 func TestAccountModelsReuseOnlyMatchingTargetCatalog(t *testing.T) {
 	h, a, f := accountModelsHarness(t, true)
-	a.aliases = []string{"byok-kth-kimi/kimi-probe-model", "byok-kth-resp/gpt-probe-model"}
 	result := activateModelAccount(t, h, "account-new")
 	if result.ModelsState != "ready" || len(a.imports) != 0 {
 		t.Fatalf("matching target: state=%s imports=%d", result.ModelsState, len(a.imports))
@@ -146,10 +149,51 @@ func TestAccountModelsDoNotStartFirstImportWithoutActiveIntent(t *testing.T) {
 
 func TestAccountModelsRejectPartialRuntimeCatalog(t *testing.T) {
 	h, a, _ := accountModelsHarness(t, true)
-	a.aliases = []string{"byok-kth-kimi/kimi-probe-model"}
+	delete(section(a.config, "models"), "byok-kth-resp/gpt-probe-model")
 	result := activateModelAccount(t, h, "account-new")
 	if result.ModelsState != "pending" || len(a.imports) != 0 {
 		t.Fatalf("partial runtime catalog: state=%s imports=%d", result.ModelsState, len(a.imports))
+	}
+}
+
+func TestAccountModelsRejectDifferentDaemonModelOrProvider(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		section string
+		id      string
+		field   string
+		value   any
+	}{
+		{"provider-url", "providers", "byok-kth-kimi", "baseUrl", "https://other.example/v1"},
+		{"provider-type", "providers", "byok-kth-kimi", "type", "openai-responses"},
+		{"provider-credential", "providers", "byok-kth-kimi", "credential", "other-credential"},
+		{"model-id", "models", "byok-kth-kimi/kimi-probe-model", "model", "other-model"},
+		{"context-size", "models", "byok-kth-kimi/kimi-probe-model", "maxContextSize", float64(1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h, a, _ := accountModelsHarness(t, true)
+			row := section(a.config, test.section)[test.id].(map[string]any)
+			row[test.field] = test.value
+			result := activateModelAccount(t, h, "account-new")
+			if result.ModelsState != "pending" || len(a.imports) != 0 {
+				t.Fatalf("different daemon catalog: state=%s imports=%d", result.ModelsState, len(a.imports))
+			}
+		})
+	}
+}
+
+func TestAccountModelsRequireFreshRuntimeAfterImport(t *testing.T) {
+	h, a, _ := accountModelsHarness(t, false)
+	install := a.onImport
+	a.onImport = func(request ImportRequest) {
+		install(request)
+		a.mu.Lock()
+		a.runtimeChanged = false
+		a.mu.Unlock()
+	}
+	result := activateModelAccount(t, h, "account-new")
+	if result.ModelsState != "pending" || result.ModelsReason != "account_models_runtime_unverified" || len(a.imports) != 1 {
+		t.Fatalf("import without a runtime transition: state=%s reason=%s imports=%d", result.ModelsState, result.ModelsReason, len(a.imports))
 	}
 }
 

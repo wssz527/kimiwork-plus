@@ -829,8 +829,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 //
 // "A child is running" is not enough: a child that was already up before the
 // import may not have read the new profile. The loaded generation is recorded
-// at launch or after an account switch verifies the exact catalog in the ready
-// runtime. Adoption requires that generation to be current.
+// at launch or after a verified account transition and a matching catalog read
+// through the ready daemon. Adoption requires that generation to be current.
 func (c *Controller) runtimeLoaded(generation int) bool {
 	c.mu.Lock()
 	bridge := c.bridge
