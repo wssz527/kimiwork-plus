@@ -1,93 +1,142 @@
 package kimi
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 )
 
-func modelConfigResult() map[string]any {
-	return map[string]any{"exists": true, "value": map[string]any{
-		"providers": map[string]any{"byok-kth-kimi": map[string]any{
-			"type": "kimi", "baseUrl": "http://127.0.0.1:9999/v1", "credential": "byok-kth", "apiKey": "private-provider-value",
+func modelProfileResult() map[string]any {
+	return map[string]any{"profile": map[string]any{
+		"id": "byok-kth", "kind": "kth", "baseUrl": "http://127.0.0.1:9999/v1", "credentialRef": "cred-1",
+		"models": []any{map[string]any{
+			"alias": "byok-kth-kimi/probe", "providerId": "byok-kth-kimi", "model": "probe", "family": "kimi",
+			"maxContextSize": 100000, "maxOutputSize": 1000, "capabilities": []any{"tool_use"}, "token": "private-model-value",
 		}},
-		"models": map[string]any{"byok-kth-kimi/probe": map[string]any{
-			"provider": "byok-kth-kimi", "model": "probe", "maxContextSize": 100000, "token": "private-model-value",
-		}},
+		"pending": []any{}, "delisted": []any{}, "token": "private-profile-value", "tokenMask": "private-mask-value",
 	}}
 }
 
-func installModelConfigRPC(t *testing.T, page *runtimePage) {
-	t.Helper()
-	page.api["rpc"] = func(method string, params map[string]any) any {
+func installModelProfileAPI(page *runtimePage) {
+	page.api["getByokProfile"] = func() any {
 		page.rpcCalls++
-		if method == "conversations.getKimiModelList" {
-			return map[string]any{"models": []any{map[string]any{"model": "k3-agent"}}}
-		}
-		if method != "config.get" || params["key"] != "model" {
-			t.Fatalf("unexpected query: %s", method)
-		}
 		return page.rpcResult
 	}
+	page.api["rpc"] = func(string, map[string]any) any {
+		panic(page.runtime.NewGoError(fmt.Errorf("unauthorized RPC sender or method")))
+	}
 }
 
-func TestAccountModelCatalogUsesBYOKConfigRatherThanNativeKimiList(t *testing.T) {
+func TestAccountModelCatalogUsesAllowedPageProfile(t *testing.T) {
 	page := newRuntimePage(t)
-	page.current, page.rpcResult = "ready", modelConfigResult()
-	installModelConfigRPC(t, page)
+	page.current, page.rpcResult = "ready", modelProfileResult()
+	installModelProfileAPI(page)
 	result := page.run(t, accountModelConfigExpression)
-	catalog, _ := result["catalog"].(map[string]any)
-	if result["ok"] != true || catalog == nil || len(section(catalog, "models")) != 1 {
-		t.Fatalf("BYOK catalog was not read: %#v", result)
+	if result["ok"] != true || result["profile"] == nil {
+		t.Fatalf("allowed profile was not read: %#v", result)
 	}
-	for _, private := range []string{"secret-token-value", "private-provider-value", "private-model-value", "endpoint", "transport"} {
+	for _, private := range []string{"private-profile-value", "private-mask-value", "private-model-value", "secret-token-value", "tokenMask", "endpoint", "transport"} {
 		if strings.Contains(fmt.Sprint(result), private) {
-			t.Fatalf("model query exposed %q", private)
+			t.Fatalf("profile query exposed %q", private)
 		}
 	}
-	page.rpcResult = map[string]any{"ok": true, "result": modelConfigResult()}
 	if result := page.run(t, accountModelConfigExpression); result["ok"] != true || page.rpcCalls != 2 {
-		t.Fatal("model query reused an earlier daemon result")
+		t.Fatal("profile query reused an earlier page result")
 	}
 }
 
-func TestAccountModelConfigRefusesUnavailableOrMalformedDaemon(t *testing.T) {
+func TestAccountModelProfileRefusesUnavailableOrMalformedPage(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		state  string
 		result any
 	}{
-		{"not-ready", "starting", modelConfigResult()},
-		{"rpc-error", "ready", map[string]any{"ok": false}},
-		{"missing-config", "ready", map[string]any{"exists": false}},
-		{"not-a-record", "ready", map[string]any{"exists": true, "value": "wrong"}},
-		{"missing-providers", "ready", map[string]any{"exists": true, "value": map[string]any{"models": map[string]any{}}}},
-		{"invalid-provider", "ready", map[string]any{"exists": true, "value": map[string]any{
-			"providers": map[string]any{}, "models": map[string]any{"byok-kth-kimi/probe": map[string]any{"provider": 1}},
-		}}},
+		{"not-ready", "starting", modelProfileResult()},
+		{"missing-profile", "ready", map[string]any{"profile": nil}},
+		{"not-a-record", "ready", map[string]any{"profile": "wrong"}},
+		{"wrong-kind", "ready", map[string]any{"profile": map[string]any{"id": "byok-kth", "kind": "other"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			page := newRuntimePage(t)
 			page.current, page.rpcResult = test.state, test.result
-			installModelConfigRPC(t, page)
-			if result := page.run(t, accountModelConfigExpression); result["ok"] != false || result["catalog"] != nil {
-				t.Fatalf("unverified catalog: %#v", result)
+			installModelProfileAPI(page)
+			if result := page.run(t, accountModelConfigExpression); result["ok"] != false || result["profile"] != nil {
+				t.Fatalf("unverified profile: %#v", result)
 			}
 			if test.state != "ready" && page.rpcCalls != 0 {
-				t.Fatal("queried a daemon that is not ready")
+				t.Fatal("queried a page whose daemon is not ready")
 			}
 		})
 	}
 }
 
-func TestAccountModelConfigRefusesReadinessLostDuringRead(t *testing.T) {
+func TestAccountModelProfileRefusesPendingOrMalformedRows(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"pending", func(p map[string]any) { p["pending"] = []any{"byok-kth-kimi/probe"} }},
+		{"invalid-pending", func(p map[string]any) { p["pending"] = "wrong" }},
+		{"invalid-models", func(p map[string]any) { p["models"] = "wrong" }},
+		{"invalid-alias", func(p map[string]any) { p["models"].([]any)[0].(map[string]any)["alias"] = "other/probe" }},
+		{"invalid-context", func(p map[string]any) { p["models"].([]any)[0].(map[string]any)["maxContextSize"] = "wrong" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			page := newRuntimePage(t)
+			page.current, page.rpcResult = "ready", modelProfileResult()
+			test.mutate(page.rpcResult.(map[string]any)["profile"].(map[string]any))
+			installModelProfileAPI(page)
+			if result := page.run(t, accountModelConfigExpression); result["ok"] != false {
+				t.Fatalf("accepted malformed profile: %#v", result)
+			}
+		})
+	}
+}
+
+func TestAccountModelProfileRefusesReadinessLostDuringRead(t *testing.T) {
 	page := newRuntimePage(t)
 	page.current = "ready"
-	page.api["rpc"] = func(string, map[string]any) any {
+	page.api["getByokProfile"] = func() any {
 		page.current = "switching"
-		return modelConfigResult()
+		return modelProfileResult()
 	}
 	if result := page.run(t, accountModelConfigExpression); result["ok"] != false {
 		t.Fatalf("accepted a daemon that stopped being ready: %#v", result)
+	}
+}
+
+func TestAccountModelProfileConfigReusesDeclarationRules(t *testing.T) {
+	payload, err := json.Marshal(modelProfileResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	profile := result["profile"].(map[string]any)
+	config, err := accountProfileConfig(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProvider := map[string]any{"type": "kimi", "baseUrl": "http://127.0.0.1:9999/v1", "credential": "cred-1"}
+	provider := section(config, "providers")["byok-kth-kimi"].(map[string]any)
+	model := section(config, "models")["byok-kth-kimi/probe"].(map[string]any)
+	if !providerMatches(provider, wantProvider) || !modelMatches(model, modelEntry(profileRows(profile)[0])) {
+		t.Fatal("page profile did not retain its declaration terms")
+	}
+	if strings.Contains(fmt.Sprint(config), "private-") {
+		t.Fatal("normalized catalog retained private profile fields")
+	}
+	profile["delisted"] = []any{"byok-kth-kimi/probe"}
+	config, err = accountProfileConfig(profile)
+	if err != nil || len(section(config, "models")) != 0 {
+		t.Fatal("delisted model was accepted")
+	}
+	profile["delisted"] = []any{}
+	profile["models"] = append(profile["models"].([]any), profile["models"].([]any)[0])
+	if _, err := accountProfileConfig(profile); err == nil {
+		t.Fatal("duplicate model alias was accepted")
 	}
 }

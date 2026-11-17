@@ -78,7 +78,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			continue
 		}
 		reason = "account_models_runtime_unverified"
-		if !accountDaemonHasModels(ctx, surface, catalog) {
+		if !accountPageHasModels(ctx, surface, catalog) {
 			continue
 		}
 		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
@@ -102,7 +102,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	return "pending", reason
 }
 
-func accountDaemonHasModels(ctx context.Context, surface accountSurface, want []accountCatalogEntry) bool {
+func accountPageHasModels(ctx context.Context, surface accountSurface, want []accountCatalogEntry) bool {
 	models, ok := surface.(accountModelSurface)
 	if !ok {
 		return false
