@@ -46,8 +46,8 @@ const (
 	// ImportStateAccountChanged means the profile belongs to another account than
 	// the configured one. It is never repaired by importing anyway.
 	ImportStateAccountChanged = "account-changed"
-	// ImportStateRequiresRestart means the import is in the files but Kimi has
-	// not loaded it; the application has to restart.
+	// ImportStateRequiresRestart means the import needs a Work kernel reload.
+	// The official importer schedules it; this is not a desktop restart request.
 	ImportStateRequiresRestart = "requires-restart"
 	// ImportStateApplied means the readback found the models in the profile and
 	// the generated config. It is the only state that claims an effect.
@@ -132,7 +132,7 @@ func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportR
 		// caller has to report, and it says nothing about what Kimi would have done.
 		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
 	}
-	return c.gradeImport(ctx, result), nil
+	return c.gradeImport(result, account), nil
 }
 
 // gradeImport turns the page's answer into a state backed by readback evidence.
@@ -140,16 +140,22 @@ func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportR
 // The page only reports that the official API accepted the request. Whether the
 // models are in place is answered by reconciling the profile and the generated
 // config again, which is the same readback the periodic caller uses.
-func (c *Controller) gradeImport(ctx context.Context, result ImportResult) ImportResult {
+// Confirmation remains bound to the account named before the page request.
+func (c *Controller) gradeImport(result ImportResult, expectedAccount string) ImportResult {
 	if result.State == "" {
 		result.State = importState(result)
 	}
 	if !result.OK {
 		return result
 	}
-	integration := c.ReconcileWithReadback(ctx)
+	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted
+	if integration.Reason == "account_changed" {
+		result.State, result.Reason = ImportStateAccountChanged, NativeAccountChanged
+		result.Applied, result.Adopted = false, false
+		return result
+	}
 	if result.RequiresRestart {
 		// The files hold the import but Kimi has not loaded it. Calling that
 		// applied would tell the user to look for models the application has not

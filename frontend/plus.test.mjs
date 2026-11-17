@@ -426,6 +426,23 @@ test('activation statuses use the backend vocabulary without raw state codes', (
   } finally { env.restore(); }
 });
 
+test('account activation distinguishes identity success from model readiness', () => {
+  for (const modelsState of ['ready', 'pending', 'failed']) {
+    const env = makePlus({ data: { accounts: {
+      state: 'ready', currentId: 'acct-a', accounts: [{ id: 'acct-a', name: 'A' }],
+      activation: { state: 'hot', hot: true, verified: true, modelsState },
+    } } });
+    try {
+      env.panel.render(env.getState());
+      const text = textOf(env.byId('plus-overview-account'));
+      assert.match(text, /未重启，热切换/);
+      if (modelsState === 'ready') assert.match(text, /第三方模型已就绪/);
+      else assert.match(text, /账号已切换，第三方模型尚未就绪，请在模型页同步/);
+      assert.doesNotMatch(text, /应用失败/);
+    } finally { env.restore(); }
+  }
+});
+
 test('budget zero limits are refused locally instead of submitted to a positive-only API', async () => {
   const env = makePlus({ routes: {
     '/api/budget': () => ({ budget: { configured: null, revision: 'r1', status: {} } }),

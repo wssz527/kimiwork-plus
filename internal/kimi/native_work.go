@@ -123,8 +123,10 @@ type ReconcileOptions struct {
 	Models             []Model
 	AccountScope       string
 	ConnectionRevision string
-	AllowNativeImport  bool
 	NativeProfile      map[string]any
+	// AllowAccountRebind follows a confirmed import or a switch whose target
+	// catalog and runtime were verified. Periodic callers leave it false.
+	AllowAccountRebind bool
 }
 
 // Reconcile compares the profile, the intent and the generated config, and
@@ -182,12 +184,17 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: reason}
 	}
 
-	// A confirmed account switch ends the old import; it is never repaired by
-	// reaching for another account's profile.
+	// Account changes require a confirmed import or a verified switch. Both
+	// require the caller's exact profile and preserve every ownership gate.
+	rebind := false
 	if intent != nil && intent.AccountDigest != "" && scopeDigest != "" && intent.AccountDigest != scopeDigest {
-		return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed"}
+		rebind = options.AllowAccountRebind && selectedKey != "" && sha256Hex(selectedKey) == scopeDigest &&
+			intent.Active && normalizeNativeURL(intent.URL) == target
+		if !rebind {
+			return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed"}
+		}
 	}
-	if intent != nil && intent.ProfileKeyDigest != "" && selectedKey != "" &&
+	if intent != nil && intent.ProfileKeyDigest != "" && selectedKey != "" && !rebind &&
 		sha256Hex(selectedKey) != intent.ProfileKeyDigest {
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed"}
 	}
@@ -785,22 +792,21 @@ func kthProfiles(store map[string]any) []profileCandidate {
 	return found
 }
 
-// selectProfile picks the profile that belongs to this account. Two candidates
-// with no way to tell them apart is `account_ambiguous`, never a guess.
+// Exact account scope wins over legacy intent and single-profile fallbacks.
 func selectProfile(candidates []profileCandidate, scopeDigest string, intent *nativeIntent) (profileCandidate, bool) {
 	if len(candidates) == 0 {
 		return profileCandidate{}, false
 	}
-	if intent != nil && intent.ProfileKeyDigest != "" {
+	if scopeDigest != "" {
 		for _, candidate := range candidates {
-			if sha256Hex(candidate.key) == intent.ProfileKeyDigest {
+			if sha256Hex(candidate.key) == scopeDigest {
 				return candidate, false
 			}
 		}
 	}
-	if scopeDigest != "" {
+	if intent != nil && intent.ProfileKeyDigest != "" {
 		for _, candidate := range candidates {
-			if sha256Hex(candidate.key) == scopeDigest {
+			if sha256Hex(candidate.key) == intent.ProfileKeyDigest {
 				return candidate, false
 			}
 		}

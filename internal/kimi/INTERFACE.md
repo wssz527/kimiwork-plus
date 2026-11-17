@@ -287,6 +287,46 @@ state. DNS failures do not block unrelated gateway or desktop functions.
 - an account change is `account_changed` and is **not** in the importable set;
 - the intent records digests only, never a token.
 
+### Account scope and profile selection
+
+Three levels are involved, and they are not interchangeable:
+
+- `uid` — the identity Kimi signs in with;
+- store key — `sha256(uid)`, which is exactly what `AccountScope(kimiHome)`
+  answers and how `byok-providers.json` keys a profile;
+- scope digest — `sha256(store key)`, which is what the intent records in both
+  `accountDigest` and `profileKeyDigest`.
+
+`Reconcile` hashes the scope once to reach the digest; `Readback(account)` takes
+the scope (the store key) and hashes it once for the same reason. Both must stay
+at one hash or they disagree about which profile belongs to whom.
+
+`selectProfile` prefers the caller's exact scope over a recorded intent. After a
+switch the store holds one profile per account while the intent still names the
+old one, so preferring the intent would keep answering for the account the user
+left. If no exact scope matches, the existing intent and single-profile fallback
+remain available; a confirmed import still requires an exact scope match before
+it may change recorded ownership. Multiple candidates with neither match are
+`account_ambiguous`.
+
+### Confirming an import that landed after a switch
+
+`ReconcileOptions.AllowAccountRebind` is set after the official page accepts an
+import, or after an explicit account switch verifies the target's exact catalog,
+gateway credential, generated config and current runtime aliases. `gradeImport`
+passes the original request account to `reconcile`; a changed or missing identity
+returns `account-changed` before ownership is reconciled.
+The confirmed call may move a stale recorded account onto its exact current
+profile, so a successful import is not reported as `account_changed` forever.
+
+The licence is narrow. It applies only when the selected profile's key hashes to
+the caller's own scope digest, the intent is still active and still points at the
+configured URL. Every other gate stays: `foreign_provider` / `foreign_model`,
+`native_profile_pending`, `profile_delisted`, `base_url_changed` and a different
+URL are all still refused, and a refusal writes nothing. The periodic path
+(`Reconcile`, `ReconcileWithReadback`) passes false, so an account switch nobody
+watched remains `account_changed` and is never adopted.
+
 States: `idle`, `ready`, `repaired`, `conflict`, `needs-native-import`,
 `waiting-config`, `pending`, `disabled`, `account-unverified`.
 `IntegrationResult.NeedsNativeImport()` is true only for the reasons a native
@@ -1030,6 +1070,26 @@ usage windows. Opening the official QR/phone login page and cancelling restored
 the original account without a desktop restart. These observations belong to the
 development build; final artifact and GUI acceptance are tracked in the workspace
 handoff. Idle token lifetime and Windows account runtime behaviour remain unverified.
+
+After identity activation releases the lifecycle lock, `ActivateAccount` retains
+account-operation serialization while synchronizing an already-active gateway
+catalog. An absent target profile or changed catalog/credential uses one official
+import. A target profile with a foreign URL or conflicting generated entries is
+reported without replacement. Existing pending imports are awaited rather than
+resubmitted. Exact target profiles, credential equality, generated entries and
+all aliases from the ready runtime's `conversations.getKimiModelList` are required
+before reuse or adoption. The RPC row's `model` field is the alias; its other data
+never leaves the renderer. A config repair during reconciliation requires another
+runtime check before adoption.
+
+The official importer schedules a Work kernel reload when `requiresRestart` is
+true. Catalog synchronization waits for that transition and never calls the desktop
+restart fallback. `AccountActivation.modelsState` is optional (`ready`, `pending`,
+`failed`) with a fixed `modelsReason` when needed. Model failure preserves the
+successful identity result and is shown separately in the panel. A successful
+runtime check records the reconciled generation as loaded, allowing later periodic
+readback to retain adoption. These new paths have synthetic regression coverage;
+final-build two-account model selection still requires live acceptance.
 
 ## 41. Explicit connection credential authorization
 

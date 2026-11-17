@@ -48,6 +48,20 @@ test('unreadable connection credentials expose explicit system authorization eve
   assert.equal(dom.applyButton.hidden, true);
 });
 
+test('a verified account change requests model synchronization instead of another login', () => {
+  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
+  for (const reason of ['account_changed', 'native_import_account_changed']) {
+    const data = { integration: { state: 'needs-native-import', reason, readback: { accountVerified: true } } };
+    const verdict = syncState(data);
+    assert.equal(verdict.code, 'pending');
+    assert.equal(verdict.word, '当前账号待同步');
+    assert.match(verdict.note, /当前账号已登录/);
+    assert.doesNotMatch(verdict.note, /重启/);
+    assert.equal(syncState({ integration: { ...data.integration, readback: { accountVerified: false } } }).code, 'login');
+  }
+  assert.equal(syncState({ integration: { reason: 'native_import_waiting_login', readback: { accountVerified: true } } }).code, 'login');
+});
+
 function makeProblems() {
   const code = [
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',

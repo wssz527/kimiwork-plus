@@ -21,7 +21,7 @@ func (n *Native) initAccounts(gateway *Runtime) error {
 			}
 			result, err := n.controller.ActivateAccount(ctx, session)
 			n.mu.Lock()
-			n.accountActivation = core.Document{"state": result.State, "reason": result.Reason, "failureReason": result.FailureReason, "hot": result.Hot, "restarted": result.Restarted, "verified": result.Verified, "rolledBack": result.RolledBack, "requiresLogin": result.RequiresLogin}
+			n.accountActivation = core.Document{"state": result.State, "reason": result.Reason, "failureReason": result.FailureReason, "modelsState": result.ModelsState, "modelsReason": result.ModelsReason, "hot": result.Hot, "restarted": result.Restarted, "verified": result.Verified, "rolledBack": result.RolledBack, "requiresLogin": result.RequiresLogin}
 			n.mu.Unlock()
 			if result.RequiresLogin {
 				return accountCapture{}, errors.New("account_credentials_rejected")

@@ -1966,6 +1966,10 @@ function syncState(data) {
     return { code: 'manual-exit', tone: 'warn', word: '可以受管重启 Kimi',
       note: '点击「正常退出并重启 Kimi」，产品会请求系统正常退出当前实例，再使用官方登录和真实 Work 数据受管启动。' };
   }
+  if (has('account_changed', 'native_import_account_changed') && info.readback?.accountVerified === true) {
+    return { code: 'pending', tone: 'warn', word: '当前账号待同步',
+      note: '当前账号已登录，模型目录还未与此账号完成核对。请在模型页同步到 Work。' };
+  }
   if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
     if (data?.profile?.canReuseLogin === true && !has('account_changed', 'native_import_account_changed')) {

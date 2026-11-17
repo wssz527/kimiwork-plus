@@ -219,6 +219,8 @@ type AccountActivation struct {
 	State         string `json:"state"`
 	Reason        string `json:"reason,omitempty"`
 	FailureReason string `json:"failureReason,omitempty"`
+	ModelsState   string `json:"modelsState,omitempty"`
+	ModelsReason  string `json:"modelsReason,omitempty"`
 	UserID        string `json:"userId,omitempty"`
 	Digest        string `json:"digest,omitempty"`
 	// Hot means the page followed without a restart.
@@ -335,6 +337,21 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	}
 	accountSessionMu.Lock()
 	defer accountSessionMu.Unlock()
+	result, err := c.activateAccount(ctx, session)
+	if err != nil || !result.Verified {
+		return result, err
+	}
+	home, homeErr := c.WorkHome()
+	surface, surfaceErr := c.accountSurface()
+	if homeErr != nil || surfaceErr != nil {
+		result.ModelsState, result.ModelsReason = "pending", "account_models_runtime_unverified"
+	} else {
+		result.ModelsState, result.ModelsReason = c.syncAccountModels(ctx, surface, home, session.UserID)
+	}
+	return result, nil
+}
+
+func (c *Controller) activateAccount(ctx context.Context, session AccountSession) (AccountActivation, error) {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
 

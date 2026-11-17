@@ -746,7 +746,7 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 // whatever account happens to be there, because an import into the wrong account
 // is the one mistake that cannot be undone from here.
 func (c *Controller) Reconcile() IntegrationResult {
-	return c.reconcile(false)
+	return c.reconcile(false, "")
 }
 
 // ReconcileWithReadback is the call the production loop uses: reconcile, then
@@ -757,10 +757,10 @@ func (c *Controller) Reconcile() IntegrationResult {
 // from the caller's configuration and never from a directory outside it.
 func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
 	_ = ctx
-	return c.reconcile(true)
+	return c.reconcile(true, "")
 }
 
-func (c *Controller) reconcile(withReadback bool) IntegrationResult {
+func (c *Controller) reconcile(withReadback bool, confirmedAccount string) IntegrationResult {
 	c.mu.Lock()
 	settings := c.settings
 	c.mu.Unlock()
@@ -770,6 +770,13 @@ func (c *Controller) reconcile(withReadback bool) IntegrationResult {
 
 	account, verified := c.profileAccount()
 	scope := account
+	if confirmedAccount != "" && (!verified || confirmedAccount != account) {
+		result := IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed", Readback: c.readback(account)}
+		c.mu.Lock()
+		c.integration = &result
+		c.mu.Unlock()
+		return result
+	}
 	if !verified {
 		// Nothing is read from a profile without an identity, and no reconcile
 		// writes into it either: the answer is waiting for the user's login.
@@ -795,7 +802,7 @@ func (c *Controller) reconcile(withReadback bool) IntegrationResult {
 	}
 	result := integration.Reconcile(ReconcileOptions{
 		Enabled: settings.GatewayURL != "", URL: settings.GatewayURL, Models: settings.Models,
-		AccountScope: scope, AllowNativeImport: false,
+		AccountScope: scope, AllowAccountRebind: confirmedAccount != "",
 	})
 	if withReadback {
 		readback := integration.Readback(account)
@@ -821,10 +828,9 @@ func (c *Controller) reconcile(withReadback bool) IntegrationResult {
 // import this reconcile just read back.
 //
 // "A child is running" is not enough: a child that was already up before the
-// import has not read the new profile, and reporting it as adopted would tell
-// the user to look for models their application cannot see. So the child is
-// tagged with the intent generation it started against, and adoption requires
-// that generation to be the current one.
+// import may not have read the new profile. The loaded generation is recorded
+// at launch or after an account switch verifies the exact catalog in the ready
+// runtime. Adoption requires that generation to be current.
 func (c *Controller) runtimeLoaded(generation int) bool {
 	c.mu.Lock()
 	bridge := c.bridge

@@ -718,6 +718,10 @@
     if (activation.verified === true) bits.push('读回一致');
     if (activation.hot === true) bits.push('未重启，热切换');
     if (activation.requiresLogin === true) bits.push('需要在该窗口登录');
+    if (activation.modelsState === 'ready') bits.push('第三方模型已就绪');
+    if (activation.modelsState === 'pending' || activation.modelsState === 'failed') {
+      bits.push('账号已切换，第三方模型尚未就绪，请在模型页同步');
+    }
     return node('small', 'plus-overview__meta', bits.join(' · '));
   }
 

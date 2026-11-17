@@ -51,9 +51,10 @@ type ImportReadback struct {
 
 // Readback reads the profile and the generated config without writing anything.
 //
-// `account` is the account scope digest as `AccountScope` answers it, not a raw
-// identity: the digest is what this package compares and records, so it is
-// passed through rather than hashed again.
+// `account` is the account scope as `AccountScope` answers it, not a raw
+// identity. Profiles in Kimi's store are keyed by that same value, one hash
+// below the scope digest `Reconcile` compares, so this call derives the digest
+// exactly the way `Reconcile` does and both agree on which profile is whose.
 //
 // It is deliberately a separate call from Reconcile: reading is safe at any
 // time, while reconciling may write. A caller that only wants evidence — a
@@ -95,8 +96,14 @@ func (n *NativeIntegration) Readback(account string) ImportReadback {
 	if out.StorePresent {
 		store, err := readJSONFile(filepath.Join(n.kimiDir, NativeWorkStore), maxStoreBytes)
 		if err == "" {
-			digest := out.AccountDigest
-			selected, ambiguous := selectProfile(kthProfiles(store), digest, intent)
+			// `account` is the scope, and the store keys profiles one hash below
+			// it: the selector wants the same level `Reconcile` computes, or it
+			// can never match the caller's own profile.
+			scopeDigest := ""
+			if out.AccountDigest != "" {
+				scopeDigest = sha256Hex(out.AccountDigest)
+			}
+			selected, ambiguous := selectProfile(kthProfiles(store), scopeDigest, intent)
 			if !ambiguous && selected.profile != nil {
 				if value := normalizeNativeURL(stringField(selected.profile, "baseUrl")); value != "" {
 					out.URL = value
