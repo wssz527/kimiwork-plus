@@ -27,9 +27,12 @@ if [ -x "$target/Contents/MacOS/gateway-daemon" ]; then
   endpoint="$HOME/Library/Application Support/kimi-work-plus-preview/desktop-endpoint.json"
   if [ -f "$endpoint" ]; then
     state="$HOME/Library/Application Support/kimi-work-plus-preview"
-    if ! "$target/Contents/MacOS/gateway-daemon" --state-dir "$state" --stop-daemon; then
-      echo 'The preview daemon did not stop normally. The installed preview was not replaced.' >&2
-      exit 1
+    endpoint_pid="$(/usr/bin/plutil -extract pid raw -o - "$endpoint" 2>/dev/null || true)"
+    if [[ ! "$endpoint_pid" =~ ^[1-9][0-9]*$ ]] || kill -0 "$endpoint_pid" 2>/dev/null; then
+      if ! "$target/Contents/MacOS/gateway-daemon" --state-dir "$state" --stop-daemon; then
+        echo 'The preview daemon did not stop normally. The installed preview was not replaced.' >&2
+        exit 1
+      fi
     fi
   fi
 fi
