@@ -19,18 +19,38 @@ const escapeMap = {
   native_mcp_test_requires_kernel_runtime: '当前版本暂不支持连接测试；仍可管理已有服务配置。',
 };
 
+/* 翻译宿主状态来自内核，state 与 reason 都是英文内部值；面向用户只说结论，
+   原始码留在 title 里供排查。 */
+const translationStateWords = { inactive: '未启用', active: '已生效', attaching: '正在接入页面', failed: '接入失败' };
+const translationStateReasons = {
+  translation_disabled: '翻译已在设置里关闭，Kimi 页面不会被注入。',
+  no_managed_child: '还没有受管启动的 Kimi；启动后才会应用翻译。',
+  translation_waiting_view: '已准备好，等待 Work 页面出现后接入。',
+};
+
 function errorText(error) {
   return escapeMap[error?.code] || error?.message || '操作未完成，请检查当前状态。';
 }
 
-function relocate(id, parent) {
+function relocate(id, parent, beforeId) {
   const node = $(id);
-  if (node && parent) parent.append(node);
+  if (!node || !parent) return;
+  let anchor = beforeId ? $(beforeId) : null;
+  /* 按钮藏在说明区里；插到父级视图中必须对准它在视图里的直属祖先。 */
+  while (anchor && anchor.parentNode && anchor.parentNode !== parent) anchor = anchor.parentNode;
+  if (anchor && anchor.parentNode === parent) parent.insertBefore(node, anchor);
+  else parent.append(node);
 }
 
 function mountLegacy() {
-  relocate('native-panel', $('view-maintenance'));
-  relocate('update-panel', $('view-maintenance'));
+  const maintenance = $('view-maintenance');
+  /* 接入与预览是日常设置，排在这些恢复项与运行记录之前；直接 append 会把它们
+     推到页面末尾，让每天要用的开关落到诊断区下面。 */
+  relocate('native-panel', maintenance, 'ob-advanced-toggle');
+  relocate('update-panel', maintenance, 'ob-advanced-toggle');
+  const diagnostics = $('sa-diagnostics-body');
+  /* 挂载可能被重复调用；诊断区里只留一份契约说明。 */
+  if (!diagnostics || $('role-contract')) return;
   const roles = document.createElement('details');
   roles.className = 'growth-disclosure';
   roles.id = 'role-contract';
@@ -40,7 +60,7 @@ function mountLegacy() {
   body.className = 'growth-disclosure__body';
   body.innerHTML = '<p>已只读核对 Kimi Work 3.2.25 当前内核：coder、plan、explore 等 profile 决定提示词与工具权限，profile 接口没有 model、modelAlias 或 thinking 默认字段。模型由单次显式参数、全局池默认或调用方继承决定。</p><p>因此本轮不实现角色默认或强制角色模型，不添加无效下拉框。单次指定模型不等同于已接管所有官方自动子代理；实际契约与版本摘要见交付的 ROLE_CONTRACT.txt。</p><p>日常子代理继续使用上面的“继承主模型”基线，本页不会借角色调查重新启用全局模型池。</p>';
   roles.append(summaryRole, body);
-  $('sa-diagnostics-body').append(roles);
+  diagnostics.append(roles);
 }
 
 function fieldFromDraft(draft) {
@@ -263,7 +283,15 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     text('tr-key-state', config.provider === 'custom'
       ? envReady ? '当前宿主已提供此凭据变量；Key 不会回显。' : '当前宿主未提供此变量；请在下方重新输入 Key 并保存。'
       : 'Bing / Google 使用现有翻译服务；不需要模型连接 Key。');
-    text('tr-runtime', `运行状态：${data.translation.runtime?.state || '未报告'}。${data.translation.runtime?.warning || data.translation.runtime?.reason || '保存设置与运行采用是分开的状态。'}`);
+    const runtime = data.translation.runtime || {};
+    const stateWord = translationStateWords[runtime.state] || '状态未报告';
+    const stateNote = runtime.warning || translationStateReasons[runtime.reason]
+      || (runtime.reason ? '宿主报告了未识别的状态，详见诊断信息。' : '保存设置与运行采用是分开的状态。');
+    text('tr-runtime', '运行状态：' + stateWord + '。' + stateNote);
+    const runtimeNode = $('tr-runtime');
+    if (runtimeNode) {
+      runtimeNode.title = [runtime.state, runtime.reason].filter(Boolean).join(' · ');
+    }
     text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致');
     $('tr-copy').disabled = !copySelect.value;
     const modelKey = JSON.stringify(data.models.map(row => [row.id, row.name, row.connectionId, row.protocol]));

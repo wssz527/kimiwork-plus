@@ -765,6 +765,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 	if raw, ok := document.Get("prompt_cache_key"); ok {
 		_ = json.Unmarshal(raw, &promptCacheKey)
 	}
+	upstreamStartedAt := g.config.Now()
 	chosen := g.tryCandidates(ctx, route, document, selected, headers, promptCacheKey)
 	usageContext := chosen.usage
 	if record != nil {
@@ -820,7 +821,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	firstByteAt := g.config.Now()
+	// Upstream response headers have already arrived here; use this timestamp for
+	// bodyless responses.
+	responseHeadAt := g.config.Now()
 	first := true
 	kind := ScanNone
 	if upstream.Status >= 200 && upstream.Status < 300 {
@@ -837,7 +840,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		if n > 0 {
 			if first {
 				first = false
-				elapsed := g.config.Now().Sub(firstByteAt).Milliseconds()
+				elapsed := g.config.Now().Sub(upstreamStartedAt).Milliseconds()
 				if record != nil {
 					record.FirstByteMS = &elapsed
 				}
@@ -881,6 +884,13 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		if typ := failureScan.Finish(); typ != "" && record != nil {
 			record.UpstreamErrorType = typ
 		}
+	}
+	/* A response that carried no body at all still reached the caller at the
+	   head; leaving FirstByteMS unset would report a measured zero-byte answer
+	   as unmeasured. */
+	if first && record != nil {
+		elapsed := responseHeadAt.Sub(upstreamStartedAt).Milliseconds()
+		record.FirstByteMS = &elapsed
 	}
 	if ctx.Err() != nil {
 		if record != nil {

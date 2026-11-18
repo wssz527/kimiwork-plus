@@ -22,6 +22,16 @@ func TestNativeSwarmRequiresAnExplicitBoolean(t *testing.T) {
 	}
 }
 
+func TestNativeSwarmRequiresTheDisplayedConversation(t *testing.T) {
+	for _, key := range []any{nil, 123, "", " conv-1 "} {
+		native := &Native{operation: core.Document{"state": "running"}}
+		_, err := native.Action(context.Background(), core.Document{"action": "set-swarm", "enabled": true, "conversationKey": key})
+		if err == nil || err.Error() != "invalid_swarm_conversation" {
+			t.Fatalf("invalid conversation accepted: %v", err)
+		}
+	}
+}
+
 func TestSwarmReadRouteUsesTheReadOnlyNativeSurface(t *testing.T) {
 	dir := t.TempDir() + "/state"
 	store, err := core.Open(dir)

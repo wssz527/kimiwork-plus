@@ -1,7 +1,11 @@
 package bridge
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+
 	"kimiworkplus.local/migration/internal/core"
 )
 
@@ -34,20 +38,22 @@ func (s *Service) authorizeConnectionCredentials(d core.Document) error {
 	}
 	return nil
 }
-func (s *Service) stageCredentials(d core.Document, changes map[string]*string) (err error) {
+func (s *Service) stageCredentials(d core.Document, changes map[string]*string) (staged []string, err error) {
 	if len(changes) > 0 && s.Keys == nil {
-		return errors.New("credentials_unavailable")
+		return nil, errors.New("credentials_unavailable")
 	}
 	created := []string{}
 	defer func() {
-		if err == nil {
+		if err != nil {
+			for _, ref := range created {
+				if e := s.Keys.Delete(ref); e != nil {
+					err = errors.New("credentials_cleanup_failed")
+				}
+			}
+			staged = nil
 			return
 		}
-		for _, ref := range created {
-			if e := s.Keys.Delete(ref); e != nil {
-				err = errors.New("credentials_cleanup_failed")
-			}
-		}
+		staged = created
 	}()
 	for _, v := range core.Rows(d["connections"]) {
 		c := core.Object(v)
@@ -63,11 +69,70 @@ func (s *Service) stageCredentials(d core.Document, changes map[string]*string) 
 		ref := "connection-" + RandomKey()
 		created = append(created, ref)
 		if e := stageCredential(s.Keys, ref, *value); e != nil {
-			return e
+			return nil, e
 		}
 		c["apiKeyRef"] = ref
 	}
-	return nil
+	return created, nil
+}
+
+// discardStagedCredentials removes connection credentials that a failed save
+// staged once no durable configuration refers to them. A commit can fail after
+// it wrote the recovery journal, and the next start applies that journal, so a
+// reference in either durable document keeps the key alive.
+func (s *Service) discardStagedCredentials(refs []string) {
+	if len(refs) == 0 || s.Keys == nil {
+		return
+	}
+	referenced, known := s.durableCredentialRefs()
+	if !known {
+		return
+	}
+	for _, ref := range refs {
+		if !referenced[ref] {
+			_ = s.Keys.Delete(ref)
+		}
+	}
+}
+
+func (s *Service) durableCredentialRefs() (map[string]bool, bool) {
+	refs := map[string]bool{}
+	current, _, err := s.Store.Read()
+	if err != nil {
+		return nil, false
+	}
+	collectCredentialRefs(current, refs)
+	// Without the state directory the recovery journal cannot be inspected, and
+	// a pending journal is the one document that can still activate these keys.
+	if s.StateDir == "" {
+		return nil, false
+	}
+	raw, err := core.ReadPrivateFile(filepath.Join(s.StateDir, "gateway.json.journal"), 4<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return refs, true
+	}
+	if err != nil {
+		return nil, false
+	}
+	var pending struct {
+		After core.Document `json:"after"`
+	}
+	if json.Unmarshal(raw, &pending) != nil || pending.After == nil {
+		return nil, false
+	}
+	collectCredentialRefs(pending.After, refs)
+	return refs, true
+}
+
+func collectCredentialRefs(d core.Document, refs map[string]bool) {
+	for _, v := range core.Rows(d["connections"]) {
+		if ref := core.String(core.Object(v)["apiKeyRef"]); ref != "" {
+			refs[ref] = true
+		}
+	}
+	if ref := core.String(core.Object(d["translation"])["apiKeyRef"]); ref != "" {
+		refs[ref] = true
+	}
 }
 func connectionRows(d core.Document, keys KeyStore) []any {
 	rows := []any{}

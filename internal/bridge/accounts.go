@@ -64,6 +64,18 @@ func (a *accountManager) capture(ctx context.Context) (accountCapture, AccountSu
 	return snapshot, row, err
 }
 
+// captureBackground stores a session that a periodic observation happened to
+// see. It is not a user gesture, so its credential write may neither open a
+// system authorization dialog nor queue behind one that is already open.
+func (a *accountManager) captureBackground(ctx context.Context) (accountCapture, AccountSummary, error) {
+	snapshot, err := a.hooks.Capture(ctx)
+	if err != nil {
+		return accountCapture{}, AccountSummary{}, err
+	}
+	row, err := a.vault.captureBackground(snapshot)
+	return snapshot, row, err
+}
+
 func (a *accountManager) confirmRestore(ctx context.Context, id string) (bool, error) {
 	fresh, err := a.hooks.Capture(ctx)
 	if err != nil || accountID(fresh.UserID) != id {

@@ -258,9 +258,16 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		}
 		profileMode = mode
 	}
+	var swarmKey string
+	var swarmEnabled bool
 	if action == "set-swarm" {
-		if _, ok := in["enabled"].(bool); !ok {
+		var ok bool
+		if swarmEnabled, ok = in["enabled"].(bool); !ok {
 			return nil, errors.New("invalid_swarm_mode")
+		}
+		swarmKey, _ = in["conversationKey"].(string)
+		if !kimi.ValidSwarmConversationKey(swarmKey) {
+			return nil, errors.New("invalid_swarm_conversation")
 		}
 	}
 	if action == "check-upstream" {
@@ -282,7 +289,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
+	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
 	default:
 		return nil, errors.New("native_preview_unavailable")
 	}
@@ -309,7 +316,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		state := "done"
 		switch action {
 		case "set-swarm":
-			result, err = n.setSwarm(deadline, in["enabled"].(bool))
+			result, err = n.setSwarm(deadline, swarmKey, swarmEnabled)
 		case "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove":
 			if n.accounts == nil {
 				err = errors.New("account_switch_unavailable")
@@ -328,13 +335,13 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if err == nil {
 				err = n.syncWorkHome()
 			}
-			state = "starting"
+		case "open-work":
+			err = n.controller.OpenWork(deadline)
 		case "restart-kimi":
 			err = n.controller.RestartOfficial(deadline)
 			if err == nil {
 				err = n.syncWorkHome()
 			}
-			state = "starting"
 		case "connect-kimi":
 			var imported kimi.ImportResult
 			imported, err = n.controller.ImportModelsAuthorized(deadline)

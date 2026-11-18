@@ -168,6 +168,12 @@ func stageCredential(keys KeyStore, name, value string) error {
 	if err := setVisibleCredential(keys, name, value); err != nil {
 		return err
 	}
+	return verifyStaged(keys, name, value)
+}
+
+// verifyStaged reads the value back from the store and removes it again unless
+// the store holds exactly what the caller wrote.
+func verifyStaged(keys KeyStore, name, value string) error {
 	actual, err := readBackCredential(keys, name)
 	if err != nil {
 		_ = keys.Delete(name)
@@ -178,6 +184,79 @@ func stageCredential(keys KeyStore, name, value string) error {
 		return errors.New("credentials_readback_failed")
 	}
 	return nil
+}
+
+// backgroundCredentialStore is implemented by a cache that can stage and remove
+// one credential for a caller that is not a user gesture.
+type backgroundCredentialStore interface {
+	stageBackground(string, string) error
+	deleteBackground(string) error
+}
+
+// The gate prevents a dialog from starting between the noninteractive write,
+// readback and failure cleanup. A dialog already in progress makes this fail fast.
+func (k *CachedKeys) stageBackground(name, value string) error {
+	if !k.gate.TryRLock() {
+		return errCredentialAuthorizationRequired
+	}
+	defer k.gate.RUnlock()
+	if err := k.store.Set(name, value); err != nil {
+		return err
+	}
+	if err := verifyStaged(k.store, name, value); err != nil {
+		// The store's final content is unknown after a failed verification, so the
+		// next read must consult it instead of a cached value.
+		k.invalidate(name, false)
+		return err
+	}
+	k.accept(name, value)
+	return nil
+}
+
+// accept records the value this process just verified and bumps the generation,
+// so a read that started before the write cannot put its older answer back.
+func (k *CachedKeys) accept(name, value string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.changes[name]++
+	k.values[name] = value
+}
+
+// deleteBackground removes a credential for a background caller. It reports a
+// pending authorization instead of waiting for it, so a cleanup that has to wait
+// keeps the reference for the next attempt rather than stalling the caller.
+func (k *CachedKeys) deleteBackground(name string) error {
+	if !k.gate.TryRLock() {
+		return errCredentialAuthorizationRequired
+	}
+	defer k.gate.RUnlock()
+	if err := k.store.Delete(name); err != nil {
+		return err
+	}
+	k.invalidate(name, true)
+	return nil
+}
+
+// stageCredentialBackground stages a credential captured without a user
+// gesture. It never asks for system authorization and never queues behind an
+// interaction that is already waiting for the user.
+func stageCredentialBackground(keys KeyStore, name, value string) error {
+	if store, ok := keys.(backgroundCredentialStore); ok {
+		return store.stageBackground(name, value)
+	}
+	// A store without a visible path cannot open a dialog, so its ordinary write
+	// already has the behaviour a background caller needs.
+	if err := keys.Set(name, value); err != nil {
+		return err
+	}
+	return verifyStaged(keys, name, value)
+}
+
+func deleteCredentialBackground(keys KeyStore, name string) error {
+	if store, ok := keys.(backgroundCredentialStore); ok {
+		return store.deleteBackground(name)
+	}
+	return keys.Delete(name)
 }
 
 func readBackCredential(keys KeyStore, name string) (string, error) {

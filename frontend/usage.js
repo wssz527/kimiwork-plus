@@ -248,40 +248,96 @@
     return bucket.label || time(bucket.start || bucket.startAt || bucket.at);
   }
 
+  /* 图表只描述可观察到的数值：空缺处断开，不插值也不当 0。所有几何量都按
+     viewBox 的实际宽度算，CSS 再用 preserveAspectRatio 保持纵横比，窄视口
+     不会把文字和圆点横向拉扁。 */
+  function chartGeometry(buckets) {
+    const width = Math.max(360, Math.min(960, 320 + buckets.length * 28));
+    const height = 220;
+    const plot = { left: 52, right: width - 20, top: 34, bottom: 184 };
+    const values = buckets.flatMap(row => [token(row, 'input'), token(row, 'output')]).filter(value => value !== null);
+    const max = Math.max(1, ...values);
+    const count = buckets.length;
+    const x = index => count === 1
+      ? (plot.left + plot.right) / 2
+      : plot.left + (plot.right - plot.left) * (index / (count - 1));
+    const y = value => plot.bottom - (value / max) * (plot.bottom - plot.top);
+    return { width, height, plot, max, x, y };
+  }
+
   function renderChart(buckets) {
     const root = $('usage-chart-body');
     root.replaceChildren();
     if (!buckets.some(row => row.requests > 0)) { const p = document.createElement('p'); p.className = 'usage-chart__empty'; p.textContent = '该时间段尚无可观察请求。'; root.append(p); return; }
     const ns = 'http://www.w3.org/2000/svg';
+    const { width, height, plot, max, x, y } = chartGeometry(buckets);
     const svg = document.createElementNS(ns, 'svg');
-    svg.setAttribute('viewBox', '0 0 800 220');
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     svg.setAttribute('role', 'img');
     svg.setAttribute('aria-label', '输入与输出 Token 趋势图');
-    const values = buckets.flatMap(row => [token(row, 'input'), token(row, 'output')]).filter(value => value !== null);
-    const max = Math.max(1, ...values);
-    const x = index => buckets.length === 1 ? 400 : 52 + index * (720 / (buckets.length - 1));
-    const y = value => 184 - value / max * 150;
-    for (const [label, value] of [[fmt(max), 34], [fmt(Math.round(max / 2)), 109], ['0', 184]]) {
-      const line = document.createElementNS(ns, 'line'); line.setAttribute('x1', '52'); line.setAttribute('x2', '780'); line.setAttribute('y1', String(value)); line.setAttribute('y2', String(value)); line.setAttribute('class', 'usage-chart__grid'); svg.append(line);
-      const node = document.createElementNS(ns, 'text'); node.setAttribute('x', '46'); node.setAttribute('y', String(value + 3)); node.setAttribute('text-anchor', 'end'); node.setAttribute('class', 'usage-chart__label'); node.textContent = label; svg.append(node);
+    for (const [label, value] of [[fmt(max), plot.top], [fmt(Math.round(max / 2)), (plot.top + plot.bottom) / 2], ['0', plot.bottom]]) {
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', String(plot.left)); line.setAttribute('x2', String(plot.right));
+      line.setAttribute('y1', String(value)); line.setAttribute('y2', String(value));
+      line.setAttribute('class', 'usage-chart__grid'); svg.append(line);
+      const node = document.createElementNS(ns, 'text');
+      node.setAttribute('x', String(plot.left - 6)); node.setAttribute('y', String(value + 3));
+      node.setAttribute('text-anchor', 'end'); node.setAttribute('class', 'usage-chart__label');
+      node.textContent = label; svg.append(node);
     }
-    for (const [name, className] of [['input', 'usage-chart__line'], ['output', 'usage-chart__line usage-chart__line--output']]) {
+    const series = [['input', 'usage-chart__line', 'usage-chart__point'],
+      ['output', 'usage-chart__line usage-chart__line--output', 'usage-chart__point usage-chart__point--output']];
+    for (const [name, lineClass, pointClass] of series) {
       let segment = [];
-      const flush = () => { if (segment.length > 1) { const path = document.createElementNS(ns, 'path'); path.setAttribute('d', segment.map((point, index) => (index ? 'L' : 'M') + point.join(',')).join(' ')); path.setAttribute('class', className); svg.append(path); } segment = []; };
-      buckets.forEach((row, index) => { const value = token(row, name); if (value === null) flush(); else segment.push([x(index).toFixed(1), y(value).toFixed(1)]); });
+      const flush = () => {
+        if (segment.length > 1) {
+          const path = document.createElementNS(ns, 'path');
+          path.setAttribute('d', segment.map((point, index) => (index ? 'L' : 'M') + point).join(' '));
+          path.setAttribute('class', lineClass); svg.append(path);
+        } else if (segment.length === 1) {
+          /* 单点没有相邻点可连，用一小段横线标出该系列确实有值、位置在哪，
+             否则只有一个圆点会让另一个系列看起来是缺失。 */
+          const [cx, cy] = segment[0].split(',');
+          const tick = document.createElementNS(ns, 'line');
+          tick.setAttribute('x1', String(Number(cx) - 6)); tick.setAttribute('x2', String(Number(cx) + 6));
+          tick.setAttribute('y1', cy); tick.setAttribute('y2', cy);
+          tick.setAttribute('class', lineClass + ' usage-chart__tick'); svg.append(tick);
+        }
+        segment = [];
+      };
+      buckets.forEach((row, index) => {
+        const value = token(row, name);
+        if (value === null) flush();
+        else segment.push(x(index).toFixed(1) + ',' + y(value).toFixed(1));
+      });
       flush();
+      buckets.forEach((row, index) => {
+        const value = token(row, name);
+        if (value === null) return;
+        const point = document.createElementNS(ns, 'circle');
+        point.setAttribute('cx', x(index).toFixed(1)); point.setAttribute('cy', y(value).toFixed(1));
+        point.setAttribute('r', '4'); point.setAttribute('class', pointClass);
+        point.setAttribute('tabindex', '0'); point.setAttribute('role', 'button');
+        point.setAttribute('aria-label', bucketLabel(row) + '，' + (name === 'input' ? '输入 ' : '输出 ') + fmt(value)
+          + '，输入 ' + fmt(token(row, 'input')) + '，输出 ' + fmt(token(row, 'output')));
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = bucketLabel(row) + ' · 输入 ' + fmt(token(row, 'input')) + ' · 输出 ' + fmt(token(row, 'output'));
+        point.append(title);
+        const choose = () => selectBucket(row);
+        point.addEventListener('click', choose);
+        point.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(); } });
+        svg.append(point);
+      });
     }
-    const labelEvery = Math.max(1, Math.ceil(buckets.length / 6));
+    const labelEvery = Math.max(1, Math.ceil(buckets.length / Math.max(2, Math.floor((width - 80) / 70))));
     buckets.forEach((row, index) => {
-      if (index % labelEvery === 0 || index === buckets.length - 1) { const label = document.createElementNS(ns, 'text'); label.setAttribute('x', String(x(index))); label.setAttribute('y', '207'); label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'usage-chart__label'); label.textContent = bucketLabel(row); svg.append(label); }
-      const pointValue = token(row, 'input') ?? token(row, 'output');
-      if (pointValue === null) return;
-      const point = document.createElementNS(ns, 'circle');
-      point.setAttribute('cx', String(x(index))); point.setAttribute('cy', String(y(pointValue))); point.setAttribute('r', '4'); point.setAttribute('class', 'usage-chart__point'); point.setAttribute('tabindex', '0'); point.setAttribute('role', 'button'); point.setAttribute('aria-label', bucketLabel(row) + '，输入 ' + fmt(token(row, 'input')) + '，输出 ' + fmt(token(row, 'output')));
-      const title = document.createElementNS(ns, 'title'); title.textContent = bucketLabel(row) + ' · 输入 ' + fmt(token(row, 'input')) + ' · 输出 ' + fmt(token(row, 'output')); point.append(title);
-      const choose = () => selectBucket(row);
-      point.addEventListener('click', choose); point.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(); } });
-      svg.append(point);
+      if (index % labelEvery === 0 || index === buckets.length - 1) {
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', x(index).toFixed(1)); label.setAttribute('y', String(plot.bottom + 23));
+        label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'usage-chart__label');
+        label.textContent = bucketLabel(row); svg.append(label);
+      }
     });
     root.append(svg);
   }

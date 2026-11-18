@@ -136,7 +136,7 @@ func (n *Native) observeAccounts(ctx context.Context) {
 	if restore != "" && (!adding || id == restore) || restore == "" && current == id {
 		return
 	}
-	if _, _, err := n.accounts.capture(deadline); err != nil {
+	if _, _, err := n.accounts.captureBackground(deadline); err != nil {
 		return
 	}
 	if adding {

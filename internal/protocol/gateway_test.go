@@ -644,3 +644,50 @@ func TestClientDisconnectIsRecordedAsCancelled(t *testing.T) {
 		t.Fatalf("status %d ledger %q", record.Status, record.LedgerStatus())
 	}
 }
+
+func TestFirstByteIncludesTheUpstreamHeadDelay(t *testing.T) {
+	fake := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		// The vendor takes this long to produce its head. Starting the
+		// first-byte clock after the head was forwarded counted none of it.
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+	})
+	gateway, url := startGateway(t, fake.server.URL, []protocol.Model{chatModel("kimi-probe")}, nil)
+	reply, _ := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-probe", "messages": []any{}}, nil)
+	if reply.StatusCode != 200 {
+		t.Fatalf("status %d", reply.StatusCode)
+	}
+	record := gateway.Metrics().Recent[0]
+	if record.FirstByteMS == nil {
+		t.Fatal("first byte was not measured")
+	}
+	if *record.FirstByteMS < 100 {
+		t.Fatalf("first byte %d ms does not include the upstream head delay", *record.FirstByteMS)
+	}
+	if *record.FirstByteMS > record.MS {
+		t.Fatalf("first byte %d ms exceeds the total %d ms", *record.FirstByteMS, record.MS)
+	}
+}
+
+func TestFirstByteIsMeasuredForABodylessResponse(t *testing.T) {
+	fake := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	gateway, url := startGateway(t, fake.server.URL, []protocol.Model{chatModel("kimi-probe")}, nil)
+	reply, _ := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-probe", "messages": []any{}}, nil)
+	if reply.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d", reply.StatusCode)
+	}
+	record := gateway.Metrics().Recent[0]
+	if record.FirstByteMS == nil {
+		t.Fatal("a bodyless response left the first byte unmeasured")
+	}
+	if *record.FirstByteMS < 100 {
+		t.Fatalf("first byte %d ms does not include the upstream head delay", *record.FirstByteMS)
+	}
+}

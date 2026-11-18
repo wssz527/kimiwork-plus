@@ -70,11 +70,18 @@
     age: '读数已超过新鲜期',
     throttled: '刚读过，等一会儿再读',
     selection_changed: '读取期间换了来源，这次结果已作废',
+    NO_KEY: '缺少面板会话密钥，请重新打开面板',
+    unauthorized: '面板会话密钥已失效，请重新打开面板',
+    request_failed: '读取失败，稍后重试',
+    code_local_needs_adoption: '需要先采用本机 Kimi Code 登录',
   };
 
+  /* 有明确失败原因时它就是这次尝试的结论；`reading_superseded` 只说明手上这份
+     读数属于别的来源，不能盖掉「Key 被拒绝」这类用户必须处理的原因。 */
   function codeReasonText(code, notes = []) {
+    if (code && CODE_REASON[code]) return CODE_REASON[code];
     if (notes.includes('reading_superseded')) return '这份读数属于另一个来源或账号，不作数';
-    return CODE_REASON[code] || code || '';
+    return code || '';
   }
 
   const code = {
@@ -307,6 +314,9 @@
     invalid_magpie_address: '地址不符合规则',
     connection_unavailable: '这条连接已不在配置中',
     invalid_magpie_connection: '这条连接的地址不是 Magpie 网关',
+    NO_KEY: '缺少面板会话密钥，请重新打开面板',
+    unauthorized: '面板会话密钥已失效，请重新打开面板',
+    request_failed: '读取失败，稍后重试',
   };
 
   const magpie = { state: null, loading: false, form: { open: false, connectionId: '', baseUrl: '', busy: false } };
@@ -905,14 +915,31 @@
     if (!view) { slot.replaceChildren(node('p', 'empty', '正在读取预算设置。')); return; }
     const status = view.status && typeof view.status === 'object' ? view.status : {};
     const wrap = node('div');
-    wrap.append(renderBudgetStatus(status));
+    const summary = node('div');
+    summary.id = 'plus-budget-status';
+    summary.append(renderBudgetStatus(status));
+    summary.dataset.signature = JSON.stringify(status);
+    wrap.append(summary);
     wrap.append(renderBudgetForm());
     slot.replaceChildren(wrap);
+  }
+
+  function renderBudgetSummary(status) {
+    const summary = $('plus-budget-status');
+    if (!summary) return;
+    const signature = JSON.stringify(status);
+    if (summary.dataset.signature === signature) return;
+    summary.replaceChildren(renderBudgetStatus(status));
+    summary.dataset.signature = signature;
   }
 
   function renderBudgetStatus(status) {
     const box = node('div', 'plus-budget-status');
     const enforcement = textOf(status.enforcement);
+    if (status.state === 'error') {
+      box.append(node('p', 'note note--warn', '预算状态读取失败，请刷新后重试。'));
+      return box;
+    }
     if (!textOf(status.currency)) {
       box.append(node('p', 'hint', '还没有启用预算保护。这里的花费是按本机账本和自填定价估算的，不是供应商账单。'));
       return box;
@@ -939,7 +966,7 @@
       if (unpriced) bits.push(unpriced + ' 次未定价（未计入金额）');
       if (inflight) bits.push(inflight + ' 次在途（可能超出）');
       if (row.partial === true) bits.push('金额不完整');
-      if (row.reached === true) bits.push(textOf(row.action) === 'block' ? '已达上限，新请求会被拒绝' : '已达上限，仅提醒');
+      if (status.enabled === true && row.reached === true) bits.push(textOf(row.action) === 'block' ? '已达上限，新请求会被拒绝' : '已达上限，仅提醒');
       const reset = time(row.resetsAt);
       if (reset) bits.push('重置于 ' + reset);
       if (bits.length) card.append(node('small', null, bits.join(' · ')));
@@ -976,7 +1003,7 @@
       const row = form[name];
       grid.append(
         field(name === 'daily' ? '每日上限（留空不限制）' : '每月上限（留空不限制）', textField(row.limit, value => { row.limit = value; form.dirty = true; }, '例如 20', 'number')),
-        field('达到上限时', selectField([['remind', '只提醒'], ['block', '拒绝新请求']], row.action, value => { row.action = value; form.dirty = true; })),
+        field('达到上限时', selectField([['remind', '在面板提醒'], ['block', '拒绝新请求']], row.action, value => { row.action = value; form.dirty = true; })),
       );
     }
     const serialize = node('label', 'check');
@@ -985,7 +1012,7 @@
     box2.checked = form.serialize;
     box2.addEventListener('change', () => { form.serialize = box2.checked; form.dirty = true; renderBudget(); });
     serialize.append(box2, node('span', null, '串行发送请求'));
-    const hint = node('p', 'field__hint', '开启后同一时间只发一个请求。它能把「在途请求让花费超过上限」的窗口关掉，代价是吞吐下降、响应变慢。');
+    const hint = node('p', 'field__hint', '开启后一次只处理一个请求，等上一笔入账再判断是否放行。最后一笔已放行的请求仍可能让花费超过上限。');
 
     const line = node('div', 'action-line action-line--start');
     line.append(
@@ -1111,6 +1138,7 @@
     work_swarm_conversation_unavailable: '当前没有打开的会话',
     work_swarm_unsupported: '这个 Work 页面不支持 Swarm 接口',
     work_swarm_unavailable: '这台机器上没有可用的 Swarm 接口',
+    work_swarm_conversation_changed: 'Work 会话已变化，请重新读取当前会话再操作',
     work_swarm_not_confirmed: '写入后读回不一致，未确认生效',
     native_preview_unavailable: '这个面板版本还没有提供 Swarm 接口，需要更新的后端',
     request_failed: '读取失败，稍后重试',
@@ -1133,7 +1161,10 @@
     if (caps.kernelVersion) bits.push('内核 ' + caps.kernelVersion);
     if (caps.kernelCommit) bits.push('提交 ' + String(caps.kernelCommit).slice(0, 7));
     const force = caps.subagents && caps.subagents.forceKeySupported;
-    if (force === false) bits.push('固定子代理模型：当前内核接受');
+    /* force 键是内核自己钉住单一默认模型时用的；内核声明不支持该键时，
+       只能写 default_model，不能说成「接受固定子代理模型」。 */
+    if (force === false) bits.push('固定子代理模型：当前内核不接受 force 键，改为只写默认模型');
+    else if (force === true) bits.push('固定子代理模型：当前内核支持');
 
     if (bits.length) head.append(node('small', null, bits.join(' · ')));
     wrap.append(head);
@@ -1169,11 +1200,12 @@
     }
     /* Swarm 只在用户显式点击时设置：不用页面默认值、不自动开启。 */
     const line = node('div', 'action-line action-line--start');
-    line.append(button('读取当前会话', { onClick: () => loadSwarm() }));
+    line.append(button('读取当前会话', { disabled: swarm.writing || swarm.loading, onClick: () => loadSwarm() }));
     if (known) {
       line.append(button(snapshot.enabled ? '关闭这个会话的 Swarm' : '开启这个会话的 Swarm', {
         className: 'btn btn--primary btn--sm',
-        onClick: () => setSwarm(!snapshot.enabled),
+        disabled: swarm.writing || swarm.loading,
+        onClick: () => setSwarm(snapshot.conversationKey, !snapshot.enabled),
       }));
     }
     box.append(line);
@@ -1186,6 +1218,7 @@
     if (swarm.loading) return;
     swarm.loading = true;
     swarm.reason = '';
+    renderCapabilities(stateData());
     try {
       const result = await request('/api/work/swarm');
       const snapshot = result && (result.swarm || result);
@@ -1206,11 +1239,12 @@
     renderCapabilities(stateData());
   }
 
-  async function setSwarm(enabled) {
-    if (swarm.writing) return;
+  async function setSwarm(conversationKey, enabled) {
+    if (swarm.writing || swarm.loading) return;
     swarm.writing = true;
+    renderCapabilities(stateData());
     try {
-      const result = await request('/api/actions', { method: 'POST', body: { action: 'set-swarm', enabled } });
+      const result = await request('/api/actions', { method: 'POST', body: { action: 'set-swarm', conversationKey, enabled } });
       const operation = result && result.operation ? result.operation : null;
       notify(enabled ? '已请求开启当前会话的 Swarm。' : '已请求关闭当前会话的 Swarm。', 'ok');
       if (operation && operation.id) {
@@ -1225,13 +1259,17 @@
           if (!op || op.id !== id) break;
           if (!['running', 'pending'].includes(textOf(op.state))) {
             if (['failed', 'unavailable', 'interrupted'].includes(textOf(op.state))) {
-              notify('Swarm 未生效：' + (capabilityReason[textOf(op.reason)] || textOf(op.reason) || textOf(op.state)), 'error');
+              if (op.reason === 'work_swarm_conversation_changed') {
+                swarm.snapshot = null;
+                swarm.reason = op.reason;
+              }
+              notify('Swarm 未确认：' + (capabilityReason[textOf(op.reason)] || textOf(op.reason) || textOf(op.state)), 'error');
             }
             break;
           }
         }
       }
-      await loadSwarm();
+      if (swarm.reason !== 'work_swarm_conversation_changed') await loadSwarm();
     } catch (error) {
       notify(error.message || 'Swarm 操作失败', 'error');
     } finally {
@@ -1264,9 +1302,17 @@
       render(data) {
         renderAccountsAll();
         if (data) renderCapabilities(data);
+        if (data?.budget && budget.view?.status?.state !== 'error') renderBudgetSummary(data.budget);
       },
-      async refresh() {
-        await Promise.all([loadCode(), loadMagpie(), loadBudget()]);
+      async refresh(options = {}) {
+        const { live = false } = options;
+        /* 用户停在用量页点顶栏刷新时，读缓存不够：Kimi Code 与 Magpie 要走
+           各自的真实重读，Kimi Code 仍遵守后台的节流窗口，不额外强制。 */
+        if (live) {
+          await Promise.all([refreshCode(false), refreshMagpie(), loadBudget()]);
+        } else {
+          await Promise.all([loadCode(), loadMagpie(), loadBudget()]);
+        }
         renderCapabilities(stateData());
       },
     };
@@ -1307,7 +1353,7 @@
     const budgetHead = node('div', 'band__head');
     budgetHead.append(node('div'));
     budgetHead.firstChild.append(node('h2', null, '预算保护'));
-    budgetHead.firstChild.append(node('p', null, '按本机请求账本与你在模型上填的定价估算花费，达到上限时提醒或拒绝新请求。这是本工具的估算，不是供应商的硬上限：供应商仍会按它自己的计费继续放行。'));
+    budgetHead.firstChild.append(node('p', null, '按本机账本和模型定价估算费用。达到上限时，可在 Work+ 面板提醒或拒绝新请求。实际费用以供应商账单为准。'));
     budgetSection.append(budgetHead);
     const budgetBody = node('div');
     budgetBody.id = 'plus-budget-body';

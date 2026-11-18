@@ -107,7 +107,10 @@ func (v *accountVault) cleanup(index *accountIndex) error {
 	}
 	remaining := make([]string, 0, len(index.RetiredCredentials))
 	for _, ref := range index.RetiredCredentials {
-		if v.keys == nil || v.keys.Delete(ref) != nil {
+		// Removal is not a user gesture: it may not open a system dialog and may
+		// not wait behind one. A store that reports a pending interaction keeps
+		// the reference here and the next cleanup retries it.
+		if v.keys == nil || deleteCredentialBackground(v.keys, ref) != nil {
 			remaining = append(remaining, ref)
 		}
 	}
@@ -136,6 +139,17 @@ func (v *accountVault) summaries() ([]AccountSummary, string, error) {
 }
 
 func (v *accountVault) capture(snapshot accountCapture) (AccountSummary, error) {
+	return v.stage(snapshot, false)
+}
+
+// captureBackground stores a session observed without a user gesture. Its
+// credential write must never open a system authorization dialog and must never
+// queue behind one that is already open.
+func (v *accountVault) captureBackground(snapshot accountCapture) (AccountSummary, error) {
+	return v.stage(snapshot, true)
+}
+
+func (v *accountVault) stage(snapshot accountCapture, background bool) (AccountSummary, error) {
 	if strings.TrimSpace(snapshot.UserID) == "" || len(snapshot.UserID) > 1024 || len(snapshot.Name) > 256 || strings.ContainsAny(snapshot.Name, "\x00\r\n") || len(snapshot.Session) == 0 || len(snapshot.Session) > 256<<10 || !json.Valid(snapshot.Session) {
 		return AccountSummary{}, errors.New("account_snapshot_invalid")
 	}
@@ -167,7 +181,13 @@ func (v *accountVault) capture(snapshot accountCapture) (AccountSummary, error) 
 	if position >= 0 {
 		row.LastUsedAt = index.Accounts[position].LastUsedAt
 	}
-	if err := stageCredential(v.keys, row.CredentialRef, string(snapshot.Session)); err != nil {
+	write, remove := stageCredential, v.keys.Delete
+	if background {
+		write, remove = stageCredentialBackground, func(ref string) error { return deleteCredentialBackground(v.keys, ref) }
+	}
+	// The index keeps its previous reference until the new one is written and
+	// read back, so a refused or locked store leaves a usable account behind.
+	if err := write(v.keys, row.CredentialRef, string(snapshot.Session)); err != nil {
 		return AccountSummary{}, err
 	}
 	if position >= 0 {
@@ -180,7 +200,7 @@ func (v *accountVault) capture(snapshot accountCapture) (AccountSummary, error) 
 		index.RetiredCredentials = append(index.RetiredCredentials, oldRef)
 	}
 	if err := core.AtomicJSON(v.path, index); err != nil {
-		_ = v.keys.Delete(row.CredentialRef)
+		_ = remove(row.CredentialRef)
 		return AccountSummary{}, errors.New("account_store_write_failed")
 	}
 	_ = v.cleanup(&index)

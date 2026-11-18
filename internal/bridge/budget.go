@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"math"
+	"net/http"
 	"sync"
 	"time"
 
@@ -184,6 +185,7 @@ func (g *budgetGate) spend(now time.Time, location *time.Location, source string
 		started := record.Status == "started"
 		priced := !started && record.EstimatedCost != nil && record.PriceSource != nil &&
 			*record.PriceSource == source
+		refused := refusedBeforeForwarding(record)
 		for _, window := range []*protocol.Spend{&month, &day} {
 			if at < dayStart && window == &day {
 				continue
@@ -195,7 +197,9 @@ func (g *budgetGate) spend(now time.Time, location *time.Location, source string
 				window.Cost += *record.EstimatedCost
 				window.Priced++
 			default:
-				window.Unpriced++
+				if !refused {
+					window.Unpriced++
+				}
 			}
 		}
 	}
@@ -204,6 +208,23 @@ func (g *budgetGate) spend(now time.Time, location *time.Location, source string
 		window.Cost = math.Round(window.Cost*1e8) / 1e8
 	}
 	return day, month
+}
+
+// These codes are exclusive to refusals before any upstream attempt. Failures
+// from conversion, transport, cancellation or upstream responses remain unknown.
+func refusedBeforeForwarding(record *ledger.Record) bool {
+	if record.Status != "failed" || record.ErrorCode == nil || record.HTTPStatus == nil ||
+		*record.HTTPStatus < http.StatusBadRequest || *record.HTTPStatus >= 600 {
+		return false
+	}
+	switch *record.ErrorCode {
+	case "request_too_large", "invalid_json", "invalid_model", "model_not_enabled_for_kimi",
+		"model_protocol_mismatch", "budget_limit_reached", "connection_unavailable",
+		"catalog_unavailable", "instructions_unavailable", "invalid_messages", "invalid_input":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseLedgerInstant(value string) int64 {

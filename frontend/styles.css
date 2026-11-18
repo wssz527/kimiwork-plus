@@ -149,8 +149,8 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: var(--kimi
 .brand { display: inline-flex; align-items: center; padding: 3px 0; border: 0; background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; }
 .brand__name { font: 700 22px/1.1 var(--display); letter-spacing: -.025em; }
 .brand__plus, .product-lockup__plus { color: var(--accent); }
-.work-index { justify-self: start; }
-.work-index__summary { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--rule-strong); border-radius: 999px; color: var(--ink-2); font-size: 12px; font-weight: 620; cursor: pointer; list-style: none; }
+.work-index { flex: none; justify-self: start; }
+.work-index__summary { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--rule-strong); border-radius: 999px; color: var(--ink-2); font-size: 12px; font-weight: 620; white-space: nowrap; cursor: pointer; list-style: none; }
 .work-index__summary::-webkit-details-marker { display: none; }
 .work-index__summary .icon { width: 13px; height: 13px; transition: transform var(--fast) var(--ease); }
 .work-index[open] .work-index__summary { border-color: var(--accent); color: var(--accent); }
@@ -177,7 +177,7 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: var(--kimi
 .theme-field { position: relative; }
 .theme-field::after { content: ""; position: absolute; right: 12px; top: 14px; width: 6px; height: 6px; border-right: 1px solid var(--ink-3); border-bottom: 1px solid var(--ink-3); transform: rotate(45deg); pointer-events: none; }
 .theme-field select:hover { background: var(--hover); }
-.masthead__navigation { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.masthead__navigation { display: flex; align-items: center; gap: 16px; min-width: 0; flex-wrap: wrap; row-gap: 8px; }
 .masthead__separator { color: var(--rule-strong); }
 
 .main { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; max-width: 1320px; margin: 0 auto; padding: 0 40px; }
@@ -203,6 +203,11 @@ body[data-view="overview"] .topbar { display: none; }
 .section-links .btn--quiet:hover:not(:disabled) { border-color: var(--accent-rule); color: var(--accent); }
 #view-work section[id], #view-work details[id] { scroll-margin-top: 18px; }
 #view-work > .hint { color: var(--ink-3); }
+/* 视图合并后区块是拼接出来的：紧跟在自带下边框的分类导航条之后，第一块再画一次
+   上边框就是两条线只隔一段空白。去掉后一条，保留间距。 */
+.section-links + .band, .workspace-sync + .band, .growth-disclosure + .band { border-top: 0; }
+/* 运行记录的外层已有强调上边框，内部第一块不必再画一条。 */
+.overview-records__body > .band:first-child { border-top: 0; }
 #models-services .band { padding-top: 0; }
 #view-models .growth-disclosure { margin-top: 24px; }
 @media (max-width: 1024px) {
@@ -558,6 +563,20 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--sunk); color: var
   #recent-table .col-reqctx { display: none; }
 }
 
+/* 640–1024px 之间原本没有任何顶栏规则：导航胶囊可以被压到只剩一个字的宽度，
+   于是「全部功能」逐字竖排，并与右侧工具挤在一起。胶囊保持单行、整枚换行，
+   空间实在不够时（<=780px）把工具整行移到下面。 */
+@media (max-width: 1024px) {
+  .masthead { gap: 12px; }
+  .masthead__navigation { flex-wrap: wrap; row-gap: 8px; }
+  .masthead__tools { margin-left: auto; }
+}
+
+@media (max-width: 780px) {
+  .masthead { grid-template-columns: minmax(0, 1fr); align-items: start; row-gap: 10px; }
+  .masthead__tools { justify-content: space-between; width: 100%; margin-left: 0; }
+}
+
 @media (max-width: 900px) {
   .main { padding-inline: 28px; }
   .takeover__stage { grid-template-columns: 1fr; min-height: 0; padding: 54px 0; }
@@ -685,7 +704,7 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 .usage-stat dd { margin-top: 7px; color: var(--ink); font: 700 25px/1.15 var(--display); overflow-wrap: anywhere; }
 .usage-stat small { display: block; margin-top: 6px; color: var(--ink-4); font-size: 11px; }
 .usage-chart { margin: 30px 0; padding: 20px 0; border-block: 1px solid var(--rule); }
-.usage-chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+.usage-chart svg { display: block; width: 100%; height: auto; max-height: 260px; overflow: visible; }
 .usage-chart__legend { display: flex; gap: 20px; margin-bottom: 12px; color: var(--ink-3); font-size: 12px; }
 .usage-chart__legend span::before { content: ""; display: inline-block; width: 18px; height: 3px; margin-right: 7px; vertical-align: middle; background: var(--accent); }
 .usage-chart__legend span:last-child::before { background: var(--rule-strong); }
@@ -694,7 +713,9 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 .usage-chart__grid { stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .usage-chart__label { fill: var(--ink-3); font: 10px var(--ui); }
 .usage-chart__point { fill: var(--surface-strong); stroke: var(--accent); stroke-width: 2; cursor: pointer; vector-effect: non-scaling-stroke; }
+.usage-chart__point--output { stroke: var(--rule-strong); }
 .usage-chart__point:focus { outline: none; stroke-width: 4; }
+.usage-chart__tick { stroke-linecap: round; }
 .usage-chart__empty { padding: 48px 0; color: var(--ink-3); text-align: center; }
 .usage-detail { padding: 16px 0; border-top: 1px solid var(--rule); }
 .usage-detail__title { margin-bottom: 12px; font: 700 23px/1.2 var(--display); }

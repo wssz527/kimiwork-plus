@@ -62,6 +62,35 @@ test('a verified account change requests model synchronization instead of anothe
   assert.equal(syncState({ integration: { reason: 'native_import_waiting_login', readback: { accountVerified: true } } }).code, 'login');
 });
 
+test('overview only promotes restart when it is needed', () => {
+  const launch = { dataset: {}, setAttribute() {} };
+  const renderLaunch = new Function('dom', `
+    const ACTION_LABEL = {'open-work': '打开 Kimi Work', 'launch-kimi': '启动 Kimi Work', 'restart-kimi': '重启 Kimi'};
+    const state = {};
+    const isInFlight = () => false;
+    const syncState = data => ({ code: data.sync });
+    const setText = (element, text) => { element.textContent = text; };
+    ${sourceFunction('renderLaunch')}
+    return renderLaunch;
+  `)({ onboardLaunch: launch });
+  renderLaunch({ kimiProcess: { running: true }, integration: { desktop: { managed: true } }, sync: 'synced' });
+  assert.equal(launch.dataset.action, 'open-work');
+  renderLaunch({ kimiProcess: { running: true }, integration: { desktop: { managed: false } } });
+  assert.equal(launch.dataset.action, 'restart-kimi');
+  renderLaunch({ kimiProcess: { running: true }, sync: 'restart' });
+  assert.equal(launch.dataset.action, 'restart-kimi');
+  renderLaunch({ kimiProcess: { running: false } });
+  assert.equal(launch.dataset.action, 'launch-kimi');
+});
+
+test('budget notice distinguishes reminders, refusals and disabled protection', () => {
+  const notice = new Function(sourceFunction('budgetNotice') + '\nreturn budgetNotice;')();
+  const budget = { enabled: true, spend: { daily: { reached: true, action: 'remind' }, monthly: { reached: true, action: 'block' } } };
+  assert.match(notice(budget), /今日.*此上限仅提醒.*本月.*新请求会被拒绝/);
+  assert.equal(notice({ ...budget, enabled: false }), '');
+  assert.equal(notice({ ...budget, spend: { daily: { reached: false } } }), '');
+});
+
 function makeProblems() {
   const code = [
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
@@ -476,12 +505,22 @@ function makeDomTree() {
         }
         return null;
       },
+      insertBefore(node, reference) {
+        /* 与真实 DOM 一致：先把节点从原位置摘下来，再按参照物的新下标插入。 */
+        if (node.parent) node.parent.children.splice(node.parent.children.indexOf(node), 1);
+        node.parent = this;
+        const index = reference ? this.children.indexOf(reference) : -1;
+        if (index < 0) this.children.push(node);
+        else this.children.splice(index, 0, node);
+        return node;
+      },
       scrollIntoView() { this.scrolled = true; },
       focus() { this.focused = true; },
       hasAttribute(name) { return Object.hasOwn(this.attributes, name); },
       setAttribute(name, value) { this.attributes[name] = value; },
     };
     Object.defineProperty(node, 'parentElement', { get() { return this.parent; } });
+    Object.defineProperty(node, 'parentNode', { get() { return this.parent; } });
     if (id) byId.set(id, node);
     return node;
   };
@@ -830,7 +869,9 @@ test('clearing a price submits null so the stored price is removed', () => {
   const { model, errors } = buildModel(draft);
   assert.deepEqual(errors, []);
   assert.equal(model.pricing, null);
-  assert.equal(model.failover, null);
+  assert.equal(Object.hasOwn(model, 'failover'), false);
+  draft.baseEntity = { ...base, failover: [{ connectionId: 'backup' }] };
+  assert.equal(buildModel(draft).model.failover, null);
 });
 
 test('a price with only one side is refused rather than half-priced', () => {
@@ -879,4 +920,317 @@ test('the add-a-provider wizard keeps existing pricing and failover', () => {
   assert.deepEqual(merged[0].pricing, { inputPerMillion: 2, outputPerMillion: 4 });
   assert.deepEqual(merged[0].failover, [{ connectionId: 'backup' }]);
   assert.equal(merged[0].reasoning, true);
+});
+
+test('renderFailoverRows keeps the active input node and focus across re-renders', () => {
+  const replaceCalls = [];
+  const doc = { activeElement: null };
+  function makeNode(tag) {
+    const node = {
+      tagName: tag.toUpperCase(),
+      className: '',
+      dataset: {},
+      attributes: {},
+      children: [],
+      parentNode: null,
+      value: '',
+      disabled: false,
+      textContent: '',
+      selectionStart: 0,
+      selectionEnd: 0,
+      setAttribute(name, value) { this.attributes[name] = String(value); },
+      append(...items) {
+        for (const item of items) {
+          item.parentNode = this;
+          this.children.push(item);
+        }
+      },
+      replaceChildren(...items) {
+        if (this === container) replaceCalls.push(items.length);
+        for (const old of this.children) old.parentNode = null;
+        this.children = [];
+        this.append(...items);
+      },
+      contains(target) {
+        for (let cur = target; cur; cur = cur.parentNode) if (cur === this) return true;
+        return false;
+      },
+      closest(selector) {
+        const match = /^\[data-failover-index\]$/.test(selector)
+          ? (n) => n.dataset && n.dataset.failoverIndex !== undefined
+          : () => false;
+        for (let cur = this; cur; cur = cur.parentNode) if (match(cur)) return cur;
+        return null;
+      },
+      querySelector(selector) {
+        const field = selector.match(/^\[data-failover-field="([^"]+)"\]$/)?.[1];
+        const remove = selector === '[data-failover-remove]';
+        const indexMatch = selector.match(/^\[data-failover-index="([^"]+)"\]\s+\[data-failover-field="([^"]+)"\]$/);
+        if (indexMatch) {
+          const row = this.children.find((child) => child.dataset?.failoverIndex === indexMatch[1]);
+          return row ? row.querySelector(`[data-failover-field="${indexMatch[2]}"]`) : null;
+        }
+        const walk = (root) => {
+          for (const child of root.children) {
+            if (field && child.dataset?.failoverField === field) return child;
+            if (remove && child.dataset?.failoverRemove !== undefined) return child;
+            const nested = walk(child);
+            if (nested) return nested;
+          }
+          return null;
+        };
+        return walk(this);
+      },
+      focus() { doc.activeElement = this; },
+      setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+    };
+    return node;
+  }
+  doc.createElement = makeNode;
+  doc.createElementNS = (_ns, tag) => makeNode(tag);
+
+  const container = makeNode('div');
+  const countNode = makeNode('span');
+  const addButton = makeNode('button');
+  const state = {
+    modelsSaving: false,
+    data: {
+      connections: {
+        saved: [
+          { id: 'primary', name: '主连接' },
+          { id: 'backup', name: '备用连接' },
+          { id: 'third', name: '第三连接' },
+        ],
+      },
+    },
+  };
+  const dom = { mFailoverRows: container, mFailoverCount: countNode, mFailoverAdd: addButton };
+  const render = new Function('document', 'state', 'dom', `
+    ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('iconUse')}
+    ${sourceFunction('renderFailoverRows')}
+    return renderFailoverRows;
+  `)(doc, state, dom);
+
+  const editor = {
+    draft: {
+      connectionId: 'primary',
+      failover: [{ connectionId: 'backup', upstreamModelId: '', upstreamProtocol: '' }],
+    },
+  };
+  render(editor);
+  assert.equal(replaceCalls.length, 1);
+
+  const firstInput = container.querySelector('[data-failover-field="upstreamModelId"]');
+  assert.notEqual(firstInput, null);
+  firstInput.focus();
+  firstInput.value = 'l';
+  firstInput.setSelectionRange(1, 1);
+  editor.draft.failover[0].upstreamModelId = 'l';
+
+  render(editor);
+  assert.equal(replaceCalls.length, 1);
+  assert.equal(container.querySelector('[data-failover-field="upstreamModelId"]'), firstInput);
+  assert.equal(doc.activeElement, firstInput);
+  assert.equal(firstInput.value, 'l');
+
+  /* 结构变化（增删行或主连接切换）必须重建行，并在同槽位存在时恢复焦点与光标。 */
+  editor.draft.failover.push({ connectionId: '', upstreamModelId: '', upstreamProtocol: '' });
+  render(editor);
+  assert.equal(replaceCalls.length, 2);
+  const rebuiltInput = container.querySelector('[data-failover-index="0"] [data-failover-field="upstreamModelId"]');
+  assert.equal(doc.activeElement, rebuiltInput);
+  assert.equal(rebuiltInput.selectionStart, 1);
+  assert.equal(rebuiltInput.selectionEnd, 1);
+  assert.equal(countNode.textContent, '2 / 8');
+});
+
+test('an untouched model stays clean with reordered metadata and an empty standby list', () => {
+  const { buildModel, canonicalModel } = makeModelDraft();
+  const base = {
+    id: 'conn/resp/model-a', protocol: 'responses', contextWindow: 200000,
+    connectionId: 'conn', metadataSource: { checkedAt: '2026-11-16', kind: 'discovery' },
+    failover: [],
+  };
+  const draft = {
+    id: base.id, name: '', context: '200000', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], defaultEffort: '',
+    connectionId: 'conn', upstreamModelId: '', upstreamProtocol: '',
+    contextLimit: '', metadataSource: base.metadataSource,
+    pricing: {}, failover: [], baseEntity: base, touched: new Set(),
+  };
+  const built = buildModel(draft);
+  assert.equal(canonicalModel(built.candidate), canonicalModel(base));
+  assert.deepEqual(built.touched, []);
+  assert.equal(Object.hasOwn(built.model, 'metadataSource'), false);
+  assert.equal(Object.hasOwn(built.model, 'failover'), false);
+  assert.equal(canonicalModel({ ...base, failover: undefined }), canonicalModel(base));
+
+  draft.metadataSource = { kind: 'manual', checkedAt: '2026-11-17' };
+  draft.failover = [{ connectionId: 'backup' }];
+  const changed = buildModel(draft);
+  assert.deepEqual(changed.touched, ['failover', 'metadataSource']);
+  assert.notEqual(canonicalModel(changed.candidate), canonicalModel(base));
+});
+
+test('rebaseEditor preserves touched pricing and failover edits', () => {
+  const state = {
+    data: {
+      revision: 'rev-2',
+      models: [{
+        id: 'conn/chat/model-a',
+        connectionId: 'conn',
+        contextWindow: 128000,
+        name: '服务端新名',
+        pricing: { inputPerMillion: 1, outputPerMillion: 2 },
+        failover: [{ connectionId: 'old-backup' }],
+      }],
+    },
+    editor: null,
+  };
+  const code = [
+    'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+    "const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];",
+    'const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;',
+    'const MAX_EFFORTS = 12;',
+    'const dom = {};',
+    'const findModel = id => state.data.models.find(row => row.id === id) || null;',
+    'const upstreamProtocolSupported = () => false;',
+    'const fillEditorFields = () => {};',
+    'const renderEditor = () => {};',
+    'const showToast = () => {};',
+    ...['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf',
+      'priceDraftFrom', 'failoverDraftFrom', 'buildPrice', 'buildFailover',
+      'canonicalFailover', 'buildModel', 'modelDraftFrom', 'rebaseEditor'].map(sourceFunction),
+    'return rebaseEditor;',
+  ].join('\n');
+  const rebase = new Function('state', code)(state);
+  const base = {
+    id: 'conn/chat/model-a',
+    connectionId: 'conn',
+    contextWindow: 128000,
+    name: '旧名',
+    pricing: { inputPerMillion: 1, outputPerMillion: 2 },
+    failover: [{ connectionId: 'old-backup' }],
+  };
+  state.editor = {
+    originalId: base.id,
+    baseRevision: 'rev-1',
+    conflict: true,
+    serverErrors: ['conflict'],
+    draft: {
+      id: base.id,
+      name: '旧名',
+      context: '128000',
+      output: '',
+      tools: undefined,
+      reasoning: false,
+      vision: false,
+      efforts: [],
+      defaultEffort: '',
+      connectionId: 'conn',
+      upstreamModelId: '',
+      upstreamProtocol: '',
+      upstreamProtocolChoices: null,
+      contextLimit: '',
+      metadataSource: null,
+      pricing: { inputPerMillion: '3', outputPerMillion: '9', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+      failover: [{ connectionId: 'backup', upstreamModelId: 'model-b', upstreamProtocol: '' }],
+      baseEntity: base,
+      touched: new Set(['pricing', 'failover']),
+    },
+  };
+  rebase();
+  assert.equal(state.editor.draft.name, '服务端新名');
+  assert.deepEqual(state.editor.draft.pricing, { inputPerMillion: '3', outputPerMillion: '9', cachedInputPerMillion: '', cacheWritePerMillion: '' });
+  assert.deepEqual(state.editor.draft.failover, [{ connectionId: 'backup', upstreamModelId: 'model-b', upstreamProtocol: '' }]);
+});
+
+/* ---------- 设置页顺序、原始码展示与刷新联动 ---------- */
+
+test('the daily connection panels stay above the recovery toggles and run records', () => {
+  const { byId, makeNode, document } = makeDomTree();
+  const maintenance = makeNode('view-maintenance');
+  const nativePanel = makeNode('native-panel');
+  const updatePanel = makeNode('update-panel');
+  const roleContract = makeNode('role-contract');
+  const diagnostics = makeNode('sa-diagnostics-body');
+  diagnostics.append(roleContract);
+  const advancedToggle = makeNode('ob-advanced-toggle', 'BUTTON');
+  const advancedBody = makeNode('ob-advanced');
+  const records = makeNode('overview-records', 'DETAILS');
+  const restartPanel = makeNode('restart-panel');
+  /* 真实页面里两个面板原本就在恢复项之前，是 relocate 把它们挪到末尾的；
+     这里按「已被挪到末尾」的错位状态构造，验证修复会把它们放回去。 */
+  maintenance.append(advancedToggle, advancedBody, records, restartPanel, nativePanel, updatePanel);
+
+  const code = [
+    'const $ = id => document.getElementById(id);',
+    growingFunction('relocate'),
+    growingFunction('mountLegacy'),
+    'return mountLegacy;',
+  ].join('\n');
+  const mount = new Function('document', code)(document);
+  mount();
+  mount();
+
+  const order = byId.get('view-maintenance').children.map(node => node.id);
+  assert.ok(order.indexOf('native-panel') < order.indexOf('ob-advanced-toggle'));
+  assert.ok(order.indexOf('update-panel') < order.indexOf('ob-advanced-toggle'));
+  assert.ok(order.indexOf('native-panel') < order.indexOf('overview-records'));
+  assert.ok(order.indexOf('update-panel') < order.indexOf('overview-records'));
+  assert.equal(order.filter(id => id === 'native-panel').length, 1);
+  assert.ok(diagnostics.children.some(node => node.id === 'role-contract'));
+});
+
+function growingFunction(name) {
+  return growthFunction(name);
+}
+
+test('the runtime subagent mode is named in Chinese, not as a raw inherit', () => {
+  const render = sourceFunction('renderSubagents');
+  const line = render.split('\n').find(row => row.includes('dom.rtSub'));
+  assert.notEqual(line, undefined, 'renderSubagents must publish the runtime summary');
+  assert.match(line, /POLICY_MODE_WORD\[runtime\.mode\]/);
+  assert.doesNotMatch(line, /\[runtime\.mode,/);
+});
+
+test('boot reads the session key before any view mounts', () => {
+  const boot = sourceFunction('boot');
+  const keyAt = boot.indexOf('state.key = readKey()');
+  const mountAt = boot.indexOf('initView()');
+  assert.notEqual(keyAt, -1);
+  assert.notEqual(mountAt, -1);
+  assert.ok(keyAt < mountAt, 'the session key must be ready before the view mounts');
+});
+
+/* 系统直接启动的 Kimi（managed=false）不能被说成受管进程已加载配置，
+   也不能被当成首次使用让用户重复点启动。 */
+test('an unmanaged Kimi started from the Dock is not reported as a managed load', () => {
+  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
+  const nativeConnectionText = new Function(sourceFunction('nativeConnectionText') + '\nreturn nativeConnectionText;')();
+  const base = {
+    kimiProcess: { running: true },
+    integration: {
+      applied: true,
+      readback: { accountVerified: true },
+      desktop: { state: 'stopped', managed: false, reason: 'managed_child_exited_application-exit' },
+      imported: true,
+      nativeImport: {},
+    },
+  };
+  const verdict = syncState(base);
+  assert.equal(verdict.code, 'synced');
+  assert.doesNotMatch(verdict.note, /受管进程已加载/);
+  assert.match(verdict.note, /未受本产品托管/);
+  assert.match(verdict.note, /正常退出并重启 Kimi/);
+
+  const text = nativeConnectionText(base);
+  assert.match(text, /未受本产品托管/);
+  assert.match(text, /正常退出并重启 Kimi/);
+  assert.doesNotMatch(text, /首次使用/);
+
+  /* 受管进程仍在时，原来说明必须保持不变。 */
+  const managed = { ...base, integration: { ...base.integration, adopted: true, desktop: { state: 'ready', managed: true } } };
+  assert.match(syncState(managed).note, /受管进程已加载对应配置代次/);
 });

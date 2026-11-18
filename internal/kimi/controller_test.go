@@ -67,6 +67,21 @@ func (f *fakeActions) OpenWorkSettings(context.Context) (ActionResult, error) {
 	return ActionResult{OK: true}, nil
 }
 
+func TestControllerOpenWorkActivatesOnlyTheExistingSurface(t *testing.T) {
+	controller := &Controller{}
+	if err := controller.OpenWork(context.Background()); err == nil || err.Error() != "native_bridge_waiting_work" {
+		t.Fatalf("open without existing surface: %v", err)
+	}
+	actions := &fakeActions{connected: true}
+	controller.actions = actions
+	if err := controller.OpenWork(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if actions.activated != 1 || controller.child != nil {
+		t.Fatalf("activations=%d child=%v", actions.activated, controller.child)
+	}
+}
+
 func TestBridgeHostPublishesALoopbackDescriptor(t *testing.T) {
 	kimiDir := t.TempDir()
 	actions := &fakeActions{connected: true}

@@ -115,7 +115,8 @@ function revealWorkspaceSection(id) {
 }
 
 const ACTION_LABEL = {
-  'launch-kimi': '打开 / 启动 Kimi',
+  'launch-kimi': '启动 Kimi Work',
+  'open-work': '打开 Kimi Work',
   'restart-kimi': '正常退出并重启 Kimi',
   'prepare-native': '准备原生设置',
   'remove-dns': '移除单域名 DNS',
@@ -128,6 +129,7 @@ const ACTION_LABEL = {
   'account-cancel-add': '恢复原账号',
   'account-switch': '切换账号',
   'account-remove': '移除账号',
+  'set-swarm': '设置并行模式',
 };
 
 const ACTION_STATE = {
@@ -272,6 +274,8 @@ const ERROR_HINT = {
 /* configured（已保存）/ policy（文件与策略）/ runtime（内核运行时）三层，
    加上 observed-schema 真实观察，各自用词不能互相冒充。 */
 const POLICY_MODE_WORD = { inherit: '继承主模型', force: '固定一个模型', pool: '模型池', blocked: '已阻止' };
+/* 传输标识是内部值，用户可见处只写中文；原始值留在 title 里供排查。 */
+const POLICY_TRANSPORT_WORD = { 'native-config': '原生配置文件' };
 
 const $ = (id) => document.getElementById(id);
 
@@ -290,6 +294,8 @@ const dom = {
   restartBanner: $('restart-banner'),
   restartBannerText: $('restart-banner-text'),
   restartBannerLink: $('restart-banner-link'),
+  budgetBanner: $('budget-banner'),
+  budgetBannerText: $('budget-banner-text'),
 
   opbar: $('opbar'),
   opbarDot: $('opbar-dot'),
@@ -798,7 +804,8 @@ function setView(view, { persist = true } = {}) {
     }
     if (view === 'models') { renderModels(); renderConnection(); }
     if (view === 'work') renderSubagents();
-    if (view === 'usage') { usagePanel.show(); void plusPanel.refresh(); }
+    /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
+    if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
   };
   apply();
 }
@@ -967,7 +974,7 @@ function canonicalModel(model) {
     model.connectionId || '',
     model.upstreamModelId || '',
     model.contextLimit || 0,
-    JSON.stringify(model.metadataSource || null),
+    JSON.stringify(metadataSourceOf(model.metadataSource)),
     model.upstreamProtocol || '',
     JSON.stringify(canonicalPrice(model.pricing)),
     JSON.stringify(canonicalFailover(model.failover)),
@@ -988,7 +995,7 @@ function canonicalPrice(pricing) {
 }
 
 function canonicalFailover(failover) {
-  if (!Array.isArray(failover)) return null;
+  if (!Array.isArray(failover)) return [];
   return failover.filter((row) => row && typeof row === 'object' && row.connectionId).map((row) => [
     row.connectionId, row.upstreamModelId || '', row.upstreamProtocol === 'anthropic' ? 'anthropic' : '',
   ]);
@@ -1098,6 +1105,8 @@ function buildModel(input) {
     for (const [field, value] of Object.entries(values)) {
       let before = base[field] ?? null;
       let after = value;
+      if (field === 'metadataSource') { before = metadataSourceOf(before); after = metadataSourceOf(after); }
+      if (field === 'failover') { before = canonicalFailover(before); after = canonicalFailover(after); }
       if (field === 'reasoning') before = base.reasoning === true;
       if (field === 'inputModalities') { before = hasVision(base); after = input.vision === true; }
       if (field === 'reasoningEfforts') {
@@ -1922,6 +1931,21 @@ function renderShell(data) {
     setText(dom.restartBannerText, '连接配置已修改，当前网关仍在使用启动时的设置。请到「连接」页点「应用已保存的连接」，由后台服务在安全时应用；页面会如实显示是否生效。');
   }
   setText(dom.navModelCount, fmtCount((data.models || []).length));
+  const budgetMessage = budgetNotice(data.budget);
+  setHidden(dom.budgetBanner, !budgetMessage);
+  setText(dom.budgetBannerText, budgetMessage);
+}
+
+function budgetNotice(budget) {
+  if (budget?.enabled !== true) return '';
+  const notices = [];
+  for (const [period, label] of [['daily', '今日'], ['monthly', '本月']]) {
+    const window = budget.spend?.[period];
+    if (window?.reached !== true) continue;
+    notices.push(label + '已达预算上限' + (window.action === 'block' ? '，新请求会被拒绝' : '，此上限仅提醒'));
+  }
+  if (notices.length && budget.warning === 'unpriced_models_not_limited') notices.push('未定价费用未计入');
+  return notices.length ? notices.join('。') + '。' : '';
 }
 
 function desktopScopeInfo(data) {
@@ -1955,9 +1979,14 @@ function syncState(data) {
   const phases = [info.onboarding?.state, info.onboarding?.stage, info.stage, info.state]
     .filter((value) => typeof value === 'string');
   const has = (...values) => values.some((value) => reasons.includes(value) || phases.includes(value));
+  /* Kimi 由系统直接启动时，产品没有它的子进程：这时说「受管进程已加载」是错的，
+     即使磁盘上的模型配置确实已经同步过。 */
+  const unmanagedRunning = data?.kimiProcess?.running === true && info.desktop?.managed === false;
   if (info.readback && info.applied === true) {
     return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
-      note: info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
+      note: unmanagedRunning
+        ? '已同步的模型配置仍保留在磁盘；当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」可恢复完整受管能力。'
+        : info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
   }
   if (info.desktop?.state === 'failed' && /^(work_storage_|existing_login_|profile_mode_)/.test(info.desktop.reason || '')) {
     return { code: 'conflict', tone: 'bad', word: '隔离启动未完成', note: nativeConnectionText(data) };
@@ -2065,6 +2094,13 @@ function nativeConnectionText(data) {
   const importReceipt = info.nativeImport || {};
   if (importReceipt.requiresRestart === true || importReceipt.restartDeferred === true) {
     return '模型已接入 Kimi 原生选择器，但需要重启 Kimi Work 后才会生效。';
+  }
+  /* 系统直接启动的 Kimi 不是首次使用：模型配置可能已在磁盘上，只是没有受管进程。
+     落到末尾兜底会把它说成「首次使用」，反而让用户重复点启动。 */
+  if (data?.kimiProcess?.running === true && info.desktop?.managed === false) {
+    return info.imported && info.readback
+      ? '当前 Kimi 由系统直接启动，未受本产品托管；已同步的模型配置仍保留在磁盘。点「正常退出并重启 Kimi」可恢复完整受管能力。'
+      : '当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」后，模型接入会在受管启动中继续。';
   }
   if (info.imported && info.readback) return info.adopted ? '目录、账号与配置代次已读回；官方菜单采用请在 Kimi 窗口确认。' : '目录、账号与地址已读回，等待官方运行时采用。';
   if (info.imported) return '原生接口已接受模型目录，等待目录、账号与地址读回。';
@@ -2763,18 +2799,22 @@ function renderOnboard() {
 
 function renderLaunch(data) {
   if (!dom.onboardLaunch) return;
-  const running = isInFlight(data && data.operation) && ['launch-kimi', 'restart-kimi'].includes(data.operation.action);
-  const blocked = isInFlight(data && data.operation) && !['launch-kimi', 'restart-kimi'].includes(data.operation.action);
+  const launchActions = ['launch-kimi', 'open-work', 'restart-kimi'];
+  const running = isInFlight(data?.operation) && launchActions.includes(data.operation.action);
+  const blocked = isInFlight(data?.operation) && !running;
   const sync = syncState(data);
   const alreadyRunning = data?.kimiProcess?.running === true;
-  dom.onboardLaunch.dataset.action = alreadyRunning ? 'restart-kimi' : 'launch-kimi';
+  const integration = data?.integration;
+  const needsRestart = integration?.desktop?.managed === false || ['manual-exit', 'restart'].includes(sync.code);
+  const action = !alreadyRunning ? 'launch-kimi' : needsRestart ? 'restart-kimi' : 'open-work';
+  dom.onboardLaunch.dataset.action = action;
   dom.onboardLaunch.dataset.profileMode = '';
   dom.onboardLaunch.hidden = false;
-  dom.onboardLaunch.disabled = running || blocked;
-  setText(dom.onboardLaunch, alreadyRunning ? '正常退出并重启 Kimi' : running ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
+  dom.onboardLaunch.disabled = running || blocked || Boolean(state.pendingAction);
+  setText(dom.onboardLaunch, ACTION_LABEL[action]);
   dom.onboardLaunch.setAttribute('aria-busy', running ? 'true' : 'false');
   if (dom.onboardLaunchHint) {
-    const hint = alreadyRunning ? '点击后会请求系统正常退出当前 Kimi，再沿用官方登录和真实 Work 数据受管重启；不会强制结束进程。' : recoveryCopy(sync);
+    const hint = action === 'restart-kimi' ? '点击后会正常退出 Kimi，再沿用当前登录和 Work 数据重新启动。' : action === 'launch-kimi' ? recoveryCopy(sync) : null;
     setHidden(dom.onboardLaunchHint, !hint);
     setText(dom.onboardLaunchHint, hint || '');
   }
@@ -2789,7 +2829,7 @@ function recoveryCopy(sync) {
     'manual-exit': '点击「正常退出并重启 Kimi」，由产品请求系统正常退出并受管重启。',
     'waiting-quit': '退出请求已发出；关闭完成后会自动受管重启，请等待运行状态读回。',
     daimon: '模型暂时还不能在 Kimi 里选择；后台会自动对齐，不用重复点击或重启桌面。',
-    synced: '已核对原生模型目录，不代表已选模或已回复；点「打开 / 启动 Kimi」即可打开 Kimi，不会额外跳到 Work 或设置页。',
+    synced: '已核对模型目录。启动后可在 Work 中选择模型。',
     imported: '已导入模型目录，后台还会核对；需要时仍可点「打开 / 启动 Kimi」。',
   }[sync.code] || null;
 }
@@ -3145,6 +3185,9 @@ function requestErrorText(row) {
   const type = row?.upstreamErrorType || row?.failure?.upstreamType || '';
   const upstream = side === 'upstream' || code.startsWith('upstream_');
   let text = '';
+  if (code === 'budget_limit_reached') {
+    return '本机网关已拒绝请求。请在「用量 → 预算保护」查看上限与重置时间。';
+  }
   if (type === 'insufficient_quota' || code === 'upstream_rate_limited' || (upstream && status === 429)) {
     text = '上游限流或账户额度不足，请稍后重试或检查账户额度';
   } else if (code === 'upstream_unauthorized' || code === 'upstream_forbidden' || (upstream && (status === 401 || status === 403))) {
@@ -3267,6 +3310,7 @@ function operationNote(op) {
   if (op && op.state === 'waiting-kimi-exit') {
     return '检测到另一个 Kimi 实例。点击「正常退出并重启 Kimi」后，产品会发送正常退出请求并完成受管重启。';
   }
+  if (op?.action === 'open-work' && op.state === 'failed') return '请从官方 Kimi 窗口进入 Work，或检查接入状态。';
   const code = op && typeof op.reason === 'string' && op.reason ? op.reason : '';
   if (!code) return '';
   return reasonText(code);
@@ -3298,7 +3342,7 @@ function renderActions(data) {
   const alreadyRunning = data?.kimiProcess?.running === true;
   for (const button of actionButtons) {
     const reuseLogin = button.dataset.profileMode === 'existing-authorized';
-    if (!reuseLogin && ['launch-kimi', 'restart-kimi'].includes(button.dataset.action)) {
+    if (button.id === 'native-launch') {
       button.dataset.action = alreadyRunning ? 'restart-kimi' : 'launch-kimi';
     }
     const action = button.dataset.action;
@@ -3306,7 +3350,7 @@ function renderActions(data) {
     const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
     const pending = state.pendingAction === action;
     button.disabled = busy || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
-    if (needsReady && !reuseLogin) setText(button, alreadyRunning ? '正常退出并重启 Kimi' : pending ? '正在打开 / 启动 Kimi…' : '打开 / 启动 Kimi');
+    if (button.id === 'native-launch') setText(button, ACTION_LABEL[action]);
     if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
     button.classList.toggle('is-busy', pending);
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
@@ -4140,7 +4184,9 @@ function editorDirty() {
   if (!editor.originalId) {
     const draft = editor.draft;
     return Boolean(draft.id || draft.name || draft.context || draft.output || draft.efforts.length || draft.reasoning
-      || draft.vision || draft.upstreamModelId || draft.upstreamProtocol || typeof draft.tools === 'boolean');
+      || draft.vision || draft.upstreamModelId || draft.upstreamProtocol || typeof draft.tools === 'boolean'
+      || (draft.failover && draft.failover.length)
+      || PRICE_FIELDS.some((field) => draft.pricing && draft.pricing[field]));
   }
   const built = buildModel(editor.draft);
   return canonicalModel(built.candidate) !== canonicalModel(editor.draft.baseEntity);
@@ -4193,6 +4239,8 @@ function rebaseEditor() {
     upstreamProtocol: () => { next.upstreamProtocol = previous.upstreamProtocol; },
     contextLimit: () => { next.contextLimit = previous.contextLimit; },
     metadataSource: () => { next.metadataSource = previous.metadataSource; },
+    pricing: () => { next.pricing = { ...previous.pricing }; },
+    failover: () => { next.failover = failoverDraftFrom(previous.failover); },
   };
   for (const field of touched) assign[field]?.();
   editor.draft = next;
@@ -4284,77 +4332,137 @@ function renderFailoverRows(editor) {
   if (!dom.mFailoverRows) return;
   const draft = editor.draft;
   const rows = Array.isArray(draft.failover) ? draft.failover : [];
-  const connections = (connectionRowsOf(state.data) || []).filter((row) => row && !row.legacy);
-  const nodes = rows.map((row, index) => {
-    const li = document.createElement('div');
-    li.className = 'failover-row';
-    li.dataset.failoverIndex = String(index);
+  const connections = (connectionRowsOf(state.data) || [])
+    .filter((row) => row && !row.legacy && row.id !== draft.connectionId);
+  const connectionOptions = [{ value: '', label: '选择连接' }].concat(connections.map((connection) => ({
+    value: connection.id,
+    label: connection.name && connection.name !== connection.id
+      ? connection.name + ' · ' + connection.id : connection.id,
+  })));
+  const signature = JSON.stringify([rows.length, connectionOptions]);
+  const existing = Array.from(dom.mFailoverRows.children || []);
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
 
-    const id = document.createElement('label');
-    id.className = 'field';
-    const idLabel = document.createElement('span');
-    idLabel.className = 'field__label';
-    idLabel.textContent = '备用 ' + (index + 1);
-    const select = document.createElement('select');
-    select.dataset.failoverField = 'connectionId';
-    const blank = document.createElement('option');
-    blank.value = '';
-    blank.textContent = '选择连接';
-    select.append(blank);
-    connections.forEach((connection) => {
-      if (connection.id === draft.connectionId) return;
-      const option = document.createElement('option');
-      option.value = connection.id;
-      option.textContent = connection.name && connection.name !== connection.id
-        ? connection.name + ' · ' + connection.id : connection.id;
-      select.append(option);
+  if (dom.mFailoverRows.dataset.signature === signature && existing.length === rows.length) {
+    rows.forEach((row, index) => {
+      const li = existing[index];
+      const select = li.querySelector('[data-failover-field="connectionId"]');
+      if (select) {
+        select.disabled = state.modelsSaving;
+        const nextConn = row.connectionId || '';
+        if (active !== select && select.value !== nextConn) select.value = nextConn;
+      }
+      const input = li.querySelector('[data-failover-field="upstreamModelId"]');
+      if (input) {
+        input.disabled = state.modelsSaving;
+        const nextModel = row.upstreamModelId || '';
+        if (active !== input && input.value !== nextModel) input.value = nextModel;
+      }
+      const protocolSelect = li.querySelector('[data-failover-field="upstreamProtocol"]');
+      if (protocolSelect) {
+        protocolSelect.disabled = state.modelsSaving;
+        const nextProto = row.upstreamProtocol === 'anthropic' ? 'anthropic' : '';
+        if (active !== protocolSelect && protocolSelect.value !== nextProto) protocolSelect.value = nextProto;
+      }
+      const remove = li.querySelector('[data-failover-remove]');
+      if (remove) remove.disabled = state.modelsSaving;
     });
-    select.value = row.connectionId || '';
-    id.append(idLabel, select);
-
-    const upstream = document.createElement('label');
-    upstream.className = 'field';
-    const upstreamLabel = document.createElement('span');
-    upstreamLabel.className = 'field__label';
-    upstreamLabel.textContent = '服务商模型 ID（可选）';
-    const input = document.createElement('input');
-    input.className = 'mono';
-    input.dataset.failoverField = 'upstreamModelId';
-    input.autocomplete = 'off';
-    input.spellcheck = false;
-    input.placeholder = '与该连接上的模型相同';
-    input.value = row.upstreamModelId || '';
-    upstream.append(upstreamLabel, input);
-
-    const protocol = document.createElement('label');
-    protocol.className = 'field';
-    const protocolLabelNode = document.createElement('span');
-    protocolLabelNode.className = 'field__label';
-    protocolLabelNode.textContent = '上游格式（可选）';
-    const protocolSelect = document.createElement('select');
-    protocolSelect.dataset.failoverField = 'upstreamProtocol';
-    for (const [value, label] of [['', '与主连接相同'], ['anthropic', 'Anthropic Messages']]) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = label;
-      protocolSelect.append(option);
+  } else {
+    let focusIndex = null;
+    let focusField = null;
+    let selStart = null;
+    let selEnd = null;
+    if (active && dom.mFailoverRows.contains && dom.mFailoverRows.contains(active)) {
+      const host = active.closest ? active.closest('[data-failover-index]') : null;
+      if (host) focusIndex = Number(host.dataset.failoverIndex);
+      if (active.dataset && active.dataset.failoverField) focusField = active.dataset.failoverField;
+      if (typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number') {
+        selStart = active.selectionStart;
+        selEnd = active.selectionEnd;
+      }
     }
-    protocolSelect.value = row.upstreamProtocol === 'anthropic' ? 'anthropic' : '';
-    protocol.append(protocolLabelNode, protocolSelect);
 
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'iconbtn';
-    remove.dataset.failoverRemove = String(index);
-    remove.setAttribute('aria-label', '移除第 ' + (index + 1) + ' 条备用连接');
-    remove.append(iconUse('i-x'));
+    const nodes = rows.map((row, index) => {
+      const li = document.createElement('div');
+      li.className = 'failover-row';
+      li.dataset.failoverIndex = String(index);
 
-    li.append(id, upstream, protocol, remove);
-    return li;
-  });
-  dom.mFailoverRows.replaceChildren(...nodes);
+      const id = document.createElement('label');
+      id.className = 'field';
+      const idLabel = document.createElement('span');
+      idLabel.className = 'field__label';
+      idLabel.textContent = '备用 ' + (index + 1);
+      const select = document.createElement('select');
+      select.dataset.failoverField = 'connectionId';
+      connectionOptions.forEach((choice) => {
+        const option = document.createElement('option');
+        option.value = choice.value;
+        option.textContent = choice.label;
+        select.append(option);
+      });
+      select.value = row.connectionId || '';
+      select.disabled = state.modelsSaving;
+      id.append(idLabel, select);
+
+      const upstream = document.createElement('label');
+      upstream.className = 'field';
+      const upstreamLabel = document.createElement('span');
+      upstreamLabel.className = 'field__label';
+      upstreamLabel.textContent = '服务商模型 ID（可选）';
+      const input = document.createElement('input');
+      input.className = 'mono';
+      input.dataset.failoverField = 'upstreamModelId';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.placeholder = '与该连接上的模型相同';
+      input.value = row.upstreamModelId || '';
+      input.disabled = state.modelsSaving;
+      upstream.append(upstreamLabel, input);
+
+      const protocol = document.createElement('label');
+      protocol.className = 'field';
+      const protocolLabelNode = document.createElement('span');
+      protocolLabelNode.className = 'field__label';
+      protocolLabelNode.textContent = '上游格式（可选）';
+      const protocolSelect = document.createElement('select');
+      protocolSelect.dataset.failoverField = 'upstreamProtocol';
+      for (const [value, label] of [['', '与主连接相同'], ['anthropic', 'Anthropic Messages']]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        protocolSelect.append(option);
+      }
+      protocolSelect.value = row.upstreamProtocol === 'anthropic' ? 'anthropic' : '';
+      protocolSelect.disabled = state.modelsSaving;
+      protocol.append(protocolLabelNode, protocolSelect);
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'iconbtn';
+      remove.dataset.failoverRemove = String(index);
+      remove.setAttribute('aria-label', '移除第 ' + (index + 1) + ' 条备用连接');
+      remove.disabled = state.modelsSaving;
+      remove.append(iconUse('i-x'));
+
+      li.append(id, upstream, protocol, remove);
+      return li;
+    });
+    dom.mFailoverRows.dataset.signature = signature;
+    dom.mFailoverRows.replaceChildren(...nodes);
+    if (focusField && Number.isInteger(focusIndex) && focusIndex >= 0 && focusIndex < rows.length) {
+      const target = dom.mFailoverRows.querySelector(
+        '[data-failover-index="' + focusIndex + '"] [data-failover-field="' + focusField + '"]',
+      );
+      if (target && target.focus) {
+        target.focus({ preventScroll: true });
+        if (selStart !== null && selEnd !== null && target.setSelectionRange) {
+          target.setSelectionRange(selStart, selEnd);
+        }
+      }
+    }
+  }
   if (dom.mFailoverCount) dom.mFailoverCount.textContent = rows.length + ' / 8';
-  if (dom.mFailoverAdd) dom.mFailoverAdd.disabled = rows.length >= 8;
+  if (dom.mFailoverAdd) dom.mFailoverAdd.disabled = rows.length >= 8 || state.modelsSaving;
 }
 
 function toggleEffortChoice(value) {
@@ -5033,12 +5141,13 @@ function renderSubagents() {
       : (saved.model || '未选择') + (saved.effort ? ' · 档位 ' + saved.effort : ' · 档位自动'));
   setText(dom.saPolicyMode, POLICY_MODE_WORD[policy.mode] || policy.mode || '—');
   setText(dom.saPolicySub, policy.mode === 'blocked'
-    ? (policy.reason || 'unknown') + ' · 外来配置或归属冲突，未被覆盖，保存已拒绝'
-    : (policy.transport || 'native-config') + ' · 策略文件已读取');
+    ? '策略文件里存在阻止项或外来归属冲突，未被覆盖，保存已拒绝'
+    : (POLICY_TRANSPORT_WORD[policy.transport || 'native-config'] || '原生配置文件') + ' · 策略文件已读取');
+  if (dom.saPolicySub) dom.saPolicySub.title = [policy.transport, policy.reason].filter(Boolean).join(' · ');
   const runtimeInfo = RUNTIME_STATE[runtime.state] || { tone: 'neutral', word: runtime.state || '未知', note: '' };
   setDot(dom.rtStateDot, runtimeInfo.tone);
   setText(dom.rtState, runtimeInfo.word);
-  setText(dom.rtSub, [runtime.mode, runtime.version ? 'v' + runtime.version : '',
+  setText(dom.rtSub, [POLICY_MODE_WORD[runtime.mode] || '', runtime.version ? 'v' + runtime.version : '',
     runtime.lastSpawn && typeof runtime.lastSpawn.modelAlias === 'string' ? '最近启动 ' + runtime.lastSpawn.modelAlias : '']
     .filter(Boolean).join(' · ') || '—');
 
@@ -6142,6 +6251,10 @@ async function confirmActionResult(action, opId) {
     return;
   }
 
+  if (failed && action === 'open-work') {
+    showToast('未能打开 Work，请从 Kimi 窗口进入 Work，或在「接入与恢复」检查连接。', 'error');
+    return;
+  }
   if (failed) {
     showToast((ACTION_LABEL[action] || action) + '未完成：' + (ACTION_STATE[op.state] || op.state) + (op.reason ? '（' + reasonText(op.reason) + '）' : ''), 'error');
     return;
@@ -6408,6 +6521,12 @@ function bindEvents() {
   });
 
   if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => setView('models'));
+  $('budget-banner-link')?.addEventListener('click', () => {
+    setView('usage');
+    const tab = $('usage-tab-budget');
+    tab?.click();
+    tab?.focus();
+  });
   $('overview-details')?.addEventListener('click', () => setView('maintenance'));
   $('quick-models')?.addEventListener('click', () => setView('models'));
   $('quick-usage')?.addEventListener('click', () => setView('usage'));
@@ -6444,9 +6563,16 @@ function bindEvents() {
 
   if (dom.refresh) dom.refresh.addEventListener('click', async () => {
     dom.refresh.disabled = true;
-    await loadState();
-    if (state.view === 'usage') await usagePanel.reload();
-    dom.refresh.disabled = false;
+    /* 顶栏刷新是用户明确要求「现在就是最新的」：额度卡片与用量一起重读，
+       否则停在用量页时点刷新，Kimi Code 与 Magpie 的读数仍是上一轮的。 */
+    try {
+      const tasks = [loadState()];
+      if (state.view === 'usage') tasks.push(usagePanel.reload());
+      if (plusPanel && typeof plusPanel.refresh === 'function') tasks.push(plusPanel.refresh({ live: state.view === 'usage' }));
+      await Promise.all(tasks);
+    } finally {
+      dom.refresh.disabled = false;
+    }
   });
 
   if (dom.connRetry) dom.connRetry.addEventListener('click', async () => {
@@ -6616,7 +6742,10 @@ function bindEvents() {
       const host = control.closest('[data-failover-index]');
       if (!host) return;
       const row = editor.draft.failover[Number(host.dataset.failoverIndex)];
-      if (row) row.upstreamModelId = control.value;
+      if (row) {
+        row.upstreamModelId = control.value;
+        editor.draft.touched.add('failover');
+      }
     });
     dom.mFailoverRows.addEventListener('click', (event) => {
       const remove = event.target && event.target.closest ? event.target.closest('[data-failover-remove]') : null;
@@ -7033,6 +7162,9 @@ function boot() {
     plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data),
       onAccounts: () => { setView('maintenance'); revealWorkspaceSection('plus-accounts-panel'); } });
   }
+  /* 会话密钥必须先就绪：停留在「用量」等视图时，挂载就会立刻发出第一笔请求，
+     先挂视图再读密钥会让那次请求带着空密钥失败，界面上闪现「缺少面板会话密钥」。 */
+  state.key = readKey();
   initView();
   bindEvents();
   observeMasthead();
@@ -7045,7 +7177,6 @@ function boot() {
     if (!document.hidden) adoptLocationKey();
   });
 
-  state.key = readKey();
   if (!state.key) {
     showGate('missing');
     return;

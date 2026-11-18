@@ -343,6 +343,10 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	}
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
+	// Credentials staged by this save are discarded when it fails before the
+	// configuration is durable. A failure after the commit leaves them active,
+	// because the committed document already refers to them.
+	var pending []string
 	d, rev, e := s.Store.Prepare(core.String(in["revision"]), func(d core.Document) error {
 		switch path {
 		case "/api/workspace":
@@ -362,7 +366,11 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 			if e = core.Validate(d); e != nil {
 				return e
 			}
-			return s.stageCredentials(d, changes)
+			var staged []string
+			if staged, e = s.stageCredentials(d, changes); e == nil {
+				pending = staged
+			}
+			return e
 		case "/api/models":
 			if _, ok := in["models"].([]any); !ok {
 				return errors.New("invalid_models")
@@ -379,7 +387,11 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 			if e = core.Validate(d); e != nil {
 				return e
 			}
-			return s.stageCredentials(d, changes)
+			var staged []string
+			if staged, e = s.stageCredentials(d, changes); e == nil {
+				pending = staged
+			}
+			return e
 		case "/api/budget/save":
 			if core.String(in["revision"]) == "" {
 				return core.ErrConflict
@@ -401,6 +413,9 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	}
 	d, _, e = s.Store.Commit(d, rev)
 	if e != nil {
+		// The commit may have failed after writing the recovery journal that the
+		// next start applies, so only unreferenced keys are removed here.
+		s.discardStagedCredentials(pending)
 		return nil, e
 	}
 	if s.OnConfig != nil {

@@ -136,7 +136,7 @@ function makePlus({ data = {}, routes = {}, onAccounts } = {}) {
     globalThis[name] = value;
   }
   const request = async (path, options = {}) => {
-    calls.push({ path, body: options.body });
+    calls.push({ path, method: options.method, body: options.body });
     const handler = routes[path];
     if (!handler) return {};
     return handler(options.body || null);
@@ -528,6 +528,24 @@ test('an unknown swarm snapshot cannot masquerade as an off switch', async () =>
   } finally { env.restore(); }
 });
 
+test('swarm submits the displayed conversation and requires a fresh read on conflict', async () => {
+  const env = makePlus({ data: { workCapabilities: { state: 'inspected', swarm: { state: 'user-controlled' } } }, routes: {
+    '/api/work/swarm': () => ({ swarm: { state: 'off', conversationKey: 'conv-1', enabled: false } }),
+    '/api/actions': () => ({ operation: { id: 'swarm-1', state: 'running' } }),
+    '/api/state': () => ({ workCapabilities: env.getState().workCapabilities, operation: { id: 'swarm-1', state: 'failed', reason: 'work_swarm_conversation_changed' } }),
+  } });
+  try {
+    env.panel.render(env.getState());
+    const body = env.byId('plus-capabilities-body');
+    await findButton(body, '读取当前会话').listeners.click[0]();
+    await findButton(body, '开启这个会话的 Swarm').listeners.click[0]();
+    assert.deepEqual(env.calls.find(call => call.path === '/api/actions').body, { action: 'set-swarm', conversationKey: 'conv-1', enabled: true });
+    assert.match(textOf(body), /会话已变化，请重新读取/);
+    assert.equal(findButton(body, '开启这个会话的 Swarm'), null);
+    assert.equal(env.calls.filter(call => call.path === '/api/work/swarm').length, 1);
+  } finally { env.restore(); }
+});
+
 test('an unsupported tower is reported as such, not as missing', async () => {
   const env = makePlus({
     data: {
@@ -666,5 +684,115 @@ test('a failed recovery restart never signs out or resubmits account add', async
     assert.deepEqual(actions, ['account-begin-add', 'restart-kimi']);
     assert.match(textOf(env.byId('plus-accounts-body')), /Kimi 尚未退出/);
     assert.equal(env.getState().accounts.currentId, 'acct-a');
+  } finally { env.restore(); }
+});
+
+test('a real failure reason outranks the superseded note', async () => {
+  const env = makePlus({
+    data: {},
+    routes: {
+      '/api/quota/code': () => ({ state: {
+        status: 'error', errorReason: 'auth_rejected', windows: [], wallet: null,
+        notes: ['reading_superseded'], sources: [], selectedSource: 'manual',
+      } }),
+      '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+      '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+    },
+  });
+  try {
+    await env.panel.refresh();
+    const text = textOf(env.byId('plus-code-body'));
+    assert.match(text, /Key 被拒绝或已过期/);
+    assert.doesNotMatch(text, /这份读数属于另一个来源或账号/);
+  } finally { env.restore(); }
+});
+
+test('a missing panel key is reported in plain words, not as NO_KEY', async () => {
+  const env = makePlus({
+    data: {},
+    routes: {
+      '/api/quota/code': () => ({ state: { status: 'error', errorReason: 'NO_KEY', windows: [], wallet: null, notes: [], sources: [] } }),
+      '/api/quota/magpie': () => ({ state: { status: 'error', errorReason: 'NO_KEY', notes: [], snapshot: null } }),
+      '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+    },
+  });
+  try {
+    await env.panel.refresh();
+    for (const id of ['plus-code-body', 'plus-magpie-body']) {
+      const text = textOf(env.byId(id));
+      assert.doesNotMatch(text, /NO_KEY/);
+      assert.match(text, /缺少面板会话密钥/);
+    }
+  } finally { env.restore(); }
+});
+
+test('an unadopted local source explains itself instead of printing its internal code', async () => {
+  const env = makePlus({
+    data: {},
+    routes: {
+      '/api/quota/code': () => ({ state: {
+        status: 'not_read', windows: [], wallet: null, notes: [], selectedSource: 'manual',
+        sources: [{ id: 'local', label: '本机 Kimi Code 登录', availability: 'unadopted',
+          accountMasked: 'acct-c51b5062', detail: 'code_local_needs_adoption' }],
+      } }),
+      '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+      '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+    },
+  });
+  try {
+    await env.panel.refresh();
+    const text = textOf(env.byId('plus-code-body'));
+    assert.match(text, /已检测到，尚未采用/);
+    assert.match(text, /需要先采用本机 Kimi Code 登录/);
+    assert.doesNotMatch(text, /code_local_needs_adoption/);
+  } finally { env.restore(); }
+});
+
+test('the subagent force-key line never claims support the kernel lacks', () => {
+  const cases = [
+    [false, /当前内核不接受/],
+    [true, /当前内核支持/],
+  ];
+  for (const [value, pattern] of cases) {
+    const env = makePlus({
+      data: { workCapabilities: { state: 'inspected', subagents: { forceKeySupported: value },
+        swarm: { state: 'unverified' }, tower: { state: 'unverified' } } },
+      routes: {
+        '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], notes: [], sources: [] } }),
+        '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+        '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+      },
+    });
+    try {
+      env.panel.render(env.getState());
+      const text = textOf(env.byId('plus-capabilities-body'));
+      assert.match(text, pattern);
+      if (value === false) assert.doesNotMatch(text, /固定子代理模型：当前内核接受/);
+    } finally { env.restore(); }
+  }
+});
+
+test('a masthead refresh in the usage view re-reads the live quota instead of the cache', async () => {
+  const routes = {
+    '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], notes: [], sources: [] } }),
+    '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+    '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+  };
+  const env = makePlus({ routes });
+  try {
+    env.calls.length = 0;
+    await env.panel.refresh();
+    /* 默认刷新只读缓存：两个额度接口各取一次 GET，没有任何 POST。 */
+    assert.equal(env.calls.filter(call => call.method === 'POST').length, 0);
+    assert.equal(env.calls.filter(call => call.path === '/api/quota/code').length, 1);
+
+    env.calls.length = 0;
+    await env.panel.refresh({ live: true });
+    const posts = env.calls.filter(call => call.method === 'POST');
+    assert.deepEqual(posts.map(call => call.path).sort(), ['/api/quota/code', '/api/quota/magpie']);
+    /* 顶栏刷新不得强制绕过节流窗口。 */
+    const codeRefresh = posts.find(call => call.path === '/api/quota/code');
+    assert.equal(codeRefresh.body.force, undefined);
+    assert.equal(codeRefresh.body.action, 'refresh');
   } finally { env.restore(); }
 });

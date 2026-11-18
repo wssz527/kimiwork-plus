@@ -382,6 +382,15 @@ func TestControllerSwarmModeReadsWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestControllerSetSwarmModeDoesNotWriteAfterConversationChanges(t *testing.T) {
+	actions := &swarmSurfaceFake{fakeActions: &fakeActions{connected: true}, key: "conv-2"}
+	controller := swarmController(t, actions)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
+	if err == nil || err.Error() != SwarmErrConversationChanged || snapshot.Confirmed || len(actions.writesKey) != 0 {
+		t.Fatalf("snapshot=%+v err=%v writes=%v", snapshot, err, actions.writesKey)
+	}
+}
+
 func TestControllerSetSwarmModeConfirmsOnlyAfterMatchingReadback(t *testing.T) {
 	actions := &swarmSurfaceFake{fakeActions: &fakeActions{connected: true}, key: "conv-1",
 		getResult: SwarmSnapshot{State: SwarmStateOn, ConversationKey: "conv-1", Enabled: true,
@@ -390,7 +399,7 @@ func TestControllerSetSwarmModeConfirmsOnlyAfterMatchingReadback(t *testing.T) {
 			Epoch: "e", Revision: 3}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +434,7 @@ func TestControllerSetSwarmModeRefusesWhenTheActiveConversationMovedOn(t *testin
 			Epoch: "e", Revision: 4}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil || err.Error() != SwarmErrConversationChanged {
 		t.Fatalf("err: %v", err)
 	}
@@ -449,7 +458,7 @@ func TestControllerSetSwarmModeRefusesAMismatchedReadback(t *testing.T) {
 			Epoch: "e", Revision: 3}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil || err.Error() != SwarmErrNotConfirmed {
 		t.Fatalf("err: %v", err)
 	}
@@ -468,7 +477,7 @@ func TestControllerSetSwarmModeRefusesAChangedEpoch(t *testing.T) {
 			Epoch: "epoch-after", Revision: 3}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil || err.Error() != SwarmErrNotConfirmed {
 		t.Fatalf("err: %v", err)
 	}
@@ -486,7 +495,7 @@ func TestControllerSetSwarmModeAcceptsAnUnstampedWrite(t *testing.T) {
 			Epoch: "epoch-stamped", Revision: 1}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +511,7 @@ func TestControllerSetSwarmModeReportsAConversationChange(t *testing.T) {
 			Epoch: "e", Revision: 1}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil || err.Error() != SwarmErrConversationChanged {
 		t.Fatalf("err: %v", err)
 	}
@@ -520,7 +529,7 @@ func TestControllerSetSwarmModeKeepsTheFailureReasonAndTheRealState(t *testing.T
 			Epoch: "e", Revision: 0}}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil {
 		t.Fatal("a failed write was reported as success")
 	}
@@ -536,7 +545,7 @@ func TestControllerSwarmWithoutAManagedPageIsUnavailable(t *testing.T) {
 		err.Error() != SwarmErrUnavailable {
 		t.Fatalf("err: %v", err)
 	}
-	if _, err := controller.SetSwarmMode(context.Background(), true); err == nil ||
+	if _, err := controller.SetSwarmMode(context.Background(), "conv-1", true); err == nil ||
 		err.Error() != SwarmErrUnavailable {
 		t.Fatalf("err: %v", err)
 	}
@@ -558,7 +567,7 @@ func TestControllerSwarmSurfacesAConversationThatCannotBeRead(t *testing.T) {
 		keyErr: errors.New(SwarmErrConversationUnavailable)}
 	controller := swarmController(t, actions)
 
-	snapshot, err := controller.SetSwarmMode(context.Background(), true)
+	snapshot, err := controller.SetSwarmMode(context.Background(), "conv-1", true)
 	if err == nil || err.Error() != SwarmErrConversationUnavailable {
 		t.Fatalf("err: %v", err)
 	}
@@ -571,11 +580,11 @@ func TestControllerSwarmSurfacesAConversationThatCannotBeRead(t *testing.T) {
 }
 
 func TestSwarmKeyValidation(t *testing.T) {
-	if validSwarmKey("") || validSwarmKey(" padded") || validSwarmKey("trailing ") ||
-		validSwarmKey(strings.Repeat("k", 1025)) || validSwarmKey("bad\x00key") {
+	if ValidSwarmConversationKey("") || ValidSwarmConversationKey(" padded") || ValidSwarmConversationKey("trailing ") ||
+		ValidSwarmConversationKey(strings.Repeat("k", 1025)) || ValidSwarmConversationKey("bad\x00key") {
 		t.Fatal("an invalid key was accepted")
 	}
-	if !validSwarmKey("conversation-2f1e") {
+	if !ValidSwarmConversationKey("conversation-2f1e") {
 		t.Fatal("a valid key was refused")
 	}
 }

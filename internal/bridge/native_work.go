@@ -22,8 +22,8 @@ func (n *Native) readSwarm(ctx context.Context) (any, error) {
 	return core.Document{"swarm": snapshot}, nil
 }
 
-func (n *Native) setSwarm(ctx context.Context, enabled bool) (any, error) {
-	snapshot, err := n.controller.SetSwarmMode(ctx, enabled)
+func (n *Native) setSwarm(ctx context.Context, conversationKey string, enabled bool) (any, error) {
+	snapshot, err := n.controller.SetSwarmMode(ctx, conversationKey, enabled)
 	n.mu.Lock()
 	n.swarm = snapshot
 	n.mu.Unlock()

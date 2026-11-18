@@ -38,8 +38,8 @@ func TestFailedStageCleanup(t *testing.T) {
 		s := Service{Keys: keys}
 		d := core.Document{"connections": []any{core.Document{"apiKeyEnv": "A"}, core.Document{"apiKeyEnv": "B"}}}
 		value := "synthetic"
-		err := s.stageCredentials(d, map[string]*string{"A": &value, "B": &value})
-		if err == nil || keys.testKeys["old"] != "existing" {
+		staged, err := s.stageCredentials(d, map[string]*string{"A": &value, "B": &value})
+		if err == nil || keys.testKeys["old"] != "existing" || len(staged) != 0 {
 			t.Fatal(err)
 		}
 		if !failDelete && len(keys.testKeys) != 1 {
@@ -156,7 +156,7 @@ func TestCredentialStageDoesNotReplaceCurrentOnConflict(t *testing.T) {
 	}
 	before, rev, _ := store.Read()
 	_, _, e = store.Update(rev, func(d core.Document) error {
-		if e := s.stageCredentials(d, map[string]*string{"KIMI_WORK_LOCAL_KEY": optional("new")}); e != nil {
+		if _, e := s.stageCredentials(d, map[string]*string{"KIMI_WORK_LOCAL_KEY": optional("new")}); e != nil {
 			return e
 		}
 		external := core.Document{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 )
@@ -103,6 +104,34 @@ func (c *Controller) requireSupportedProfileMode() error {
 		}
 	}
 	return ErrProfileModeUnsupported
+}
+
+func (c *Controller) OpenWork(ctx context.Context) error {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	c.reapChildLocked()
+	c.mu.Lock()
+	actions := c.actions
+	settings := c.settings
+	c.mu.Unlock()
+	if runtime.GOOS == "darwin" && settings.profileMode() == ProfileModeOfficial && c.managedChildAlive() {
+		bundle := filepath.Dir(filepath.Dir(filepath.Dir(settings.Installation.Application)))
+		if err := exec.CommandContext(ctx, "/usr/bin/open", "-a", bundle, "kimi-work://home").Run(); err != nil {
+			return errors.New("native_bridge_activation_refused")
+		}
+		return nil
+	}
+	if actions == nil {
+		return errors.New("native_bridge_waiting_work")
+	}
+	result, err := actions.ActivateWork(ctx)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return errors.New(result.Reason)
+	}
+	return nil
 }
 
 func (c *Controller) StartOfficial(ctx context.Context) error {

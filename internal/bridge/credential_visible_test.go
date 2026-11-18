@@ -160,6 +160,7 @@ type blockedVisibleKeys struct {
 
 	plainDuringPrompt int
 	promptCount       int
+	plainStageCount   int
 }
 
 func newBlockedVisibleKeys() *blockedVisibleKeys {
@@ -235,14 +236,20 @@ func (k *blockedVisibleKeys) Get(ref string) (string, error) {
 
 func (k *blockedVisibleKeys) Set(ref, value string) error {
 	k.mu.Lock()
-	defer k.mu.Unlock()
+	if k.promptOpen > 0 {
+		k.plainStageCount++
+	}
 	k.values[ref] = value
+	k.mu.Unlock()
 	return nil
 }
 
 func (k *blockedVisibleKeys) Delete(ref string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.promptOpen > 0 {
+		k.plainStageCount++
+	}
 	delete(k.values, ref)
 	return nil
 }

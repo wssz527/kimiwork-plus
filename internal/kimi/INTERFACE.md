@@ -1097,8 +1097,10 @@ restart fallback. `AccountActivation.modelsState` is optional (`ready`, `pending
 `failed`) with a fixed `modelsReason` when needed. Model failure preserves the
 successful identity result and is shown separately in the panel. A successful
 runtime check records the reconciled generation as loaded, allowing later periodic
-readback to retain adoption. These new paths have synthetic regression coverage;
-final-build two-account model selection still requires live acceptance.
+readback to retain adoption. These paths have synthetic regression coverage.
+The final `e6d2ac1` Mac build also completed five two-account round trips and real
+DeepSeek/GLM replies under both accounts. Later-build acceptance and remaining
+limits are recorded separately in the workspace handoff.
 
 ## 41. Explicit connection credential authorization
 
@@ -1111,10 +1113,27 @@ quota and gateway reads remain noninteractive.
 
 The Mac connection-reauthorize candidate completed this explicit action through
 real system prompts and read back `apiKeySet=true` with applied runtime state.
-The authorization button itself still needs a verified GUI click; API and system
-prompt evidence do not establish that part of the interface.
+The final `e6d2ac1` build also completed a verified GUI click of the authorization
+button. That result belongs to the tested build; API and system prompt evidence
+alone do not establish later-build GUI acceptance.
 
 ## 42. Current candidate Work and Swarm adoption
+
+`GET /api/work/swarm` returns the snapshot of the open conversation. To change it, submit `{"action":"set-swarm","conversationKey":"<snapshot key>","enabled":true}` to `POST /api/actions`. Missing or malformed keys are rejected. If the open conversation changed since the panel read it, the operation returns `work_swarm_conversation_changed` and the panel asks the user to read the current conversation again.
+
+`{"action":"open-work"}` asks the existing managed Kimi window to show Work. On macOS, the official profile uses the installed Kimi app's registered `kimi-work://home` URL. Starting Kimi and requesting a graceful restart remain separate actions.
+
+`launch-kimi` and `restart-kimi` complete synchronously: the operation record is
+`done` once the start call returns, not `starting`. `starting` only ever meant
+"the launch request was sent", so keeping it as the terminal state left the panel
+claiming an in-flight operation after the child was already running.
+
+Whether the running application is managed comes from `integration.desktop.managed`
+(`ControllerStatus.ManagedPID > 0`). A Kimi started by the system itself reports
+`running === true` with `managed === false`; the panel then says the synced model
+configuration is still on disk but the process is not managed, and points at the
+graceful restart action. It does not claim the managed child loaded the
+configuration generation.
 
 On 2026-11-17, the connection-reauthorize candidate imported both named Magpie
 models through the official API and normally restarted Kimi. The official selector

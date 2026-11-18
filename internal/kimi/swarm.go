@@ -84,7 +84,7 @@ func (c *Controller) SwarmMode(ctx context.Context) (SwarmSnapshot, error) {
 // that conversation, and a readback keyed by that write always answers with it.
 // Confirmed therefore also requires the page to still show the same conversation
 // at the moment of confirmation, and the same epoch the write was stamped with.
-func (c *Controller) SetSwarmMode(ctx context.Context, enabled bool) (SwarmSnapshot, error) {
+func (c *Controller) SetSwarmMode(ctx context.Context, expectedKey string, enabled bool) (SwarmSnapshot, error) {
 	swarmModeMu.Lock()
 	defer swarmModeMu.Unlock()
 
@@ -96,7 +96,10 @@ func (c *Controller) SetSwarmMode(ctx context.Context, enabled bool) (SwarmSnaps
 	if err != nil {
 		return SwarmSnapshot{State: SwarmStateUnknown, Reason: err.Error()}, err
 	}
-	written, err := surface.swarmSet(ctx, key, enabled)
+	if key != expectedKey {
+		return swarmUnconfirmed(SwarmSnapshot{State: SwarmStateUnknown}, SwarmErrConversationChanged)
+	}
+	written, err := surface.swarmSet(ctx, expectedKey, enabled)
 	if err != nil {
 		return swarmAfterFailedWrite(ctx, surface, key, written), err
 	}
@@ -187,7 +190,7 @@ func (a *cdpActions) swarmConversationKey(ctx context.Context) (string, error) {
 		return "", errors.New(SwarmErrPageUnavailable)
 	}
 	key, _ := value.(string)
-	if !validSwarmKey(key) {
+	if !ValidSwarmConversationKey(key) {
 		return "", errors.New(SwarmErrConversationUnavailable)
 	}
 	return key, nil
@@ -202,7 +205,7 @@ func (a *cdpActions) swarmSet(ctx context.Context, conversationKey string, enabl
 }
 
 func (a *cdpActions) swarmCall(ctx context.Context, method, conversationKey string, enabled *bool) (SwarmSnapshot, error) {
-	if !validSwarmKey(conversationKey) {
+	if !ValidSwarmConversationKey(conversationKey) {
 		return SwarmSnapshot{State: SwarmStateUnknown, Reason: SwarmErrConversationUnavailable},
 			errors.New(SwarmErrConversationUnavailable)
 	}
@@ -302,7 +305,7 @@ func parseSwarmAnswer(value any, wantKey string) (SwarmSnapshot, error) {
 	// The epoch must be present but may be empty: a page that has not stamped
 	// this conversation reports an empty one, which only means no revision can
 	// be cached against an epoch.
-	if !enabledOK || !revisionOK || !validSwarmKey(key) || key != wantKey || !epochOK ||
+	if !enabledOK || !revisionOK || !ValidSwarmConversationKey(key) || key != wantKey || !epochOK ||
 		!swarmRevisionOK(revision) {
 		return SwarmSnapshot{State: SwarmStateUnknown, Reason: SwarmErrContractChanged,
 			ConversationKey: key}, errors.New(SwarmErrContractChanged)
@@ -319,9 +322,9 @@ func swarmRevisionOK(value float64) bool {
 	return value >= 0 && value <= 9007199254740991 && math.Trunc(value) == value
 }
 
-// validSwarmKey accepts what the official validator accepts, trimmed and
+// ValidSwarmConversationKey accepts what the official validator accepts, trimmed and
 // non-empty, plus a ceiling because the key is embedded in a page expression.
-func validSwarmKey(key string) bool {
+func ValidSwarmConversationKey(key string) bool {
 	if key == "" || len(key) > 1024 || strings.TrimSpace(key) != key {
 		return false
 	}
