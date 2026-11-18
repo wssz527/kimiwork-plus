@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 // Budget enforcement is an estimate over the ledger this process wrote, not a

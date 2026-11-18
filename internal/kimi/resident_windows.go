@@ -12,8 +12,10 @@ import (
 // `Get-Process` exists on every supported Windows build and needs no elevation
 // for a process the same user started.
 func residentBytesPlatform(pid int) (int64, bool) {
-	out, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-		"[Console]::Out.Write((Get-Process -Id "+strconv.Itoa(pid)+" -ErrorAction Stop).WorkingSet64)").Output()
+	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+		"[Console]::Out.Write((Get-Process -Id "+strconv.Itoa(pid)+" -ErrorAction Stop).WorkingSet64)")
+	hideBackgroundCommand(command)
+	out, err := command.Output()
 	if err != nil {
 		return 0, false
 	}

@@ -115,6 +115,7 @@ func windowsPIDs(ctx context.Context, application string) ([]int, bool, string) 
 	script := `$ErrorActionPreference = 'Stop'; foreach ($process in @(Get-Process -Name 'Kimi','kimi-desktop' -ErrorAction SilentlyContinue)) { try { [Console]::Out.Write($process.Id.ToString([Globalization.CultureInfo]::InvariantCulture) + "` + "\t" + `" + $process.Path + [Environment]::NewLine) } catch {} }`
 	command := execCommandContext(ctx, "powershell.exe",
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	hideBackgroundCommand(command)
 	out, err := command.Output()
 	if err != nil {
 		return nil, false, "process_query_failed"

@@ -75,6 +75,48 @@ func ResolveKimiHome(profileDir, override string) (string, error) {
 	return filepath.Clean(candidate), nil
 }
 
+// ResolveOfficialKimiHome derives the Work data directory for the official Kimi
+// profile. Unlike isolated sandboxes, the official profile honours a valid local
+// `daimon-storage.json` shareDir relocated outside the profile (for example onto
+// another local drive on Windows), while still confining explicit overrides to
+// the profile and refusing UNC shares or filesystem roots.
+func ResolveOfficialKimiHome(profileDir, override string) (string, error) {
+	if override != "" {
+		return ResolveKimiHome(profileDir, override)
+	}
+	if !filepath.IsAbs(profileDir) {
+		return "", ErrKimiHomeUnresolved
+	}
+	profile, err := filepath.Abs(profileDir)
+	if err != nil {
+		return "", ErrKimiHomeUnresolved
+	}
+	realProfile, err := resolveAllowMissing(profile)
+	if err != nil {
+		return "", ErrKimiHomeUnresolved
+	}
+	share, ok := storedShareDirectory(realProfile)
+	if !ok {
+		return ResolveKimiHome(profileDir, "")
+	}
+	if isUNCPath(share) {
+		return "", ErrKimiHomeOutsideProfile
+	}
+	candidate := filepath.Join(share, workDataDirectory)
+	resolved, err := resolveAllowMissing(candidate)
+	if err != nil {
+		return "", ErrKimiHomeUnresolved
+	}
+	if isUNCPath(resolved) || filepath.Dir(resolved) == resolved {
+		return "", ErrKimiHomeOutsideProfile
+	}
+	return filepath.Clean(candidate), nil
+}
+
+func isUNCPath(path string) bool {
+	return strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//")
+}
+
 // storedShareDirectory reads `shareDir` from the profile's own settings. Anything
 // unexpected answers false, so the historical layout is used instead of a guessed
 // location.

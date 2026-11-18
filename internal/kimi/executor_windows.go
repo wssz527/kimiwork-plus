@@ -9,5 +9,6 @@ import "os/exec"
 // deadline plus WaitDelay is the mechanism; the RSS watchdog still calls the
 // context's cancel function directly.
 func configureChild(command *exec.Cmd) {
+	hideBackgroundCommand(command)
 	command.WaitDelay = 2 * 1000 * 1000 * 1000
 }

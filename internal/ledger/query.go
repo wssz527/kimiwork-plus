@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"time"
+	_ "time/tzdata"
 )
 
 var (

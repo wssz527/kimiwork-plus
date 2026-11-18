@@ -901,15 +901,19 @@ func (c *Controller) setState(state ControllerState, reason string) {
 
 // WorkHome is the Work data directory the managed child uses, derived the same
 // way Kimi derives it: `daimon-storage.json` shareDir, else
-// <profile>/daimon-share/daimon. A resolution that leaves the selected profile
-// returns an error, so the integration never writes outside the selected tree.
+// <profile>/daimon-share/daimon. Isolated modes keep the result inside the
+// selected profile; official mode also accepts a local relocated shareDir.
 func (c *Controller) WorkHome() (string, error) {
 	c.mu.Lock()
 	profile := c.settings.UserDataDir
 	override := c.settings.KimiHome
+	mode := c.settings.profileMode()
 	c.mu.Unlock()
 	if profile == "" {
 		return "", ErrKimiHomeUnresolved
+	}
+	if mode == ProfileModeOfficial {
+		return ResolveOfficialKimiHome(profile, override)
 	}
 	return ResolveKimiHome(profile, override)
 }

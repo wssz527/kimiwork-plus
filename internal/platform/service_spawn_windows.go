@@ -18,12 +18,20 @@ import (
 const (
 	detachedProcess       = 0x00000008
 	createNewProcessGroup = 0x00000200
+	createNoWindow        = 0x08000000
 )
 
 func detach(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: detachedProcess | createNewProcessGroup,
+	}
+}
+
+func hideCommandConsole(command *exec.Cmd) {
+	command.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: createNoWindow,
 	}
 }
 

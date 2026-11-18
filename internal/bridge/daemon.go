@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"kimiworkplus.local/migration/internal/core"
@@ -141,6 +142,7 @@ func ReplaceDaemon(dir string) error {
 		return err
 	}
 	cmd := exec.Command(executable, "--state-dir", dir, "--port", "")
+	hideDaemonConsole(cmd)
 	cmd.Env = append(os.Environ(), "KIMI_WORK_REPLACE_DAEMON=1")
 	log, err := daemonLog(dir)
 	if err != nil {
@@ -155,7 +157,7 @@ func ReplaceDaemon(dir string) error {
 func daemonLog(dir string) (*os.File, error) {
 	path := filepath.Join(dir, "daemon.log")
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0) {
 			return nil, errors.New("unsafe_daemon_log")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -167,7 +169,7 @@ func daemonLog(dir string) (*os.File, error) {
 	}
 	opened, openErr := log.Stat()
 	current, statErr := os.Lstat(path)
-	if openErr != nil || statErr != nil || !current.Mode().IsRegular() || current.Mode().Perm()&0077 != 0 || !os.SameFile(opened, current) {
+	if openErr != nil || statErr != nil || !current.Mode().IsRegular() || (runtime.GOOS != "windows" && current.Mode().Perm()&0077 != 0) || !os.SameFile(opened, current) {
 		log.Close()
 		return nil, errors.New("unsafe_daemon_log")
 	}
@@ -202,6 +204,7 @@ func Ensure(dir, binary string) (Endpoint, error) {
 	}
 	defer log.Close()
 	cmd := exec.Command(absolute, "--state-dir", dir, "--port", "")
+	hideDaemonConsole(cmd)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err = cmd.Start(); err != nil {

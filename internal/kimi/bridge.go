@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -149,7 +150,7 @@ func ReadBridgeDescriptor(kimiDir string) (BridgeDescriptor, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 16384 {
 		return BridgeDescriptor{}, ErrBridgeUnavailable
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return BridgeDescriptor{}, ErrBridgeUnavailable
 	}
 	data, err := os.ReadFile(file)

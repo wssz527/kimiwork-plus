@@ -16,4 +16,6 @@ func detach(command *exec.Cmd) {
 	_ = runtime.GOOS
 }
 
+func hideCommandConsole(*exec.Cmd) {}
+
 func isWindows() bool { return false }

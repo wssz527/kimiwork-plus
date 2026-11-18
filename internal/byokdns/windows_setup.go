@@ -207,6 +207,7 @@ func utf16LE(value string) []byte {
 
 func windowsAdministrator(ctx context.Context, script, reportPath string) error {
 	command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(utf16LE(elevationCommand(script))))
+	hideElevationConsole(command)
 	output, err := command.CombinedOutput()
 	if err == nil {
 		return nil

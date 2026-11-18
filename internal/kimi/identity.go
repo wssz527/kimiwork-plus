@@ -69,6 +69,7 @@ func windowsIdentityScript(pid int) string {
 func windowsIdentity(ctx context.Context, pid int) ProcessIdentity {
 	command := exec.CommandContext(ctx, "powershell.exe",
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsIdentityScript(pid))
+	hideBackgroundCommand(command)
 	var stderr strings.Builder
 	command.Stderr = &stderr
 	out, err := command.Output()

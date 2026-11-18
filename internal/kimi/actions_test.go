@@ -79,6 +79,39 @@ func TestResolveKimiHomeRefusesAnEscape(t *testing.T) {
 	}
 }
 
+func TestResolveOfficialKimiHomeSupportsRelocatedShareDir(t *testing.T) {
+	base := t.TempDir()
+	profile := filepath.Join(base, "kimi-desktop")
+	relocated := filepath.Join(base, "relocated-share")
+	if err := os.MkdirAll(profile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(relocated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storage, _ := json.Marshal(map[string]any{"version": 1, "shareDir": relocated})
+	if err := os.WriteFile(filepath.Join(profile, storageFileName), storage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home, err := ResolveOfficialKimiHome(profile, "")
+	if err != nil {
+		t.Fatalf("official relocated shareDir failed: %v", err)
+	}
+	want := filepath.Join(relocated, "daimon")
+	if home != want {
+		t.Fatalf("official home = %q, want %q", home, want)
+	}
+	if _, err := ResolveKimiHome(profile, ""); !errors.Is(err, ErrKimiHomeOutsideProfile) {
+		t.Fatalf("isolated resolver accepted outside shareDir: %v", err)
+	}
+	if _, err := ResolveOfficialKimiHome(profile, relocated); !errors.Is(err, ErrKimiHomeOutsideProfile) {
+		t.Fatalf("official resolver accepted outside override: %v", err)
+	}
+	if !isUNCPath(`\\server\share\daimon`) || !isUNCPath("//server/share/daimon") {
+		t.Fatal("UNC guard did not match network share prefixes")
+	}
+}
+
 func TestResolveKimiHomeAcceptsAnInsideOverride(t *testing.T) {
 	profile := filepath.Join(t.TempDir(), "profile")
 	if err := os.MkdirAll(profile, 0o700); err != nil {

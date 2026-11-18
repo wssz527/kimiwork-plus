@@ -4,11 +4,16 @@ package kimi
 
 import (
 	"errors"
+	"os/exec"
 	"syscall"
 )
 
-// syscallSignalZero is the portable liveness probe: it reports existence without
-// delivering anything.
-func syscallSignalZero() syscall.Signal { return syscall.Signal(0) }
+func hideBackgroundCommand(*exec.Cmd) {}
 
-func isProcessGone(err error) bool { return errors.Is(err, syscall.ESRCH) }
+func processAlivePlatform(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || !errors.Is(err, syscall.ESRCH)
+}

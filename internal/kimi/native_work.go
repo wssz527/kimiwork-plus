@@ -1155,18 +1155,5 @@ func containsString(values []string, wanted string) bool {
 }
 
 func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 is the portable liveness probe: it reports existence without
-	// delivering anything. On Unix a dead pid answers ESRCH; Windows answers
-	// ErrProcessDone for an exited process.
-	if err := process.Signal(syscallSignalZero()); err != nil {
-		return !isProcessGone(err)
-	}
-	return true
+	return processAlivePlatform(pid)
 }

@@ -110,6 +110,7 @@ type localHost struct{}
 
 func (localHost) Run(ctx context.Context, name string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	hideCommandConsole(command)
 	var out strings.Builder
 	command.Stdout = &out
 	command.Stderr = &out

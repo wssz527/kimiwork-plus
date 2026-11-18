@@ -72,10 +72,12 @@ func main() {
 	app.Menu.Set(menu)
 	tray := app.SystemTray.New()
 	tray.SetLabel("K+")
+	tray.SetTooltip("Kimi Work+")
 	diagnostics := &windowDiagnostics{}
 	window.OnWindowEvent(events.Mac.WebViewWebContentProcessDidTerminate, func(*application.WindowEvent) {
 		diagnostics.Failed()
 		tray.SetLabel("K+ · 页面加载失败")
+		tray.SetTooltip("Kimi Work+ · 页面加载失败")
 	})
 	trayMenu := app.NewMenu()
 	trayMenu.Add("打开 Kimi Work+").OnClick(func(*application.Context) { openWindow() })

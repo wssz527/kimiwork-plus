@@ -940,8 +940,12 @@ replace. There is still no plaintext fallback and no old-safeStorage decryption.
 The desktop daemon constructs the controller with `ProfileModeOfficial` and the
 installed application's own profile. This is the default on macOS and Windows.
 It shares the official login and Work data deliberately; it does not copy
-credentials and does not redirect Work storage. `ProfileModeExistingAuthorized`
-and `ProfileModeIsolated` remain explicit diagnostic alternatives, not the normal
+credentials and does not redirect Work storage. `ProfileModeOfficial` honours a
+local `daimon-storage.json` `shareDir` relocation outside the profile directory
+(for example when Kimi's Work storage was moved to another local drive on
+Windows), while refusing UNC network shares, root paths, and outside overrides;
+`ProfileModeExistingAuthorized` and `ProfileModeIsolated` continue to enforce
+strict profile containment and remain explicit diagnostic alternatives, not the normal
 launch path. Resolving the Work home also accepts a not-yet-created profile and
 missing parent directories, so first-use discovery does not block gateway startup.
 An unavailable official login is reported when the user starts Kimi.

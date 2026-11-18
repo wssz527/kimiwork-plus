@@ -46,8 +46,10 @@ func discoverWindowsArchives(env map[string]string) []string {
 	if runtime.GOOS != "windows" || env["KIMI_DISABLE_DISCOVERY"] == "1" {
 		return nil
 	}
-	out, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-		installShortcutScript).Output()
+	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+		installShortcutScript)
+	hideBackgroundCommand(command)
+	out, err := command.Output()
 	if err != nil {
 		return nil
 	}
