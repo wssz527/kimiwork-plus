@@ -854,17 +854,38 @@ product adds a login item without asking.
 | Platform | Definition | Login start is |
 |---|---|---|
 | macOS | LaunchAgent in `~/Library/LaunchAgents`, `gui/<uid>` domain, no elevation | `<key>RunAtLoad</key>` |
-| Windows | `schtasks /Create /SC ONLOGON /RL LIMITED`, then `/DISABLE` in the same plan | task `Enabled` |
+| Windows | JSON record under `%APPDATA%\kimi-work-plus-preview\service`, plus a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | the `Run` value |
 
 `KeepAlive` is false on both: a crashed daemon is reported, not restarted in a
-loop that hides the failure. schtasks has no "create disabled" form, which is why
-`Register` creates the task and disables it in one action.
+loop that hides the failure.
+
+On Windows the mechanism is the per-user `Run` key, not a scheduled task. A
+medium integrity desktop process cannot create an `ONLOGON` task at all: the Task
+Scheduler refuses `schtasks /Create` with `ERROR_ACCESS_DENIED`, and requiring
+elevation for the product's own flow is exactly what this registration avoids.
+`HKCU` belongs to the signed-in user, so the value needs no elevation and the
+Explorer shell reads it at login. `Register` writes the definition and *deletes*
+the value, which is what makes `Registered && !Enabled` true; `Enable` is the only
+action that writes it, and `Disable` removes it without deleting the definition and
+without interrupting the running daemon.
+
+The value holds a command line, so it is quoted by the `CommandLineToArgvW` rules
+(a run of backslashes before a quote is doubled, the quote is escaped, a trailing
+run is doubled) rather than by wrapping the path in quotes. The preview's own path
+contains a space and a `+`, which an unquoted or naively quoted value breaks.
 
 A definition written by a different build is `Stale` with
 `registered_for_another_build` and is **never** rewritten behind the user's back;
 `Status` reports it and the user decides. The build identity lives in the plist's
-`BuildID` key on macOS, and in `<stateDir>/service-definition.json` on Windows,
-because schtasks has no metadata field that round-trips.
+`BuildID` key on macOS, and in the JSON definition on Windows, because a `Run`
+value carries no metadata that round-trips.
+
+The forced stop is `gateway-daemon --terminate-daemon --state-dir <dir>` on
+Windows, recorded as `daemon_terminate`. It is not a platform kill: the process
+verifies the recorded pid still exists and still runs this executable before
+ending it, so a reused pid cannot take an unrelated program with it, and the
+official application is never a candidate. The normal stop stays the daemon's own
+authenticated `POST /api/daemon/stop`.
 
 Every side effect goes through `ManagerHost`, so the tests drive both plans on
 either host and never register, load or start a real service.
@@ -925,8 +946,8 @@ replace. There is still no plaintext fallback and no old-safeStorage decryption.
   was performed in this round, so the fd3/fd4 path's `Verified` flag stays false
   as well.
 - **Service registration was not performed on a real machine.** The plans and
-  parsers are tested through `ManagerHost`; an actual `launchctl bootstrap` or
-  `schtasks /Create` on the user's account was deliberately not executed.
+  parsers are tested through `ManagerHost`; an actual `launchctl bootstrap` or a
+  real `HKCU\...\Run` write on the user's account was deliberately not executed.
 - **Port retention across a restart** is available as an option but is not proven
   end to end: the daemon side that reuses a port and token is the main session's
   work.

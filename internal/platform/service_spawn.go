@@ -47,7 +47,7 @@ func spawnHelper(start HelperStart) (int, error) {
 }
 
 // openHelperLog opens the operation log. The file must be private and regular:
-// the helper's output can quote launchctl or schtasks output, which is not a
+// the helper's output can quote launchctl or reg output, which is not a
 // secret but is also not something another user should read.
 func openHelperLog(path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil {

@@ -109,32 +109,11 @@ func darwinPIDs(ctx context.Context, application string) ([]int, bool, string) {
 	return pids, true, ""
 }
 
-// windowsPIDs asks for processes by name and then compares the full path, so a
-// same-named executable elsewhere on disk is not counted as the installation.
+// windowsPIDs asks the platform for processes by name and then compares the full
+// path, so a same-named executable elsewhere on disk is not counted as the
+// installation.
 func windowsPIDs(ctx context.Context, application string) ([]int, bool, string) {
-	script := `$ErrorActionPreference = 'Stop'; foreach ($process in @(Get-Process -Name 'Kimi','kimi-desktop' -ErrorAction SilentlyContinue)) { try { [Console]::Out.Write($process.Id.ToString([Globalization.CultureInfo]::InvariantCulture) + "` + "\t" + `" + $process.Path + [Environment]::NewLine) } catch {} }`
-	command := execCommandContext(ctx, "powershell.exe",
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
-	hideBackgroundCommand(command)
-	out, err := command.Output()
-	if err != nil {
-		return nil, false, "process_query_failed"
-	}
-	var pids []int
-	for _, line := range strings.Split(string(out), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		pid, err := parseSmallInt(strings.TrimSpace(parts[0]))
-		if err != nil {
-			continue
-		}
-		if samePath(filepath.Clean(strings.TrimSpace(parts[1])), filepath.Clean(application), "windows") {
-			pids = append(pids, pid)
-		}
-	}
-	return pids, true, ""
+	return platformWindowsPIDs(ctx, application)
 }
 
 // IdentityProbeTimeout bounds the identity lookups; a hung `ps` or PowerShell

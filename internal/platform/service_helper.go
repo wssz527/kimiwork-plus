@@ -98,8 +98,14 @@ func RunHelperWith(stateDir, id string, transport DaemonTransport, host ManagerH
 	if host == nil {
 		host = localHost{}
 	}
+	options := request.managerOptions(host)
+	// The helper already speaks to the daemon through this transport, so the
+	// status it reads back must use the same one. Without it the Windows status
+	// would fall back to a real HTTP client for a state directory this helper was
+	// deliberately given a substitute for.
+	options.Transport = transport
 	executor := helperExecutor{dir: dir, id: id, request: request,
-		transport: transport, manager: request.managerOptions(host)}
+		transport: transport, manager: options}
 	executor.run(operation)
 	pruneOperations(dir)
 	return nil
@@ -268,7 +274,7 @@ func (e *helperExecutor) run(operation ServiceOperation) {
 		if runtime.GOOS == "darwin" {
 			operation.Termination = TerminationLaunchd
 		} else {
-			operation.Termination = TerminationSchtasks
+			operation.Termination = TerminationWindows
 		}
 	}
 	operation.Steps = append(operation.Steps, e.step(action, started, nil, output))

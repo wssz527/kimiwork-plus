@@ -403,8 +403,6 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				return err
 			}
 			d["subagents"] = map[string]any(policy)
-		case "/api/translation":
-			return errors.New("native_preview_unavailable")
 		}
 		return nil
 	})

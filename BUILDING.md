@@ -41,7 +41,8 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o o
 
 - `register-service` 与登录启动开关（`enable-login-service` / `disable-login-service`）是内联操作：只重写 plist 或计划任务，不 bootout、不 kickstart、不 `/End`。关闭登录启动不会中断正在进行的模型请求。
 - `start-service`、`restart-service`、`stop-service`、`uninstall-service` 交给短命 helper 进程执行。helper 用 `setsid`（macOS）或 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`（Windows）脱离调用者，因此不会被它要替换的 daemon 带走；它执行完后退出，不留下长期 supervisor。
-- 停止优先走已有鉴权 HTTP `/api/daemon/stop`，并核对 `desktop-endpoint.json` 里的 PID 与 buildId。只有在调用方显式要求 `Force` 且排空失败时才回退到平台终止；此时记录 `forced=true` 并注明机制（`launchd_bootout` / `schtasks_end`），不会把 `/End` 描述为优雅排空。
+- 停止优先走已有鉴权 HTTP `/api/daemon/stop`，并核对 `desktop-endpoint.json` 里的 PID 与 buildId。只有在调用方显式要求 `Force` 且排空失败时才回退到平台终止；此时记录 `forced=true` 并注明机制（`launchd_bootout` / `daemon_terminate`），不会把强制终止描述为优雅排空。Windows 的 `daemon_terminate` 由 `gateway-daemon --terminate-daemon --state-dir <dir>` 执行，先校验记录里的 PID 仍在运行且可执行文件路径就是自己，绝不触碰官方 Kimi。
+- Windows 的登录自启用免提权的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，不用 `schtasks`：中等完整性进程创建 `ONLOGON` 任务会被系统以 `ERROR_ACCESS_DENIED` 拒绝，而本产品不能依赖手工提权。`gateway-daemon.exe` 以 `-H windowsgui` 构建，从 `Run` 键直接拉起时不出现控制台窗口；`--start-background` 负责去重与脱离子进程，`--terminate-daemon` 负责受控终止。
 - 结果以平台读回为准：`enabled`、`registered`、`running` 与 `buildId` 都要和请求一致，否则操作标为失败。start/restart 还要求私有 endpoint 与实际健康响应的 PID/buildId 符合预期，`ServingBuildID` 只取自该健康响应。健康状态不可确认不等于已排空，非 Force 操作不会继续破坏性步骤。同一时间只允许一个破坏性操作，锁记录在 `service-operations/operator.lock`，超过 deadline 的锁可被接管。
 
 宿主进程必须在解析自己的命令行参数之前处理 helper 调用，否则 helper 分支永远不会执行：
@@ -63,8 +64,10 @@ Windows 使用 `build/windows.ps1 -BuildId <build-id>` 或以下等价命令生�
 ```powershell
 $flags = "-s -w -X kimiworkplus.local/migration/internal/bridge.BuildID=<build-id>"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/KimiWorkPlus.exe ./cmd/desktop
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags $flags -o out/gateway-daemon.exe ./cmd/gateway-daemon
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/gateway-daemon.exe ./cmd/gateway-daemon
 ```
+
+两个可执行文件都以 `-H windowsgui` 构建。`gateway-daemon.exe` 也需要它：登录自启由 `HKCU\...\Run` 直接拉起进程，没有 GUI 子系统标志时会附带一个隐藏的 `conhost.exe`，并在某些路径上闪出控制台窗口。`windowsgui` 只改变控制台分配，不影响标准输入输出重定向——helper 契约和 `kimi.RunContractWorker(os.Stdin, os.Stdout)` 的管道读写照常工作，日志仍可通过 `--log-path` 落到文件。
 
 私有 CDP 在 Windows 上通过继承的两条管道 HANDLE 传递，不使用 `ExtraFiles`，也不回退到开放 TCP 调试端口。交叉构建只证明编译成功，不证明官方 CDP、DPAPI 或 WebView2 真机行为。
 

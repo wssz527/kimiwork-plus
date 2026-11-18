@@ -23,6 +23,12 @@ func main() {
 	if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 		os.Exit(code)
 	}
+	// The launch and stop flags are handled before this binary's own flag set, so
+	// the same executable can be started by the login item, by the panel and by the
+	// uninstaller without any of them depending on a shell.
+	if code, handled := platform.RunBackgroundFromArgs(os.Args); handled {
+		os.Exit(code)
+	}
 	if len(os.Args) > 1 && os.Args[1] == kimi.ContractWorkerFlag {
 		os.Exit(kimi.RunContractWorker(os.Stdin, os.Stdout))
 	}

@@ -49,10 +49,13 @@ const (
 // Termination names the mechanism that stopped the previous daemon. Only
 // "http_drain" is graceful; the others are reported as forced, never as a drain.
 const (
-	TerminationDrain    = "http_drain"
-	TerminationLaunchd  = "launchd_bootout"
-	TerminationSchtasks = "schtasks_end"
-	TerminationNone     = "none"
+	TerminationDrain   = "http_drain"
+	TerminationLaunchd = "launchd_bootout"
+	// TerminationWindows is the daemon's own --terminate-daemon path. It is not a
+	// platform kill: the process verifies the recorded pid still belongs to it
+	// before ending it, so a reused pid cannot take an unrelated program with it.
+	TerminationWindows = "daemon_terminate"
+	TerminationNone    = "none"
 )
 
 // ErrOperationBusy means another lifecycle change owns the state directory.
@@ -64,7 +67,7 @@ var ErrOperationBusy = errors.New("service_operation_busy")
 var ErrOperationNotFound = errors.New("service_operation_not_found")
 
 // OperationStep is one observable step. Output is a short tail of a command's
-// own output; the helper only runs launchctl, schtasks and its own HTTP client,
+// own output; the helper only runs launchctl, reg and its own HTTP client,
 // so this never carries a credential.
 type OperationStep struct {
 	Name       string    `json:"name"`

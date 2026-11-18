@@ -35,11 +35,7 @@ func NormalizeSubagents(value any, models []any) (Document, error) {
 				if m["tools"] != true {
 					return nil, "", errors.New("subagent_model_tools_required")
 				}
-				prefix := "byok-kth-kimi/"
-				if m["protocol"] == "responses" {
-					prefix = "byok-kth-resp/"
-				}
-				return m, prefix + String(id), nil
+				return m, subagentAlias(m), nil
 			}
 		}
 		return nil, "", errors.New("subagent_model_unavailable")
@@ -100,4 +96,23 @@ func NormalizeSubagents(value any, models []any) (Document, error) {
 		out["effort"] = effort
 	}
 	return out, nil
+}
+
+// subagentAlias reproduces the official import rule: only a model whose last
+// identifier segment starts with "kimi-" joins the kimi family. Every other model,
+// including a chat-protocol one, is imported as a responses model, and a block
+// naming the wrong family is dropped because the alias is not declared.
+func subagentAlias(model map[string]any) string {
+	id := String(model["id"])
+	if model["protocol"] == "responses" {
+		return "byok-kth-resp/" + id
+	}
+	last := id
+	if at := strings.LastIndex(id, "/"); at >= 0 {
+		last = id[at+1:]
+	}
+	if strings.HasPrefix(strings.ToLower(last), "kimi-") {
+		return "byok-kth-kimi/" + id
+	}
+	return "byok-kth-resp/" + id
 }

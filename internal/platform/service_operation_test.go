@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -266,12 +267,22 @@ func TestHelperDrainsThenReadsTheNewDaemonBack(t *testing.T) {
 	host := newFakeHost()
 	replacement := liveEndpoint()
 	replacement.PID = 5151
-	transport := &fakeTransport{endpointSequence: []DaemonEndpoint{liveEndpoint(), replacement}, healthSequence: []HealthResult{
-		{Alive: true, PID: 4242, BuildID: "build-a"}, // before
-		{Alive: false}, // after the stop
-		{Alive: true, PID: 5151, BuildID: "build-a"}, // actual replacement health
-	}}
-	controller, options := controllerFor(t, host, transport, "darwin")
+	before := HealthResult{Alive: true, PID: 4242, BuildID: "build-a"}
+	afterStop := HealthResult{Alive: false}
+	replacementHealth := HealthResult{Alive: true, PID: 5151, BuildID: "build-a"}
+	// The Windows status reads the running state from the daemon's own health, so
+	// it consumes one endpoint record and one probe per read-back that the launchd
+	// status does not. The sequences are built per platform so the assertion stays
+	// about the helper's behaviour and not about how many probes a status makes.
+	endpoints := []DaemonEndpoint{liveEndpoint(), replacement}
+	health := []HealthResult{before, afterStop, replacementHealth}
+	if runtime.GOOS == "windows" {
+		// registration read-back, drain, then the replacement's read-back.
+		endpoints = []DaemonEndpoint{liveEndpoint(), liveEndpoint(), replacement}
+		health = []HealthResult{before, before, afterStop, replacementHealth}
+	}
+	transport := &fakeTransport{endpointSequence: endpoints, healthSequence: health}
+	controller, options := controllerFor(t, host, transport, runtime.GOOS)
 	ctx := context.Background()
 	if _, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister}); err != nil {
 		t.Fatal(err)
@@ -292,13 +303,18 @@ func TestHelperDrainsThenReadsTheNewDaemonBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The helper runs the same journal entry. It is driven in-process here; in
-	// production it is a separate process spawned with the same arguments.
+	// production it is a separate process spawned with the same arguments. The
+	// status output is the platform's own: launchctl for a job, reg for a Run
+	// value. The running state and its pid come from the daemon's health on both.
 	host.outputs["/bin/launchctl"] = []string{
 		"", // bootstrap
 		"", // kickstart
-		"gui/501/dev.kimi-work-plus.preview.daemon = {\n\tstate = running\n\tpid = 5151\n}\n", // status
+		"gui/501/" + ServiceLabel + " = {\n\tstate = running\n\tpid = 5151\n}\n", // status
 	}
+	host.outputs["reg"] = []string{"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n    " +
+		ServiceLabel + "    REG_SZ    \"daemon\"\n"}
 	host.used["/bin/launchctl"] = 0
+	host.used["reg"] = 0
 	host.commands = nil
 	if err := runHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
 		t.Fatal(err)
@@ -379,7 +395,7 @@ func TestForcedStopIsReportedAsForced(t *testing.T) {
 	transport := &fakeTransport{endpoint: liveEndpoint(),
 		healthSequence: []HealthResult{{Alive: true, PID: 4242, BuildID: "build-a"}},
 		stopErr:        errStopRefused}
-	controller, options := controllerFor(t, host, transport, "darwin")
+	controller, options := controllerFor(t, host, transport, runtime.GOOS)
 	ctx := context.Background()
 	if _, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister}); err != nil {
 		t.Fatal(err)
@@ -402,20 +418,24 @@ func TestForcedStopIsReportedAsForced(t *testing.T) {
 	if !final.Forced {
 		t.Fatalf("a forced stop was not reported as forced: %+v", final)
 	}
-	if final.Termination != TerminationLaunchd {
-		t.Fatalf("termination mechanism: %q", final.Termination)
+	wantTermination, wantStep := TerminationWindows, "--terminate-daemon"
+	if runtime.GOOS == "darwin" {
+		wantTermination, wantStep = TerminationLaunchd, "bootout"
+	}
+	if final.Termination != wantTermination {
+		t.Fatalf("termination mechanism: %q, want %q", final.Termination, wantTermination)
 	}
 	if final.Drained {
 		t.Fatal("a forced stop claimed a graceful drain")
 	}
 	found := false
 	for _, line := range host.commandLines() {
-		if strings.Contains(line, "bootout") {
+		if strings.Contains(line, wantStep) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("the forced path did not unload the job: %v", host.commandLines())
+		t.Fatalf("the forced path did not run %s: %v", wantStep, host.commandLines())
 	}
 }
 
@@ -461,10 +481,24 @@ func TestDrainTimeoutAndReplacementAreDistinct(t *testing.T) {
 }
 
 func TestStartRequiresRunningAndHealthyServingIdentity(t *testing.T) {
+	// These subtests assert what the platform's own status query reports, so the
+	// helper must run the platform it is given. The status output is the only
+	// platform-specific part.
+	platformStatus := func(running bool, pid string) string {
+		if runtime.GOOS != "darwin" {
+			// A Run value that exists is what Windows answers; the running state
+			// comes from the daemon's own health, not from this output.
+			return "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n    " +
+				ServiceLabel + "    REG_SZ    \"daemon\"\n"
+		}
+		_ = running
+		_ = pid
+		return "gui/501/" + ServiceLabel + " = {\n\tstate = running\n\tpid = 4242\n}\n"
+	}
 	t.Run("not running", func(t *testing.T) {
 		host := newFakeHost()
 		transport := &fakeTransport{endpoint: liveEndpoint()}
-		controller, options := controllerFor(t, host, transport, "darwin")
+		controller, options := controllerFor(t, host, transport, runtime.GOOS)
 		if _, err := controller.Begin(context.Background(), OperationSpec{Action: OperationRegister}); err != nil {
 			t.Fatal(err)
 		}
@@ -473,7 +507,9 @@ func TestStartRequiresRunningAndHealthyServingIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		host.outputs["/bin/launchctl"] = []string{"", "", ""}
+		host.outputs["reg"] = []string{platformStatus(true, "4242")}
 		host.used["/bin/launchctl"] = 0
+		host.used["reg"] = 0
 		if err := runFastHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
 			t.Fatal(err)
 		}
@@ -491,7 +527,7 @@ func TestStartRequiresRunningAndHealthyServingIdentity(t *testing.T) {
 		transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{
 			{Alive: true, PID: 4242, BuildID: "build-b"},
 		}}
-		controller, options := controllerFor(t, host, transport, "darwin")
+		controller, options := controllerFor(t, host, transport, runtime.GOOS)
 		if _, err := controller.Begin(context.Background(), OperationSpec{Action: OperationRegister}); err != nil {
 			t.Fatal(err)
 		}
@@ -500,8 +536,10 @@ func TestStartRequiresRunningAndHealthyServingIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		host.outputs["/bin/launchctl"] = []string{"", "",
-			"gui/501/dev.kimi-work-plus.preview.daemon = {\n\tstate = running\n\tpid = 4242\n}\n"}
+			"gui/501/" + ServiceLabel + " = {\n\tstate = running\n\tpid = 4242\n}\n"}
+		host.outputs["reg"] = []string{platformStatus(true, "4242")}
 		host.used["/bin/launchctl"] = 0
+		host.used["reg"] = 0
 		if err := runFastHelperForTest(t, host, options.StateDir, operation.ID, transport); err != nil {
 			t.Fatal(err)
 		}
@@ -707,12 +745,10 @@ func TestPendingOperationsSurviveAndListNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A real schtasks query answers with the task XML and a status line; without
-	// them the read-back would (correctly) call the registration unsuccessful.
-	host.outputs["schtasks"] = []string{
-		`<Task><Settings><Enabled>false</Enabled></Settings></Task>`,
-		"TaskName: \\" + ServiceLabel + "\nStatus:        Ready\n",
-	}
+	// A real registration answers with the definition on disk and no Run value;
+	// without them the read-back would (correctly) call the registration
+	// unsuccessful.
+	host.failOn["reg"] = errors.New("ERROR: The system was unable to find the specified registry key or value.")
 	ctx := context.Background()
 	first, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister})
 	if err != nil {
@@ -739,11 +775,15 @@ func TestPendingOperationsSurviveAndListNewestFirst(t *testing.T) {
 	}
 }
 
-// Windows must never treat /End as a drain. The stop preference goes through the
-// authenticated HTTP endpoint; /End appears only in a forced path.
+// Windows must never treat a platform kill as a drain. The stop preference goes
+// through the authenticated HTTP endpoint; the daemon's own terminate path appears
+// only in a forced path.
 func TestWindowsNeverCallsEndWithoutForcing(t *testing.T) {
 	host := newFakeHost()
+	// One probe answers for the registration's read-back, one for the drain's
+	// first look, and the daemon is gone afterwards.
 	transport := &fakeTransport{endpoint: liveEndpoint(), healthSequence: []HealthResult{
+		{Alive: true, PID: 4242, BuildID: "build-a"},
 		{Alive: true, PID: 4242, BuildID: "build-a"}, // before the stop
 		{Alive: false}, // the daemon drained
 	}}
@@ -775,8 +815,8 @@ func TestWindowsNeverCallsEndWithoutForcing(t *testing.T) {
 		t.Fatalf("windows stop: %+v", final)
 	}
 	for _, line := range host.commandLines() {
-		if strings.Contains(line, "/End") {
-			t.Fatalf("a graceful Windows stop called schtasks /End: %s", line)
+		if strings.Contains(line, "--terminate-daemon") {
+			t.Fatalf("a graceful Windows stop called the terminate path: %s", line)
 		}
 	}
 	if transport.stopCalls != 1 {
@@ -793,7 +833,7 @@ func TestWindowsDescriptionDoesNotClaimAGracefulEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(flatten(description.Uninstall), " ")
-	if !strings.Contains(joined, "/End") {
+	if !strings.Contains(joined, "--terminate-daemon") {
 		t.Fatalf("the uninstall plan lost its forced step: %s", joined)
 	}
 	for _, note := range description.Notes {

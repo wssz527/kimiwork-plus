@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,7 +219,10 @@ func TestUninstallLeavesNothingBehind(t *testing.T) {
 		{Alive: true, PID: 4242, BuildID: "build-a"},
 		{Alive: false},
 	}}
-	controller, options := controllerFor(t, host, transport, "darwin")
+	// The helper is a separate process, so it builds its Manager from the runtime
+	// platform rather than from the test's GOOS override. Exercising this lifecycle
+	// on the runtime platform is what these two agree on.
+	controller, options := controllerFor(t, host, transport, runtime.GOOS)
 	ctx := context.Background()
 	if _, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister}); err != nil {
 		t.Fatal(err)
@@ -244,8 +248,8 @@ func TestUninstallLeavesNothingBehind(t *testing.T) {
 	if final.Phase != PhaseSucceeded {
 		t.Fatalf("uninstall: %+v", final)
 	}
-	if _, still := host.files[definitionPathFor("darwin", options.Home)]; still {
-		t.Fatal("the plist survived uninstall")
+	if _, still := host.files[definitionPathFor(runtime.GOOS, options.Home)]; still {
+		t.Fatal("the definition survived uninstall")
 	}
 	if final.State == nil || final.State.Registered {
 		t.Fatalf("read-back still registered: %+v", final.State)
@@ -326,7 +330,7 @@ func TestUninstallWithoutADrainIsReportedAsForced(t *testing.T) {
 	transport := &fakeTransport{endpoint: liveEndpoint(),
 		healthSequence: []HealthResult{{Alive: true, PID: 4242, BuildID: "build-a"}},
 		stopErr:        errStopRefused}
-	controller, options := controllerFor(t, host, transport, "darwin")
+	controller, options := controllerFor(t, host, transport, runtime.GOOS)
 	ctx := context.Background()
 	if _, err := controller.Begin(ctx, OperationSpec{Action: OperationRegister}); err != nil {
 		t.Fatal(err)
@@ -352,10 +356,16 @@ func TestUninstallWithoutADrainIsReportedAsForced(t *testing.T) {
 	if !final.Forced || final.Drained {
 		t.Fatalf("an uninstall without a drain did not report force: %+v", final)
 	}
-	if final.Termination != TerminationLaunchd {
-		t.Fatalf("termination: %q", final.Termination)
+	// The mechanism is the runtime platform's own forced stop, not one hard-coded
+	// name: launchd has bootout, Windows has the daemon's terminate path.
+	want := TerminationWindows
+	if runtime.GOOS == "darwin" {
+		want = TerminationLaunchd
 	}
-	if _, still := host.files[definitionPathFor("darwin", options.Home)]; still {
+	if final.Termination != want {
+		t.Fatalf("termination: %q, want %q", final.Termination, want)
+	}
+	if _, still := host.files[definitionPathFor(runtime.GOOS, options.Home)]; still {
 		t.Fatal("the definition survived uninstall")
 	}
 }

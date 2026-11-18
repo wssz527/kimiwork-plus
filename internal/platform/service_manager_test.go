@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -118,13 +119,17 @@ func TestRegisterDoesNotEnableLoginStart(t *testing.T) {
 					t.Fatalf("the definition starts at login:\n%s", content)
 				}
 			case "windows":
-				// schtasks cannot create a disabled task, so the plan must create
-				// it and then disable it in the same action.
-				if !strings.Contains(lines, "/Create") {
-					t.Fatalf("the task was not created:\n%s", lines)
+				// Register must not write a Run value: the value is the login-start
+				// mechanism, and a registration that writes it starts at login.
+				if !strings.Contains(lines, " delete ") {
+					t.Fatalf("Register did not remove the Run value:\n%s", lines)
 				}
-				if !strings.Contains(lines, "/Change /TN "+ServiceLabel+" /DISABLE") {
-					t.Fatalf("the task was left enabled after Register:\n%s", lines)
+				if strings.Contains(lines, "/d ") {
+					t.Fatalf("Register wrote a Run value:\n%s", lines)
+				}
+				definition := string(host.files[definitionPathFor(goos, options.Home)])
+				if !strings.Contains(definition, `"loginStart": false`) {
+					t.Fatalf("the definition does not record login start false:\n%s", definition)
 				}
 			}
 			// KeepAlive must never be true: a crash loop would hide the failure.
@@ -202,6 +207,14 @@ func TestUninstallRemovesOnlyItsOwnDefinition(t *testing.T) {
 					t.Fatal("the plist survived Uninstall")
 				}
 			}
+			if goos == "windows" {
+				if _, still := host.files[definitionPathFor(goos, options.Home)]; still {
+					t.Fatal("the definition survived Uninstall")
+				}
+				if !strings.Contains(strings.Join(host.commandLines(), "\n"), " delete ") {
+					t.Fatal("Uninstall did not remove the Run value")
+				}
+			}
 			for _, line := range host.commandLines() {
 				if strings.Contains(line, "Kimi.app") || strings.Contains(line, "Kimi.exe") {
 					t.Fatalf("a service command touches the official application: %s", line)
@@ -256,7 +269,7 @@ func TestStatusWithoutAServiceIsNotAnError(t *testing.T) {
 			host := newFakeHost()
 			// Both platforms' status queries fail when nothing is registered.
 			host.failOn["/bin/launchctl"] = errors.New("exit status 113")
-			host.failOn["schtasks"] = errors.New("ERROR: The system cannot find the file specified.")
+			host.failOn["reg"] = errors.New("ERROR: The system was unable to find the specified registry key or value.")
 			manager, _ := managerFor(t, goos, host)
 			state, err := manager.Status(context.Background())
 			if err != nil {
@@ -273,16 +286,17 @@ func TestStatusWithoutAServiceIsNotAnError(t *testing.T) {
 }
 
 // The state a panel renders must come from the platform's own query, not from the
-// provenance record. A record without a definition is not a service.
+// provenance record. A record without a definition and without a Run value is not a
+// service.
 func TestStatusTrustsThePlatformOverItsOwnRecord(t *testing.T) {
 	host := newFakeHost()
 	manager, options := managerFor(t, "windows", host)
 	ctx := context.Background()
-	// A record exists but schtasks knows nothing: the definition was removed by
-	// hand.
+	// A record exists but the registry knows nothing and no definition was written:
+	// the service was removed by hand.
 	host.files[filepath.Join(options.StateDir, "service-definition.json")] =
 		[]byte(`{"buildId":"build-a","binary":"x","loginStart":true}`)
-	host.failOn["schtasks"] = errors.New("not found")
+	host.failOn["reg"] = errors.New("not found")
 	state, err := manager.Status(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -292,41 +306,68 @@ func TestStatusTrustsThePlatformOverItsOwnRecord(t *testing.T) {
 	}
 }
 
-// A disabled task must report enabled=false even though it exists, because that
-// is the difference between "installed" and "starts at login".
-func TestStatusReadsTheWindowsEnabledFlag(t *testing.T) {
+// A registration without a Run value must report enabled=false, and a Run value
+// must report enabled=true. That difference is the whole point of the split: a
+// registered service that does not start at login is the normal resting state.
+func TestStatusReadsTheWindowsRunValue(t *testing.T) {
 	host := newFakeHost()
-	manager, _ := managerFor(t, "windows", host)
-	host.outputs["schtasks"] = []string{
-		`<?xml version="1.0"?><Task><Settings><Enabled>false</Enabled></Settings></Task>`,
-		"TaskName: \\" + ServiceLabel + "\nStatus:        Ready\n",
+	manager, options := managerFor(t, "windows", host)
+	ctx := context.Background()
+	if _, err := manager.Register(ctx); err != nil {
+		t.Fatal(err)
 	}
-	state, err := manager.Status(context.Background())
+	// `reg query` for a key with no such value exits non-zero and prints only the
+	// key line, which is what a registration without login start looks like.
+	host.failOn["reg"] = errors.New("ERROR: The system was unable to find the specified registry key or value.")
+	state, err := manager.Status(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !state.Registered {
-		t.Fatalf("a task that exists was reported missing: %+v", state)
+		t.Fatalf("a written definition was reported missing: %+v", state)
 	}
 	if state.Enabled {
-		t.Fatalf("a disabled task reported enabled: %+v", state)
+		t.Fatalf("a registration without a Run value reported enabled: %+v", state)
 	}
 	if state.Running {
-		t.Fatalf("a Ready task reported running: %+v", state)
+		t.Fatalf("a stopped daemon reported running: %+v", state)
 	}
 
-	host2 := newFakeHost()
-	manager2, _ := managerFor(t, "windows", host2)
-	host2.outputs["schtasks"] = []string{
-		`<Task><Settings><Enabled>true</Enabled></Settings></Task>`,
-		"Status:        Running\n",
-	}
-	state, err = manager2.Status(context.Background())
+	// Enabling writes the value; the same query now answers with it.
+	delete(host.failOn, "reg")
+	host.used["reg"] = 0
+	host.outputs["reg"] = []string{"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n    " +
+		ServiceLabel + "    REG_SZ    " + windowsCommandLine(ServiceOptions{Binary: options.Binary,
+		StateDir: options.StateDir, LogPath: options.LogPath, Port: options.Port, Home: options.Home}) + "\n\n"}
+	state, err = manager.Status(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.Enabled || !state.Running {
-		t.Fatalf("an enabled, running task: %+v", state)
+	if !state.Enabled || !state.Registered {
+		t.Fatalf("a Run value was not read as enabled: %+v", state)
+	}
+}
+
+// A definition that exists but whose Run value was deleted by hand must report
+// enabled=false: the registry is the mechanism, and claiming otherwise would tell
+// the user a login item exists when it does not.
+func TestStatusDoesNotClaimLoginStartWithoutTheRunValue(t *testing.T) {
+	host := newFakeHost()
+	manager, options := managerFor(t, "windows", host)
+	ctx := context.Background()
+	// A definition written with login start on, then the value removed by hand.
+	host.files[definitionPathFor("windows", options.Home)] = []byte(`{"label":"` + ServiceLabel +
+		`","buildId":"build-a","binary":"x","loginStart":true}`)
+	host.failOn["reg"] = errors.New("ERROR: The system was unable to find the specified registry key or value.")
+	state, err := manager.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Registered {
+		t.Fatalf("the definition was not read as registered: %+v", state)
+	}
+	if state.Enabled {
+		t.Fatalf("the definition claimed login start after the value was removed: %+v", state)
 	}
 }
 
@@ -349,13 +390,23 @@ func TestLaunchdStatusParsingIsConservative(t *testing.T) {
 }
 
 // A failing command in the middle of a plan must abort it, so a half-registered
-// service is never reported as complete.
+// service is never reported as complete. The delete step is best-effort on the
+// registration path, so the assertion uses Enable, whose registry write is not.
 func TestAFailedStepAbortsThePlan(t *testing.T) {
 	host := newFakeHost()
 	manager, _ := managerFor(t, "windows", host)
-	host.failOn["schtasks"] = errors.New("access denied")
-	if _, err := manager.Register(context.Background()); err == nil {
-		t.Fatal("a failed schtasks call reported success")
+	host.failOn["reg"] = errors.New("access denied")
+	if _, err := manager.Enable(context.Background()); err == nil {
+		t.Fatal("a failed reg add reported success")
+	}
+	// A registration whose best-effort delete fails is still a registration: the
+	// definition is on disk and the daemon does not start at login, which is the
+	// state the action promises.
+	host = newFakeHost()
+	manager, _ = managerFor(t, "windows", host)
+	host.failOn["reg"] = errors.New("access denied")
+	if _, err := manager.Register(context.Background()); err != nil {
+		t.Fatalf("Register failed on a best-effort delete: %v", err)
 	}
 }
 
@@ -424,11 +475,21 @@ func TestDescribeMatchesTheRenderedDefinition(t *testing.T) {
 			case "windows":
 				offLines := strings.Join(flatten(off.Install), " ")
 				onLines := strings.Join(flatten(on.Install), " ")
-				if !strings.Contains(offLines, "/DISABLE") {
-					t.Fatalf("the disabled rendering does not disable: %s", offLines)
+				if !strings.Contains(offLines, " delete ") {
+					t.Fatalf("the disabled rendering does not delete the Run value: %s", offLines)
 				}
-				if strings.Contains(onLines, "/DISABLE") {
-					t.Fatalf("the enabled rendering still disables: %s", onLines)
+				if strings.Contains(offLines, "/d ") {
+					t.Fatalf("the disabled rendering writes a Run value: %s", offLines)
+				}
+				if !strings.Contains(onLines, "/d ") {
+					t.Fatalf("the enabled rendering does not write the Run value: %s", onLines)
+				}
+				if !strings.Contains(onLines, "--start-background") {
+					t.Fatalf("the enabled rendering does not start the daemon in the background: %s", onLines)
+				}
+				if !strings.Contains(off.Content, `"loginStart": false`) ||
+					!strings.Contains(on.Content, `"loginStart": true`) {
+					t.Fatal("the rendered definitions do not differ on login start")
 				}
 			}
 			// Describing must not touch the machine.
@@ -468,5 +529,118 @@ func TestOpenManagerRefusesWhatItCannotOperate(t *testing.T) {
 	if _, err := OpenManager(ManagerOptions{Binary: filepath.Join(t.TempDir(), "d"),
 		GOOS: "linux", Host: host}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("linux: %v", err)
+	}
+}
+
+// The Run value is a command line, and Explorer hands it to CreateProcess
+// unchanged. A path with a space and a "+" — which is exactly what the preview is
+// installed under — must survive both parsers, so the quoting rules are checked
+// against known inputs rather than only through a round trip this package wrote.
+func TestQuoteWindowsFollowsCommandLineRules(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`C:\plain.exe`, `"C:\plain.exe"`},
+		{`C:\Program Files\Kimi Work+ Preview\gateway-daemon.exe`,
+			`"C:\Program Files\Kimi Work+ Preview\gateway-daemon.exe"`},
+		{`C:\a\`, `"C:\a\\"`},
+		{`C:\a\"b`, `"C:\a\\\"b"`},
+		{`say "hi"`, `"say \"hi\""`},
+		// A run of backslashes before a quote is doubled and the quote escaped, so
+		// the parser hands back exactly three backslashes and a quote.
+		{`a\\\"`, `"a\\\\\\\""`},
+	} {
+		if got := quoteWindows(tc.in); got != tc.want {
+			t.Fatalf("quoteWindows(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+// reg query output is the only evidence that the Run value exists. A key line, an
+// unrelated value or a different type must not be read as this preview's login
+// item.
+func TestRegistryRunValueParsingIsExact(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		want   bool
+	}{
+		{"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n    " +
+			ServiceLabel + "    REG_SZ    \"C:\\daemon.exe\" --start-background\n", true},
+		{"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\n", false},
+		{"    SomeoneElse    REG_SZ    \"C:\\other.exe\"\n", false},
+		{"    " + ServiceLabel + "    REG_DWORD    0x1\n", false},
+		{"ERROR: The system was unable to find the specified registry key or value.\n", false},
+		{"", false},
+	} {
+		if got := parseRegistryRunValue(tc.output); got != tc.want {
+			t.Fatalf("parseRegistryRunValue(%q) = %v, want %v", tc.output, got, tc.want)
+		}
+	}
+}
+
+// The Windows definition path must be the preview's own file, not the released
+// build's, and it must be inside the user's Roaming directory.
+func TestWindowsDefinitionPathIsThePreviewsOwn(t *testing.T) {
+	home := filepath.Join(string(filepath.Separator), "Users", "someone")
+	path := definitionPathFor("windows", home)
+	if !strings.HasSuffix(path, ServiceLabel+".json") {
+		t.Fatalf("definition path: %q", path)
+	}
+	if !strings.Contains(path, filepath.Join("AppData", "Roaming", "kimi-work-plus-preview")) {
+		t.Fatalf("definition path is not in the preview's own directory: %q", path)
+	}
+	if definitionPathFor("linux", home) != "" {
+		t.Fatal("an unsupported platform produced a definition path")
+	}
+}
+
+// A registration must record the command it registered, because the Run value
+// itself carries no metadata and the panel reads the build back from this file.
+func TestTheWindowsDefinitionRecordsWhatWasRegistered(t *testing.T) {
+	host := newFakeHost()
+	manager, options := managerFor(t, "windows", host)
+	if _, err := manager.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Decoding rather than substring matching keeps the assertion about the values
+	// and not about JSON escaping, which differs per separator.
+	var definition definitionRecord
+	content := host.files[definitionPathFor("windows", options.Home)]
+	if err := json.Unmarshal(content, &definition); err != nil {
+		t.Fatalf("the definition is not JSON: %v\n%s", err, content)
+	}
+	if definition.Label != ServiceLabel || definition.BuildID != "build-a" {
+		t.Fatalf("identity: %+v", definition)
+	}
+	if definition.StateDir != options.StateDir || definition.Binary != options.Binary {
+		t.Fatalf("paths: %+v", definition)
+	}
+	if definition.LoginStart || definition.KeepAlive {
+		t.Fatalf("login start or keep alive was recorded on: %+v", definition)
+	}
+	if !strings.HasPrefix(definition.CommandLine, `"`+options.Binary+`"`) {
+		t.Fatalf("the recorded command line is not quoted: %q", definition.CommandLine)
+	}
+	if !strings.Contains(definition.CommandLine, "--start-background") {
+		t.Fatalf("the recorded command line does not start the daemon in the background: %q", definition.CommandLine)
+	}
+}
+
+// Uninstall must never name the official application, and its forced step must be
+// the daemon's own terminate path rather than a platform kill.
+func TestTheWindowsUninstallTerminatesOnlyItsOwnDaemon(t *testing.T) {
+	host := newFakeHost()
+	manager, options := managerFor(t, "windows", host)
+	description, err := manager.Describe(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminate := strings.Join(description.Uninstall[0], " ")
+	if !strings.Contains(terminate, options.Binary) || !strings.Contains(terminate, "--terminate-daemon") {
+		t.Fatalf("the uninstall does not use the daemon's own terminate path: %s", terminate)
+	}
+	if strings.Contains(terminate, "Kimi.exe") || strings.Contains(terminate, "taskkill") {
+		t.Fatalf("the uninstall names another program: %s", terminate)
+	}
+	if !strings.Contains(strings.Join(description.Uninstall[1], " "), " delete ") {
+		t.Fatal("the uninstall does not remove the Run value")
 	}
 }

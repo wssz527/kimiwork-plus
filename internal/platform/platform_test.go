@@ -97,8 +97,15 @@ func TestEnsurePrivateDirTightensPermissions(t *testing.T) {
 }
 
 func TestServiceDescriptionNeverEnablesItself(t *testing.T) {
-	options := ServiceOptions{Binary: filepath.Join(string(filepath.Separator), "usr", "local", "bin", "daemon"),
-		StateDir: filepath.Join(string(filepath.Separator), "tmp", "state")}
+	// The paths are built the way the target platform builds them, so the absolute
+	// path check is exercised on the platform's own semantics rather than on a
+	// separator the host happens to use.
+	root := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+	options := ServiceOptions{Binary: filepath.Join(root, "usr", "local", "bin", "daemon"),
+		StateDir: filepath.Join(root, "tmp", "state")}
 	description, err := DescribeService(options)
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		if err != nil {
@@ -121,12 +128,27 @@ func TestServiceDescriptionNeverEnablesItself(t *testing.T) {
 		if !strings.Contains(description.Content, "<key>KeepAlive</key>") {
 			t.Fatal("launchd definition does not state KeepAlive")
 		}
-	case "schtasks":
-		if !strings.Contains(strings.Join(flatten(description.Install), " "), "ONLOGON") {
-			t.Fatal("scheduled task is not ONLOGON")
+	case "registry":
+		install := strings.Join(flatten(description.Install), " ")
+		if !strings.Contains(install, "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run") {
+			t.Fatal("the Windows definition does not use the per-user Run key")
 		}
-		if !strings.Contains(strings.Join(flatten(description.Install), " "), "/RL LIMITED") {
-			t.Fatal("scheduled task does not run limited")
+		if !strings.Contains(install, " delete ") {
+			t.Fatal("a registration that does not remove the Run value could start at login")
+		}
+		if strings.Contains(install, "/d ") {
+			t.Fatal("a registration wrote a Run value, which starts it at login")
+		}
+		if !strings.Contains(description.Content, `"loginStart": false`) {
+			t.Fatalf("the definition does not record login start false:\n%s", description.Content)
+		}
+		if !strings.Contains(description.Content, `"keepAlive": false`) {
+			t.Fatalf("the definition does not record keepAlive false:\n%s", description.Content)
+		}
+		// The command line, not the Install list, is what the Run value holds; that
+		// is the place a login start actually starts the daemon.
+		if !strings.Contains(description.Content, "--start-background") {
+			t.Fatalf("the definition does not start the daemon in the background:\n%s", description.Content)
 		}
 	}
 	// The label must be the preview identity, never the released build's.
@@ -139,7 +161,11 @@ func TestServiceDescriptionRefusesRelativePaths(t *testing.T) {
 	if _, err := DescribeService(ServiceOptions{Binary: "daemon"}); err == nil {
 		t.Fatal("a relative binary path was accepted")
 	}
-	if _, err := DescribeService(ServiceOptions{Binary: filepath.Join(string(filepath.Separator), "bin", "d"),
+	root := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+	if _, err := DescribeService(ServiceOptions{Binary: filepath.Join(root, "bin", "d"),
 		StateDir: "relative"}); err == nil {
 		t.Fatal("a relative state directory was accepted")
 	}

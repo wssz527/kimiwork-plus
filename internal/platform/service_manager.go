@@ -27,7 +27,7 @@ import (
 // the app, nothing starts by itself. Collapsing these into one "installed" flag
 // is how a product ends up quietly adding a login item.
 type ManagerState struct {
-	// Kind is "launchd" or "schtasks".
+	// Kind is "launchd" on macOS and "registry" on Windows.
 	Kind string `json:"kind"`
 	// Label is the service identity.
 	Label string `json:"label"`
@@ -210,7 +210,8 @@ func (m *serviceManager) Describe(loginStart bool) (ServiceDescription, error) {
 
 func (m *serviceManager) serviceOptions() ServiceOptions {
 	return ServiceOptions{Binary: m.options.Binary, StateDir: m.options.StateDir,
-		LogPath: m.options.LogPath, Port: m.options.Port, BuildID: m.options.BuildID}
+		LogPath: m.options.LogPath, Port: m.options.Port, BuildID: m.options.BuildID,
+		Home: m.home()}
 }
 
 func (m *serviceManager) transport() DaemonTransport {
@@ -261,7 +262,7 @@ func (m *serviceManager) uid() string {
 	return currentUID()
 }
 
-// target is the launchd service target, or the task name on Windows.
+// target is the launchd service target, or the registry value name on Windows.
 func (m *serviceManager) target() string {
 	if m.goos == "darwin" {
 		return "gui/" + m.uid() + "/" + ServiceLabel
@@ -301,7 +302,7 @@ func (m *serviceManager) plan(action string) ([]step, error) {
 	case "darwin":
 		return launchdPlan(action, options, definition, m.uid())
 	case "windows":
-		return schtasksPlan(action, options, definition)
+		return windowsPlan(action, options, definition, m.options.StateDir)
 	}
 	return nil, ErrUnsupported
 }
@@ -365,61 +366,77 @@ func launchdPlan(action string, options ServiceOptions, definition, uid string) 
 	return nil, fmt.Errorf("service_action_unknown")
 }
 
-// schtasksPlan is the Windows action plan.
+// windowsPlan is the Windows action plan.
 //
-// The task is created ONLOGON with /RL LIMITED, which is the documented way to
-// run as the signed-in user without elevation, and then immediately disabled.
-// That combination is deliberate: schtasks has no "create without a trigger"
-// form, and a task that exists but is disabled cannot start anything at login.
-// Enable is the only step that makes it active.
+// The mechanism is the per-user Run key, not a scheduled task. A medium integrity
+// desktop process cannot create an ONLOGON task: the Task Scheduler refuses it with
+// ERROR_ACCESS_DENIED, and requiring elevation for the product's own flow is
+// exactly what this design avoids. HKCU\...\Run belongs to the signed-in user, so
+// it needs no elevation and no service manager, and the Explorer shell reads it at
+// login.
 //
-// /End is not a graceful stop: it terminates the task's process and does not ask
-// it to drain. It appears only in a forced path, and every caller that uses it
-// reports a forced termination.
-func schtasksPlan(action string, options ServiceOptions, definition string) ([]step, error) {
-	commandLine := taskCommandLine(options)
-	task := func(args ...string) step {
-		return step{Command: &commandStep{Name: "schtasks", Args: append([]string{args[0], "/TN", ServiceLabel}, args[1:]...)}}
+// Register removes the value instead of adding it, which is what makes
+// "registered but not enabled" true: the definition file exists and nothing starts
+// at login. Enable is the only step that writes the value, and Disable removes it
+// again without deleting the definition or interrupting the daemon.
+//
+// Terminate calls the daemon's own --terminate-daemon path rather than a platform
+// kill: that path verifies the recorded pid is still this binary before ending it,
+// so a reused pid cannot take an unrelated program with it, and the official
+// application is never a candidate. It appears only in a forced path or as an
+// uninstall fallback, and every caller that uses it reports a forced termination.
+func windowsPlan(action string, options ServiceOptions, definition, stateDir string) ([]step, error) {
+	write := func(loginStart bool) []step {
+		description, err := describeServiceFor("windows", options, loginStart)
+		if err != nil {
+			return nil
+		}
+		return []step{{WriteFile: &fileStep{Path: definition, Content: description.Content, Mode: 0o600}}}
+	}
+	startArgs := append([]string{"--start-background"}, serviceArguments(options)...)
+	if options.LogPath != "" {
+		startArgs = append(startArgs, "--log-path", options.LogPath)
+	}
+	terminateArgs := []string{"--terminate-daemon"}
+	if stateDir != "" {
+		terminateArgs = append(terminateArgs, "--state-dir", stateDir)
+	}
+	start := func() step {
+		return step{Command: &commandStep{Name: options.Binary, Args: startArgs}}
 	}
 	switch action {
 	case actionRegister:
-		return []step{
-			{Command: &commandStep{Name: "schtasks", Args: []string{"/Create", "/F", "/SC", "ONLOGON",
-				"/RL", "LIMITED", "/TN", ServiceLabel, "/TR", commandLine}}},
-			task("/Change", "/DISABLE"),
-		}, nil
+		// The value is deleted first so a registration on a machine that already
+		// had login start on cannot leave it on.
+		return append(write(false), step{Command: registryStep(registryDeleteArgs...), IgnoreFailure: true}), nil
 	case actionEnable:
-		return []step{task("/Change", "/ENABLE")}, nil
+		// The value is written first: a definition that claims login start while
+		// the registry disagrees would make Status report a state nobody set.
+		enable := registryStep(append(append([]string{}, registryAddArgs...), "/d", windowsCommandLine(options), "/f")...)
+		return append([]step{{Command: enable}}, write(true)...), nil
 	case actionDisable:
-		return []step{task("/Change", "/DISABLE")}, nil
+		return append([]step{{Command: registryStep(registryDeleteArgs...), IgnoreFailure: true}}, write(false)...), nil
 	case actionStart, actionRestart:
-		return []step{task("/Run")}, nil
+		// The caller has already drained the old daemon for a restart; a start that
+		// finds a healthy daemon returns without spawning a second one.
+		return []step{start()}, nil
 	case actionTerminate:
-		// /End kills the task's process. It is a forced termination and is never
-		// described as a drain.
-		return []step{{Command: &commandStep{Name: "schtasks", Args: []string{"/End", "/TN", ServiceLabel}}, IgnoreFailure: true}}, nil
+		return []step{{Command: &commandStep{Name: options.Binary, Args: terminateArgs}, IgnoreFailure: true}}, nil
 	case actionStatus:
-		return []step{
-			task("/Query", "/XML"),
-			task("/Query", "/FO", "LIST"),
-		}, nil
+		return []step{{Command: registryStep(registryQueryArgs...)}}, nil
 	case actionUninstall:
 		return []step{
-			{Command: &commandStep{Name: "schtasks", Args: []string{"/End", "/TN", ServiceLabel}}, IgnoreFailure: true},
-			{Command: &commandStep{Name: "schtasks", Args: []string{"/Delete", "/F", "/TN", ServiceLabel}}},
+			{Command: &commandStep{Name: options.Binary, Args: terminateArgs}, IgnoreFailure: true},
+			{Command: registryStep(registryDeleteArgs...), IgnoreFailure: true},
+			{RemovePath: definition, IgnoreFailure: true},
 		}, nil
 	}
 	return nil, fmt.Errorf("service_action_unknown")
 }
 
-// taskCommandLine is what the task runs: the daemon with its arguments, quoted
-// the way schtasks stores and CreateProcess parses.
-func taskCommandLine(options ServiceOptions) string {
-	commandLine := quoteWindows(options.Binary)
-	for _, argument := range serviceArguments(options) {
-		commandLine += " " + quoteWindows(argument)
-	}
-	return commandLine
+// registryStep is one reg command, named once so no step can run an empty program.
+func registryStep(args ...string) *commandStep {
+	return &commandStep{Name: registryProgram, Args: args}
 }
 
 const (
@@ -582,14 +599,35 @@ func (m *serviceManager) Status(ctx context.Context) (ManagerState, error) {
 		}
 		state.Registered = registered
 	case "windows":
+		// The Run value is the login-start mechanism, so the registry is what
+		// answers "enabled". The definition file answers "registered" and carries
+		// the build that wrote it.
+		runEnabled := false
 		if len(outputs) > 0 {
-			if enabled, ok := parseSchtasksEnabled(outputs[0]); ok {
-				state.Registered, state.Enabled = true, enabled
+			runEnabled = parseRegistryRunValue(outputs[0])
+		}
+		registered := false
+		if content, readErr := m.host.ReadFile(state.DefinitionPath); readErr == nil {
+			var definition definitionRecord
+			if json.Unmarshal(content, &definition) == nil && definition.Label == ServiceLabel {
+				registered = true
+				state.RegisteredBuildID = definition.BuildID
 			}
 		}
-		if len(outputs) > 1 {
-			if running, ok := parseSchtasksStatus(outputs[1]); ok {
-				state.Running = running
+		// A value someone wrote by hand is still a registration; a definition file
+		// whose value was removed is registered but not enabled. Neither alone is
+		// reported as the other.
+		state.Registered = registered || runEnabled
+		state.Enabled = runEnabled
+		if m.options.StateDir != "" {
+			// The daemon reports its own pid, so a running process is read from the
+			// endpoint record rather than from a platform query that does not exist
+			// for a Run value.
+			if endpoint, endpointErr := m.transport().Endpoint(m.options.StateDir); endpointErr == nil {
+				health := m.transport().Health(ctx, endpoint)
+				if health.Alive && health.PID == endpoint.PID {
+					state.Running, state.PID = true, health.PID
+				}
 			}
 		}
 	}
@@ -616,18 +654,22 @@ func (m *serviceManager) Status(ctx context.Context) (ManagerState, error) {
 
 func kindFor(goos string) string {
 	if goos == "windows" {
-		return "schtasks"
+		return "registry"
 	}
 	return "launchd"
 }
 
-// definitionPathFor is the plist location. A scheduled task has none, because
-// the definition lives in the task database.
+// definitionPathFor is where each platform's definition lives. macOS uses a
+// LaunchAgent plist; Windows keeps a JSON record next to the preview's own
+// configuration, because the Run value itself carries no metadata to read back.
 func definitionPathFor(goos, home string) string {
-	if goos != "darwin" {
-		return ""
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".plist")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", "kimi-work-plus-preview", "service", ServiceLabel+".json")
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".plist")
+	return ""
 }
 
 // plistRunAtLoad reads the login-start flag back out of a rendered definition.
@@ -677,17 +719,22 @@ func plistString(content, key string) string {
 
 // definitionRecord is what this build wrote when it registered the service.
 //
-// schtasks offers no free-form metadata that survives a round trip, so the build
-// identity cannot live in the task itself. Recording it in the state directory is
-// the honest alternative: it says what *this build* wrote, and a definition
-// written by another build simply has no record here, which Status reports as
-// "unknown" rather than as a match.
+// The Run value carries only a command line, so the build identity cannot live in
+// the registry. Recording it in the definition file is the honest alternative: it
+// says what *this build* wrote, and a definition written by another build simply
+// has no record here, which Status reports as "unknown" rather than as a match.
 type definitionRecord struct {
-	BuildID    string `json:"buildId"`
-	Binary     string `json:"binary"`
-	StateDir   string `json:"stateDir,omitempty"`
-	Port       string `json:"port,omitempty"`
-	LoginStart bool   `json:"loginStart"`
+	Label       string `json:"label,omitempty"`
+	BuildID     string `json:"buildId"`
+	Binary      string `json:"binary"`
+	StateDir    string `json:"stateDir,omitempty"`
+	Port        string `json:"port,omitempty"`
+	LogPath     string `json:"logPath,omitempty"`
+	CommandLine string `json:"commandLine,omitempty"`
+	LoginStart  bool   `json:"loginStart"`
+	// KeepAlive is always false: the shell starts the daemon once at login, and a
+	// crash loop would hide the failure instead of reporting it.
+	KeepAlive bool `json:"keepAlive"`
 }
 
 // recordPath is where the record lives, or "" when there is no state directory to
@@ -707,7 +754,12 @@ func (m *serviceManager) writeRecord(loginStart bool) {
 		return
 	}
 	record := definitionRecord{BuildID: m.options.BuildID, Binary: m.options.Binary,
-		StateDir: m.options.StateDir, Port: m.options.Port, LoginStart: loginStart}
+		StateDir: m.options.StateDir, Port: m.options.Port, LogPath: m.options.LogPath,
+		LoginStart: loginStart}
+	if m.goos == "windows" {
+		record.Label = ServiceLabel
+		record.CommandLine = windowsCommandLine(m.serviceOptions())
+	}
 	encoded, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return
@@ -754,33 +806,25 @@ func parseLaunchdPrint(output string) (running bool, pid int, ok bool) {
 	return running, pid, ok
 }
 
-// parseSchtasksEnabled reads <Settings><Enabled> from `schtasks /Query /XML`.
-func parseSchtasksEnabled(output string) (enabled bool, ok bool) {
-	index := strings.Index(output, "<Enabled>")
-	if index < 0 {
-		return false, false
-	}
-	rest := output[index+len("<Enabled>"):]
-	end := strings.Index(rest, "</Enabled>")
-	if end < 0 {
-		return false, false
-	}
-	return strings.EqualFold(strings.TrimSpace(rest[:end]), "true"), true
-}
-
-// parseSchtasksStatus reads the Status line of `schtasks /Query /FO LIST`.
-func parseSchtasksStatus(output string) (running bool, ok bool) {
+// parseRegistryRunValue reads `reg query` output and reports whether this
+// preview's value exists. Both the value name and the REG_SZ type must be present:
+// a key that exists but has no such value is "not enabled", and a truncated or
+// localized output must not be read as one.
+func parseRegistryRunValue(output string) bool {
 	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-		value, found := strings.CutPrefix(trimmed, "Status:")
-		if !found {
+		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if trimmed == "" {
 			continue
 		}
-		value = strings.TrimSpace(value)
-		if value == "" {
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], ServiceLabel) {
 			continue
 		}
-		return strings.EqualFold(value, "Running"), true
+		for _, field := range fields[1:] {
+			if strings.EqualFold(field, "REG_SZ") {
+				return true
+			}
+		}
 	}
-	return false, false
+	return false
 }
