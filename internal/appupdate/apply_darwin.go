@@ -32,23 +32,90 @@ func waitForProcessExit(pid int, timeout time.Duration) {
 
 func stopTargetDesktop(targetApp string, logf func(string, ...any)) {
 	desktopBin := filepath.Join(targetApp, "Contents", "MacOS", "KimiWorkPlus")
-	_ = exec.Command("pkill", "-TERM", "-f", desktopBin).Run()
+	pids := findProcessPIDsForBinary(desktopBin)
+	if len(pids) == 0 {
+		logf("no running desktop processes matched %s", desktopBin)
+		return
+	}
+	logf("stopping %d desktop process(es) for %s: %v", len(pids), targetApp, pids)
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := exec.Command("pgrep", "-f", desktopBin).Run(); err != nil {
-			break
+		pids = findProcessPIDsForBinary(desktopBin)
+		if len(pids) == 0 {
+			logf("stopped desktop processes cleanly via SIGTERM for %s", targetApp)
+			return
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	_ = exec.Command("pkill", "-KILL", "-f", desktopBin).Run()
+	logf("desktop process(es) still alive after SIGTERM, sending SIGKILL: %v", pids)
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := exec.Command("pgrep", "-f", desktopBin).Run(); err != nil {
-			break
+		pids = findProcessPIDsForBinary(desktopBin)
+		if len(pids) == 0 {
+			logf("stopped desktop processes via SIGKILL for %s", targetApp)
+			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	logf("stopped desktop processes for %s", targetApp)
+	logf("warning: desktop process(es) remained alive after SIGKILL: %v", pids)
+}
+
+func findProcessPIDsForBinary(binaryPath string) []int {
+	out, err := exec.Command("/bin/ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+	candidates := []string{filepath.Clean(binaryPath)}
+	if resolved, err := filepath.EvalSymlinks(binaryPath); err == nil && resolved != "" {
+		cleanResolved := filepath.Clean(resolved)
+		if cleanResolved != candidates[0] {
+			candidates = append(candidates, cleanResolved)
+		}
+	}
+	seen := map[int]bool{}
+	var pids []int
+	for _, target := range candidates {
+		for _, pid := range matchingBinaryPIDs(string(out), target, os.Getpid()) {
+			if !seen[pid] {
+				seen[pid] = true
+				pids = append(pids, pid)
+			}
+		}
+	}
+	return pids
+}
+
+func matchingBinaryPIDs(psOutput, binaryPath string, selfPID int) []int {
+	if binaryPath == "" {
+		return nil
+	}
+	cleanTarget := filepath.Clean(binaryPath)
+	var pids []int
+	for _, line := range strings.Split(psOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		sp := strings.IndexAny(trimmed, " \t")
+		if sp <= 0 {
+			continue
+		}
+		pid := 0
+		if _, err := fmt.Sscanf(trimmed[:sp], "%d", &pid); err != nil || pid <= 0 || pid == selfPID {
+			continue
+		}
+		cmdLine := strings.TrimLeft(trimmed[sp:], " \t")
+		if cmdLine == cleanTarget || strings.HasPrefix(cmdLine, cleanTarget+" ") || strings.HasPrefix(cmdLine, cleanTarget+"\t") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func validateStagedArtifact(stagedApp string) error {

@@ -292,7 +292,9 @@ func waitForUpdatedHealth(plan ApplyPlan, timeout time.Duration) (daemonHealth, 
 
 func stopRunningDaemon(stateDir string, prevPID int, logf func(string, ...any)) {
 	transport := platform.HTTPTransport{Timeout: 2 * time.Second}
+	endpointPID := 0
 	if ep, err := transport.Endpoint(stateDir); err == nil {
+		endpointPID = ep.PID
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		_ = transport.Stop(ctx, ep)
 		cancel()
@@ -310,7 +312,10 @@ func stopRunningDaemon(stateDir string, prevPID int, logf func(string, ...any)) 
 	if prevPID > 0 {
 		waitForProcessExit(prevPID, 5*time.Second)
 	}
-	logf("previous daemon stopped")
+	if endpointPID > 0 && endpointPID != prevPID {
+		waitForProcessExit(endpointPID, 5*time.Second)
+	}
+	logf("previous daemon stopped (planPid=%d endpointPid=%d)", prevPID, endpointPID)
 }
 
 func openApplyLog(stateDir string) *os.File {
