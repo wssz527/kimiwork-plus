@@ -2,7 +2,7 @@
 
 Kimi Work+ 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增强套件（Go + Wails 原生应用）。它在不修改官方程序包体的前提下，通过官方配置、页面接口、受管 CDP 管道和标准本地回环接口，为 Kimi Work 接入第三方模型服务商，并提供多账号热切换、用量账本、预算保护、故障转移与可选页面增强。
 
-> **许可声明**：本项目为**源码公开、非商业许可**软件，采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。**非商业使用免费，商业使用需另行联系作者。** 本许可证不属于 OSI 定义的开源许可证。
+> **开源许可**：本项目基于 [MIT License](LICENSE) 开源。
 
 ## 核心能力
 
@@ -118,6 +118,6 @@ VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/windows.sh
 
 ## 许可证、第三方声明与贡献
 
-- **软件许可**：[PolyForm Noncommercial License 1.0.0](LICENSE)（源码公开、非商业许可；**非商业使用免费，商业使用需另行联系作者**）。
+- **开源许可**：[MIT License](LICENSE)。
 - **第三方组件声明**：见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)（包含 macOS 与 Windows 构建涉及的全部第三方 Go 模块原始版权与许可全文）。
 - **贡献说明**：提交 PR 或补丁前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
