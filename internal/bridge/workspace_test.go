@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func TestWorkspaceSavesConnectionsAndModelsAtomically(t *testing.T) {

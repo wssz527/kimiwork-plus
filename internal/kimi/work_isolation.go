@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
-	"github.com/wssz527/kimi-work-plus/internal/platform"
+	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/platform"
 )
 
 var errWorkStorageConflict = errors.New("work_storage_restore_conflict")

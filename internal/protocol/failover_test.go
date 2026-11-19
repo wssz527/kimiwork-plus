@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 // failoverGateway wires one gateway whose model names a primary and standby

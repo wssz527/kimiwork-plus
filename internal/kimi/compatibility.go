@@ -37,7 +37,7 @@ const (
 )
 
 // VerifiedOfficialVersions lists the official Kimi desktop versions that have
-// been verified end-to-end with Kimi Work+.
+// been verified end-to-end with KimiWork +.
 var VerifiedOfficialVersions = []string{"3.2.27", "3.2.28"}
 
 func IsVerifiedOfficialVersion(version string) bool {

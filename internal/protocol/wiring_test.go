@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wssz527/kimi-work-plus/internal/ledger"
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/ledger"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 // This file is the wiring the daemon does: one gateway whose sink writes a real

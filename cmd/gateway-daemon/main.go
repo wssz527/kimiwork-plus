@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/appupdate"
-	"github.com/wssz527/kimi-work-plus/internal/bridge"
-	"github.com/wssz527/kimi-work-plus/internal/core"
-	"github.com/wssz527/kimi-work-plus/internal/kimi"
-	"github.com/wssz527/kimi-work-plus/internal/platform"
+	"github.com/wssz527/kimiwork-plus/internal/appupdate"
+	"github.com/wssz527/kimiwork-plus/internal/bridge"
+	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
+	"github.com/wssz527/kimiwork-plus/internal/platform"
 )
 
 func main() {
@@ -54,7 +54,7 @@ func run() error {
 		if err := bridge.StopDaemon(*dir); err != nil {
 			return err
 		}
-		fmt.Println("Kimi Work+ daemon stopped")
+		fmt.Println("KimiWork + daemon stopped")
 		return nil
 	}
 	absolute, e := filepath.Abs(*dir)
@@ -179,7 +179,7 @@ func run() error {
 		updates.Close()
 		return e
 	}
-	fmt.Println("Kimi Work+ daemon ready")
+	fmt.Println("KimiWork + daemon ready")
 	<-ctx.Done()
 	deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

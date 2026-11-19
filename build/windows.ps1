@@ -13,9 +13,9 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
-$Flags = "-s -w -X github.com/wssz527/kimi-work-plus/internal/bridge.Version=$Version -X github.com/wssz527/kimi-work-plus/internal/bridge.BuildID=$BuildId"
-if ($UpdatePublicKey) { $Flags += " -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultPublicKeyHex=$UpdatePublicKey" }
-if ($UpdateGitHubRepo) { $Flags += " -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultGitHubRepo=$UpdateGitHubRepo" }
+$Flags = "-s -w -X github.com/wssz527/kimiwork-plus/internal/bridge.Version=$Version -X github.com/wssz527/kimiwork-plus/internal/bridge.BuildID=$BuildId"
+if ($UpdatePublicKey) { $Flags += " -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultPublicKeyHex=$UpdatePublicKey" }
+if ($UpdateGitHubRepo) { $Flags += " -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultGitHubRepo=$UpdateGitHubRepo" }
 
 $DesktopExe = Join-Path $OutputDir "KimiWorkPlus.exe"
 $DaemonExe = Join-Path $OutputDir "gateway-daemon.exe"

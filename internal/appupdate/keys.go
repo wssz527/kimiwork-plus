@@ -14,7 +14,7 @@ var (
 
 	// DefaultGitHubRepo is the GitHub Releases repository ("owner/repo") queried
 	// when no explicit feed URL is configured. Overridable at build time via -ldflags -X.
-	DefaultGitHubRepo = "wssz527/kimi-work-plus"
+	DefaultGitHubRepo = "wssz527/kimiwork-plus"
 
 	// DefaultGitHubAPIBase is the GitHub API origin.
 	DefaultGitHubAPIBase = "https://api.github.com"

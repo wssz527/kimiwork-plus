@@ -16,7 +16,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
-	"github.com/wssz527/kimi-work-plus/internal/platform"
+	"github.com/wssz527/kimiwork-plus/internal/platform"
 )
 
 const (

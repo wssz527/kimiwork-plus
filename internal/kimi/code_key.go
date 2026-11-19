@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func (c *Controller) KimiCodeKey() string {

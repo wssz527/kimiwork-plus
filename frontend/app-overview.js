@@ -915,7 +915,7 @@ function renderUpdates(data) {
     }
     if (overviewCard) {
       overviewCard.hidden = false;
-      setText($('overview-update-title'), `发现 Kimi Work+ 新版本 ${available.version}`);
+      setText($('overview-update-title'), `发现 KimiWork + 新版本 ${available.version}`);
       setText($('overview-update-notes'), available.notes || '包含稳定性修复与新功能，下载并验签后在空闲时替换重启。');
     }
   } else {
@@ -943,7 +943,7 @@ function renderUpdates(data) {
         setText(progressLabel, updates.idleReason || '正在等待 Kimi Work 与本机网关空闲后再替换…');
       } else {
         progressBar.style.width = '100%';
-        setText(progressLabel, '正在替换安装包并重启 Kimi Work+，网关恢复后页面会自动重连…');
+        setText(progressLabel, '正在替换安装包并重启 KimiWork +，网关恢复后页面会自动重连…');
       }
     } else {
       progressWrap.hidden = true;

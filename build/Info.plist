@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleName</key><string>Kimi Work+</string>
-<key>CFBundleDisplayName</key><string>Kimi Work+</string>
+<key>CFBundleDisplayName</key><string>KimiWork +</string>
 <key>CFBundleExecutable</key><string>KimiWorkPlus</string>
 <key>CFBundleIdentifier</key><string>dev.kimi-work-plus</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>

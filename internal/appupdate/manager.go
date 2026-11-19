@@ -17,7 +17,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/updater"
 	"github.com/wailsapp/wails/v3/pkg/updater/providers/endpoint"
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 const (

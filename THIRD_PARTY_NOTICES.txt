@@ -1,7 +1,7 @@
 THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
 ============================================
 
-Kimi Work+ incorporates the following third-party open-source Go components
+KimiWork + incorporates the following third-party open-source Go components
 (audited across macOS arm64/amd64 and Windows amd64 release builds, plus
 all modules listed in go.mod). The frontend contains no third-party
 JavaScript, CSS, or font libraries. All listed components use permissive

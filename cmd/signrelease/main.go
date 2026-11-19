@@ -99,7 +99,7 @@ func main() {
 		PublishedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	if m.Name == "" {
-		m.Name = "Kimi Work+ " + m.Version
+		m.Name = "KimiWork + " + m.Version
 	}
 
 	for _, spec := range artifacts {

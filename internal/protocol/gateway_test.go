@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 const gatewayKey = "synthetic-review-key"

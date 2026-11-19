@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/assets/injection"
+	"github.com/wssz527/kimiwork-plus/assets/injection"
 )
 
 // The managed child is a stand-in for Kimi: this binary re-entered with

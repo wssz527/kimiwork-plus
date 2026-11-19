@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
-	"github.com/wssz527/kimi-work-plus/internal/ledger"
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/ledger"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 // budgetGate is the daemon's answer to the protocol layer's two questions: may

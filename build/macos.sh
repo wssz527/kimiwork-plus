@@ -14,12 +14,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 export MACOSX_DEPLOYMENT_TARGET=13.0
 export CGO_ENABLED=1
-LDFLAGS="-s -w -X github.com/wssz527/kimi-work-plus/internal/bridge.Version=$VERSION -X github.com/wssz527/kimi-work-plus/internal/bridge.BuildID=$BUILD_ID"
+LDFLAGS="-s -w -X github.com/wssz527/kimiwork-plus/internal/bridge.Version=$VERSION -X github.com/wssz527/kimiwork-plus/internal/bridge.BuildID=$BUILD_ID"
 if [ -n "${UPDATE_PUBLIC_KEY:-}" ]; then
-  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultPublicKeyHex=$UPDATE_PUBLIC_KEY"
+  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultPublicKeyHex=$UPDATE_PUBLIC_KEY"
 fi
 if [ -n "${UPDATE_GITHUB_REPO:-}" ]; then
-  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
+  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
 fi
 
 build_arch() {

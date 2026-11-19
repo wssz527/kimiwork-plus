@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 func TestParseBudgetAcceptsACompleteDocument(t *testing.T) {

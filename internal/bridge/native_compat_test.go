@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
-	"github.com/wssz527/kimi-work-plus/internal/kimi"
+	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
 
 func waitNativeOperation(t *testing.T, n *Native, id string) core.Document {

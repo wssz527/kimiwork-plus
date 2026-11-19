@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func stagedRefs(t *testing.T, d core.Document) []string {

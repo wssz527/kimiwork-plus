@@ -12,7 +12,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
-	"github.com/wssz527/kimi-work-plus/internal/bridge"
+	"github.com/wssz527/kimiwork-plus/internal/bridge"
 )
 
 func main() {
@@ -40,14 +40,14 @@ func main() {
 	if startupErr == nil {
 		encryptionKey = sha256.Sum256([]byte(ep.Key))
 	}
-	app := application.New(application.Options{Name: "Kimi Work+", Description: "Kimi Work local gateway and enhancement suite", SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
 			openWindow()
 		}
 	}}, Mac: application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: false}})
 	if startupErr != nil {
 		app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
-			app.Dialog.Error().SetTitle("Kimi Work+ 无法启动").SetMessage("本机后台或窗口初始化未完成。请检查状态目录权限和网关日志后重试。\n\n诊断信息：" + startupErr.Error()).Show()
+			app.Dialog.Error().SetTitle("KimiWork + 无法启动").SetMessage("本机后台或窗口初始化未完成。请检查状态目录权限和网关日志后重试。\n\n诊断信息：" + startupErr.Error()).Show()
 			app.Quit()
 		})
 		if err := app.Run(); err != nil {
@@ -57,7 +57,7 @@ func main() {
 	}
 
 	window = app.Window.NewWithOptions(platformWindowOptions(application.WebviewWindowOptions{
-		Title:                "Kimi Work+",
+		Title:                "KimiWork +",
 		Width:                *width,
 		Height:               *height,
 		MinWidth:             1024,
@@ -135,21 +135,21 @@ func main() {
 	app.Menu.Set(menu)
 	tray := app.SystemTray.New()
 	tray.SetLabel("K+")
-	tray.SetTooltip("Kimi Work+")
+	tray.SetTooltip("KimiWork +")
 	diagnostics := &windowDiagnostics{}
 	window.OnWindowEvent(events.Mac.WebViewWebContentProcessDidTerminate, func(*application.WindowEvent) {
 		diagnostics.Failed()
 		tray.SetLabel("K+ · 页面加载失败")
-		tray.SetTooltip("Kimi Work+ · 页面加载失败")
+		tray.SetTooltip("KimiWork + · 页面加载失败")
 	})
 	trayMenu := app.NewMenu()
-	trayMenu.Add("打开 Kimi Work+").OnClick(func(*application.Context) { openWindow() })
+	trayMenu.Add("打开 KimiWork +").OnClick(func(*application.Context) { openWindow() })
 	trayMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
 		message := "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
 		if diagnostics.Status() == "web_content_process_terminated" {
 			message = "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
 		}
-		app.Dialog.Info().SetTitle("Kimi Work+ 窗口诊断").SetMessage(message).Show()
+		app.Dialog.Info().SetTitle("KimiWork + 窗口诊断").SetMessage(message).Show()
 	})
 	trayMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
 		path, err := diagnostics.Export(*dir)
@@ -167,7 +167,7 @@ func main() {
 	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })
 	tray.SetMenu(trayMenu)
 	if err := app.Run(); err != nil {
-		app.Dialog.Error().SetTitle("Kimi Work+ 窗口启动失败").SetMessage("系统未能创建应用窗口。请重新打开应用；若仍失败，请导出窗口诊断。\n\n诊断信息：" + err.Error()).Show()
+		app.Dialog.Error().SetTitle("KimiWork + 窗口启动失败").SetMessage("系统未能创建应用窗口。请重新打开应用；若仍失败，请导出窗口诊断。\n\n诊断信息：" + err.Error()).Show()
 		log.Printf("desktop_window_failed: %v", err)
 	}
 }

@@ -1,10 +1,10 @@
-# Kimi Work+ 构建与开发说明（Go / Wails）
+# KimiWork + 构建与开发说明（Go / Wails）
 
-本目录是 Kimi Work+ 1.0.0 正式实现（Go + Wails v3）的完整源码。产品通过官方配置文件、官方页面接口、受管 CDP 管道与本地回环网关接入官方 Kimi 桌面版 Work，不修改官方程序包体，也不代理官方更新。对外使用说明见 [README.md](README.md)，许可与第三方声明见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
+本目录是 KimiWork + 1.0.0 正式实现（Go + Wails v3）的完整源码。产品通过官方配置文件、官方页面接口、受管 CDP 管道与本地回环网关接入官方 Kimi 桌面版 Work，不修改官方程序包体，也不代理官方更新。对外使用说明见 [README.md](README.md)，许可与第三方声明见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
 
 ## 工具链与打包
 
-- Go 1.26.10（由 `go.mod` 的 `toolchain` 锁定，模块路径 `github.com/wssz527/kimi-work-plus`）。
+- Go 1.26.10（由 `go.mod` 的 `toolchain` 锁定，模块路径 `github.com/wssz527/kimiwork-plus`）。
 - Wails v3.1.0 稳定版（由 `go.mod` / `go.sum` 锁定，无需安装全局 Wails CLI）。
 - macOS（Universal：arm64 + amd64）：Xcode Command Line Tools、系统 WebKit、`codesign`、`lipo`、`hdiutil`。
 - Windows（amd64）：纯 Go 交叉编译（`CGO_ENABLED=0`），运行时使用系统 WebView2。
@@ -63,7 +63,7 @@ if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 Windows 使用 `build/windows.ps1 -BuildId <build-id>` 或以下等价命令生成同身份 PE 文件：
 
 ```powershell
-$flags = "-s -w -X github.com/wssz527/kimi-work-plus/internal/bridge.BuildID=<build-id>"
+$flags = "-s -w -X github.com/wssz527/kimiwork-plus/internal/bridge.BuildID=<build-id>"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/KimiWorkPlus.exe ./cmd/desktop
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/gateway-daemon.exe ./cmd/gateway-daemon
 ```

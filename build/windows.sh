@@ -10,12 +10,12 @@ mkdir -p "$OUTPUT_DIR"
 export GOOS=windows
 export GOARCH=amd64
 export CGO_ENABLED=0
-LDFLAGS="-s -w -X github.com/wssz527/kimi-work-plus/internal/bridge.Version=$VERSION -X github.com/wssz527/kimi-work-plus/internal/bridge.BuildID=$BUILD_ID"
+LDFLAGS="-s -w -X github.com/wssz527/kimiwork-plus/internal/bridge.Version=$VERSION -X github.com/wssz527/kimiwork-plus/internal/bridge.BuildID=$BUILD_ID"
 if [ -n "${UPDATE_PUBLIC_KEY:-}" ]; then
-  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultPublicKeyHex=$UPDATE_PUBLIC_KEY"
+  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultPublicKeyHex=$UPDATE_PUBLIC_KEY"
 fi
 if [ -n "${UPDATE_GITHUB_REPO:-}" ]; then
-  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimi-work-plus/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
+  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
 fi
 
 "$GO" build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o "$OUTPUT_DIR/KimiWorkPlus.exe" ./cmd/desktop

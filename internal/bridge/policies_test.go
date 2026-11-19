@@ -3,7 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 	"os"
 	"path/filepath"
 	"strings"

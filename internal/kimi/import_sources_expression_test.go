@@ -74,8 +74,8 @@ func TestSourceImportUpgradesDefaultKTHDisplayName(t *testing.T) {
 		existing string
 		want     string
 	}{
-		{"empty displayName becomes Kimi Work+", "", "Kimi Work+"},
-		{"legacy KTH displayName upgrades to Kimi Work+", "KTH", "Kimi Work+"},
+		{"empty displayName becomes KimiWork +", "", "KimiWork +"},
+		{"legacy KTH displayName upgrades to KimiWork +", "KTH", "KimiWork +"},
 		{"custom displayName is preserved", "My Gateway", "My Gateway"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

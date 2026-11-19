@@ -1,4 +1,4 @@
-module github.com/wssz527/kimi-work-plus
+module github.com/wssz527/kimiwork-plus
 
 go 1.26.0
 

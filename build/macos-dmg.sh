@@ -31,7 +31,7 @@ ditto "$APP" "$STAGE/Kimi Work+.app"
 ln -s /Applications "$STAGE/Applications"
 
 cat > "$STAGE/首次打开说明.txt" <<'EOF'
-Kimi Work+ 安装与首次打开说明（macOS）
+KimiWork + 安装与首次打开说明（macOS）
 ========================================
 
 1. 将“Kimi Work+.app”拖入右侧的“Applications（应用程序）”文件夹。
@@ -44,7 +44,7 @@ Kimi Work+ 安装与首次打开说明（macOS）
    方法 A（系统设置）：
    - 在“应用程序”中先双击一次“Kimi Work+.app”，出现拦截弹窗后点“完成”或“取消”；
    - 打开“系统设置 -> 隐私与安全性”，滑到页面下方“安全性”区域；
-   - 点击“Kimi Work+”右侧的“仍要打开”，输入本机开机密码确认即可。
+   - 点击“KimiWork +”右侧的“仍要打开”，输入本机开机密码确认即可。
 
    方法 B（终端命令）：
    xattr -dr com.apple.quarantine "/Applications/Kimi Work+.app"
@@ -63,7 +63,7 @@ for extra in LICENSE THIRD_PARTY_NOTICES.txt; do
 done
 
 hdiutil create \
-  -volname "Kimi Work+" \
+  -volname "KimiWork +" \
   -srcfolder "$STAGE" \
   -ov \
   -format UDZO \

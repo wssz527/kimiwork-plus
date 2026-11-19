@@ -17,7 +17,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
-	"github.com/wssz527/kimi-work-plus/internal/platform"
+	"github.com/wssz527/kimiwork-plus/internal/platform"
 )
 
 const (
@@ -121,7 +121,7 @@ func main() {
 	}
 	if err != nil {
 		if !opt.silent {
-			messageBox("Kimi Work+ 安装程序", err.Error(), mbOK|mbIconError)
+			messageBox("KimiWork + 安装程序", err.Error(), mbOK|mbIconError)
 		} else {
 			fmt.Fprintln(os.Stderr, err.Error())
 		}
@@ -160,8 +160,8 @@ func runInstall(opt options) error {
 	}
 
 	if !opt.silent {
-		prompt := fmt.Sprintf("即将安装 Kimi Work+ %s 到当前用户目录：\n\n%s\n\n安装过程会创建开始菜单快捷方式并注册用户级后台服务，不需要管理员权限。是否继续？", version, installDir)
-		if messageBox("安装 Kimi Work+", prompt, mbOKCancel|mbIconQuestion) != idOK {
+		prompt := fmt.Sprintf("即将安装 KimiWork + %s 到当前用户目录：\n\n%s\n\n安装过程会创建开始菜单快捷方式并注册用户级后台服务，不需要管理员权限。是否继续？", version, installDir)
+		if messageBox("安装 KimiWork +", prompt, mbOKCancel|mbIconQuestion) != idOK {
 			return nil
 		}
 	}
@@ -230,7 +230,7 @@ func runInstall(opt options) error {
 	if opt.silent {
 		shouldLaunch = opt.launch && !opt.noLaunch
 	} else if !opt.noLaunch {
-		ans := messageBox("Kimi Work+ 安装完成", "Kimi Work+ 已安装完成。\n\n是否现在启动 Kimi Work+？", mbYesNo|mbIconInformation)
+		ans := messageBox("KimiWork + 安装完成", "KimiWork + 已安装完成。\n\n是否现在启动 KimiWork +？", mbYesNo|mbIconInformation)
 		shouldLaunch = ans == idYes
 	}
 	if shouldLaunch {
@@ -255,16 +255,16 @@ func runUninstall(opt options) error {
 	if err != nil {
 		return err
 	}
-	// Safety check: refuse to uninstall from a directory that does not look like Kimi Work+.
+	// Safety check: refuse to uninstall from a directory that does not look like KimiWork +.
 	if _, err := os.Stat(filepath.Join(installDir, "KimiWorkPlus.exe")); err != nil {
 		if _, err2 := os.Stat(filepath.Join(installDir, "uninstall.exe")); err2 != nil {
-			return errors.New("目标目录不包含 Kimi Work+ 安装文件，已取消卸载。")
+			return errors.New("目标目录不包含 KimiWork + 安装文件，已取消卸载。")
 		}
 	}
 
 	if !opt.silent {
-		prompt := fmt.Sprintf("确定卸载位于以下位置的 Kimi Work+？\n\n%s\n\n后台服务和开始菜单快捷方式会被移除；您的账号、配置和用量账本保留在用户配置目录中。", installDir)
-		if messageBox("卸载 Kimi Work+", prompt, mbYesNo|mbIconQuestion) != idYes {
+		prompt := fmt.Sprintf("确定卸载位于以下位置的 KimiWork +？\n\n%s\n\n后台服务和开始菜单快捷方式会被移除；您的账号、配置和用量账本保留在用户配置目录中。", installDir)
+		if messageBox("卸载 KimiWork +", prompt, mbYesNo|mbIconQuestion) != idYes {
 			return nil
 		}
 	}
@@ -298,7 +298,7 @@ func runUninstall(opt options) error {
 
 	scheduleSelfDelete(installDir)
 	if !opt.silent {
-		messageBox("Kimi Work+ 卸载完成", "Kimi Work+ 及其后台服务已移除。", mbOK|mbIconInformation)
+		messageBox("KimiWork + 卸载完成", "KimiWork + 及其后台服务已移除。", mbOK|mbIconInformation)
 	}
 	return nil
 }
@@ -366,7 +366,7 @@ func createStartMenuShortcut(targetExe, workDir string) error {
 	if err := os.MkdirAll(filepath.Dir(scPath), 0o755); err != nil {
 		return err
 	}
-	ps := fmt.Sprintf(`$s = (New-Object -ComObject WScript.Shell).CreateShortcut(%s); $s.TargetPath = %s; $s.WorkingDirectory = %s; $s.IconLocation = %s; $s.Description = 'Kimi Work+'; $s.Save()`,
+	ps := fmt.Sprintf(`$s = (New-Object -ComObject WScript.Shell).CreateShortcut(%s); $s.TargetPath = %s; $s.WorkingDirectory = %s; $s.IconLocation = %s; $s.Description = 'KimiWork +'; $s.Save()`,
 		psQuote(scPath), psQuote(targetExe), psQuote(workDir), psQuote(targetExe+",0"))
 	out, err := runPowerShellHidden(ps)
 	if err != nil {
@@ -402,9 +402,9 @@ func writeUninstallRegistry(installDir, desktopPath, uninstallPath, version stri
 	defer procRegCloseKey.Call(hKey)
 
 	stringsToSet := map[string]string{
-		"DisplayName":          "Kimi Work+",
+		"DisplayName":          "KimiWork +",
 		"DisplayVersion":       version,
-		"Publisher":            "Kimi Work+",
+		"Publisher":            "KimiWork +",
 		"InstallLocation":      installDir,
 		"DisplayIcon":          desktopPath + ",0",
 		"UninstallString":      fmt.Sprintf(`"%s" --uninstall`, uninstallPath),

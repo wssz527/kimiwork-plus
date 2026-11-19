@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/appupdate"
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/appupdate"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func TestUpdatesHTTPAPI(t *testing.T) {

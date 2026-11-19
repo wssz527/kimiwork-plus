@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/kimi"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
 
 func initialCompatibilityReport() kimi.CompatibilityReport {

@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/wssz527/kimi-work-plus/internal/ledger"
+	"github.com/wssz527/kimiwork-plus/internal/ledger"
 )
 
 // This file is the usage-ledger dual run. The same fixture entries are written

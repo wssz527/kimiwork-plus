@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 type accountManagerFixture struct {

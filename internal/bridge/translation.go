@@ -6,7 +6,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func translationRevision(c core.TranslationConfig) string {

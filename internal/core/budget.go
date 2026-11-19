@@ -3,7 +3,7 @@ package core
 import (
 	"errors"
 
-	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 // NormalizeBudget validates one budget document and returns its canonical form.

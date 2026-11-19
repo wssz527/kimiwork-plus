@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
 func makeSignedTestZip(t *testing.T, priv ed25519.PrivateKey, topDir string, files map[string][]byte) ([]byte, string, string) {
