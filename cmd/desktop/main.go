@@ -56,7 +56,16 @@ func main() {
 		return
 	}
 
-	window = app.Window.NewWithOptions(application.WebviewWindowOptions{Title: "Kimi Work+", Width: *width, Height: *height, MinWidth: 1024, MinHeight: 700, URL: ep.URL + "/#key=" + ep.Key})
+	window = app.Window.NewWithOptions(platformWindowOptions(application.WebviewWindowOptions{
+		Title:                "Kimi Work+",
+		Width:                *width,
+		Height:               *height,
+		MinWidth:             1024,
+		MinHeight:            700,
+		URL:                  ep.URL + "/#key=" + ep.Key,
+		AllowSimpleEventEmit: true,
+	}))
+	attachWindowAppearance(app, window)
 	var epMu sync.Mutex
 	currentEndpoint := func() bridge.Endpoint {
 		epMu.Lock()

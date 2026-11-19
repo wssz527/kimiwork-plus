@@ -1274,3 +1274,30 @@ test('displayModelId decodes percent-encoded route IDs while falling back safely
   assert.equal(fn('bad%ZZescape'), 'bad%ZZescape');
   assert.equal(fn(''), '');
 });
+
+test('reportTheme emits Wails host theme events and masthead drag excludes interactive controls', () => {
+  const sent = [];
+  const doc = { title: '' };
+  const webkit = { messageHandlers: { external: { postMessage: (msg) => sent.push(msg) } } };
+  const runner = new Function(
+    'document', 'globalThis',
+    'const THEME_PREFIX = "kimi-work-plus:theme:";\n' +
+    'const THEME_TOKENS = Object.freeze({ light: "light", dark: "dark", auto: "auto" });\n' +
+    sourceFunction('postWailsMessage') + '\n' +
+    sourceFunction('reportTheme') + '\n' +
+    sourceFunction('isMastheadDragTarget') + '\n' +
+    'return { reportTheme, isMastheadDragTarget };'
+  )(doc, { webkit });
+  runner.reportTheme('dark');
+  runner.reportTheme('light');
+  runner.reportTheme('auto');
+  assert.deepEqual(sent, [
+    'wails:event:emit:kwp:theme:dark',
+    'wails:event:emit:kwp:theme:light',
+    'wails:event:emit:kwp:theme:auto',
+  ]);
+  const blankMasthead = { closest: (sel) => sel === '.masthead' ? {} : null };
+  const buttonInMasthead = { closest: (sel) => (sel === '.masthead' || sel.includes('button')) ? {} : null };
+  assert.equal(runner.isMastheadDragTarget(blankMasthead), true);
+  assert.equal(runner.isMastheadDragTarget(buttonInMasthead), false);
+});

@@ -704,9 +704,61 @@ const THEME_TOKENS = Object.freeze({ light: 'light', dark: 'dark', auto: 'auto' 
    preload and no extra renderer capability; anything else leaves the title
    exactly as the product wrote it. `auto` stays a distinct token so the shell
    can follow its own nativeTheme when the OS scheme changes. */
+function postWailsMessage(message) {
+  if (typeof message !== 'string' || !message) return false;
+  try {
+    if (globalThis.webkit && globalThis.webkit.messageHandlers && globalThis.webkit.messageHandlers.external
+      && typeof globalThis.webkit.messageHandlers.external.postMessage === 'function') {
+      globalThis.webkit.messageHandlers.external.postMessage(message);
+      return true;
+    }
+    if (globalThis.chrome && globalThis.chrome.webview && typeof globalThis.chrome.webview.postMessage === 'function') {
+      globalThis.chrome.webview.postMessage(message);
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 function reportTheme(mode) {
-  const title = THEME_PREFIX + (THEME_TOKENS[mode] || 'light');
+  const token = THEME_TOKENS[mode] || 'auto';
+  const title = THEME_PREFIX + token;
   if (document.title !== title) document.title = title;
+  postWailsMessage('wails:event:emit:kwp:theme:' + token);
+}
+
+function isMastheadDragTarget(target) {
+  if (!target || typeof target.closest !== 'function') return false;
+  if (!target.closest('.masthead')) return false;
+  return !target.closest('button, a, input, select, textarea, summary, label, .plus-account-bar, .work-index, .theme-field, [data-no-drag="true"]');
+}
+
+function initWindowChrome() {
+  const root = document.documentElement;
+  if (root && root.dataset && !root.dataset.platform) {
+    const plat = (typeof navigator !== 'undefined' && (navigator.platform || navigator.userAgent)) || '';
+    if (/mac/i.test(plat)) root.dataset.platform = 'mac';
+    else if (/win/i.test(plat)) root.dataset.platform = 'windows';
+  }
+  globalThis.__kwpSyncTheme = () => {
+    const current = (root && root.dataset && root.dataset.theme) || 'auto';
+    reportTheme(current);
+  };
+  const masthead = typeof document.querySelector === 'function' ? document.querySelector('.masthead') : null;
+  if (!masthead || masthead.dataset.dragBound === 'true') return;
+  masthead.dataset.dragBound = 'true';
+  masthead.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.detail !== 1) return;
+    if (!isMastheadDragTarget(event.target)) return;
+    postWailsMessage('wails:drag');
+  });
+  masthead.addEventListener('dblclick', (event) => {
+    if (event.button !== 0) return;
+    if (!isMastheadDragTarget(event.target)) return;
+    postWailsMessage('wails:drag:doubleclick');
+  });
 }
 
 function applyTheme(value) {
@@ -7163,6 +7215,7 @@ function refreshSavedProtocolDeclarations() {
 
 function boot() {
   initTheme();
+  initWindowChrome();
   if (typeof globalThis.KimiWorkGrowth?.mountGrowth === 'function') {
     renderGrowth = globalThis.KimiWorkGrowth.mountGrowth({ request, getState: () => state.data, getProviders: () => state.providers,
       refresh: loadState, notify: showToast, runAction });
