@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"kimiworkplus.local/migration/internal/webtools"
+	"github.com/wssz527/kimi-work-plus/internal/webtools"
 )
 
 // No test in this file reaches Tavily or any real page. Every vendor answer is a

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/ledger"
-	"kimiworkplus.local/migration/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/ledger"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
 )
 
 func spendPtr[T any](value T) *T { return &value }

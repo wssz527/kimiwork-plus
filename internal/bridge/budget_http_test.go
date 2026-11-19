@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 )
 
 func TestBudgetHTTPUsesConfigurationTransaction(t *testing.T) {

@@ -1,4 +1,4 @@
-module kimiworkplus.local/migration
+module github.com/wssz527/kimi-work-plus
 
 go 1.26.0
 

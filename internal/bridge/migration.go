@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/platform"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/platform"
 )
 
 const migrationStateFile = "migration-preview.json"

@@ -1,7 +1,7 @@
 package bridge
 
 import (
-	"kimiworkplus.local/migration/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
 	"os"
 	"path/filepath"
 	"testing"

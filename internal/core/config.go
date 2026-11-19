@@ -2,7 +2,7 @@ package core
 
 import (
 	"errors"
-	"kimiworkplus.local/migration/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
 	"net/url"
 	"regexp"
 	"strings"

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/platform"
+	"github.com/wssz527/kimi-work-plus/internal/platform"
 )
 
 type migrationMemoryKeys struct {

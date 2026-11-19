@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/ledger"
+	"github.com/wssz527/kimi-work-plus/internal/ledger"
 )
 
 const shanghai = "Asia/Shanghai"

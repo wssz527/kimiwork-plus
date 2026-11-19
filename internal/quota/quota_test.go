@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 // Every fixture below is the documented response shape, trimmed to the fields

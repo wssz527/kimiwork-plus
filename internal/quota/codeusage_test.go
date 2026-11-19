@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 // The fixtures in this file are the two shapes the official clients parse, plus

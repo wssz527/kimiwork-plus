@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 // The fixtures below are trimmed copies of real replies from a running Magpie

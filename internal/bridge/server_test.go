@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 	"net/http"
 	"strings"
 	"testing"

@@ -3,7 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 	"strings"
 )
 

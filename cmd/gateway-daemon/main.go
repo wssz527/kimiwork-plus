@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"kimiworkplus.local/migration/internal/appupdate"
-	"kimiworkplus.local/migration/internal/bridge"
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/kimi"
-	"kimiworkplus.local/migration/internal/platform"
+	"github.com/wssz527/kimi-work-plus/internal/appupdate"
+	"github.com/wssz527/kimi-work-plus/internal/bridge"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/platform"
 )
 
 func main() {

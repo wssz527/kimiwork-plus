@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"kimiworkplus.local/migration/internal/byokdns"
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/byokdns"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
 )
 
 type byokDNS interface {

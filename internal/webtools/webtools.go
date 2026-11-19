@@ -41,7 +41,7 @@ import (
 	"sync"
 	"time"
 
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 )
 
 // The vendor endpoints this adapter talks to.

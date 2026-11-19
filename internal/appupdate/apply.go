@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"kimiworkplus.local/migration/internal/platform"
+	"github.com/wssz527/kimi-work-plus/internal/platform"
 )
 
 const ApplyHelperFlag = "--apply-update"

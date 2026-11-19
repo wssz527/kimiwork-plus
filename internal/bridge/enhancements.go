@@ -6,9 +6,9 @@ import (
 	"errors"
 	"path/filepath"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/kimi"
-	"kimiworkplus.local/migration/internal/webtools"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/webtools"
 )
 
 type webService = webtools.Service

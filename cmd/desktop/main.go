@@ -12,7 +12,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
-	"kimiworkplus.local/migration/internal/bridge"
+	"github.com/wssz527/kimi-work-plus/internal/bridge"
 )
 
 func main() {

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"kimiworkplus.local/migration/internal/byokdns"
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/kimi"
-	"kimiworkplus.local/migration/internal/platform"
+	"github.com/wssz527/kimi-work-plus/internal/byokdns"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/platform"
 )
 
 type Native struct {

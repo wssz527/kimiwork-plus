@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
 )
 
 // This file is the dual run: the same fixtures are pushed through the legacy

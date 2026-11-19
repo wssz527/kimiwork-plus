@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/ledger"
-	"kimiworkplus.local/migration/internal/protocol"
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/ledger"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 type Runtime struct {

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 )
 
 // budgetFixture is one daemon-shaped runtime over a real ledger, with one fake

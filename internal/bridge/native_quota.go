@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 type quotaSettings struct {

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/kimi"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/kimi"
 )
 
 func TestNativeSwarmRequiresAnExplicitBoolean(t *testing.T) {

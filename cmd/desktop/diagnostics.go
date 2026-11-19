@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"kimiworkplus.local/migration/internal/bridge"
+	"github.com/wssz527/kimi-work-plus/internal/bridge"
 )
 
 type windowDiagnostics struct {

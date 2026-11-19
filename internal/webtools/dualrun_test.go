@@ -12,7 +12,7 @@ import (
 	"reflect"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/webtools"
+	"github.com/wssz527/kimi-work-plus/internal/webtools"
 )
 
 // This file is the dual run: the same fixtures are pushed through the legacy

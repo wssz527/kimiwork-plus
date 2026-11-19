@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
 )
 
 func event(name string, fields string) string {

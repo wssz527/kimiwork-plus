@@ -3,7 +3,7 @@ package kimi
 import (
 	"errors"
 
-	"kimiworkplus.local/migration/assets/injection"
+	"github.com/wssz527/kimi-work-plus/assets/injection"
 )
 
 // translationPayload reads the embedded renderer. It is a separate file so the

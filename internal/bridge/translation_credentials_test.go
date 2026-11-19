@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/core"
 )
 
 func TestCustomTranslationCredentialSaveAndReadback(t *testing.T) {

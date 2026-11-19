@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/protocol"
+	"github.com/wssz527/kimi-work-plus/internal/protocol"
 )
 
 func replyOK(w http.ResponseWriter, _ *http.Request, _ []byte) {

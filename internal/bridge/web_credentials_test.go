@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/webtools"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/webtools"
 )
 
 func TestWebCredentialCommitAndReopen(t *testing.T) {

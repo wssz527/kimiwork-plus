@@ -1,32 +1,33 @@
-# Go/Wails 实验实现
+# Kimi Work+ 构建与开发说明（Go / Wails）
 
-本目录是 Kimi Work+ 当前唯一开发的 Go/Wails 增强套件源码，从 0.12.1 迁移而来。Node 网关与 Magpie 专用插件停止开发，保留历史候选。当前构建是独立预览，稳定安装继续保留。阶段 1 基线 `00c62b8` 已完成核心模型链路、子代理与 MCP 真实验收；阶段 2–6 后续实现仍在集成验收，两真实账号热切换已有最终构建证据，Windows 真机按用户决定延后。
+本目录是 Kimi Work+ 1.0.0 正式实现（Go + Wails v3）的完整源码。产品通过官方配置文件、官方页面接口、受管 CDP 管道与本地回环网关接入官方 Kimi 桌面版 Work，不修改官方程序包体，也不代理官方更新。对外使用说明见 [README.md](README.md)，许可与第三方声明见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
 
-## 工具链
+## 工具链与打包
 
-- Go 1.26.10（go.mod 的 toolchain 锁定）。
-- Wails v3.1.0 稳定版，由 go.mod/go.sum 锁定，不需要用全局 Wails CLI 构建。
-- macOS arm64：Xcode Command Line Tools、系统 WebKit、codesign。
-- Windows amd64：运行时使用系统 WebView2。本轮在 macOS 交叉构建，无 Windows 真机记录。
+- Go 1.26.10（由 `go.mod` 的 `toolchain` 锁定，模块路径 `github.com/wssz527/kimi-work-plus`）。
+- Wails v3.1.0 稳定版（由 `go.mod` / `go.sum` 锁定，无需安装全局 Wails CLI）。
+- macOS（Universal：arm64 + amd64）：Xcode Command Line Tools、系统 WebKit、`codesign`、`lipo`、`hdiutil`。
+- Windows（amd64）：纯 Go 交叉编译（`CGO_ENABLED=0`），运行时使用系统 WebView2。
 
 ```sh
+go vet ./...
 go test -count=1 ./...
 go test -race -count=1 ./...
-go vet ./...
-bash build/macos.sh
+node --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs
+
+# 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
+VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/macos-dmg.sh
+
+# 交叉构建 Windows amd64 二进制、便携 .zip 与用户级 setup.exe 安装程序
+VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/windows.sh
 ```
 
-可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output bash build/macos.sh` 指定本地工具链与输出。脚本不安装、不启动、不覆盖稳定版。当前签名为 ad-hoc，仅适合开发实验，没有公证。
+可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output` 指定本地工具链与独立输出目录，并用 `CODESIGN_IDENTITY="<证书名或 SHA-1>"`、`UPDATE_PUBLIC_KEY="<hex>"`、`UPDATE_GITHUB_REPO="<owner/repo>"` 绑定发布证书与自动更新源。固定自签名证书可用 `build/create-signing-cert.sh` 在仓库外生成；自动更新清单位与 Ed25519 签名由 `cmd/signrelease` 生成（签名私钥必须保存在仓库之外）。脚本不安装、不启动、不覆盖本机既有安装，并会自动把根目录的 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt` 打入应用包、DMG 与 Windows 安装器。
+
+`KimiWorkPlus` 与 `gateway-daemon` 必须位于同一目录。独立启动网关（隔离状态目录）：
 
 ```sh
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -H windowsgui' -o out/KimiWorkPlus.exe ./cmd/desktop
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o out/gateway-daemon.exe ./cmd/gateway-daemon
-```
-
-`KimiWorkPlus` 与 `gateway-daemon` 必须放在同一目录。Mac 构建脚本会生成正确 app 结构。独立 Gateway：
-
-```sh
-./gateway-daemon --state-dir /absolute/private/preview-state --port 0
+./gateway-daemon --state-dir /absolute/private/dev-state --port 0
 ```
 
 只允许 loopback。自动生成的面板与模型令牌是私有运行数据，不提交或转发。桌面 `--state-dir` 必须指向同一实验目录，不能指向 0.12.1 生产数据目录。
@@ -62,7 +63,7 @@ if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 Windows 使用 `build/windows.ps1 -BuildId <build-id>` 或以下等价命令生成同身份 PE 文件：
 
 ```powershell
-$flags = "-s -w -X kimiworkplus.local/migration/internal/bridge.BuildID=<build-id>"
+$flags = "-s -w -X github.com/wssz527/kimi-work-plus/internal/bridge.BuildID=<build-id>"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/KimiWorkPlus.exe ./cmd/desktop
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H windowsgui" -o out/gateway-daemon.exe ./cmd/gateway-daemon
 ```
@@ -95,11 +96,12 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 
 | 能力 | 状态 |
 | --- | --- |
-| Mac 模型链路、子代理、MCP、账号切换、预算、Swarm | 真机已验证（见工作区交接记录） |
-| Windows 构建 | 仅交叉编译通过；CDP 管道、DPAPI、WebView2 与安装包未做真机验收 |
+| Mac 模型链路、子代理、MCP、账号切换、预算、Swarm、3.2.28 兼容自检、自动更新与回滚 | 真机已验证（见工作区交接记录） |
+| Windows 3.2.28 历史基线（`4ddaa3b`） | 已真机验证受管窗口、双账号切换与模型读回 |
+| Windows 阶段 8 新改动（窗口主题、用户级安装器、双 exe 自动更新、3.2.28 兼容自检） | 已完成交叉编译与单元测试；待 Windows 真机整体验收 |
 | 登录时启动 | 注册/启停与读回已验证；真实注销再登录后是否自启未测 |
-| 长期闲置令牌寿命、原生连接下拉选项点击 | 未验证 |
+| 长期闲置令牌寿命 | 未验证 |
 
 系统直接启动的官方 Kimi 不受本产品托管。此时已同步的模型配置仍保留在磁盘，但面板不会声称受管进程已加载配置代次，需点「正常退出并重启 Kimi」恢复完整受管能力。
 
-前端保留现有 HTML/CSS/JavaScript，没有为迁移重新设计 UI。翻译注入脚本仍在官方 Kimi 的渲染上下文运行。新版包不携带 Node、Electron 或 Chromium。
+前端使用原生 HTML/CSS/JavaScript（按页面拆分模块，无第三方前端依赖与打包步骤）。翻译注入脚本仍在官方 Kimi 的渲染上下文运行。正式包不携带 Node、Electron 或 Chromium。

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"kimiworkplus.local/migration/internal/bridge"
+	"github.com/wssz527/kimi-work-plus/internal/bridge"
 )
 
 type trayAccounts struct {

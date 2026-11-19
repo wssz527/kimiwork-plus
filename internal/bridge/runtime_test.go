@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/ledger"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/ledger"
 )
 
 type testKeys map[string]string

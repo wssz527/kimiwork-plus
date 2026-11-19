@@ -17,11 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"kimiworkplus.local/migration/frontend"
-	"kimiworkplus.local/migration/internal/appupdate"
-	"kimiworkplus.local/migration/internal/core"
-	"kimiworkplus.local/migration/internal/quota"
-	"kimiworkplus.local/migration/internal/webtools"
+	"github.com/wssz527/kimi-work-plus/frontend"
+	"github.com/wssz527/kimi-work-plus/internal/appupdate"
+	"github.com/wssz527/kimi-work-plus/internal/core"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/webtools"
 )
 
 type Endpoint struct {

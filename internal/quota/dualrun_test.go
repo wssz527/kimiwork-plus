@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"kimiworkplus.local/migration/internal/quota"
+	"github.com/wssz527/kimi-work-plus/internal/quota"
 )
 
 // This file is the quota dual run. The same scenarios are driven through the
