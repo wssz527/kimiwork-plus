@@ -22,7 +22,7 @@ ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
 
 rm -f "$ZIP_PATH" "$DMG_PATH"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP_PATH"
+(cd "$OUTPUT_DIR" && COPYFILE_DISABLE=1 zip -qry "$ZIP_PATH" "Kimi Work+.app")
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/kwp-dmg-stage.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT

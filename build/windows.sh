@@ -11,6 +11,12 @@ export GOOS=windows
 export GOARCH=amd64
 export CGO_ENABLED=0
 LDFLAGS="-s -w -X kimiworkplus.local/migration/internal/bridge.Version=$VERSION -X kimiworkplus.local/migration/internal/bridge.BuildID=$BUILD_ID"
+if [ -n "${UPDATE_PUBLIC_KEY:-}" ]; then
+  LDFLAGS="$LDFLAGS -X kimiworkplus.local/migration/internal/appupdate.DefaultPublicKeyHex=$UPDATE_PUBLIC_KEY"
+fi
+if [ -n "${UPDATE_GITHUB_REPO:-}" ]; then
+  LDFLAGS="$LDFLAGS -X kimiworkplus.local/migration/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
+fi
 
 "$GO" build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o "$OUTPUT_DIR/KimiWorkPlus.exe" ./cmd/desktop
 "$GO" build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o "$OUTPUT_DIR/gateway-daemon.exe" ./cmd/gateway-daemon
@@ -38,7 +44,7 @@ for extra in ("LICENSE", "THIRD_PARTY_NOTICES.txt"):
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
     for name in files:
         src = os.path.join(out_dir, name) if name.endswith(".exe") else name
-        zf.write(src, arcname=name)
+        zf.write(src, arcname="Kimi Work+/" + name)
 
 payload_zip = os.path.join(tmp_dir, "payload.zip")
 meta = json.dumps({"version": version, "buildId": build_id, "stubSize": int(stub_size)})

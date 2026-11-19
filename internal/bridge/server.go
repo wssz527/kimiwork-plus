@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"kimiworkplus.local/migration/frontend"
+	"kimiworkplus.local/migration/internal/appupdate"
 	"kimiworkplus.local/migration/internal/core"
 	"kimiworkplus.local/migration/internal/quota"
 	"kimiworkplus.local/migration/internal/webtools"
@@ -39,6 +40,7 @@ type Service struct {
 	Store       *core.Store
 	Keys        KeyStore
 	Migration   *MigrationCoordinator
+	Updates     *appupdate.Manager
 	StateDir    string
 	Endpoint    Endpoint
 	Gateway     http.Handler
@@ -103,7 +105,12 @@ func (s *Service) Start(port string, setup ...func() error) error {
 	go s.http.Serve(l)
 	return nil
 }
-func (s *Service) Close(ctx context.Context) error { return s.http.Shutdown(ctx) }
+func (s *Service) Close(ctx context.Context) error {
+	if s.Updates != nil {
+		s.Updates.Close()
+	}
+	return s.http.Shutdown(ctx)
+}
 func (s *Service) SetGateway(h http.Handler)       { s.mu.Lock(); s.Gateway = h; s.mu.Unlock() }
 func reply(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -117,7 +124,7 @@ func fail(w http.ResponseWriter, e error) {
 		status = 400
 	}
 	switch code {
-	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use":
+	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable":
 		status = 409
 	case "unauthorized":
 		status = 401
@@ -188,6 +195,14 @@ func message(code string) string {
 		return "系统凭据交互状态未能恢复，请重启预览服务后重试。"
 	case "credential_store_failed":
 		return "系统凭据操作未完成，请查看诊断状态；密钥未保存。"
+	case "updates_unavailable":
+		return "当前进程未启用自动更新管理。"
+	case "update_not_available":
+		return "当前没有可安装的新版本，请先点击「检查更新」。"
+	case "rollback_unavailable":
+		return "当前没有可回退的上一版本备份。"
+	case "invalid_update_settings":
+		return "更新设置参数无效，请确认渠道为稳定版或预览版。"
 	}
 	return "操作未完成，请检查输入或诊断信息。"
 }
@@ -268,7 +283,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := http.StatusOK
-	if (r.URL.Path == "/api/actions" || r.URL.Path == "/api/daemon/stop" || r.URL.Path == "/api/service") && r.Method == "POST" {
+	if (r.URL.Path == "/api/actions" || r.URL.Path == "/api/daemon/stop" || r.URL.Path == "/api/service" || r.URL.Path == "/api/updates/download" || r.URL.Path == "/api/updates/rollback") && r.Method == "POST" {
 		status = http.StatusAccepted
 	}
 	reply(w, status, out)
@@ -282,10 +297,69 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 			return core.Providers(), nil
 		case "/api/service":
 			return s.lifecycleAction(ctx, core.Document{"action": "status-service"})
+		case "/api/updates":
+			if s.Updates == nil {
+				return core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"}, nil
+			}
+			return s.Updates.State(), nil
 		}
 	}
 	if method == "POST" {
 		switch path {
+		case "/api/updates/check":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			st, err := s.Updates.CheckNow(ctx)
+			return core.Document{"ok": err == nil, "updates": st}, nil
+		case "/api/updates/download":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			st, err := s.Updates.StartDownloadAndApply()
+			if err != nil {
+				return nil, err
+			}
+			return core.Document{"ok": true, "updates": st}, nil
+		case "/api/updates/cancel":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			return core.Document{"ok": true, "updates": s.Updates.Cancel()}, nil
+		case "/api/updates/rollback":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			st, err := s.Updates.StartRollback()
+			if err != nil {
+				return nil, err
+			}
+			return core.Document{"ok": true, "updates": st}, nil
+		case "/api/updates/settings":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			var autoCheck *bool
+			if raw, ok := in["autoCheck"]; ok {
+				b, valid := raw.(bool)
+				if !valid {
+					return nil, errors.New("invalid_update_settings")
+				}
+				autoCheck = &b
+			}
+			channel := ""
+			if raw, ok := in["channel"]; ok {
+				c, valid := raw.(string)
+				if !valid || (c != "stable" && c != "preview") {
+					return nil, errors.New("invalid_update_settings")
+				}
+				channel = c
+			}
+			st, err := s.Updates.UpdateSettings(autoCheck, channel)
+			if err != nil {
+				return nil, err
+			}
+			return core.Document{"ok": true, "updates": st}, nil
 		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save":
 			return s.configure(path, in)
 		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie":
@@ -444,9 +518,13 @@ func (s *Service) State() (core.Document, error) {
 	}
 	connections := connectionRows(d, s.Keys)
 	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
+	updatesDoc := core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"}
+	if s.Updates != nil {
+		updatesDoc = s.Updates.State()
+	}
 	state := core.Document{
 		"schemaVersion": 1, "revision": rev, "capabilities": core.Document{"modelEditor": core.Document{"upstreamProtocol": true}},
-		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": s.serviceStatus(), "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"},
+		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": s.serviceStatus(), "updates": updatesDoc,
 		"gateway": core.Document{"state": "unavailable", "modelCount": 0, "activeRequests": 0}, "models": d["models"],
 		"connections": core.Document{"active": connections, "saved": connections, "restartRequired": false, "apply": core.Document{"state": "applied"}},
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},

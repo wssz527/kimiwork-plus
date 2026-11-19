@@ -656,11 +656,254 @@ function renderWorkspaceSync(data) {
 
 
 let trackedServiceOperation = '';
+let updateReconnectActive = false;
+let updateFastPollTimer = null;
+
+function fmtBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function updateStateSummary(updates) {
+  const st = updates?.state || 'idle';
+  switch (st) {
+    case 'checking': return { tone: 'warn', word: '正在检查更新…' };
+    case 'up_to_date': return { tone: 'ok', word: '已是最新版本' };
+    case 'available': return { tone: 'warn', word: '发现新版本 ' + (updates.available?.version || '') };
+    case 'downloading': return { tone: 'warn', word: '正在下载更新' };
+    case 'verifying': return { tone: 'warn', word: '正在校验签名' };
+    case 'waiting_idle': return { tone: 'warn', word: '等待空闲后替换' };
+    case 'applying': return { tone: 'warn', word: '正在替换并重启' };
+    case 'error': return { tone: 'bad', word: '更新未完成' };
+    default: return { tone: 'neutral', word: '尚未检查' };
+  }
+}
+
+function scheduleUpdateFastPoll(active) {
+  if (!active) {
+    if (updateFastPollTimer !== null) {
+      window.clearTimeout(updateFastPollTimer);
+      updateFastPollTimer = null;
+    }
+    return;
+  }
+  if (updateFastPollTimer !== null) return;
+  updateFastPollTimer = window.setTimeout(async () => {
+    updateFastPollTimer = null;
+    try { await loadState({ silent: true }); } catch {}
+  }, 500);
+}
+
+async function waitForUpdateReconnect(prevBuildId, actionLabel) {
+  if (updateReconnectActive) return;
+  updateReconnectActive = true;
+  const deadline = Date.now() + 35000;
+  try {
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      try {
+        const ok = await loadState({ silent: true });
+        if (ok && state.data) {
+          const nextBuild = state.data.updates?.buildId || state.data.service?.buildId || '';
+          const nextState = state.data.updates?.state || '';
+          if (nextState !== 'applying' && nextState !== 'waiting_idle' && (!prevBuildId || nextBuild !== prevBuildId || state.data.updates?.lastRollback)) {
+            if (state.data.updates?.lastRollback?.automatic) {
+              showToast('新版本未能正常就绪，已自动回退到上一版本 ' + (state.data.updates.currentVersion || '') + '。', 'error');
+            } else {
+              showToast(actionLabel + '已完成，当前版本 ' + (state.data.updates?.currentVersion || '') + '。', 'ok');
+            }
+            return;
+          }
+        }
+      } catch {}
+    }
+  } finally {
+    updateReconnectActive = false;
+  }
+}
+
+function renderUpdates(data) {
+  const updates = data?.updates || {};
+  const st = updates.state || 'idle';
+  const busy = ['checking', 'downloading', 'verifying', 'waiting_idle', 'applying'].includes(st);
+  const available = updates.available || null;
+  const summary = updateStateSummary(updates);
+
+  const current = $('upd-current');
+  if (current) current.textContent = updates.currentVersion || '未知版本';
+  setText($('upd-current-sub'), '构建标识 · ' + (updates.buildId || data.service?.buildId || 'development'));
+  setDot($('upd-state-dot'), summary.tone);
+  setText($('upd-state-word'), summary.word);
+  setText($('upd-last-check'), updates.lastCheckedAt ? '上次检查 · ' + fmtTime(updates.lastCheckedAt) : '尚未检查');
+
+  const channelSel = $('upd-channel');
+  if (channelSel && document.activeElement !== channelSel) {
+    channelSel.value = updates.channel === 'preview' ? 'preview' : 'stable';
+    channelSel.disabled = busy;
+  }
+  const autoBox = $('upd-auto-check');
+  if (autoBox && document.activeElement !== autoBox) {
+    autoBox.checked = updates.autoCheck !== false;
+    autoBox.disabled = busy;
+  }
+
+  const releaseBox = $('upd-release-box');
+  if (releaseBox) {
+    if (available && available.version) {
+      releaseBox.hidden = false;
+      const chLabel = available.channel === 'preview' ? '预览版' : '稳定版';
+      const sizeText = available.size ? ' · ' + fmtBytes(available.size) : '';
+      setText($('upd-release-title'), `新版本 ${available.version}（${chLabel}${sizeText}）`);
+      setText($('upd-release-notes'), available.notes || '本次更新包含问题修复与体验改进。');
+    } else {
+      releaseBox.hidden = true;
+    }
+  }
+
+  const topBanner = $('update-top-banner');
+  const topText = $('update-top-banner-text');
+  const overviewCard = $('overview-update-card');
+  if (available && available.version && ['available', 'downloading', 'verifying', 'waiting_idle', 'applying'].includes(st)) {
+    const firstLine = String(available.notes || '').split(/\r?\n/).map(line => line.trim()).find(Boolean) || '';
+    const brief = firstLine ? '：' + (firstLine.length > 64 ? firstLine.slice(0, 64) + '…' : firstLine) : '';
+    if (topBanner && topText) {
+      topBanner.hidden = state.view === 'overview' || state.view === 'maintenance';
+      setText(topText, `发现新版本 ${available.version}${brief}`);
+    }
+    if (overviewCard) {
+      overviewCard.hidden = false;
+      setText($('overview-update-title'), `发现 Kimi Work+ 新版本 ${available.version}`);
+      setText($('overview-update-notes'), available.notes || '包含稳定性修复与新功能，下载并验签后在空闲时替换重启。');
+    }
+  } else {
+    if (topBanner) topBanner.hidden = true;
+    if (overviewCard) overviewCard.hidden = true;
+  }
+
+  const progressWrap = $('upd-progress-wrap');
+  const progressBar = $('upd-progress-bar');
+  const progressLabel = $('upd-progress-label');
+  if (progressWrap && progressBar && progressLabel) {
+    if (['downloading', 'verifying', 'waiting_idle', 'applying'].includes(st)) {
+      progressWrap.hidden = false;
+      if (st === 'downloading') {
+        const pct = Math.max(0, Math.min(100, Number(updates.progress?.percent || 0)));
+        progressBar.style.width = pct + '%';
+        const written = fmtBytes(updates.progress?.written || 0);
+        const total = updates.progress?.total ? ' / ' + fmtBytes(updates.progress.total) : '';
+        setText(progressLabel, `正在下载更新包：${pct}%（${written}${total}）`);
+      } else if (st === 'verifying') {
+        progressBar.style.width = '100%';
+        setText(progressLabel, '下载完成，正在校验 Ed25519 签名与包体完整性…');
+      } else if (st === 'waiting_idle') {
+        progressBar.style.width = '100%';
+        setText(progressLabel, updates.idleReason || '正在等待 Kimi Work 与本机网关空闲后再替换…');
+      } else {
+        progressBar.style.width = '100%';
+        setText(progressLabel, '正在替换安装包并重启 Kimi Work+，网关恢复后页面会自动重连…');
+      }
+    } else {
+      progressWrap.hidden = true;
+    }
+  }
+
+  const errBox = $('upd-error-box');
+  if (errBox) {
+    const err = updates.error;
+    if (err && (err.message || err.code)) {
+      errBox.hidden = false;
+      setText($('upd-error-msg'), err.message || '更新未能完成，当前版本与网关保持不变。');
+      setText($('upd-error-next'), err.nextStep ? '下一步：' + err.nextStep : '');
+      const diagDetail = [
+        err.stage ? 'stage=' + err.stage : '',
+        err.code ? 'code=' + err.code : '',
+        err.detail ? 'detail=' + err.detail : '',
+      ].filter(Boolean).join('\n');
+      setText($('upd-error-detail'), diagDetail || '无附加诊断信息');
+    } else {
+      errBox.hidden = true;
+    }
+  }
+
+  const historyNote = $('upd-history-note');
+  if (historyNote) {
+    const rb = updates.lastRollback;
+    const applied = updates.lastApplied;
+    const rbTime = rb?.at ? Date.parse(rb.at) : 0;
+    const apTime = applied?.at ? Date.parse(applied.at) : 0;
+    if (rb && rbTime >= apTime) {
+      historyNote.hidden = false;
+      historyNote.classList.toggle('note--warn', Boolean(rb.automatic));
+      const msg = rb.automatic
+        ? `上次尝试更新到 ${rb.fromVersion || '新版本'} 未能正常启动，已自动回退到 ${rb.toVersion || updates.currentVersion}（${fmtTime(rb.at)}）。`
+        : `已手动回退到版本 ${rb.toVersion || updates.currentVersion}（${fmtTime(rb.at)}）。`;
+      setText(historyNote, msg);
+    } else if (applied && applied.toVersion) {
+      historyNote.hidden = false;
+      historyNote.classList.remove('note--warn');
+      setText(historyNote, `最近一次已于 ${fmtTime(applied.at)} 从 ${applied.fromVersion || '旧版本'} 更新到 ${applied.toVersion}。`);
+    } else {
+      historyNote.hidden = true;
+    }
+  }
+
+  const checkBtn = $('upd-check');
+  if (checkBtn) checkBtn.disabled = busy;
+  const downloadBtn = $('upd-download');
+  if (downloadBtn) {
+    downloadBtn.hidden = !(available && available.version && (st === 'available' || st === 'error'));
+    downloadBtn.disabled = busy;
+    downloadBtn.textContent = st === 'error' ? '重试下载并更新' : '下载并更新';
+  }
+  const cancelBtn = $('upd-cancel');
+  if (cancelBtn) {
+    cancelBtn.hidden = !(st === 'downloading' || st === 'waiting_idle');
+    cancelBtn.disabled = st === 'applying';
+  }
+  const rollbackBtn = $('upd-rollback');
+  if (rollbackBtn) {
+    const rbAvail = updates.rollback?.available === true;
+    rollbackBtn.hidden = !rbAvail;
+    rollbackBtn.disabled = busy;
+    rollbackBtn.textContent = rbAvail && updates.rollback.version
+      ? `回退到上一版本（${updates.rollback.version}）`
+      : '回退到上一版本';
+  }
+
+  scheduleUpdateFastPoll(['downloading', 'verifying', 'waiting_idle'].includes(st));
+  if (st === 'applying') {
+    void waitForUpdateReconnect(updates.buildId || data.service?.buildId || '', '版本替换');
+  }
+}
+
+async function updateAction(endpoint, body = {}, okMessage = '') {
+  const prevBuild = state.data?.updates?.buildId || state.data?.service?.buildId || '';
+  const result = await request(endpoint, { method: 'POST', body });
+  if (result?.updates && state.data) {
+    state.data.updates = result.updates;
+    renderUpdates(state.data);
+  }
+  if (endpoint === '/api/updates/check') {
+    const u = result?.updates;
+    if (u?.state === 'available') showToast('发现新版本 ' + (u.available?.version || '') + '。', 'ok');
+    else if (u?.state === 'up_to_date') showToast('当前已是最新版本。', 'ok');
+    else if (u?.error?.message) showToast(u.error.message, 'error');
+  } else if (endpoint === '/api/updates/download') {
+    showToast('已开始下载更新包，验签并等待空闲后会自动替换重启。', 'ok');
+  } else if (endpoint === '/api/updates/rollback') {
+    showToast('已启动回退到上一版本，等待空闲后将替换并重启。', 'ok');
+    void waitForUpdateReconnect(prevBuild, '回退');
+  } else if (okMessage) {
+    showToast(okMessage, 'ok');
+  }
+  return result;
+}
 
 function renderPreviewLifecycle(data) {
-  const current = $('upd-current');
-  if (current) current.textContent = data.updates?.currentVersion || '未知版本';
-  setText($('upd-current-sub'), '构建标识 · ' + (data.service?.buildId || 'development'));
+  renderUpdates(data);
   setText($('preview-service-state'), data.service?.state === 'running' ? '后台运行中' : '后台状态未确认');
   const operation = data.service?.operation;
   const busy = operation && ['pending', 'running'].includes(operation.phase);
@@ -798,8 +1041,10 @@ export {
   renderOverview,
   renderPreviewLifecycle,
   renderShell,
+  renderUpdates,
   renderWorkspaceSync,
   resetRecentSignature,
   runOverviewIssueAction,
   syncState,
+  updateAction,
 };

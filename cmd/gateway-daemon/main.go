@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"kimiworkplus.local/migration/internal/appupdate"
 	"kimiworkplus.local/migration/internal/bridge"
 	"kimiworkplus.local/migration/internal/core"
 	"kimiworkplus.local/migration/internal/kimi"
@@ -18,6 +20,9 @@ import (
 )
 
 func main() {
+	if code, handled := appupdate.RunApplyHelperFromArgs(os.Args); handled {
+		os.Exit(code)
+	}
 	if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 		os.Exit(code)
 	}
@@ -140,14 +145,38 @@ func run() error {
 	if e != nil {
 		return e
 	}
-	service := &bridge.Service{Store: store, StateDir: *dir, Keys: keys, Migration: migration, Gateway: gateway, OnConfig: gateway.Apply, Extra: gateway.Action}
+	var nativeRef atomic.Pointer[bridge.Native]
+	exePath, _ := os.Executable()
+	updates, e := appupdate.NewManager(appupdate.Options{
+		StateDir:       *dir,
+		CurrentVersion: bridge.Version,
+		BuildID:        bridge.BuildID,
+		ExecutablePath: exePath,
+		IdleCheck: func() (bool, string) {
+			if n := nativeRef.Load(); n != nil {
+				return n.UpdateIdleCheck(gateway)
+			}
+			if gateway.ActiveRequests() > 0 {
+				return false, "网关仍有正在传输的模型请求，等待完成后再更新。"
+			}
+			return true, ""
+		},
+	})
+	if e != nil {
+		return e
+	}
+	service := &bridge.Service{Store: store, StateDir: *dir, Keys: keys, Migration: migration, Updates: updates, Gateway: gateway, OnConfig: gateway.Apply, Extra: gateway.Action}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	service.SetStop(stop)
 	if e = service.Start(*port, func() error {
-		_, err := bridge.AttachNative(ctx, service, gateway)
+		native, err := bridge.AttachNative(ctx, service, gateway)
+		if err == nil && native != nil {
+			nativeRef.Store(native)
+		}
 		return err
 	}); e != nil {
+		updates.Close()
 		return e
 	}
 	fmt.Println("Kimi Work+ daemon ready")

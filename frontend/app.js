@@ -1,7 +1,7 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderWorkspaceSync, resetRecentSignature, runOverviewIssueAction } from './app-overview.js';
+import { isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, resetRecentSignature, runOverviewIssueAction, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 
 let renderGrowth = () => {};
@@ -46,6 +46,7 @@ function setView(view, { persist = true } = {}) {
     if (view === 'work') renderSubagents();
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
+    if (state.data) renderUpdates(state.data);
   };
   apply();
 }
@@ -486,6 +487,52 @@ function bindEvents() {
   }
   const migrationTopLink = $('migration-top-banner-link');
   if (migrationTopLink) migrationTopLink.addEventListener('click', () => setView('maintenance'));
+  const openUpdateSection = () => {
+    setView('maintenance');
+    revealWorkspaceSection('update-panel');
+  };
+  const updTopLink = $('update-top-banner-link');
+  if (updTopLink) updTopLink.addEventListener('click', openUpdateSection);
+  const overviewUpdGo = $('overview-update-go');
+  if (overviewUpdGo) overviewUpdGo.addEventListener('click', openUpdateSection);
+  const updCheck = $('upd-check');
+  if (updCheck) updCheck.addEventListener('click', async () => {
+    updCheck.disabled = true;
+    try { await updateAction('/api/updates/check', {}); }
+    catch (error) { showToast(error.message || '检查更新失败，当前运行未受影响。', 'error'); }
+    finally { updCheck.disabled = false; }
+  });
+  const updDownload = $('upd-download');
+  if (updDownload) updDownload.addEventListener('click', async () => {
+    updDownload.disabled = true;
+    try { await updateAction('/api/updates/download', {}); }
+    catch (error) { showToast(error.message || '未能启动更新下载。', 'error'); }
+    finally { updDownload.disabled = false; }
+  });
+  const updCancel = $('upd-cancel');
+  if (updCancel) updCancel.addEventListener('click', async () => {
+    updCancel.disabled = true;
+    try { await updateAction('/api/updates/cancel', {}, '已取消当前更新操作。'); }
+    catch (error) { showToast(error.message || '取消更新未成功。', 'error'); }
+    finally { updCancel.disabled = false; }
+  });
+  const updRollback = $('upd-rollback');
+  if (updRollback) updRollback.addEventListener('click', async () => {
+    updRollback.disabled = true;
+    try { await updateAction('/api/updates/rollback', {}); }
+    catch (error) { showToast(error.message || '未能启动版本回退。', 'error'); }
+    finally { updRollback.disabled = false; }
+  });
+  const updChannel = $('upd-channel');
+  if (updChannel) updChannel.addEventListener('change', async () => {
+    try { await updateAction('/api/updates/settings', { channel: updChannel.value }, '更新渠道已保存。'); }
+    catch (error) { showToast(error.message || '保存更新渠道失败。', 'error'); }
+  });
+  const updAutoCheck = $('upd-auto-check');
+  if (updAutoCheck) updAutoCheck.addEventListener('change', async () => {
+    try { await updateAction('/api/updates/settings', { autoCheck: updAutoCheck.checked }, updAutoCheck.checked ? '已开启自动检查更新。' : '已关闭自动检查更新。'); }
+    catch (error) { showToast(error.message || '保存自动检查设置失败。', 'error'); }
+  });
   const migrationResume = $('migration-resume');
   if (migrationResume) migrationResume.addEventListener('click', async () => {
     migrationResume.disabled = true;

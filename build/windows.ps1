@@ -2,7 +2,9 @@ param(
   [string]$OutputDir = "out/windows-amd64",
   [string]$Go = "go",
   [string]$Version = "1.0.0",
-  [string]$BuildId = "development"
+  [string]$BuildId = "development",
+  [string]$UpdatePublicKey = "",
+  [string]$UpdateGitHubRepo = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -12,6 +14,8 @@ $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
 $Flags = "-s -w -X kimiworkplus.local/migration/internal/bridge.Version=$Version -X kimiworkplus.local/migration/internal/bridge.BuildID=$BuildId"
+if ($UpdatePublicKey) { $Flags += " -X kimiworkplus.local/migration/internal/appupdate.DefaultPublicKeyHex=$UpdatePublicKey" }
+if ($UpdateGitHubRepo) { $Flags += " -X kimiworkplus.local/migration/internal/appupdate.DefaultGitHubRepo=$UpdateGitHubRepo" }
 
 $DesktopExe = Join-Path $OutputDir "KimiWorkPlus.exe"
 $DaemonExe = Join-Path $OutputDir "gateway-daemon.exe"
@@ -46,7 +50,7 @@ try {
   $zf = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
   try {
     foreach ($item in $Items) {
-      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zf, $item, [System.IO.Path]::GetFileName($item)) | Out-Null
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zf, $item, ("Kimi Work+/" + [System.IO.Path]::GetFileName($item))) | Out-Null
     }
   } finally { $zf.Dispose() }
 

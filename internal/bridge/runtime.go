@@ -187,6 +187,16 @@ func (r *Runtime) ServeHTTP(w http.ResponseWriter, q *http.Request) {
 	r.mu.RUnlock()
 	g.ServeHTTP(w, q)
 }
+func (r *Runtime) ActiveRequests() int {
+	r.mu.RLock()
+	g := r.gateway
+	r.mu.RUnlock()
+	if g == nil {
+		return 0
+	}
+	return g.Inflight()
+}
+
 func (r *Runtime) State() core.Document {
 	r.mu.RLock()
 	g, active := r.gateway, r.active

@@ -194,6 +194,31 @@ func processView(state kimi.RunningState) core.Document {
 	}
 	return core.Document{"running": nil, "state": "unknown"}
 }
+func (n *Native) UpdateIdleCheck(gateway *Runtime) (bool, string) {
+	if gateway != nil && gateway.ActiveRequests() > 0 {
+		return false, "网关仍有正在传输的模型请求，等待完成后再更新。"
+	}
+	if n == nil {
+		return true, ""
+	}
+	n.mu.Lock()
+	operating := n.operation != nil && n.operation["state"] == "running"
+	status := n.controller.Status(context.Background())
+	n.mu.Unlock()
+	if operating {
+		return false, "后台正在执行 Kimi 接入或维护操作，等待完成后再更新。"
+	}
+	if status.ManagedPID > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		busy, err := n.controller.AccountWorkBusy(ctx)
+		cancel()
+		if err == nil && busy {
+			return false, "Kimi Work 仍有正在进行的任务，等待任务结束后再替换。"
+		}
+	}
+	return true, ""
+}
+
 func (n *Native) State() core.Document {
 	n.mu.Lock()
 	status := n.controller.Status(context.Background())
