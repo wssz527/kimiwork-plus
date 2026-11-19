@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	createNoWindow                  = 0x08000000
-	processQueryLimitedInformation  = 0x1000
-	stillActive                     = 259
-	hkeyCurrentUser                 = uintptr(0x80000001)
-	keyWrite                        = 0x20006
-	regSZ                           = 1
-	uninstallRegSubKey              = `Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.kimi-work-plus`
+	createNoWindow                 = 0x08000000
+	detachedProcess                = 0x00000008
+	processQueryLimitedInformation = 0x1000
+	stillActive                    = 259
+	hkeyCurrentUser                = uintptr(0x80000001)
+	keyWrite                       = 0x20006
+	regSZ                          = 1
+	uninstallRegSubKey             = `Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.kimi-work-plus`
 )
 
 var (
@@ -188,6 +189,13 @@ func sweepWindowsAsides(target string) {
 	}
 }
 
+func launchSysProcAttr(launchMode string) *syscall.SysProcAttr {
+	if launchMode == "daemon" {
+		return &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	}
+	return &syscall.SysProcAttr{CreationFlags: detachedProcess}
+}
+
 func launchInstallation(targetDir, stateDir, launchMode string, logf func(string, ...any)) error {
 	defaultDir, _ := platform.DefaultStateDir()
 	customState := stateDir != "" && stateDir != defaultDir
@@ -207,7 +215,7 @@ func launchInstallation(targetDir, stateDir, launchMode string, logf func(string
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = targetDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	cmd.SysProcAttr = launchSysProcAttr(launchMode)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

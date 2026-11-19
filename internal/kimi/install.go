@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,10 +31,11 @@ func ExecutableCandidates(archive string, platform string) []string {
 	if platform == "" {
 		platform = runtime.GOOS
 	}
-	parent := filepath.Dir(filepath.Dir(filepath.Clean(archive)))
 	if platform == "darwin" {
-		return []string{filepath.Join(parent, "MacOS", "Kimi")}
+		parent := path.Dir(path.Dir(path.Clean(archive)))
+		return []string{path.Join(parent, "MacOS", "Kimi")}
 	}
+	parent := filepath.Dir(filepath.Dir(filepath.Clean(archive)))
 	if platform == "win32" || platform == "windows" {
 		out := make([]string, 0, 4)
 		for _, name := range []string{"Kimi.exe", "kimi-desktop.exe", "Kimi", "kimi"} {

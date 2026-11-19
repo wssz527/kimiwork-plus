@@ -167,10 +167,12 @@ func TestBridgeDescriptorValidation(t *testing.T) {
 	if _, err := ReadBridgeDescriptor(dir); err != nil {
 		t.Fatalf("valid descriptor refused: %v", err)
 	}
-	// Group-readable descriptors are refused.
-	write(valid, 0o644)
-	if _, err := ReadBridgeDescriptor(dir); err == nil {
-		t.Fatal("a group-readable descriptor was accepted")
+	if runtime.GOOS != "windows" {
+		// Group-readable descriptors are refused.
+		write(valid, 0o644)
+		if _, err := ReadBridgeDescriptor(dir); err == nil {
+			t.Fatal("a group-readable descriptor was accepted")
+		}
 	}
 	// A non-loopback URL is refused.
 	offHost := map[string]any{"schemaVersion": 1, "id": "x", "pid": 1, "applicationPid": 2,

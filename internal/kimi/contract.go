@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"runtime"
 	"sort"
 	"strings"
@@ -99,7 +99,7 @@ func ArchiveCandidates(platform string, env map[string]string) []string {
 		home := env["HOME"]
 		out := []string{"/Applications/Kimi.app/Contents/Resources/app.asar"}
 		if home != "" {
-			out = append(out, filepath.Join(home, "Applications", "Kimi.app", "Contents", "Resources", "app.asar"))
+			out = append(out, path.Join(home, "Applications", "Kimi.app", "Contents", "Resources", "app.asar"))
 		}
 		return out
 	case "win32", "windows":

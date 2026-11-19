@@ -47,7 +47,12 @@ func newBYOKTestNative(t *testing.T) *Native {
 		probe: &byokdns.Probe{Lookup: func(context.Context, string) (string, error) {
 			return "10.1.2.3", nil
 		}},
-		admin:        func(context.Context, string, string) error { return nil },
+		admin: func(_ context.Context, _, report string) error {
+			if report != "" {
+				return os.WriteFile(report, []byte("done\n"), 0o600)
+			}
+			return nil
+		},
 		resolverPath: filepath.Join(directory, "resolver", byokdns.Domain),
 	}
 }
