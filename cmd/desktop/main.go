@@ -17,7 +17,7 @@ import (
 
 func main() {
 	defaultDir, startupErr := bridge.DefaultStateDir()
-	dir := flag.String("state-dir", defaultDir, "preview state directory")
+	dir := flag.String("state-dir", defaultDir, "application state directory")
 	width := flag.Int("width", 1180, "window width")
 	height := flag.Int("height", 820, "window height")
 	flag.Parse()
@@ -40,7 +40,7 @@ func main() {
 	if startupErr == nil {
 		encryptionKey = sha256.Sum256([]byte(ep.Key))
 	}
-	app := application.New(application.Options{Name: "Kimi Work+", Description: "Go/Wails experimental preview", SingleInstance: &application.SingleInstanceOptions{UniqueID: "dev.kimi-work-plus.preview", EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+	app := application.New(application.Options{Name: "Kimi Work+", Description: "Kimi Work local gateway and enhancement suite", SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
 			openWindow()
 		}
@@ -51,7 +51,7 @@ func main() {
 			app.Quit()
 		})
 		if err := app.Run(); err != nil {
-			log.Printf("preview_window_failed: %v", err)
+			log.Printf("desktop_window_failed: %v", err)
 		}
 		return
 	}
@@ -147,14 +147,14 @@ func main() {
 	trayMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
 		message := "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
 		if diagnostics.Status() == "web_content_process_terminated" {
-			message = "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开预览；不要反复刷新。"
+			message = "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
 		}
 		app.Dialog.Info().SetTitle("Kimi Work+ 窗口诊断").SetMessage(message).Show()
 	})
 	trayMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
 		path, err := diagnostics.Export(*dir)
 		if err != nil {
-			app.Dialog.Error().SetTitle("无法导出窗口诊断").SetMessage("请检查预览状态目录是否可写，然后重试。").Show()
+			app.Dialog.Error().SetTitle("无法导出窗口诊断").SetMessage("请检查应用状态目录是否可写，然后重试。").Show()
 			return
 		}
 		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
@@ -168,6 +168,6 @@ func main() {
 	tray.SetMenu(trayMenu)
 	if err := app.Run(); err != nil {
 		app.Dialog.Error().SetTitle("Kimi Work+ 窗口启动失败").SetMessage("系统未能创建应用窗口。请重新打开应用；若仍失败，请导出窗口诊断。\n\n诊断信息：" + err.Error()).Show()
-		log.Printf("preview_window_failed: %v", err)
+		log.Printf("desktop_window_failed: %v", err)
 	}
 }

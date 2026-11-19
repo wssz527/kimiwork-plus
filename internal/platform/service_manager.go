@@ -493,7 +493,12 @@ func (m *serviceManager) runSteps(ctx context.Context, steps []step) ([]string, 
 // Register writes the definition without enabling login start. It does not
 // bootstrap the job either: registration is a file the user asked for, and
 // touching launchd here would make "registered but not started" false.
+// Any lingering legacy preview service is uninstalled first so two daemons
+// never run side by side.
 func (m *serviceManager) Register(ctx context.Context) (ManagerState, error) {
+	if registered, enabled := m.legacyPreviewServiceState(ctx); registered || enabled {
+		m.uninstallLegacyPreviewService(ctx)
+	}
 	if _, err := m.run(ctx, actionRegister); err != nil {
 		return ManagerState{}, err
 	}
@@ -504,6 +509,9 @@ func (m *serviceManager) Register(ctx context.Context) (ManagerState, error) {
 // Enable is the only path that makes the daemon start at login. It rewrites the
 // definition and does not reload the job, so a request in flight is unaffected.
 func (m *serviceManager) Enable(ctx context.Context) (ManagerState, error) {
+	if registered, enabled := m.legacyPreviewServiceState(ctx); registered || enabled {
+		m.uninstallLegacyPreviewService(ctx)
+	}
 	if _, err := m.run(ctx, actionEnable); err != nil {
 		return ManagerState{}, err
 	}
@@ -665,16 +673,99 @@ func kindFor(goos string) string {
 }
 
 // definitionPathFor is where each platform's definition lives. macOS uses a
-// LaunchAgent plist; Windows keeps a JSON record next to the preview's own
+// LaunchAgent plist; Windows keeps a JSON record next to the product's own
 // configuration, because the Run value itself carries no metadata to read back.
 func definitionPathFor(goos, home string) string {
 	switch goos {
 	case "darwin":
 		return filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".plist")
 	case "windows":
-		return filepath.Join(home, "AppData", "Roaming", "kimi-work-plus-preview", "service", ServiceLabel+".json")
+		return filepath.Join(home, "AppData", "Roaming", StateDirName, "service", ServiceLabel+".json")
 	}
 	return ""
+}
+
+func legacyDefinitionPathFor(goos, home string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "LaunchAgents", LegacyPreviewServiceLabel+".plist")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", LegacyPreviewStateDirName, "service", LegacyPreviewServiceLabel+".json")
+	}
+	return ""
+}
+
+func (m *serviceManager) legacyPreviewServiceState(ctx context.Context) (registered bool, enabled bool) {
+	legacyDef := legacyDefinitionPathFor(m.goos, m.home())
+	switch m.goos {
+	case "darwin":
+		if content, err := m.host.ReadFile(legacyDef); err == nil {
+			registered = true
+			enabled = plistRunAtLoad(string(content))
+		}
+		target := "gui/" + m.uid() + "/" + LegacyPreviewServiceLabel
+		if out, err := m.host.Run(ctx, "/bin/launchctl", "print", target); err == nil {
+			if _, _, ok := parseLaunchdPrint(out); ok {
+				registered = true
+			}
+		}
+	case "windows":
+		if content, err := m.host.ReadFile(legacyDef); err == nil {
+			var def definitionRecord
+			if json.Unmarshal(content, &def) == nil && def.Label == LegacyPreviewServiceLabel {
+				registered = true
+				enabled = def.LoginStart
+			}
+		}
+		if out, err := m.host.Run(ctx, registryProgram, legacyRegistryQueryArgs...); err == nil {
+			if parseRegistryRunValueForLabel(out, LegacyPreviewServiceLabel) {
+				registered = true
+				enabled = true
+			}
+		}
+	}
+	return registered, enabled
+}
+
+func (m *serviceManager) uninstallLegacyPreviewService(ctx context.Context) {
+	legacyDef := legacyDefinitionPathFor(m.goos, m.home())
+	switch m.goos {
+	case "darwin":
+		target := "gui/" + m.uid() + "/" + LegacyPreviewServiceLabel
+		_, _ = m.host.Run(ctx, "/bin/launchctl", "bootout", target)
+		_ = m.host.Remove(legacyDef)
+	case "windows":
+		_, _ = m.host.Run(ctx, registryProgram, legacyRegistryDeleteArgs...)
+		_ = m.host.Remove(legacyDef)
+	}
+}
+
+// MigrateLegacyPreviewService checks for a preview-era background service,
+// uninstalls the old label first, and re-registers the formal service label
+// with the same login-start preference.
+func MigrateLegacyPreviewService(ctx context.Context, options ManagerOptions) (migrated bool, enabled bool, err error) {
+	mgr, err := OpenManager(options)
+	if err != nil {
+		return false, false, err
+	}
+	sm, ok := mgr.(*serviceManager)
+	if !ok {
+		return false, false, nil
+	}
+	wasRegistered, wasEnabled := sm.legacyPreviewServiceState(ctx)
+	if !wasRegistered && !wasEnabled {
+		return false, false, nil
+	}
+	sm.uninstallLegacyPreviewService(ctx)
+	if _, err := sm.Register(ctx); err != nil {
+		return false, false, err
+	}
+	if wasEnabled {
+		if _, err := sm.Enable(ctx); err != nil {
+			return false, false, err
+		}
+	}
+	return true, wasEnabled, nil
 }
 
 // plistRunAtLoad reads the login-start flag back out of a rendered definition.
@@ -812,17 +903,21 @@ func parseLaunchdPrint(output string) (running bool, pid int, ok bool) {
 }
 
 // parseRegistryRunValue reads `reg query` output and reports whether this
-// preview's value exists. Both the value name and the REG_SZ type must be present:
+// service's value exists. Both the value name and the REG_SZ type must be present:
 // a key that exists but has no such value is "not enabled", and a truncated or
 // localized output must not be read as one.
 func parseRegistryRunValue(output string) bool {
+	return parseRegistryRunValueForLabel(output, ServiceLabel)
+}
+
+func parseRegistryRunValueForLabel(output, label string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r"))
 		if trimmed == "" {
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) < 2 || !strings.EqualFold(fields[0], ServiceLabel) {
+		if len(fields) < 2 || !strings.EqualFold(fields[0], label) {
 			continue
 		}
 		for _, field := range fields[1:] {

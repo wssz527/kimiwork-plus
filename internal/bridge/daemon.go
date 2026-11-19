@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"kimiworkplus.local/migration/internal/core"
+	"kimiworkplus.local/migration/internal/platform"
 )
 
 var (
@@ -25,11 +26,11 @@ var (
 )
 
 func DefaultStateDir() (string, error) {
-	d, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(d, "kimi-work-plus-preview"), nil
+	return platform.DefaultStateDir()
+}
+
+func LegacyPreviewStateDir() (string, error) {
+	return platform.LegacyPreviewStateDir()
 }
 
 func ReadEndpoint(dir string) (Endpoint, error) {
@@ -98,7 +99,7 @@ func StopDaemon(dir string) error {
 		if errors.Is(err, errHealthRefused) {
 			return errors.New("daemon_stop_replaced")
 		}
-		if err == nil {
+		if err == nil || errors.Is(err, errBuildMismatch) {
 			if ctx.Err() != nil {
 				return errors.New("daemon_stop_timeout")
 			}

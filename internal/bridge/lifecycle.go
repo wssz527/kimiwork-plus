@@ -44,7 +44,7 @@ func (s *Service) serviceController() (platform.Controller, error) {
 }
 
 func (s *Service) serviceStatus() core.Document {
-	state := core.Document{"mode": "preview", "state": "running", "buildId": BuildID,
+	state := core.Document{"mode": "release", "state": "running", "buildId": BuildID,
 		"windowIndependent": true, "loginStartup": "manual"}
 	if s.StateDir == "" {
 		return state

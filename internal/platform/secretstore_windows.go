@@ -49,11 +49,22 @@ func dpapiDirectory() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "kimi-work-plus-preview", "secrets"), nil
+	return filepath.Join(base, StateDirName, "secrets"), nil
+}
+
+func dpapiDirectoryForService(service string) (string, error) {
+	if strings.HasPrefix(service, "dev.kimi-work-plus.preview") {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(base, LegacyPreviewStateDirName, "secrets"), nil
+	}
+	return dpapiDirectory()
 }
 
 func newDPAPI(service string) (Credentials, error) {
-	dir, err := dpapiDirectory()
+	dir, err := dpapiDirectoryForService(service)
 	if err != nil {
 		return nil, err
 	}

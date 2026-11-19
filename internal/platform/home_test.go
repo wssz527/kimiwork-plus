@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDefaultStateDirIsIsolatedFromTheReleasedBuild(t *testing.T) {
+func TestDefaultStateDirUsesFormalIdentity(t *testing.T) {
 	dir, err := DefaultStateDir()
 	if err != nil {
 		t.Fatal(err)
@@ -13,13 +13,18 @@ func TestDefaultStateDirIsIsolatedFromTheReleasedBuild(t *testing.T) {
 	if dir == "" {
 		t.Fatal("empty state dir")
 	}
-	// The preview must never share a directory with the released build, or the
-	// two writers would race on the same config revision journal.
-	if contains(dir, "kimi-work-gateway") {
-		t.Fatalf("state dir collides with the released layout: %s", dir)
+	if contains(dir, "kimi-work-gateway") || contains(dir, "preview") {
+		t.Fatalf("state dir should use formal kimi-work-plus identity: %s", dir)
 	}
-	if !contains(dir, "preview") {
-		t.Fatalf("state dir is not identifiable as the preview: %s", dir)
+	if !contains(dir, StateDirName) {
+		t.Fatalf("state dir missing %s: %s", StateDirName, dir)
+	}
+	legacy, err := LegacyPreviewStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(legacy, LegacyPreviewStateDirName) || legacy == dir {
+		t.Fatalf("legacy preview dir unexpected: %s vs %s", legacy, dir)
 	}
 }
 

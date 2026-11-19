@@ -30,8 +30,15 @@ func TestTheWindowsStoreKeepsCiphertextInAPrivateDirectory(t *testing.T) {
 	if !strings.HasPrefix(dir, base) {
 		t.Fatalf("store directory %q is outside the per-user config directory %q", dir, base)
 	}
-	if !strings.Contains(filepath.Base(filepath.Dir(dir)), "preview") {
-		t.Fatalf("store directory is not the preview's own: %q", dir)
+	if filepath.Base(filepath.Dir(dir)) != StateDirName {
+		t.Fatalf("store directory is not the product's own: %q", dir)
+	}
+	legacyDir, err := dpapiDirectoryForService("dev.kimi-work-plus.preview.0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(filepath.Dir(legacyDir)) != LegacyPreviewStateDirName {
+		t.Fatalf("legacy preview store directory mismatch: %q", legacyDir)
 	}
 }
 
@@ -72,8 +79,8 @@ func TestNativeRegistryRoundTrip(t *testing.T) {
 	}
 	subkey := `Software\` + filepath.Base(dir)
 	testKey := hkcPrefix + subkey
-	valueName := "dev.kimi-work-plus.preview.daemon"
-	cmdLine := `"C:\Program Files\Kimi Work+ Preview\gateway-daemon.exe" "--start-background"`
+	valueName := ServiceLabel
+	cmdLine := `"C:\Program Files\Kimi Work+\gateway-daemon.exe" "--start-background"`
 	t.Cleanup(func() {
 		name, err := syscall.UTF16PtrFromString(subkey)
 		if err != nil {

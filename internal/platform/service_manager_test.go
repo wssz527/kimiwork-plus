@@ -464,7 +464,7 @@ func TestDescribeMatchesTheRenderedDefinition(t *testing.T) {
 			if off.LoginStart || !on.LoginStart {
 				t.Fatalf("LoginStart flags: %v %v", off.LoginStart, on.LoginStart)
 			}
-			if off.Label != ServiceLabel || !strings.Contains(off.Label, "preview") {
+			if off.Label != ServiceLabel || strings.Contains(off.Label, "preview") {
 				t.Fatalf("label: %q", off.Label)
 			}
 			switch goos {
@@ -576,19 +576,94 @@ func TestRegistryRunValueParsingIsExact(t *testing.T) {
 	}
 }
 
-// The Windows definition path must be the preview's own file, not the released
-// build's, and it must be inside the user's Roaming directory.
-func TestWindowsDefinitionPathIsThePreviewsOwn(t *testing.T) {
+func TestWindowsDefinitionPathUsesFormalDirectory(t *testing.T) {
 	home := filepath.Join(string(filepath.Separator), "Users", "someone")
 	path := definitionPathFor("windows", home)
 	if !strings.HasSuffix(path, ServiceLabel+".json") {
 		t.Fatalf("definition path: %q", path)
 	}
-	if !strings.Contains(path, filepath.Join("AppData", "Roaming", "kimi-work-plus-preview")) {
-		t.Fatalf("definition path is not in the preview's own directory: %q", path)
+	if !strings.Contains(path, filepath.Join("AppData", "Roaming", StateDirName)) || strings.Contains(path, "preview") {
+		t.Fatalf("definition path is not in the formal directory: %q", path)
 	}
 	if definitionPathFor("linux", home) != "" {
 		t.Fatal("an unsupported platform produced a definition path")
+	}
+}
+
+func TestRegisterUninstallsLegacyPreviewServiceFirst(t *testing.T) {
+	for _, goos := range []string{"darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			host := newFakeHost()
+			manager, options := managerFor(t, goos, host)
+			legacyDef := legacyDefinitionPathFor(goos, options.Home)
+			if goos == "darwin" {
+				host.files[legacyDef] = []byte("<plist><key>Label</key><string>" + LegacyPreviewServiceLabel + "</string><key>RunAtLoad</key><true/></plist>")
+			} else {
+				host.files[legacyDef] = []byte(`{"label":"` + LegacyPreviewServiceLabel + `","loginStart":true}`)
+			}
+			state, err := manager.Register(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.Registered || state.Label != ServiceLabel {
+				t.Fatalf("unexpected state after register: %+v", state)
+			}
+			if _, stillExists := host.files[legacyDef]; stillExists {
+				t.Fatalf("legacy preview definition %s was not removed", legacyDef)
+			}
+			if _, newExists := host.files[definitionPathFor(goos, options.Home)]; !newExists {
+				t.Fatalf("formal definition was not written")
+			}
+			foundLegacyCleanup := false
+			for _, cmd := range host.commands {
+				if strings.Contains(strings.Join(cmd.args, " "), LegacyPreviewServiceLabel) {
+					foundLegacyCleanup = true
+					break
+				}
+			}
+			if !foundLegacyCleanup {
+				t.Fatalf("legacy preview service was not unloaded/deleted before register: %+v", host.commands)
+			}
+		})
+	}
+}
+
+func TestMigrateLegacyPreviewServicePreservesLoginStart(t *testing.T) {
+	for _, goos := range []string{"darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			host := newFakeHost()
+			_, options := managerFor(t, goos, host)
+			legacyDef := legacyDefinitionPathFor(goos, options.Home)
+			if goos == "darwin" {
+				host.files[legacyDef] = []byte("<plist><key>Label</key><string>" + LegacyPreviewServiceLabel + "</string><key>RunAtLoad</key><true/></plist>")
+			} else {
+				host.files[legacyDef] = []byte(`{"label":"` + LegacyPreviewServiceLabel + `","loginStart":true}`)
+				host.outputs[registryProgram] = []string{
+					LegacyPreviewServiceLabel + "    REG_SZ    \"C:\\old.exe\" --start-background\n",
+					"", // legacy delete
+					"", // register legacy query
+					"", // register delete
+					"", // status query
+					"", // enable legacy query
+					"", // enable add
+					ServiceLabel + "    REG_SZ    " + windowsCommandLine(ServiceOptions{Binary: options.Binary, StateDir: options.StateDir, Port: options.Port}) + "\n",
+				}
+			}
+			migrated, enabled, err := MigrateLegacyPreviewService(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !migrated || !enabled {
+				t.Fatalf("expected migrated=true enabled=true, got migrated=%v enabled=%v", migrated, enabled)
+			}
+			if _, exists := host.files[legacyDef]; exists {
+				t.Fatalf("legacy definition still exists")
+			}
+			newDef := host.files[definitionPathFor(goos, options.Home)]
+			if len(newDef) == 0 || !strings.Contains(string(newDef), ServiceLabel) {
+				t.Fatalf("formal definition missing or wrong: %s", string(newDef))
+			}
+		})
 	}
 }
 

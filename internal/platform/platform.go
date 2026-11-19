@@ -31,9 +31,12 @@ var ErrCredentialInvalid = errors.New("credential_invalid")
 // Platform is the compile-time target, not the runtime host.
 func Platform() string { return runtime.GOOS }
 
-// DefaultStateDir is the per-user directory this product owns. It is separate
-// from the released 0.12.1 directory on purpose: the two must be able to run
-// side by side without sharing a config, a ledger or a lock.
+const (
+	StateDirName              = "kimi-work-plus"
+	LegacyPreviewStateDirName = "kimi-work-plus-preview"
+)
+
+// DefaultStateDir is the per-user directory this product owns.
 func DefaultStateDir() (string, error) {
 	if explicit := os.Getenv("KIMI_WORK_PLUS_STATE_DIR"); explicit != "" {
 		return filepath.Abs(explicit)
@@ -42,7 +45,16 @@ func DefaultStateDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "kimi-work-plus-preview"), nil
+	return filepath.Join(base, StateDirName), nil
+}
+
+// LegacyPreviewStateDir is the per-user directory used by preview builds prior to 1.0.0.
+func LegacyPreviewStateDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, LegacyPreviewStateDirName), nil
 }
 
 // EnsurePrivateDir creates a directory that only this user can reach and

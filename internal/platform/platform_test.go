@@ -151,8 +151,7 @@ func TestServiceDescriptionNeverEnablesItself(t *testing.T) {
 			t.Fatalf("the definition does not start the daemon in the background:\n%s", description.Content)
 		}
 	}
-	// The label must be the preview identity, never the released build's.
-	if description.Label != ServiceLabel || !strings.Contains(ServiceLabel, "preview") {
+	if description.Label != ServiceLabel || strings.Contains(ServiceLabel, "preview") {
 		t.Fatalf("unexpected label %q", description.Label)
 	}
 }

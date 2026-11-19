@@ -168,7 +168,7 @@ type daemonOptions struct {
 
 func parseDaemonArguments(args []string, withLog bool) (daemonOptions, error) {
 	var options daemonOptions
-	set := flag.NewFlagSet("kimi-work-plus-preview", flag.ContinueOnError)
+	set := flag.NewFlagSet("kimi-work-plus", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	set.StringVar(&options.StateDir, "state-dir", "", "")
 	set.StringVar(&options.Port, "port", "", "")

@@ -23,8 +23,6 @@ import (
 	"kimiworkplus.local/migration/internal/webtools"
 )
 
-const Version = "0.13.0-preview.4"
-
 type Endpoint struct {
 	URL     string `json:"url"`
 	Key     string `json:"key"`
@@ -40,6 +38,7 @@ type KeyStore interface {
 type Service struct {
 	Store       *core.Store
 	Keys        KeyStore
+	Migration   *MigrationCoordinator
 	StateDir    string
 	Endpoint    Endpoint
 	Gateway     http.Handler
@@ -315,6 +314,20 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return core.Document{"operation": core.Document{"action": "restart-daemon", "state": "stopping", "endpoint": s.Endpoint.URL}}, nil
 			}
 			return s.lifecycleAction(ctx, in)
+		case "/api/migration/resume":
+			if s.Migration == nil {
+				return core.Document{"ok": true, "migration": core.Document{"status": "not_needed"}}, nil
+			}
+			if _, err := s.Migration.ResumeInteractive(); err != nil {
+				return nil, err
+			}
+			if s.OnConfig != nil {
+				if d, _, readErr := s.Store.Read(); readErr == nil {
+					_ = s.OnConfig(d)
+				}
+			}
+			state, err := s.State()
+			return core.Document{"ok": true, "migration": s.Migration.Status(), "state": state}, err
 		case "/api/daemon/stop":
 			if s.stop == nil {
 				return nil, errors.New("daemon_stop_unavailable")
@@ -433,7 +446,7 @@ func (s *Service) State() (core.Document, error) {
 	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
 	state := core.Document{
 		"schemaVersion": 1, "revision": rev, "capabilities": core.Document{"modelEditor": core.Document{"upstreamProtocol": true}},
-		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": s.serviceStatus(), "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "preview-local"},
+		"configuration": core.Document{"state": "ready", "file": "gateway.json"}, "service": s.serviceStatus(), "updates": core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"},
 		"gateway": core.Document{"state": "unavailable", "modelCount": 0, "activeRequests": 0}, "models": d["models"],
 		"connections": core.Document{"active": connections, "saved": connections, "restartRequired": false, "apply": core.Document{"state": "applied"}},
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},
@@ -464,6 +477,9 @@ func (s *Service) State() (core.Document, error) {
 	}
 	state["translation"] = core.Document{"configured": translationPublicConfig(settings), "revision": translationRevision(settings), "environment": core.Document{"keySet": s.translationKey(d, settings) != ""}, "runtime": core.Document{"state": runtimeState, "reason": reason}}
 	core.Object(state["gateway"])["url"] = s.Endpoint.URL + "/v1"
+	if s.Migration != nil {
+		state["migration"] = s.Migration.Status()
+	}
 	if s.NativeState != nil {
 		for k, v := range s.NativeState() {
 			state[k] = v

@@ -480,10 +480,32 @@ function bindEvents() {
     if (button) button.addEventListener('click', async () => {
       button.disabled = true;
       try { await previewServiceAction(action); }
-      catch (error) { showToast(error.message || '预览后台操作未完成，原运行状态未替换。', 'error'); }
+      catch (error) { showToast(error.message || '后台服务操作未完成，原运行状态未替换。', 'error'); }
       finally { button.disabled = false; }
     });
   }
+  const migrationTopLink = $('migration-top-banner-link');
+  if (migrationTopLink) migrationTopLink.addEventListener('click', () => setView('maintenance'));
+  const migrationResume = $('migration-resume');
+  if (migrationResume) migrationResume.addEventListener('click', async () => {
+    migrationResume.disabled = true;
+    try {
+      const result = await request('/api/migration/resume', { method: 'POST', body: {} });
+      if (result.state) {
+        state.data = result.state;
+        renderAll(state.data);
+      } else {
+        await loadState({ silent: true });
+      }
+      const status = result.migration?.status;
+      if (status === 'completed') showToast('旧凭据已迁移并核对完成。', 'ok');
+      else showToast('部分旧凭据仍需系统授权，请响应系统提示后重试。', 'error');
+    } catch (error) {
+      showToast(error.message || '凭据迁移未能完成，原条目保持不变。', 'error');
+    } finally {
+      migrationResume.disabled = false;
+    }
+  });
   request('/api/service').then(result => {
     if (!result.service || !state.data) return;
     state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };

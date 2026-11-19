@@ -200,7 +200,7 @@ function nativeConnectionText(data) {
     work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
     work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
     work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
-    native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧预览或其他接入实例，再重新准备。',
+    native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧版本或其他接入实例，再重新准备。',
     native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
     native_byok_intranet_unavailable: '指定域名的私网解析尚未生效。请重新准备原生入口；若仍失败，请检查诊断中的 DNS 状态。',
     native_byok_reveal_failed: '官方功能标记未能写入或读回，未继续导入。请检查诊断信息。',
@@ -659,8 +659,8 @@ let trackedServiceOperation = '';
 
 function renderPreviewLifecycle(data) {
   const current = $('upd-current');
-  if (current) current.textContent = data.updates?.currentVersion || '未知预览版本';
-  setText($('upd-current-sub'), '独立 Go/Wails 预览 · ' + (data.service?.buildId || 'development'));
+  if (current) current.textContent = data.updates?.currentVersion || '未知版本';
+  setText($('upd-current-sub'), '构建标识 · ' + (data.service?.buildId || 'development'));
   setText($('preview-service-state'), data.service?.state === 'running' ? '后台运行中' : '后台状态未确认');
   const operation = data.service?.operation;
   const busy = operation && ['pending', 'running'].includes(operation.phase);
@@ -671,6 +671,38 @@ function renderPreviewLifecycle(data) {
   if (enable) enable.disabled = Boolean(busy) || data.service?.loginStartup === 'enabled';
   const disable = $('service-disable');
   if (disable) disable.disabled = Boolean(busy) || data.service?.loginStartup !== 'enabled';
+  const migration = data.migration;
+  const banner = $('migration-banner');
+  const note = $('migration-note');
+  const actions = $('migration-actions');
+  const topBanner = $('migration-top-banner');
+  const topText = $('migration-top-banner-text');
+  if (banner && note && actions) {
+    if (migration && (migration.status === 'needs_authorization' || migration.status === 'in_progress')) {
+      banner.hidden = false;
+      actions.hidden = false;
+      const pending = Number(migration.pendingCount || 0);
+      const message = pending > 0
+        ? `检测到预览版遗留的 ${pending} 项凭据尚未完成迁移，需要系统授权读取旧钥匙串条目。原预览条目与旧目录均已保留。`
+        : '预览版数据迁移尚未完成，可点击下方按钮继续迁移并读回核对。';
+      setText(note, message);
+      if (topBanner && topText) {
+        topBanner.hidden = false;
+        setText(topText, pending > 0
+          ? `检测到预览版 ${pending} 项旧凭据待授权迁移，原数据与旧条目均已保留。`
+          : '预览版数据迁移尚未完成，请前往设置页继续迁移。');
+      }
+    } else if (migration && migration.status === 'completed' && migration.legacyDirPreserved) {
+      banner.hidden = false;
+      actions.hidden = true;
+      setText(note, '已从预览版完成配置与凭据迁移。原预览目录和旧钥匙串条目均已保留，确认无误后再自行清理。');
+      if (topBanner) topBanner.hidden = true;
+    } else {
+      banner.hidden = true;
+      actions.hidden = true;
+      if (topBanner) topBanner.hidden = true;
+    }
+  }
   if (busy && trackedServiceOperation !== operation.id) {
     trackedServiceOperation = operation.id;
     void trackServiceOperation(operation.id, operation.action, operation);
@@ -750,7 +782,7 @@ async function previewServiceAction(action) {
     await trackServiceOperation(operation.id, operation.action, operation);
     return;
   }
-  showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');
+  showToast('后台服务状态已更新；登录启动与进程运行分开显示。', 'ok');
   await loadState({ silent: true });
 }
 

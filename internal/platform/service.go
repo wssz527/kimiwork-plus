@@ -34,9 +34,11 @@ type ServiceDescription struct {
 	LoginStart bool `json:"loginStart"`
 }
 
-// ServiceLabel is the preview identity. It is deliberately not the released
-// build's label: the two services must be able to coexist.
-const ServiceLabel = "dev.kimi-work-plus.preview.daemon"
+// ServiceLabel is the formal background daemon service identifier.
+const ServiceLabel = "dev.kimi-work-plus.daemon"
+
+// LegacyPreviewServiceLabel is the service identifier used by preview builds prior to 1.0.0.
+const LegacyPreviewServiceLabel = "dev.kimi-work-plus.preview.daemon"
 
 // ServiceOptions describes the binary the service should run.
 type ServiceOptions struct {
@@ -272,9 +274,11 @@ const windowsRunKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 const registryProgram = "reg"
 
 var (
-	registryAddArgs    = []string{"add", windowsRunKey, "/v", ServiceLabel, "/t", "REG_SZ"}
-	registryDeleteArgs = []string{"delete", windowsRunKey, "/v", ServiceLabel, "/f"}
-	registryQueryArgs  = []string{"query", windowsRunKey, "/v", ServiceLabel}
+	registryAddArgs          = []string{"add", windowsRunKey, "/v", ServiceLabel, "/t", "REG_SZ"}
+	registryDeleteArgs       = []string{"delete", windowsRunKey, "/v", ServiceLabel, "/f"}
+	registryQueryArgs        = []string{"query", windowsRunKey, "/v", ServiceLabel}
+	legacyRegistryDeleteArgs = []string{"delete", windowsRunKey, "/v", LegacyPreviewServiceLabel, "/f"}
+	legacyRegistryQueryArgs  = []string{"query", windowsRunKey, "/v", LegacyPreviewServiceLabel}
 )
 
 func boolTag(value bool) string {

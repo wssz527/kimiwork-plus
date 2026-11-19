@@ -1617,7 +1617,7 @@ const APPLY_COPY = {
     note: '连接已保存，当前网关尚未应用；没有可自动应用的受管服务。' },
   failed: { tone: 'bad', word: '应用失败', note: '连接已保存，但应用未完成；可重试，不会结束正在运行的任务。' },
   authorization: { tone: 'bad', word: '连接需要系统授权',
-    note: '当前预览无法读取已保存的 Key。点「重新授权并应用连接」并响应系统提示，不会显示或改写 Key。' },
+    note: '当前应用无法读取已保存的 Key。点「重新授权并应用连接」并响应系统提示，不会显示或改写 Key。' },
 };
 
 const APPLY_REFUSAL = {
@@ -1697,7 +1697,7 @@ function renderApply(data) {
   const stateInfo = applyState(data);
   if (dom.restartHead) {
     setText(dom.restartHead, stateInfo === APPLY_COPY.authorization
-      ? '由当前预览向系统申请读取已保存的连接凭据，后台不会自动弹出授权。'
+      ? '由当前窗口向系统申请读取已保存的连接凭据，后台不会自动弹出授权。'
       : running ? '本面板由后台服务运行；保存连接后在这里应用，不需要终端命令。'
         : '本面板不是由受管后台服务运行；连接保存后需要由受管服务应用。');
   }
