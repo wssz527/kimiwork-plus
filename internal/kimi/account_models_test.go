@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type accountModelActions struct {
@@ -14,8 +15,12 @@ type accountModelActions struct {
 	modelErr error
 }
 
-func (a *accountModelActions) accountModelConfig(context.Context, accountPage) (map[string]any, error) {
-	return a.config, a.modelErr
+func (a *accountModelActions) accountModelConfig(context.Context, accountPage) (accountModelConfig, error) {
+	if a.modelErr != nil {
+		return accountModelConfig{}, a.modelErr
+	}
+	return accountModelConfig{providers: section(a.config, "providers"),
+		models: section(a.config, "models"), credentialPublished: true}, nil
 }
 
 func accountModelsHarness(t *testing.T, targetProfile bool) (*accountHarness, *accountModelActions, *nativeFixture) {
@@ -144,6 +149,29 @@ func TestAccountModelsDoNotStartFirstImportWithoutActiveIntent(t *testing.T) {
 	result := activateModelAccount(t, h, "account-new")
 	if result.ModelsState != "" || len(a.imports) != 0 {
 		t.Fatalf("inactive integration imported a catalog: state=%s imports=%d", result.ModelsState, len(a.imports))
+	}
+}
+
+func TestReconcileConfirmsRunningCatalogAfterGenerationChanges(t *testing.T) {
+	h, a, _ := accountModelsHarness(t, true)
+	child, _ := startFakeChild(t)
+	h.controller.child = child
+	t.Cleanup(func() { _ = child.Stop(time.Second) })
+	a.modelErr = errors.New(AccountErrUnavailable)
+	result := h.controller.ReconcileWithReadback(context.Background())
+	if !result.Applied || result.Adopted {
+		t.Fatalf("catalog files alone established adoption: %+v", result)
+	}
+	a.modelErr = nil
+	h.page.user["work"] = "account-new"
+	result = h.controller.ReconcileWithReadback(context.Background())
+	if !result.Applied || result.Adopted {
+		t.Fatalf("catalog was adopted with another page identity: %+v", result)
+	}
+	h.page.user["work"] = "account-old"
+	result = h.controller.ReconcileWithReadback(context.Background())
+	if !result.Applied || !result.Adopted || len(a.imports) != 0 {
+		t.Fatalf("matching runtime did not confirm adoption: %+v imports=%d", result, len(a.imports))
 	}
 }
 

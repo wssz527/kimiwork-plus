@@ -287,6 +287,16 @@ state. DNS failures do not block unrelated gateway or desktop functions.
 - an account change is `account_changed` and is **not** in the importable set;
 - the intent records digests only, never a token.
 
+Kimi 3.2.28 stores model sources under `accounts` in `byok-providers.json`.
+For this format, reconciliation checks the selected account's active models and
+provider declarations against the official generated configuration. It records
+verified ownership in the intent and leaves the generated configuration to Kimi.
+The account transition checks the published model directory through
+`kimiAgentAPI.byokSources.list()` on the Work shell, with the desktop page's
+`clawBridgeAPI.byokSources.list()` as a fallback. Only entries marked `available`
+qualify. Builds with the legacy `profiles` store retain the
+`kimiAgentAPI.getByokProfile()` readback.
+
 ### Account scope and profile selection
 
 Three levels are involved, and they are not interchangeable:

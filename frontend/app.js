@@ -51,7 +51,7 @@ const UPSTREAM_REASON = {
 };
 
 let renderGrowth = () => {};
-let usagePanel = { show() {}, reload: async () => {} };
+let usagePanel = { show() {}, reload: async () => {}, reset() {} };
 let plusPanel = { render() {}, refresh: async () => {} };
 
 const VIEW_COPY = {
@@ -7085,6 +7085,7 @@ function adoptLocationKey() {
   state.applyUnsupported = false;
   state.applyRefusal = null;
   state.providers = null;
+  if (typeof usagePanel !== 'undefined' && usagePanel && typeof usagePanel.reset === 'function') usagePanel.reset();
   modelSignature = '';
   recentSignature = '';
   saModelSignature = '';
@@ -7096,7 +7097,9 @@ function adoptLocationKey() {
   showGate('checking');
   void loadProviders();
   loadState().then((ok) => {
-    if (ok) startPolling();
+    if (!ok) return;
+    if (typeof usagePanel !== 'undefined' && usagePanel && state.view === 'usage') usagePanel.show();
+    startPolling();
   });
   return true;}
 
@@ -7171,10 +7174,16 @@ function boot() {
   actionButtons = Array.from(document.querySelectorAll('[data-action]'));
 
   /* 面板重启后粘贴新链接只改变 hash，浏览器不会重新执行脚本，
-     因此在 hash 变化与页面重新可见时都重新取一次密钥。 */
+     因此在 hash 变化与页面重新可见时都重新取一次密钥。密钥已更换时
+     adoptLocationKey 会自己重读状态；同一次可见事件不再并发补一次。 */
   window.addEventListener('hashchange', adoptLocationKey);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) adoptLocationKey();
+    if (document.hidden) return;
+    if (adoptLocationKey()) return;
+    if (!state.key || state.started) return;
+    loadState().then((ok) => {
+      if (ok && !state.timer) startPolling();
+    });
   });
 
   if (!state.key) {
@@ -7187,14 +7196,6 @@ function boot() {
   loadState().then((ok) => {
     if (!ok) return;
     startPolling();
-  });
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.key && !state.started) {
-      loadState().then((ok) => {
-        if (ok && !state.timer) startPolling();
-      });
-    }
   });
 }
 

@@ -46,9 +46,46 @@ func renderedCatalog(t *testing.T) json.RawMessage {
 
 func TestCatalogRendersTheSameShapeAsTheGateway(t *testing.T) {
 	got := renderedCatalog(t)
-	want := fixtureCatalog(t)
-	if string(got) != string(want) {
+	want := strings.ReplaceAll(string(fixtureCatalog(t)), `,"models":`, `,"api":"http://127.0.0.1:43117/v1","models":`)
+	want = strings.Replace(want, `"tool_call":false`, `"tool_call":true`, 1)
+	if string(got) != want {
 		t.Fatalf("catalog mismatch\n got=%s\nwant=%s", got, want)
+	}
+}
+
+func TestRouteCatalogParserTakesPrecedenceOverModelsList(t *testing.T) {
+	source := string(loadFixture(t, "bundle-0.js")) + `
+function _0xfee1(data) {
+  if (!data || !Object.keys(data).length) throw new Error("byok-incomplete-catalog");
+  const groups = Object.values(data).map(group => ({"base_url": group.api, type: group.type, "models": group.models}));
+  const routes = [], blocked = [];
+  for (const group of groups) {
+    const models = [];
+    for (const [id, model] of Object.entries(group.models)) {
+      if (!group.base_url || !isIPv4(new URL(group.base_url).hostname) || model.tool_call === false) blocked.push({modelId: id});
+      else models.push({model: id});
+    }
+    if (models.length) routes.push({protocol: group.type, models});
+  }
+  return {routes, blocked};
+}
+`
+	models := SampleModels()
+	for _, tc := range []struct {
+		name string
+		body json.RawMessage
+		want string
+	}{
+		{"has group endpoints", renderedCatalog(t), StateVerified},
+		{"missing group endpoints", fixtureCatalog(t), StateIncompatible},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome := runContractPipeline(Job{Source: source, Catalog: tc.body}, 5*time.Second)
+			got := verdict(ContractResult{Contracts: RuntimeContracts(source)}, outcome.Result, models)
+			if outcome.Error != "" || got.Parser != "_0xfee1" || got.State != tc.want {
+				t.Fatalf("outcome=%+v verdict=%+v", outcome, got)
+			}
+		})
 	}
 }
 

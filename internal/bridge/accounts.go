@@ -129,6 +129,17 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 	a.mu.Lock()
 	restore, adding := a.restoreID, a.adding
 	a.mu.Unlock()
+	if restore != "" && !adding && (action == "account-begin-add" || action == "account-switch") {
+		// An interrupted switch can leave its recovery marker behind across a
+		// daemon restart. Only a live capture, which requires the signed-in page
+		// and config to agree, may prove that the current account is real.
+		if _, err := a.hooks.Capture(ctx); err == nil {
+			if clearErr := a.setRestore("", false); clearErr != nil {
+				return nil, clearErr
+			}
+			restore = ""
+		}
+	}
 	switch action {
 	case "account-capture":
 		if _, _, err := a.capture(ctx); err != nil {

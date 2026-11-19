@@ -3,6 +3,68 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = readFileSync(new URL('./usage.js', import.meta.url), 'utf8');
+
+function usagePanelEnv() {
+  const nodes = new Map();
+  const makeNode = (id = '') => {
+    const node = {
+      id, textContent: '', hidden: false, value: '', disabled: false, open: false, className: '',
+      children: [], dataset: {}, style: {},
+      replaceChildren(...children) { node.children = children; },
+      append(...children) { node.children.push(...children); },
+      addEventListener() {}, setAttribute() {}, getAttribute() { return ''; },
+      querySelector() { return null; }, querySelectorAll() { return []; }, focus() {},
+    };
+    return node;
+  };
+  const document = {
+    getElementById(id) {
+      if (!nodes.has(id)) nodes.set(id, makeNode(id));
+      return nodes.get(id);
+    },
+    createElement() { return makeNode(); },
+    createElementNS() { return makeNode(); },
+    querySelectorAll() { return []; },
+  };
+  const runtime = {};
+  new Function('document', 'globalThis', source)(document, runtime);
+  return { nodes, mount: runtime.KimiWorkUsage.mount };
+}
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
+/* 端点会话更换后，旧请求即使晚到也不能再写回面板；reset 还要清掉已渲染的
+   旧账本和额度卡片，show 在已有请求在途时不能重复发起。 */
+test('a reset invalidates in-flight usage and quota reads and clears rendered data', async () => {
+  const env = usagePanelEnv();
+  const calls = [];
+  const request = (path, options) => new Promise((resolve, reject) => calls.push({ path, options, resolve, reject }));
+  const panel = env.mount({ request, notify() {} });
+
+  panel.show();
+  assert.deepEqual(calls.map(call => call.path), ['/api/usage/query', '/api/quota']);
+  panel.show();
+  assert.equal(calls.length, 2, 'show must not duplicate requests while reads are pending');
+
+  panel.reset();
+  assert.equal(env.nodes.get('usage-stat-input').textContent, '—');
+  assert.equal(env.nodes.get('quota-list').children.length, 0);
+  assert.equal(env.nodes.get('usage-records-body').children.length, 0);
+
+  calls[0].resolve({ summary: { inputTokens: 999 }, records: [{ at: '2026-11-19T00:00:00Z', inputTokens: 999 }], filters: {} });
+  calls[1].resolve({ records: [{ sourceName: '旧来源' }] });
+  await flush();
+  assert.equal(env.nodes.get('usage-stat-input').textContent, '—', 'a stale usage reply must not overwrite the reset panel');
+  assert.equal(env.nodes.get('quota-list').children.length, 0, 'a stale quota reply must not refill the old ledger');
+
+  panel.show();
+  panel.show();
+  assert.equal(calls.length, 4, 'the new endpoint should be read once and not duplicated');
+  calls[2].resolve({ summary: { inputTokens: 12 }, records: [], filters: {} });
+  calls[3].resolve({ records: [] });
+  await flush();
+  assert.equal(env.nodes.get('usage-stat-input').textContent, '12');
+});
 const start = source.indexOf('  function quotaPathProblem(value, required = false) {');
 const end = source.indexOf('\n  }', start);
 assert.notEqual(start, -1, 'missing quotaPathProblem in current source');

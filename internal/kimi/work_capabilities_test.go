@@ -1,6 +1,8 @@
 package kimi
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,6 +34,45 @@ func TestWorkCapabilitiesFollowActualKernelContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := ProbeWorkCapabilities(installation); got.Subagents.ForceKeySupported != nil || got.Swarm.State != "unverified" || got.Tower.KernelAvailable {
+		t.Fatal(got)
+	}
+}
+
+func TestWorkCapabilitiesReadPackagedCore(t *testing.T) {
+	root := t.TempDir()
+	resources := filepath.Join(root, "resources")
+	if err := os.Mkdir(resources, 0700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(resources, "daimon-core.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	zip := gzip.NewWriter(file)
+	archive := tar.NewWriter(zip)
+	for name, data := range map[string]string{
+		"./bundle.json":         `{"version":"1.0.14","kernelCommit":"303f4196e"}`,
+		"./" + capabilityKernel: "AgentSwarm Only the user can turn on swarm mode.",
+	} {
+		if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := archive.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zip.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := ProbeWorkCapabilities(Installation{Archive: filepath.Join(root, "app.asar"), Version: "3.2.28"})
+	if got.State != "inspected" || got.KernelVersion != "1.0.14" || got.KernelCommit != "303f4196e" || got.Swarm.State != "user-controlled" {
 		t.Fatal(got)
 	}
 }

@@ -756,8 +756,14 @@ func (c *Controller) Reconcile() IntegrationResult {
 // The account is always taken from this controller's selected profile, never
 // from the caller's configuration and never from a directory outside it.
 func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
-	_ = ctx
-	return c.reconcile(true, "")
+	result := c.reconcile(true, "")
+	if result.Applied && !result.Adopted && !result.Changed && accountSessionMu.TryLock() {
+		defer accountSessionMu.Unlock()
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		result = c.confirmRunningCatalog(ctx, result)
+	}
+	return result
 }
 
 func (c *Controller) reconcile(withReadback bool, confirmedAccount string) IntegrationResult {

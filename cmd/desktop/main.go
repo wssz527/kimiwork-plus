@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -55,15 +57,67 @@ func main() {
 	}
 
 	window = app.Window.NewWithOptions(application.WebviewWindowOptions{Title: "Kimi Work+", Width: *width, Height: *height, MinWidth: 1024, MinHeight: 700, URL: ep.URL + "/#key=" + ep.Key})
+	var epMu sync.Mutex
+	currentEndpoint := func() bridge.Endpoint {
+		epMu.Lock()
+		defer epMu.Unlock()
+		return ep
+	}
+	syncEndpoint := func() (bridge.Endpoint, bool) {
+		latest, err := bridge.ReadEndpoint(*dir)
+		if err != nil {
+			return bridge.Endpoint{}, false
+		}
+		observed := currentEndpoint()
+		if latest == observed || !bridge.Healthy(latest) {
+			return bridge.Endpoint{}, false
+		}
+		confirmed, err := bridge.ReadEndpoint(*dir)
+		if err != nil || confirmed != latest {
+			return bridge.Endpoint{}, false
+		}
+		epMu.Lock()
+		defer epMu.Unlock()
+		if ep != observed {
+			return bridge.Endpoint{}, false
+		}
+		ep = confirmed
+		return confirmed, true
+	}
+	applyEndpoint := func(next bridge.Endpoint) {
+		application.InvokeAsync(func() {
+			epMu.Lock()
+			defer epMu.Unlock()
+			if ep != next {
+				return
+			}
+			window.SetURL(next.URL + "/#key=" + next.Key)
+		})
+	}
 	openWindow = func() {
-		if latest, err := bridge.ReadEndpoint(*dir); err == nil && bridge.Healthy(latest) && latest != ep {
-			ep = latest
-			window.SetURL(ep.URL + "/#key=" + ep.Key)
+		if next, changed := syncEndpoint(); changed {
+			applyEndpoint(next)
 		}
 		window.Show()
 		window.Restore()
 		window.Focus()
 	}
+	stopSync := make(chan struct{})
+	defer close(stopSync)
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopSync:
+				return
+			case <-ticker.C:
+				if next, changed := syncEndpoint(); changed {
+					applyEndpoint(next)
+				}
+			}
+		}
+	}()
 	window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) { window.Hide(); e.Cancel() })
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { openWindow() })
 	menu := app.NewMenu()

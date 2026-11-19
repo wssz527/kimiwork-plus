@@ -7,7 +7,17 @@ import (
 )
 
 type accountModelSurface interface {
-	accountModelConfig(context.Context, accountPage) (map[string]any, error)
+	accountModelConfig(context.Context, accountPage) (accountModelConfig, error)
+}
+
+// accountModelConfig is what one page reports about the loaded catalog. The two
+// store generations answer in the same two sections; `credentialPublished` says
+// whether the providers carry a credential reference at all, because the 3.2.28
+// surface reports only whether a key is configured.
+type accountModelConfig struct {
+	providers           map[string]any
+	models              map[string]any
+	credentialPublished bool
 }
 
 type accountCatalogEntry struct {
@@ -102,6 +112,59 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	return "pending", reason
 }
 
+func (c *Controller) confirmRunningCatalog(ctx context.Context, result IntegrationResult) IntegrationResult {
+	c.mu.Lock()
+	child, bridge, settings := c.child, c.bridge, c.settings
+	c.mu.Unlock()
+	if child == nil || bridge == nil || result.Readback.Generation <= 0 {
+		return result
+	}
+	surface, err := c.accountSurface()
+	if err != nil {
+		return result
+	}
+	home := c.kimiHome()
+	user, verified := accountPageUser(ctx, surface)
+	if !verified || sha256Hex(user) != result.Readback.AccountDigest || !accountConfigMatches(home, user) {
+		return result
+	}
+	native, err := NewNativeIntegration(settings.StateDir, home, "gateway")
+	if err != nil {
+		return result
+	}
+	catalog, reason, _ := native.accountCatalog(settings, result.Readback.AccountDigest)
+	if reason != "" || len(catalog) == 0 || !accountPageHasModels(ctx, surface, catalog) {
+		return result
+	}
+	runtime, page, ok := accountRuntimeTarget(ctx, surface)
+	if !ok {
+		return result
+	}
+	ready, err := runtime.accountRuntimeReady(ctx, page, false)
+	_ = runtime.accountStopRuntimeWatch(ctx, page)
+	if err != nil || !ready {
+		return result
+	}
+	current, verified := accountPageUser(ctx, surface)
+	if !verified || current != user || !accountConfigMatches(home, user) || c.currentGeneration() != result.Readback.Generation {
+		return result
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.child != child || c.bridge != bridge || c.integration == nil || c.integration.Readback != result.Readback {
+		return result
+	}
+	select {
+	case <-child.Exit():
+		return result
+	default:
+	}
+	c.loadedKnown, c.loadedGeneration = true, result.Readback.Generation
+	result.Adopted = true
+	c.integration = &result
+	return result
+}
+
 func accountPageHasModels(ctx context.Context, surface accountSurface, want []accountCatalogEntry) bool {
 	models, ok := surface.(accountModelSurface)
 	if !ok {
@@ -116,15 +179,19 @@ func accountPageHasModels(ctx context.Context, surface accountSurface, want []ac
 			continue
 		}
 		config, err := models.accountModelConfig(ctx, page)
-		if err != nil || config == nil {
+		if err != nil {
 			continue
 		}
-		providers, entries := section(config, "providers"), section(config, "models")
+		providers, entries := config.providers, config.models
+		matches := providerMatches
+		if !config.credentialPublished {
+			matches = providerMatchesPublished
+		}
 		all := true
 		for _, entry := range want {
 			provider, _ := providers[stringField(entry.model, "provider")].(map[string]any)
 			model, _ := entries[entry.alias].(map[string]any)
-			if !providerMatches(provider, entry.provider) || !modelMatches(model, entry.model) {
+			if !matches(provider, entry.provider) || !modelMatches(model, entry.model) {
 				all = false
 				break
 			}
@@ -142,10 +209,14 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 	if storeErr != "" {
 		return nil, "profile_store_" + storeErr, storeErr == "absent"
 	}
+	// Both store generations are keyed by the account key, which is already what
+	// `scope` answers; comparing them directly is what makes a v3 `accounts` key
+	// and a legacy `profiles` key select the same way.
 	var profile map[string]any
+	var account *nativeAccountV3
 	for _, candidate := range kthProfiles(store) {
 		if candidate.key == scope {
-			profile = candidate.profile
+			profile, account = candidate.profile, candidate.v3
 			break
 		}
 	}
@@ -159,7 +230,15 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		return nil, "profile_delisted", true
 	}
 	target := normalizeNativeURL(settings.GatewayURL)
-	if normalizeNativeURL(stringField(profile, "baseUrl")) != target {
+	if account != nil {
+		// A v3 account states a base URL per provider, so every provider this
+		// account holds must already point at the gateway.
+		for _, value := range account.baseURLs {
+			if value != target {
+				return nil, "foreign_url", false
+			}
+		}
+	} else if normalizeNativeURL(stringField(profile, "baseUrl")) != target {
 		return nil, "foreign_url", false
 	}
 	config, configErr := readJSONFile(filepath.Join(n.kimiDir, NativeWorkConfig), maxConfigBytes)
@@ -195,7 +274,7 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		if provider == nil || model == nil {
 			return nil, "config_not_generated", false
 		}
-		wantProvider := map[string]any{"type": providerType(row), "baseUrl": target, "credential": credentialRef}
+		wantProvider := desiredProviderTerms(target, credentialRef, providerID, providerType(row), account)
 		wantModel := modelEntry(row)
 		if !providerMatches(provider, wantProvider) {
 			return nil, "foreign_provider", false

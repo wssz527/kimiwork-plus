@@ -382,6 +382,7 @@ func TestCatalogShapesAndModelOrder(t *testing.T) {
 	_, url := startGateway(t, fake.server.URL, models, nil)
 
 	request, _ := http.NewRequest(http.MethodGet, url+"/models/api.json", nil)
+	request.Host = "untrusted.example:12345"
 	request.Header.Set("Authorization", "Bearer "+gatewayKey)
 	request.Header.Set("Sec-Fetch-Site", "none")
 	reply, err := http.DefaultClient.Do(request)
@@ -408,15 +409,16 @@ func TestCatalogShapesAndModelOrder(t *testing.T) {
 	if firstResponses < 0 || secondResponses < 0 || firstResponses > secondResponses {
 		t.Fatalf("responses model order lost: %s", raw)
 	}
-	var catalog map[string]any
+	var catalog map[string]struct {
+		API string `json:"api"`
+	}
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if _, ok := catalog["kimi"]; !ok {
-		t.Fatalf("kimi group missing: %s", raw)
-	}
-	if _, ok := catalog["responses"]; !ok {
-		t.Fatalf("responses group missing: %s", raw)
+	for _, group := range []string{"kimi", "responses"} {
+		if got := catalog[group].API; got != url {
+			t.Errorf("catalog group %q api = %q, want listening endpoint %q", group, got, url)
+		}
 	}
 
 	request, _ = http.NewRequest(http.MethodGet, url+"/models", nil)

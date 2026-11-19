@@ -13,8 +13,8 @@ import (
 //	table    the symbol used by the bootstrap IIFE `})(NAME, <number>)` whose
 //	         function body declares a large string array and returns it
 //	decoder  `function f(a, b) { a = a - <number>; ... }`
-//	parser   the function whose decoded body mentions `skippedModels` and
-//	         `family` and contains no `await`
+//	parser   a synchronous route catalog converter, or the legacy parser
+//	         whose body mentions both `skippedModels` and `family`
 //
 // Everything is best effort. A bundle this cannot read is `unverified`, which
 // is not a failure: the gateway only emits the documented api.json shape and
@@ -36,7 +36,7 @@ var (
 	reReturnsTbl = regexp.MustCompile(`return _0x[0-9a-f]+;`)
 	reAliasPair  = regexp.MustCompile(`\b(_0x[0-9a-f]+)\s*=\s*(_0x[0-9a-f]+)\s*[,;]`)
 	reCallNumber = regexp.MustCompile(`\b(_0x[0-9a-f]+)\((\d+)\)`)
-	reLiteral    = regexp.MustCompile(`^(?:\{|\[|"|'|-?\d|!0|!1|void 0|null|true|false)`)
+	reLiteral    = regexp.MustCompile(`^(?:\{|\[|"|'|-?\d|!0|!1|void 0|null|true|false|(?:/\* @__PURE__ \*/\s*)?new Set\(\[)`)
 	reDeclName   = regexp.MustCompile(`^(_0x[0-9a-f]+) = ([\s\S]+)$`)
 	reIdent      = regexp.MustCompile(`\b(_0x[0-9a-f]+)\b`)
 )
@@ -351,8 +351,31 @@ func quoteJS(value string) string {
 	return out.String()
 }
 
-// findParser looks for the catalog parser among the functions that mention
-// `skippedModels`, which survives obfuscation as plain text.
+func findRouteCatalogParser(text string, decode func(string) string, index sourceIndex) (string, bool) {
+	const marker = `"byok-incomplete-catalog"`
+	for at := 0; ; {
+		found := strings.Index(text[at:], marker)
+		if found < 0 {
+			return "", false
+		}
+		position := at + found
+		at = position + len(marker)
+		start := strings.LastIndex(text[:position], "\nfunction ") + 1
+		match := reFuncDecl.FindStringSubmatch(text[start:min(start+60, len(text))])
+		if match == nil {
+			continue
+		}
+		source, ok := functionAt(index, text, match[1])
+		if !ok || len(source) > maxFunctionBytes || !strings.Contains(source, marker) {
+			continue
+		}
+		decoded := decode(source)
+		if strings.Contains(decoded, `"base_url"`) && strings.Contains(decoded, `"models"`) && !strings.Contains(decoded, "await ") {
+			return match[1], true
+		}
+	}
+}
+
 func findParser(text string, decode func(string) string, index sourceIndex) (name string, source string, ok bool) {
 	seen := map[string]bool{}
 	for at := 0; ; {
@@ -546,6 +569,7 @@ func RuntimeContracts(text string) map[string]bool {
 	for marker, id := range runtimeMarkers {
 		out[id] = strings.Contains(text, marker)
 	}
+	out["catalog_parser"] = out["catalog_parser"] || strings.Contains(text, `"byok-incomplete-catalog"`)
 	return out
 }
 

@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"unsafe"
 )
 
 // The Windows store binds each blob to the current user through DPAPI, and the
@@ -60,5 +62,43 @@ func TestProtectionForbidsInteraction(t *testing.T) {
 func TestAnEmptyCiphertextIsRefused(t *testing.T) {
 	if _, err := unprotect(nil); err == nil {
 		t.Fatal("an empty ciphertext was accepted")
+	}
+}
+
+func TestNativeRegistryRoundTrip(t *testing.T) {
+	dir, err := os.MkdirTemp(t.TempDir(), "kwp-registry-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subkey := `Software\` + filepath.Base(dir)
+	testKey := hkcPrefix + subkey
+	valueName := "dev.kimi-work-plus.preview.daemon"
+	cmdLine := `"C:\Program Files\Kimi Work+ Preview\gateway-daemon.exe" "--start-background"`
+	t.Cleanup(func() {
+		name, err := syscall.UTF16PtrFromString(subkey)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		code, _, _ := advapi32Registry.NewProc("RegDeleteKeyW").Call(uintptr(syscall.HKEY_CURRENT_USER), uintptr(unsafe.Pointer(name)))
+		if code != 0 && code != uintptr(syscall.ERROR_FILE_NOT_FOUND) {
+			t.Error(syscall.Errno(code))
+		}
+	})
+	if _, err := executeWindowsRegistry([]string{"add", testKey, "/v", valueName, "/t", "REG_SZ", "/d", cmdLine, "/f"}); err != nil {
+		t.Fatalf("registry add failed: %v", err)
+	}
+	queried, err := executeWindowsRegistry([]string{"query", testKey, "/v", valueName})
+	if err != nil {
+		t.Fatalf("registry query failed: %v", err)
+	}
+	if !parseRegistryRunValue(queried) || !strings.Contains(queried, cmdLine) {
+		t.Fatalf("unexpected registry query output: %q", queried)
+	}
+	if _, err := executeWindowsRegistry([]string{"delete", testKey, "/v", valueName, "/f"}); err != nil {
+		t.Fatalf("registry delete failed: %v", err)
+	}
+	if _, err := executeWindowsRegistry([]string{"query", testKey, "/v", valueName}); err == nil {
+		t.Fatal("deleted registry value still answered query")
 	}
 }

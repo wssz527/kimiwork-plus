@@ -214,3 +214,87 @@ func TestAccountManagerDoesNotSwitchDuringWork(t *testing.T) {
 		t.Fatal("busy check happened after changing account")
 	}
 }
+
+func TestAccountManagerHealsStaleRestoreWhenSessionVerified(t *testing.T) {
+	f := newAccountManagerFixture(t)
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.active, f.token = "second", "second-token"
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an interrupted non-adding switch left in accounts.json across daemon restart.
+	f.active, f.token = "first", "first-token"
+	if err := f.vault.setPending(accountID("first"), false); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newAccountManager(f.vault, f.hooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.manager = restarted
+	if err := f.action(t, "account-switch", accountID("second")); err != nil {
+		t.Fatalf("stale restoreId blocked switch despite verified live session: %v", err)
+	}
+	if f.active != "second" || f.manager.State()["restoreAccountId"] != "" {
+		t.Fatalf("unexpected state after self-healed switch: %+v", f.manager.State())
+	}
+}
+
+func TestAccountManagerKeepsStaleRestoreWhenSessionUnverified(t *testing.T) {
+	f := newAccountManagerFixture(t)
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.active, f.token = "second", "second-token"
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.active = ""
+	if err := f.vault.setPending(accountID("first"), false); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newAccountManager(f.vault, f.hooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.manager = restarted
+	err = f.action(t, "account-switch", accountID("second"))
+	if err == nil || err.Error() != "account_login_pending" {
+		t.Fatalf("unverified session must keep the recovery marker: %v", err)
+	}
+	if f.manager.State()["restoreAccountId"] != accountID("first") || f.activates != 0 {
+		t.Fatalf("recovery marker changed without verification: %+v", f.manager.State())
+	}
+}
+
+func TestAccountManagerHealsStaleRestoreBeforeAddKeepsRecovery(t *testing.T) {
+	f := newAccountManagerFixture(t)
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.active, f.token = "second", "second-token"
+	if err := f.action(t, "account-capture", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.active, f.token = "first", "first-token"
+	if err := f.vault.setPending(accountID("first"), false); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newAccountManager(f.vault, f.hooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.manager = restarted
+	if err := f.action(t, "account-begin-add", ""); err != nil {
+		t.Fatalf("stale restoreId blocked adding despite verified live session: %v", err)
+	}
+	state := f.manager.State()
+	if state["adding"] != true || state["restoreAccountId"] != accountID("first") || f.active != "" {
+		t.Fatalf("adding flow lost its recovery account: %+v", state)
+	}
+	if err := f.action(t, "account-cancel-add", ""); err != nil || f.active != "first" {
+		t.Fatalf("cancelled add did not restore the original account: %v", err)
+	}
+}

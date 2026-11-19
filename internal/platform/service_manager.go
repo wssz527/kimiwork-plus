@@ -109,6 +109,11 @@ type ManagerHost interface {
 type localHost struct{}
 
 func (localHost) Run(ctx context.Context, name string, args ...string) (string, error) {
+	// Registry steps answer from advapi32 in-process: spawning reg.exe for a
+	// two-line answer costs a console host and depends on an external program.
+	if handled, out, err := runPlatformRegistry(ctx, name, args); handled {
+		return out, err
+	}
 	command := exec.CommandContext(ctx, name, args...)
 	hideCommandConsole(command)
 	var out strings.Builder

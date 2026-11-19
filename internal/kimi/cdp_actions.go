@@ -558,7 +558,11 @@ func findPath(targets []actionTarget, path string) (actionTarget, bool) {
 
 // The page expressions. They are the released build's own calls.
 const (
-	importProbeExpression = `typeof globalThis.clawBridgeAPI?.importByokModels === "function"`
+	importProbeExpression = `(function(){
+const api = globalThis.clawBridgeAPI;
+const sources = api?.byokSources;
+return typeof api?.importByokModels === "function" || (typeof sources?.list === "function" && typeof sources.preview === "function" && typeof sources.save === "function");
+})()`
 
 	openSettingsExpression = `(function(){
 var api = globalThis.kimiAgentAPI;
@@ -589,14 +593,61 @@ catch (error) { return { asked: false, failed: true }; }
 
 // importExpression renders the official import call.
 func importExpression(token, baseURL string) string {
-	return `(async()=>{const api=globalThis.clawBridgeAPI;` +
-		`if(typeof api?.importByokModels!=="function")return {ok:false,code:"contract-changed"};` +
-		`if(typeof api.revealByok==="function"){const state=await api.revealByok();` +
-		`if(state?.available===false)return {ok:false,code:"feature-disabled"};}` +
-		`const result=await api.importByokModels(` + quoteJS(token) + `,` + quoteJS(baseURL) + `);` +
-		`return {ok:result?.ok===true,code:result?.code,` +
-		`requiresRestart:result?.requiresRestart===true,restartDeferred:result?.restartDeferred===true,` +
-		`models:Array.isArray(result?.profile?.models)?result.profile.models.length:0};})()`
+	return `(async(token, baseURL)=>{
+const api=globalThis.clawBridgeAPI;
+if(typeof api?.revealByok==="function"){
+  const state=await api.revealByok();
+  if(state?.available===false)return {ok:false,code:"feature-disabled"};
+}
+if(typeof api?.importByokModels==="function"){
+  const result=await api.importByokModels(token,baseURL);
+  return {ok:result?.ok===true,code:result?.code,
+    requiresRestart:result?.requiresRestart===true,restartDeferred:result?.restartDeferred===true,
+    models:Array.isArray(result?.profile?.models)?result.profile.models.length:0};
+}
+const sources=api?.byokSources;
+if(typeof sources?.list!=="function"||typeof sources.preview!=="function"||typeof sources.save!=="function"){
+  return {ok:false,code:"contract-changed"};
+}
+const unwrap=result=>result?.ok===true?result.value:null;
+baseURL=baseURL.replace(/\/$/,"");
+const catalogURL=baseURL+"/models/api.json";
+const snapshot=unwrap(await sources.list());
+if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string"){
+  return {ok:false,code:"contract-changed"};
+}
+const existing=snapshot.sources.find(source=>source.id==="byok-kth");
+if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL))){
+  return {ok:false,code:"foreign-url"};
+}
+const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&
+  snapshot.sources.some(source=>source.id!==existing?.id);
+const result=await sources.preview({sourceId:existing?.id,sourceRevision:existing?.revision??null,
+  accountRevision:snapshot.accountRevision,
+  draft:{kind:"kth",displayName:existing?.displayName||"Kimi Work+",registryUrl:catalogURL,
+    registryKey:{mode:"set",value:token},reuseRegistryCredential:true}});
+const preview=unwrap(result);
+if(!preview?.canSave||typeof preview.previewId!=="string"||!Array.isArray(preview.candidates)||!preview.candidates.length||
+  preview.scopeToken!==snapshot.scopeToken||preview.accountRevision!==snapshot.accountRevision||
+  preview.sourceRevision!==(existing?.revision??null)){
+  if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
+  return {ok:false,code:result?.reasonCode||"catalog-unconfirmed"};
+}
+const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
+if(!saved?.ok||saved.value?.sourceId!==preview.sourceId)return {ok:false,code:saved?.reasonCode||"import-failed"};
+let status=saved.value.status;
+if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function"){
+  const current=unwrap(await sources.list());
+  if(current?.scopeToken!==snapshot.scopeToken||current.accountRevision!==saved.value.accountRevision){
+    return {ok:false,code:"byok-source-stale"};
+  }
+  const applied=await sources.applyPending(saved.value.accountRevision);
+  if(!applied?.ok)return {ok:false,code:applied?.reasonCode||"import-failed"};
+  status=applied.value?.status;
+}
+if(!["applied","pending","deferred"].includes(status))return {ok:false,code:"import-failed"};
+return {ok:true,requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:preview.candidates.length};
+})(` + quoteJS(token) + `,` + quoteJS(baseURL) + `)`
 }
 
 // isLoopbackGateway accepts only a loopback http endpoint with a /v1 path, which

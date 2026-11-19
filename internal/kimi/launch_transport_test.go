@@ -137,6 +137,11 @@ func TestChildArgumentsNameOnlyTheTransportInUse(t *testing.T) {
 		if got := inheritedHandles(command); got != 2 {
 			t.Fatalf("%d inherited handles, want 2", got)
 		}
+		// The official application is the managed child, so starting it hidden
+		// would leave the user with a running Kimi and no window.
+		if managedChildWindowHidden(command) {
+			t.Fatal("the managed child would start with its main window hidden")
+		}
 		if len(command.ExtraFiles) != 0 {
 			t.Fatalf("the handle transport also set ExtraFiles: %v", command.ExtraFiles)
 		}

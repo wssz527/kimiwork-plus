@@ -161,7 +161,7 @@ func (p *fakePage) emit(write func(string), message map[string]any) {
 // through their real expressions rather than through a stub.
 func (p *fakePage) actionReply(sessionID, expression string) any {
 	switch {
-	case strings.Contains(expression, "typeof globalThis.clawBridgeAPI?.importByokModels"):
+	case expression == importProbeExpression:
 		// Only the settings overlay carries the import API. The Work view has the
 		// settings *open* call; a fake that answered both from every page would
 		// hide the ordering the actions depend on.

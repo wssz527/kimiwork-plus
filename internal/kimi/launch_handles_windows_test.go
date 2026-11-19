@@ -13,3 +13,10 @@ func inheritedHandles(command *exec.Cmd) int {
 	}
 	return len(command.SysProcAttr.AdditionalInheritedHandles)
 }
+
+// managedChildWindowHidden reports whether the child would start with its main
+// window suppressed. The managed application is the official Kimi the user
+// interacts with, so its window must be visible.
+func managedChildWindowHidden(command *exec.Cmd) bool {
+	return command.SysProcAttr != nil && command.SysProcAttr.HideWindow
+}

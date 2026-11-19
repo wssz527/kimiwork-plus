@@ -41,7 +41,7 @@
       : record.status === 'error' ? '查询失败'
         : record.status === 'not_configured' ? '凭据未配置'
           : record.status === 'not_read' ? '尚未查询' : '最近一次查询成功';
-  const state = { tab: 'requests', range: 'today', filters: {}, result: null, quota: null, loading: false, bucket: null, clearArmed: false };
+  const state = { tab: 'requests', range: 'today', filters: {}, result: null, quota: null, loading: false, quotaLoading: false, bucket: null, clearArmed: false };
   let request;
   let notify;
   let clearTimer;
@@ -146,11 +146,17 @@
   loadUsage.sequence = 0;
 
   async function loadQuota() {
+    const sequence = ++loadQuota.sequence;
+    state.quotaLoading = true;
     try {
-      state.quota = await request('/api/quota');
+      const quota = await request('/api/quota');
+      if (sequence !== loadQuota.sequence) return;
+      state.quota = quota;
       renderQuota();
-    } catch (error) { showError(error); }
+    } catch (error) { if (sequence === loadQuota.sequence) showError(error); }
+    finally { if (sequence === loadQuota.sequence) state.quotaLoading = false; }
   }
+  loadQuota.sequence = 0;
 
   async function reload() {
     await Promise.all([loadUsage(), loadQuota()]);
@@ -160,7 +166,7 @@
     state.tab = tab;
     document.querySelectorAll('[data-usage-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.usageTab === tab)));
     for (const name of ['requests', 'quotas', 'sources', 'budget']) hide('usage-pane-' + name, name !== tab);
-    if (['quotas', 'sources'].includes(tab) && !state.quota) void loadQuota();
+    if (['quotas', 'sources'].includes(tab) && !state.quota && !state.quotaLoading) void loadQuota();
   }
 
   const filterViews = {
@@ -598,18 +604,62 @@
 
   function mount(options) {
     request = options.request; notify = options.notify || (() => {});
-    if (!$('usage-root')) return { show() {}, reload: async () => {} };
+    if (!$('usage-root')) return { show() {}, reload: async () => {}, reset() {} };
     template(); bind();
     return {
       show(filter = null) {
-        if (filter?.connectionId && state.filters.connectionId !== filter.connectionId) {
+        const filterChanged = Boolean(filter?.connectionId && state.filters.connectionId !== filter.connectionId);
+        if (filterChanged) {
           state.filters.connectionId = filter.connectionId;
           state.result = null;
         }
-        if (!state.result) void loadUsage();
-        if (!state.quota) void loadQuota();
+        if (filterChanged || (!state.result && !state.loading)) void loadUsage();
+        if (!state.quota && !state.quotaLoading) void loadQuota();
       },
       reload,
+      reset() {
+        loadUsage.sequence++;
+        loadQuota.sequence++;
+        state.result = null;
+        state.quota = null;
+        state.bucket = null;
+        state.loading = false;
+        state.quotaLoading = false;
+        state.filters = {};
+        state.clearArmed = false;
+        clearTimeout(clearTimer);
+        text('usage-clear', '清除历史');
+        showError(null);
+        renderFilters();
+        for (const id of ['usage-stat-input', 'usage-stat-output', 'usage-stat-total', 'usage-stat-cache-read', 'usage-stat-cache-write', 'usage-stat-requests', 'usage-stat-errors']) text(id, '—');
+        text('usage-stat-observed', '有 usage 的请求数未知');
+        text('usage-stat-cost', '未提供');
+        text('usage-coverage', '仅统计经过本机网关的可观察请求；官方直连和接入前历史不会补算。');
+        hide('usage-bucket-detail', true);
+        text('usage-bucket-title', '');
+        const bucketRecords = $('usage-bucket-records');
+        if (bucketRecords) bucketRecords.replaceChildren();
+        const chart = $('usage-chart-body');
+        if (chart) {
+          const note = document.createElement('p');
+          note.className = 'usage-chart__empty';
+          note.textContent = '用量数据尚未读取。';
+          chart.replaceChildren(note);
+        }
+        const records = $('usage-records-body');
+        if (records) records.replaceChildren();
+        hide('usage-records-empty', false);
+        text('usage-records-empty', '用量数据尚未读取。');
+        text('usage-records-limit', '');
+        const quota = $('quota-list');
+        if (quota) quota.replaceChildren();
+        hide('quota-empty', false);
+        text('quota-empty', '额度来源尚未读取。这不表示余额为 0。');
+        const sources = $('quota-source-list');
+        if (sources) sources.replaceChildren();
+        const editor = $('quota-source-editor');
+        if (editor) editor.replaceChildren();
+      },
     };
   }
 

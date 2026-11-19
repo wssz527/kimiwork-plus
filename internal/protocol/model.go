@@ -643,7 +643,7 @@ func equalStringPtr(left, right *string) bool {
 // NativeCatalog renders the catalog Kimi's own model menu reads. The order of
 // the rows is the order the menu shows them, so it is preserved by emitting
 // JSON directly instead of going through a map.
-func NativeCatalog(models []Model) []byte {
+func NativeCatalog(models []Model, api string) []byte {
 	var kimi, responses []Model
 	for _, model := range models {
 		if model.Protocol == ProtocolChat {
@@ -666,6 +666,8 @@ func NativeCatalog(models []Model) []byte {
 		b.WriteString(quote(name))
 		b.WriteString(`:{"type":`)
 		b.WriteString(quote(kind))
+		b.WriteString(`,"api":`)
+		b.WriteString(quote(api))
 		b.WriteString(`,"models":{`)
 		for i, model := range rows {
 			if i > 0 {

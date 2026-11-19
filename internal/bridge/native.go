@@ -205,8 +205,11 @@ func (n *Native) State() core.Document {
 	integration := core.Document{"state": "unchecked", "imported": false, "desktop": desktop, "reason": "native_import_not_verified"}
 	if status.Integration != nil {
 		raw, _ := json.Marshal(status.Integration)
-		_ = json.Unmarshal(raw, &integration)
-		integration["desktop"] = desktop
+		var verified core.Document
+		if json.Unmarshal(raw, &verified) == nil && verified != nil {
+			integration = verified
+			integration["desktop"] = desktop
+		}
 	}
 	var operation core.Document
 	if n.operation != nil {

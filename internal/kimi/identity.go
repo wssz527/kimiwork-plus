@@ -15,7 +15,7 @@ import (
 // Each platform uses the same source the official daemon uses:
 //
 //	darwin   `ps -p <pid> -o lstart=`
-//	windows  Get-Process StartTime as FILETIME ticks
+//	windows  GetProcessTimes creation time as FILETIME ticks
 //
 // Anything unreadable answers `unknown`, never a value that compares equal.
 func ProcessStartIdentity(ctx context.Context, pid int) ProcessIdentity {
@@ -48,46 +48,7 @@ func darwinIdentity(ctx context.Context, pid int) ProcessIdentity {
 	return ProcessIdentity{Kind: IdentityDarwinLStart, Value: value}
 }
 
-const (
-	windowsNotFoundMarker     = "__DAIMON_PROCESS_NOT_FOUND__"
-	windowsPermissionMarker   = "__DAIMON_PROCESS_PERMISSION_DENIED__"
-	windowsFiletimeUnixOffset = 116444736000000000
-)
-
-// windowsIdentityScript is fixed text with one integer interpolated. It writes
-// the creation time as FILETIME ticks so the value compares without locale or
-// timezone luck.
-func windowsIdentityScript(pid int) string {
-	return `$ErrorActionPreference = 'Stop'; try { $process = Get-Process -Id ` + strconv.Itoa(pid) +
-		` -ErrorAction Stop; [Console]::Out.Write($process.StartTime.ToUniversalTime().ToFileTimeUtc()` +
-		`.ToString([Globalization.CultureInfo]::InvariantCulture)) } catch { if ($_.FullyQualifiedErrorId -like ` +
-		`'NoProcessFoundForGivenId*') { [Console]::Error.Write('` + windowsNotFoundMarker + `'); exit 3 }; ` +
-		`if (($_.Exception.NativeErrorCode -eq 5) -or ($_.Exception -is [System.UnauthorizedAccessException])) { ` +
-		`[Console]::Error.Write('` + windowsPermissionMarker + `'); exit 4 }; exit 5 }`
-}
-
-func windowsIdentity(ctx context.Context, pid int) ProcessIdentity {
-	command := exec.CommandContext(ctx, "powershell.exe",
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsIdentityScript(pid))
-	hideBackgroundCommand(command)
-	var stderr strings.Builder
-	command.Stderr = &stderr
-	out, err := command.Output()
-	if err != nil {
-		if strings.Contains(stderr.String(), windowsNotFoundMarker) {
-			return ProcessIdentity{Kind: IdentityNotFound}
-		}
-		if strings.Contains(stderr.String(), windowsPermissionMarker) {
-			return ProcessIdentity{Kind: IdentityUnknown, Reason: "permission_denied"}
-		}
-		return ProcessIdentity{Kind: IdentityUnknown, Reason: "query_failed"}
-	}
-	value := strings.TrimSpace(string(out))
-	if !validFiletime(value) {
-		return ProcessIdentity{Kind: IdentityUnknown, Reason: "invalid_output"}
-	}
-	return ProcessIdentity{Kind: IdentityWindowsFT, Value: value}
-}
+const windowsFiletimeUnixOffset = 116444736000000000
 
 // validFiletime accepts only a positive tick count that converts to a real
 // Unix millisecond value: a syntactically valid but impossible count is not

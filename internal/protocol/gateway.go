@@ -631,7 +631,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 	if catalog {
 		var body []byte
 		if r.URL.Path == "/v1/models/api.json" {
-			body = NativeCatalog(models)
+			local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+			if !ok || !local.IP.IsLoopback() {
+				refuse(http.StatusServiceUnavailable, "catalog_unavailable")
+				return nil
+			}
+			body = NativeCatalog(models, "http://"+local.String()+"/v1")
 		} else {
 			body = OpenAIModels(models)
 		}

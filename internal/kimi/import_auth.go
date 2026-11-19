@@ -7,7 +7,7 @@ import (
 
 // An import is two separate facts and this file keeps them apart:
 //
-//	the request   the official page accepted importByokModels
+//	the request   the official page accepted the model import
 //	the evidence  the profile and the generated config now hold those models
 //
 // A page that answers `ok` has only done the first. The second is read back from

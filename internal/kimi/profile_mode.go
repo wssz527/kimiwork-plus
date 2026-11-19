@@ -114,12 +114,22 @@ func (c *Controller) OpenWork(ctx context.Context) error {
 	actions := c.actions
 	settings := c.settings
 	c.mu.Unlock()
-	if runtime.GOOS == "darwin" && settings.profileMode() == ProfileModeOfficial && c.managedChildAlive() {
-		bundle := filepath.Dir(filepath.Dir(filepath.Dir(settings.Installation.Application)))
-		if err := exec.CommandContext(ctx, "/usr/bin/open", "-a", bundle, "kimi-work://home").Run(); err != nil {
-			return errors.New("native_bridge_activation_refused")
+	if settings.profileMode() == ProfileModeOfficial && c.managedChildAlive() {
+		var command *exec.Cmd
+		const workURL = "kimi-work://home"
+		switch runtime.GOOS {
+		case "darwin":
+			bundle := filepath.Dir(filepath.Dir(filepath.Dir(settings.Installation.Application)))
+			command = exec.CommandContext(ctx, "/usr/bin/open", "-a", bundle, workURL)
+		case "windows":
+			command = exec.CommandContext(ctx, settings.Installation.Application, workURL)
 		}
-		return nil
+		if command != nil {
+			if err := command.Run(); err != nil {
+				return errors.New("native_bridge_activation_refused")
+			}
+			return nil
+		}
 	}
 	if actions == nil {
 		return errors.New("native_bridge_waiting_work")

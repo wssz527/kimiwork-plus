@@ -159,6 +159,7 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 
 	profile := options.NativeProfile
 	selectedKey := ""
+	var selected profileCandidate
 	storeKind := "injected"
 	if profile == nil {
 		store, err := readJSONFile(filepath.Join(n.kimiDir, NativeWorkStore), maxStoreBytes)
@@ -175,6 +176,7 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 		}
 		profile = chosen.profile
 		selectedKey = chosen.key
+		selected = chosen
 	}
 	if profile == nil {
 		reason := "profile_missing"
@@ -206,6 +208,12 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 	}
 	if delisted, _ := profile["delisted"].(bool); delisted {
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "profile_delisted"}
+	}
+	// The 3.2.28 account shape declares everything per provider and is generated
+	// by the official application, so it is verified on its own terms: this
+	// package never writes a v3 store's `config.json`.
+	if selected.v3 != nil {
+		return n.verifyAccount(selected, target, catalog, intent, scopeDigest)
 	}
 	profileURL := normalizeNativeURL(stringField(profile, "baseUrl"))
 	if profileURL == "" {
@@ -755,11 +763,23 @@ func providerReferenced(models map[string]any, providerID string) bool {
 type profileCandidate struct {
 	key     string
 	profile map[string]any
+	// v3 is set when the profile came from the 3.2.28 `accounts` shape. Its
+	// declarations are per provider and it is verified, never written.
+	v3 *nativeAccountV3
 }
 
-// kthProfiles reads the profile entries Kimi's own store holds. Profiles are
+// kthProfiles reads the profile entries Kimi's own store holds. Both store
+// generations are accepted, because the released build moved from `profiles` to
+// `accounts` and an installation upgraded in place may hold either. Profiles are
 // found by shape, not by version: the store's own `v` field is tolerated.
 func kthProfiles(store map[string]any) []profileCandidate {
+	if found := legacyProfiles(store); len(found) > 0 {
+		return found
+	}
+	return accountProfiles(store)
+}
+
+func legacyProfiles(store map[string]any) []profileCandidate {
 	profiles, ok := store["profiles"].(map[string]any)
 	if !ok {
 		return nil
@@ -793,6 +813,11 @@ func kthProfiles(store map[string]any) []profileCandidate {
 }
 
 // Exact account scope wins over legacy intent and single-profile fallbacks.
+//
+// Both store generations key a profile by sha256 of the signed-in user id,
+// which is what `AccountScope` answers, so the digest comparison is the same for
+// each. A v3 account is selected by its key alone: its profile map carries no
+// identity of its own.
 func selectProfile(candidates []profileCandidate, scopeDigest string, intent *nativeIntent) (profileCandidate, bool) {
 	if len(candidates) == 0 {
 		return profileCandidate{}, false
@@ -913,6 +938,15 @@ func providerMatches(current, desired map[string]any) bool {
 	return stringField(current, "type") == stringField(desired, "type") &&
 		normalizeNativeURL(stringField(current, "baseUrl")) == stringField(desired, "baseUrl") &&
 		stringField(current, "credential") == stringField(desired, "credential")
+}
+
+// providerMatchesPublished is providerMatches for an answer that publishes no
+// credential reference: the 3.2.28 surface reports whether a key is configured,
+// not which reference holds it, so only the terms it does publish are compared.
+// The store on disk is what proves the reference.
+func providerMatchesPublished(current, desired map[string]any) bool {
+	return stringField(current, "type") == stringField(desired, "type") &&
+		normalizeNativeURL(stringField(current, "baseUrl")) == stringField(desired, "baseUrl")
 }
 
 // modelMatches compares declaration terms: "absent" and "an empty list" both

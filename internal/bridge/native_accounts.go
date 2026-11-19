@@ -133,13 +133,13 @@ func (n *Native) observeAccounts(ctx context.Context) {
 	restore, adding := n.accounts.restoreID, n.accounts.adding
 	n.accounts.mu.Unlock()
 	id := accountID(identity.UserID)
-	if restore != "" && (!adding || id == restore) || restore == "" && current == id {
+	if (adding && id == restore) || (restore == "" && current == id) {
 		return
 	}
 	if _, _, err := n.accounts.captureBackground(deadline); err != nil {
 		return
 	}
-	if adding {
+	if restore != "" {
 		if err := n.accounts.setRestore("", false); err != nil {
 			return
 		}

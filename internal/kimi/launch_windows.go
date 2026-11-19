@@ -57,7 +57,6 @@ func prepareManagedChild(command *exec.Cmd, pipes launchPipes) ([]string, error)
 
 	command.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags:              createNoWindow,
-		HideWindow:                 true,
 		AdditionalInheritedHandles: []syscall.Handle{readHandle, writeHandle},
 	}
 	return []string{"--remote-debugging-io-pipes=" + ioPipesArgument(uintptr(readHandle), uintptr(writeHandle))}, nil

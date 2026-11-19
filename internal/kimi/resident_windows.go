@@ -3,25 +3,47 @@
 package kimi
 
 import (
-	"os/exec"
-	"strconv"
-	"strings"
+	"syscall"
+	"unsafe"
 )
 
-// windowsResidentBytes uses the documented PowerShell working-set counter.
-// `Get-Process` exists on every supported Windows build and needs no elevation
-// for a process the same user started.
+type processMemoryCounters struct {
+	CB                         uint32
+	PageFaultCount             uint32
+	PeakWorkingSetSize         uintptr
+	WorkingSetSize             uintptr
+	QuotaPeakPagedPoolUsage    uintptr
+	QuotaPagedPoolUsage        uintptr
+	QuotaPeakNonPagedPoolUsage uintptr
+	QuotaNonPagedPoolUsage     uintptr
+	PagefileUsage              uintptr
+	PeakPagefileUsage          uintptr
+}
+
+var procGetProcessMemoryInfo = kernel32Identity.NewProc("K32GetProcessMemoryInfo")
+
+// Query-limited access is the documented requirement for
+// K32GetProcessMemoryInfo since Windows 7; a VM_READ handle is not needed for
+// the counters and would only widen what this probe may open.
 func residentBytesPlatform(pid int) (int64, bool) {
-	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-		"[Console]::Out.Write((Get-Process -Id "+strconv.Itoa(pid)+" -ErrorAction Stop).WorkingSet64)")
-	hideBackgroundCommand(command)
-	out, err := command.Output()
+	if pid <= 0 {
+		return 0, false
+	}
+	handle, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return 0, false
 	}
-	value, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if err != nil || value <= 0 {
+	defer syscall.CloseHandle(handle)
+
+	var counters processMemoryCounters
+	counters.CB = uint32(unsafe.Sizeof(counters))
+	ok, _, _ := procGetProcessMemoryInfo.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&counters)),
+		uintptr(counters.CB),
+	)
+	if ok == 0 || counters.WorkingSetSize == 0 {
 		return 0, false
 	}
-	return value, true
+	return int64(counters.WorkingSetSize), true
 }

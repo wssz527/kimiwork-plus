@@ -124,7 +124,7 @@ func runFakeCDPChild() int {
 // preload API surface, not a DOM: the actions call these names and nothing else.
 func fakeEvaluate(expression, sessionID string) any {
 	switch {
-	case strings.Contains(expression, "typeof globalThis.clawBridgeAPI?.importByokModels"):
+	case expression == importProbeExpression:
 		// Only the settings overlay carries the import API.
 		return true
 	case strings.Contains(expression, "importByokModels"):

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -171,9 +173,13 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 	decode := func(source string) string { return decodeSource(source, aliasSet, lookup) }
 
 	index := indexFunctions(text)
-	parserName, _, found := findParser(text, decode, index)
-	if !found {
-		return Outcome{Error: "parser_not_found"}
+	parserName, routeCatalog := findRouteCatalogParser(text, decode, index)
+	if !routeCatalog {
+		var found bool
+		parserName, _, found = findParser(text, decode, index)
+		if !found {
+			return Outcome{Error: "parser_not_found"}
+		}
 	}
 
 	closure := map[string]bool{parserName: true}
@@ -219,6 +225,11 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 		if err := newSandbox(run); err != nil {
 			return Outcome{Error: "contract_sandbox_failed"}
 		}
+		if routeCatalog {
+			if err := installCatalogURLTypes(run); err != nil {
+				return Outcome{Error: "contract_sandbox_failed"}
+			}
+		}
 		failure := ""
 		if err := guard(run, budget, func() error {
 			if _, err := run.RunString(declaredAliases); err != nil {
@@ -244,15 +255,9 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 		} else {
 			report := contractReport{Table: table, Decoder: decoder, Parser: parserName,
 				Functions: len(closure), Pending: SortedIDs(keys(pending))}
-			var parsed struct {
-				Models  []any `json:"models"`
-				Skipped []any `json:"skippedModels"`
-			}
-			if result == nil || json.Unmarshal([]byte(result.String()), &parsed) != nil {
+			if result == nil || !readCatalogReport([]byte(result.String()), routeCatalog, &report) {
 				return Outcome{Error: "parser_result_unrecognized"}
 			}
-			report.Models = parsed.Models
-			report.Skipped = parsed.Skipped
 			if report.Models == nil {
 				report.Models = []any{}
 			}
@@ -298,6 +303,79 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 		}
 	}
 	return Outcome{Error: "closure_unstable"}
+}
+
+func installCatalogURLTypes(vm *goja.Runtime) error {
+	if err := vm.Set("URL", func(call goja.ConstructorCall) *goja.Object {
+		value, err := url.Parse(call.Argument(0).String())
+		if err != nil || value.Host == "" || (value.Scheme != "http" && value.Scheme != "https") {
+			panic(vm.NewTypeError("invalid URL"))
+		}
+		host := value.Hostname()
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		pass, _ := value.User.Password()
+		fields := map[string]string{
+			"protocol": value.Scheme + ":", "hostname": host, "origin": value.Scheme + "://" + value.Host,
+			"pathname": value.EscapedPath(), "username": value.User.Username(), "password": pass,
+		}
+		for name, field := range fields {
+			if err := call.This.Set(name, field); err != nil {
+				panic(vm.NewTypeError("invalid URL property"))
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return vm.Set("isIPv4", func(value string) bool {
+		ip, err := netip.ParseAddr(value)
+		return err == nil && ip.Is4()
+	})
+}
+
+func readCatalogReport(raw []byte, routeCatalog bool, report *contractReport) bool {
+	if !routeCatalog {
+		var parsed struct {
+			Models  []any `json:"models"`
+			Skipped []any `json:"skippedModels"`
+		}
+		if json.Unmarshal(raw, &parsed) != nil {
+			return false
+		}
+		report.Models, report.Skipped = parsed.Models, parsed.Skipped
+		return true
+	}
+	var parsed struct {
+		Routes []struct {
+			Protocol string `json:"protocol"`
+			Models   []struct {
+				ID string `json:"model"`
+			} `json:"models"`
+		} `json:"routes"`
+		Blocked []struct {
+			ID string `json:"modelId"`
+		} `json:"blocked"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil || parsed.Routes == nil || parsed.Blocked == nil {
+		return false
+	}
+	for _, route := range parsed.Routes {
+		if route.Protocol == "" || len(route.Models) == 0 {
+			return false
+		}
+		for _, model := range route.Models {
+			report.Models = append(report.Models, map[string]string{"model": model.ID, "family": route.Protocol})
+		}
+	}
+	for _, blocked := range parsed.Blocked {
+		if blocked.ID == "" {
+			return false
+		}
+		report.Skipped = append(report.Skipped, blocked.ID)
+	}
+	return true
 }
 
 func aliasDeclarations(set map[string]bool) string {

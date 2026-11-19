@@ -410,6 +410,38 @@ test('switching the private panel session clears the visible catalogue query and
   assert.equal(dom.onboardKey.value, '');
 });
 
+function rotatedKeyHarness(loadState, calls) {
+  const state = { key: 'old-session', view: 'usage', onboard: { advanced: false, query: 'vision' } };
+  const dom = { conn: {}, onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
+  const usagePanel = { reset() { calls.push('reset'); }, show() { calls.push('show'); }, reload: async () => {} };
+  const code = [
+    'let modelSignature = "", recentSignature = "", saModelSignature = "", saEffortSignature = "";',
+    sourceFunction('adoptLocationKey'),
+    'return adoptLocationKey;',
+  ].join('\n');
+  return new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', 'usagePanel', code)(
+    state, dom, { location: { hash: '#key=new-session', pathname: '/', search: '' } },
+    { setItem: () => {} }, { replaceState: () => {} }, 'panel-key',
+    () => calls.push('stop'), () => {}, () => {}, () => {}, loadState, () => calls.push('start'), usagePanel,
+  );
+}
+
+test('adopting a rotated key clears usage before reading the new endpoint', async () => {
+  const calls = [];
+  const rotate = rotatedKeyHarness(async () => { calls.push('load'); return true; }, calls);
+  assert.equal(rotate(), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['reset', 'stop', 'load', 'show', 'start']);
+});
+
+test('a failed new endpoint read leaves usage cleared instead of showing old data', async () => {
+  const calls = [];
+  const rotate = rotatedKeyHarness(async () => { calls.push('load'); return false; }, calls);
+  assert.equal(rotate(), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['reset', 'stop', 'load']);
+});
+
 test('native search stays inside its single existing disclosure', () => {
   const nodes = {};
   const makeNode = (id = '') => ({

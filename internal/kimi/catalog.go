@@ -93,7 +93,7 @@ func SampleModels() []Model {
 		{ID: "gpt-probe-model", Protocol: "responses", ContextWindow: 262144, MaxOutputTokens: 16384,
 			Tools: true, Reasoning: true, InputModalities: []string{"text", "image"}},
 		{ID: "group/generic-probe-model", Protocol: "responses", ContextWindow: 32768, Tools: true},
-		{ID: "plain-probe-id", Protocol: "responses", ContextWindow: 8192},
+		{ID: "plain-probe-id", Protocol: "responses", ContextWindow: 8192, Tools: true},
 	}
 }
 
@@ -130,12 +130,13 @@ func Catalog(models []Model) *orderedObject {
 			responses.set(row.ID, entry)
 		}
 	}
+	const probeAPI = "http://127.0.0.1:43117/v1"
 	out := newOrdered()
 	if len(kimi.keys) > 0 {
-		out.set("kimi", newOrdered().set("type", "kimi").set("models", kimi))
+		out.set("kimi", newOrdered().set("type", "kimi").set("api", probeAPI).set("models", kimi))
 	}
 	if len(responses.keys) > 0 {
-		out.set("responses", newOrdered().set("type", "openai_responses").set("models", responses))
+		out.set("responses", newOrdered().set("type", "openai_responses").set("api", probeAPI).set("models", responses))
 	}
 	return out
 }
