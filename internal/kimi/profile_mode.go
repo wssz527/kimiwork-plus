@@ -151,7 +151,7 @@ func (c *Controller) StartOfficial(ctx context.Context) error {
 }
 
 func (c *Controller) startOfficial(ctx context.Context) error {
-	profile, err := existingLoginDirectory()
+	profile, err := OfficialProfileDirectory()
 	if err != nil {
 		return err
 	}

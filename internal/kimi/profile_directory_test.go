@@ -1,6 +1,7 @@
 package kimi
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,6 +29,32 @@ func TestOfficialWorkHomeResolvesBeforeProfileCreation(t *testing.T) {
 	}
 	if _, err := os.Stat(profile); !os.IsNotExist(err) {
 		t.Fatalf("the missing profile was created: %v", err)
+	}
+}
+
+func TestOfficialStartWithAnUninitializedProfile(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("official profile is not supported on this platform")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
+	profile, err := OfficialProfileDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewController(ControllerSettings{StateDir: filepath.Join(dir, "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := controller.validateOfficialProfile(profile); err != nil || got != profile {
+		t.Fatalf("cold profile validation: %q, %v", got, err)
+	}
+	if err := controller.StartOfficial(context.Background()); err == nil || err.Error() != "kimi_application_missing" {
+		t.Fatalf("start should proceed to the installation check, got %v", err)
+	}
+	if _, err := os.Lstat(profile); !os.IsNotExist(err) {
+		t.Fatalf("a refused launch created the profile: %v", err)
 	}
 }
 

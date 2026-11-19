@@ -945,8 +945,10 @@ func (c *Controller) validateOfficialProfile(candidate string) (string, error) {
 	if err != nil || resolved != official {
 		return "", errors.New("official_profile_mismatch")
 	}
-	if err := validateExistingProfileDirectory(official); err != nil {
-		return "", err
+	if _, err := os.Lstat(expected); !errors.Is(err, os.ErrNotExist) {
+		if err := validateExistingProfileDirectory(expected); err != nil {
+			return "", err
+		}
 	}
 	return filepath.Clean(candidate), nil
 }
