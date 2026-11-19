@@ -1313,3 +1313,94 @@ test('reportTheme emits Wails host theme events and masthead drag excludes inter
   assert.equal(runner.isMastheadDragTarget(blankMasthead), true);
   assert.equal(runner.isMastheadDragTarget(buttonInMasthead), false);
 });
+
+test('renderCompatibility distinguishes verified, new version pass, and degraded guards', () => {
+  const nodes = {};
+  for (const id of [
+    'overview-compat-bar', 'compat-dot', 'compat-summary', 'compat-version', 'compat-note',
+    'diag-compat-dot', 'diag-compat-version', 'diag-compat-kernel',
+    'diag-compat-catalog', 'diag-compat-catalog-sub',
+    'diag-compat-apis', 'diag-compat-apis-sub',
+    'diag-compat-store', 'diag-compat-guards',
+  ]) {
+    nodes[id] = { id, textContent: '', hidden: false, dataset: {} };
+  }
+  const $ = (id) => nodes[id] || null;
+  const setDot = (el, tone) => { if (el) el.dataset.tone = tone; };
+  const setHidden = (el, flag) => { if (el) el.hidden = Boolean(flag); };
+  const setText = (el, text) => { if (el) el.textContent = String(text ?? ''); };
+  const fmtCount = (v) => String(v);
+  const fmtTime = () => '12:00:00';
+  const reasonText = (c) => c;
+  const fn = new Function(
+    '$', 'setDot', 'setHidden', 'setText', 'fmtCount', 'fmtTime', 'reasonText',
+    sourceFunction('compatToneOf') + '\n' +
+    sourceFunction('compatStoreLabel') + '\n' +
+    sourceFunction('renderCompatibility') + '\n' +
+    'return renderCompatibility;'
+  )($, setDot, setHidden, setText, fmtCount, fmtTime, reasonText);
+
+  fn({
+    compatibility: {
+      status: 'verified',
+      summary: '兼容',
+      officialVersion: '3.2.28',
+      verifiedVersion: true,
+      verifiedVersions: ['3.2.27', '3.2.28'],
+      kernelVersion: '1.0.14',
+      kernelCommit: '303f4196e',
+      checks: {
+        catalog: { status: 'pass', modelCount: 5, acceptedCount: 5 },
+        accountApi: { status: 'pass', source: 'preload', getUserProfile: true, byokSourcesList: true },
+        storeFormat: { status: 'pass', format: 'accounts' },
+      },
+      affectedFeatures: [],
+      guards: { modelSyncWriteBlocked: false, accountSwitchWriteBlocked: false },
+    },
+  });
+  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'ok');
+  assert.equal(nodes['compat-summary'].textContent, '兼容');
+  assert.equal(nodes['compat-version'].textContent, 'Kimi 3.2.28');
+  assert.match(nodes['diag-compat-store'].textContent, /accounts/);
+
+  fn({
+    compatibility: {
+      status: 'new_version_ok',
+      summary: '新版本，基础检查通过',
+      officialVersion: '3.2.99',
+      verifiedVersion: false,
+      versionChanged: true,
+      previousVersion: '3.2.28',
+      checks: {
+        catalog: { status: 'pass', modelCount: 5, acceptedCount: 5 },
+        accountApi: { status: 'pass', source: 'preload', getUserProfile: true, byokSourcesList: true },
+        storeFormat: { status: 'pass', format: 'accounts' },
+      },
+      affectedFeatures: [],
+      guards: { modelSyncWriteBlocked: false, accountSwitchWriteBlocked: false },
+    },
+  });
+  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'warn');
+  assert.equal(nodes['compat-summary'].textContent, '新版本，基础检查通过');
+  assert.match(nodes['compat-note'].textContent, /3\.2\.28.*3\.2\.99/);
+
+  fn({
+    compatibility: {
+      status: 'degraded',
+      summary: '模型同步不可用',
+      officialVersion: '3.3.0',
+      verifiedVersion: false,
+      checks: {
+        catalog: { status: 'fail', reason: 'models_skipped' },
+        accountApi: { status: 'pass', source: 'preload', getUserProfile: true, byokSourcesList: true },
+        storeFormat: { status: 'fail', format: 'unknown' },
+      },
+      affectedFeatures: [{ feature: 'model_sync', label: '模型同步不可用', writeBlocked: true }],
+      guards: { modelSyncWriteBlocked: true, accountSwitchWriteBlocked: false },
+    },
+  });
+  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'bad');
+  assert.equal(nodes['compat-summary'].textContent, '模型同步不可用');
+  assert.match(nodes['compat-note'].textContent, /已停止受影响功能的写入/);
+  assert.match(nodes['diag-compat-guards'].textContent, /已停止模型同步写入/);
+});

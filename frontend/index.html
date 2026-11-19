@@ -83,6 +83,19 @@
           <p class="upd-overview__notes" id="overview-update-notes"></p>
         </div>
 
+        <div class="compat-overview" id="overview-compat-bar" data-tone="neutral">
+          <div class="compat-overview__main">
+            <span class="compat-overview__label">官方 Kimi 兼容</span>
+            <span class="compat-overview__verdict"><span class="dot" id="compat-dot" data-tone="neutral"></span><strong id="compat-summary">正在检查…</strong></span>
+            <span class="compat-overview__version mono" id="compat-version" hidden></span>
+          </div>
+          <p class="compat-overview__note" id="compat-note">启动与官方版本变化时自动执行只读自检（模型目录、账号接口、存储格式）。</p>
+          <div class="compat-overview__actions">
+            <button class="btn btn--quiet btn--sm" id="compat-recheck" type="button" data-action="check-compatibility">重新自检</button>
+            <button class="btn btn--quiet btn--sm" id="compat-details-link" type="button">查看诊断</button>
+          </div>
+        </div>
+
         <div class="overview-grid" id="handoff" data-state="idle" data-tone="neutral">
           <article class="overview-card">
             <span class="overview-card__label">本机网关</span>
@@ -340,8 +353,18 @@
   <p class="hint" id="preview-service-hint">自动更新与后台服务只管理 Kimi Work+ 自身；更新失败或新版本无法就绪时会自动回退，网关数据与钥匙串凭据保持不变。</p>
 </section>
       <details class="overview-records" id="overview-records">
-        <summary><span>诊断与运行记录</span><span>配置状态与最近请求</span></summary>
+        <summary><span>诊断与运行记录</span><span>版本自检、配置状态与最近请求</span></summary>
         <div class="overview-records__body">
+          <section class="band" id="compat-diagnostics-panel" aria-labelledby="compat-diag-heading">
+            <div class="band__head"><div><h2 id="compat-diag-heading">官方 Kimi 版本自检</h2><p id="diag-compat-sub">启动及检测到官方版本或内核变化时自动执行只读检查；受影响的功能会自动停止写入。</p></div><button class="btn btn--outline btn--sm" id="diag-compat-recheck" type="button" data-action="check-compatibility">立即自检</button></div>
+            <dl class="facts facts--overview">
+              <div class="fact"><dt>官方版本与内核</dt><dd><span class="dot" id="diag-compat-dot" data-tone="neutral"></span><span id="diag-compat-version">—</span></dd><p class="fact__sub" id="diag-compat-kernel">—</p></div>
+              <div class="fact"><dt>模型目录探针</dt><dd id="diag-compat-catalog">—</dd><p class="fact__sub" id="diag-compat-catalog-sub">—</p></div>
+              <div class="fact"><dt>账号与模型接口</dt><dd id="diag-compat-apis">—</dd><p class="fact__sub" id="diag-compat-apis-sub">—</p></div>
+              <div class="fact"><dt>存储格式与写入保护</dt><dd id="diag-compat-store">—</dd><p class="fact__sub" id="diag-compat-guards">—</p></div>
+            </dl>
+          </section>
+
           <section class="band" aria-labelledby="runtime-facts-heading">
             <div class="band__head"><h2 id="runtime-facts-heading">配置与连接状态</h2><span class="band__note">配置与连接分开报告</span></div>
             <dl class="facts facts--overview">

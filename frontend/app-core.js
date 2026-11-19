@@ -106,6 +106,7 @@ const ACTION_LABEL = {
   'account-switch': '切换账号',
   'account-remove': '移除账号',
   'set-swarm': '设置并行模式',
+  'check-compatibility': '官方版本自检',
 };
 
 const ACTION_STATE = {
@@ -198,6 +199,8 @@ const DIAG_REASON = {
   kimi_application_missing: '未找到官方 Kimi 应用。请安装官方桌面版后重试。',
   existing_login_profile_invalid: '官方登录目录不可用。请先正常打开官方 Kimi，再从面板重新启动。',
   existing_login_profile_unavailable: '未找到官方登录目录。请先正常打开官方 Kimi。',
+  compat_model_sync_blocked: '当前官方 Kimi 版本未通过模型同步兼容性检查，已停止写入模型配置；本机网关和其他功能照常运行。',
+  compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；本机网关和其他功能照常运行。',
 };
 
 const ERROR_HINT = {

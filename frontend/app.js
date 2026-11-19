@@ -428,6 +428,10 @@ function bindEvents() {
     tab?.focus();
   });
   $('overview-details')?.addEventListener('click', () => setView('maintenance'));
+  $('compat-details-link')?.addEventListener('click', () => {
+    setView('maintenance');
+    revealWorkspaceSection('compat-diagnostics-panel');
+  });
   dom.overviewOpenModels?.addEventListener('click', () => setView('models'));
   dom.overviewOpenUsage?.addEventListener('click', () => setView('usage'));
   dom.overviewIssueAction?.addEventListener('click', runOverviewIssueAction);

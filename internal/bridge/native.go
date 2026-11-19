@@ -17,30 +17,34 @@ import (
 )
 
 type Native struct {
-	mu                sync.Mutex
-	profileMu         sync.Mutex
-	profileReason     string
-	service           *Service
-	controller        *kimi.Controller
-	process           core.Document
-	contract          *kimi.ContractResult
-	operation         core.Document
-	jobs              chan struct{}
-	policies          *nativePolicies
-	web               *webService
-	webKeys           *webKey
-	mcp               *kimi.MCPManager
-	dns               byokDNS
-	probe             *byokdns.Probe
-	admin             byokdns.Administrator
-	dnsReason         string
-	resolverPath      string
-	workCapabilities  kimi.WorkCapabilities
-	quota             *nativeQuota
-	accounts          *accountManager
-	accountActivation core.Document
-	accountReason     string
-	swarm             kimi.SwarmSnapshot
+	mu                  sync.Mutex
+	compatMu            sync.Mutex
+	profileMu           sync.Mutex
+	profileReason       string
+	service             *Service
+	controller          *kimi.Controller
+	process             core.Document
+	contract            *kimi.ContractResult
+	compatibility       kimi.CompatibilityReport
+	compatFingerprint   kimi.OfficialFingerprint
+	compatLiveProbedPID int
+	operation           core.Document
+	jobs                chan struct{}
+	policies            *nativePolicies
+	web                 *webService
+	webKeys             *webKey
+	mcp                 *kimi.MCPManager
+	dns                 byokDNS
+	probe               *byokdns.Probe
+	admin               byokdns.Administrator
+	dnsReason           string
+	resolverPath        string
+	workCapabilities    kimi.WorkCapabilities
+	quota               *nativeQuota
+	accounts            *accountManager
+	accountActivation   core.Document
+	accountReason       string
+	swarm               kimi.SwarmSnapshot
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -73,7 +77,7 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	}
 	capabilities := kimi.ProbeWorkCapabilities(install)
 	policies.capabilities = capabilities.Subagents
-	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, jobs: make(chan struct{}, 2), workCapabilities: capabilities}
+	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, compatibility: initialCompatibilityReport(), jobs: make(chan struct{}, 2), workCapabilities: capabilities}
 	n.quota = newNativeQuota(s, controller.KimiCodeKey, kimi.LocalKimiCodeKey)
 	if err := n.initAccounts(gateway); err != nil {
 		n.accountReason = core.ErrorCode(err)
@@ -157,6 +161,7 @@ func (n *Native) watch(ctx context.Context) {
 	n.contract = native.Contract
 	n.process = processView(native.Application)
 	n.mu.Unlock()
+	n.runCompatibilityCheck(ctx, native.Contract, false)
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	var configObserved os.FileInfo
@@ -165,6 +170,9 @@ func (n *Native) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			n.maybeRecheckCompatibility(ctx)
+			modelBlocked := n.modelSyncWriteBlocked()
+			accountBlocked := n.accountSwitchWriteBlocked()
 			n.mu.Lock()
 			settings := n.controller.Settings()
 			if settings.Installation.Application != "" {
@@ -176,12 +184,16 @@ func (n *Native) watch(ctx context.Context) {
 				}
 			}
 			n.controller.Tick(ctx)
-			n.controller.ReconcileWithReadback(ctx)
+			if !modelBlocked {
+				n.controller.ReconcileWithReadback(ctx)
+			}
 			n.mu.Unlock()
 			if err := n.syncWorkHome(); err == nil {
 				configObserved = n.reconcile(configObserved)
 			}
-			n.observeAccounts(ctx)
+			if !accountBlocked {
+				n.observeAccounts(ctx)
+			}
 		}
 	}
 }
@@ -243,7 +255,7 @@ func (n *Native) State() core.Document {
 			operation[k] = v
 		}
 	}
-	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
+	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "compatibility": n.compatibilitySnapshot(), "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
 	out["workCapabilities"] = n.workCapabilities
 	if n.swarm.State == "" {
 		out["swarm"] = kimi.SwarmSnapshot{State: kimi.SwarmStateUnknown, Reason: "work_swarm_not_checked"}
@@ -317,7 +329,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
+	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "check-compatibility", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
 	default:
 		return nil, errors.New("native_preview_unavailable")
 	}
@@ -343,9 +355,16 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		var result any
 		state := "done"
 		switch action {
+		case "check-compatibility":
+			report := n.runCompatibilityCheck(deadline, nil, true)
+			result = core.Document{"compatibility": report}
 		case "set-swarm":
 			result, err = n.setSwarm(deadline, swarmKey, swarmEnabled)
 		case "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove":
+			if action != "account-remove" && n.accountSwitchWriteBlocked() {
+				err = errors.New(kimi.CompatErrAccountSwitchBlocked)
+				break
+			}
 			if n.accounts == nil {
 				err = errors.New("account_switch_unavailable")
 				break
@@ -371,6 +390,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = n.syncWorkHome()
 			}
 		case "connect-kimi":
+			if n.modelSyncWriteBlocked() {
+				err = errors.New(kimi.CompatErrModelSyncBlocked)
+				break
+			}
 			var imported kimi.ImportResult
 			imported, err = n.controller.ImportModelsAuthorized(deadline)
 			if err == nil {
@@ -382,6 +405,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 			result = imported
 		case "prepare-native":
+			if n.modelSyncWriteBlocked() {
+				err = errors.New(kimi.CompatErrModelSyncBlocked)
+				break
+			}
 			err = n.prepareBYOK(deadline)
 			var imported *kimi.ImportResult
 			if err == nil {

@@ -574,13 +574,16 @@
         select.append(option);
       }
       select.value = current ? textOf(current.id) : '';
-      select.disabled = Boolean(account.busy || book.adding || book.restoreAccountId);
+      const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+      select.disabled = Boolean(account.busy || book.adding || book.restoreAccountId || accountCompatBlocked);
       select.addEventListener('change', () => requestSwitch(select.value));
       parts.push(select);
     } else {
       parts.push(node('span', 'plus-account-bar__hint', '尚未保存任何账号'));
     }
-    if (book.accounts.length > 1 || account.busy) {
+    if (data?.compatibility?.guards?.accountSwitchWriteBlocked === true) {
+      parts.push(node('span', 'plus-account-bar__hint', '账号切换已暂停'));
+    } else if (book.accounts.length > 1 || account.busy) {
       parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '必要时重启 Work'));
     }
     parts.push(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
@@ -685,6 +688,7 @@
     account_identity_mismatch: '切换后读到的账号与所选不一致，已恢复原账号',
     operation_busy: '已有操作在进行，等它结束再试',
     credentials_unavailable: '系统凭据存储不可用',
+    compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；其余功能照常运行。',
   };
 
   function renderAccountsAll() {
@@ -768,6 +772,10 @@
       return;
     }
     const wrap = node('div');
+    const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+    if (accountCompatBlocked) {
+      wrap.append(node('p', 'note note--warn', '当前官方 Kimi 版本未通过账号接口检查，账号切换与写入已暂停；本机网关与其他功能照常运行。'));
+    }
     appendAccountError(wrap);
 
     if (book.adding || book.restoreAccountId) {
@@ -808,7 +816,7 @@
 
       const actions = node('div', 'plus-account__actions');
       if (id !== book.currentId) {
-        actions.append(button('切换', { disabled: Boolean(account.busy || book.adding || book.restoreAccountId), onClick: () => requestSwitch(id) }));
+        actions.append(button('切换', { disabled: Boolean(account.busy || book.adding || book.restoreAccountId || accountCompatBlocked), onClick: () => requestSwitch(id) }));
       }
       actions.append(button('移除', {
         className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy || id === book.currentId || id === book.restoreAccountId),
@@ -840,19 +848,19 @@
       wrap.append(box);
     }
 
-    wrap.append(accountActionLine(book));
+    wrap.append(accountActionLine(book, accountCompatBlocked));
     slot.replaceChildren(wrap);
   }
 
-  function accountActionLine(book) {
+  function accountActionLine(book, accountCompatBlocked = false) {
     const line = node('div', 'action-line action-line--start');
     if (!book.adding && !book.restoreAccountId) {
       line.append(button('添加账号', {
-        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy),
+        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy || accountCompatBlocked),
         onClick: () => runAccount('account-begin-add'),
       }));
       line.append(button(book.accounts.length ? '只保存当前登录' : '保存当前账号', {
-        disabled: Boolean(account.busy), onClick: () => runAccount('account-capture'),
+        disabled: Boolean(account.busy || accountCompatBlocked), onClick: () => runAccount('account-capture'),
       }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));

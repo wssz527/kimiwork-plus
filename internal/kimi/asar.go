@@ -82,6 +82,73 @@ func ReadAsarEntry(file, entryPath string) (string, error) {
 	return string(body), nil
 }
 
+// ListAsarEntries lists regular file paths under dirPrefix (slash-separated,
+// e.g. "out/preload") inside an asar archive without extracting file bodies.
+func ListAsarEntries(file, dirPrefix string) ([]string, error) {
+	handle, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+
+	head := make([]byte, 16)
+	if _, err := io.ReadFull(handle, head); err != nil {
+		return nil, ErrAsarUnreadable
+	}
+	jsonSize := binary.LittleEndian.Uint32(head[12:])
+	if jsonSize == 0 || jsonSize > maxHeaderBytes {
+		return nil, ErrAsarUnreadable
+	}
+	document := make([]byte, jsonSize)
+	if _, err := io.ReadFull(handle, document); err != nil {
+		return nil, ErrAsarUnreadable
+	}
+	var node map[string]any
+	if json.Unmarshal(document, &node) != nil {
+		return nil, ErrAsarUnreadable
+	}
+	current := node
+	prefix := strings.Trim(dirPrefix, "/")
+	if prefix != "" {
+		for _, part := range strings.Split(prefix, "/") {
+			files, ok := current["files"].(map[string]any)
+			if !ok {
+				return nil, ErrAsarUnreadable
+			}
+			next, ok := files[part].(map[string]any)
+			if !ok {
+				return nil, ErrAsarUnreadable
+			}
+			current = next
+		}
+	}
+	var out []string
+	var walk func(n map[string]any, p string)
+	walk = func(n map[string]any, p string) {
+		files, ok := n["files"].(map[string]any)
+		if !ok {
+			return
+		}
+		for name, raw := range files {
+			child, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			full := name
+			if p != "" {
+				full = p + "/" + name
+			}
+			if _, hasChildren := child["files"]; hasChildren {
+				walk(child, full)
+				continue
+			}
+			out = append(out, full)
+		}
+	}
+	walk(current, prefix)
+	return SortedIDs(out), nil
+}
+
 func number(value any) (int64, bool) {
 	switch typed := value.(type) {
 	case float64:

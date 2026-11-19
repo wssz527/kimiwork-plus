@@ -67,6 +67,12 @@ func (p *nativePolicies) setHome(home string) (bool, error) {
 	p.lastSubagentStatus = kimi.SubagentStatus{}
 	return true, nil
 }
+
+func (p *nativePolicies) setCapabilities(caps kimi.SubagentCapabilities) {
+	p.mu.Lock()
+	p.capabilities = caps
+	p.mu.Unlock()
+}
 func decodeStrict(in any, out any) error {
 	raw, err := json.Marshal(in)
 	if err != nil {

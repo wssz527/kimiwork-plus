@@ -128,7 +128,7 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 	if !ok {
 		return Outcome{Error: "table_not_found"}
 	}
-	decoder, _, ok := decoderFunction(text)
+	decoder, offset, ok := decoderFunction(text)
 	if !ok {
 		return Outcome{Error: "decoder_not_found"}
 	}
@@ -173,7 +173,8 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 	decode := func(source string) string { return decodeSource(source, aliasSet, lookup) }
 
 	index := indexFunctions(text)
-	parserName, routeCatalog := findRouteCatalogParser(text, decode, index)
+	markerCalls := findDecodedMarkerCalls(vm, budget, table, decoder, offset, "byok-incomplete-catalog")
+	parserName, routeCatalog := findRouteCatalogParser(text, decode, index, markerCalls...)
 	if !routeCatalog {
 		var found bool
 		parserName, _, found = findParser(text, decode, index)
@@ -303,6 +304,42 @@ func runContractPipeline(job Job, budget time.Duration) Outcome {
 		}
 	}
 	return Outcome{Error: "closure_unstable"}
+}
+
+func findDecodedMarkerCalls(vm *goja.Runtime, budget time.Duration, table, decoder string, offset int, target string) []string {
+	var raw goja.Value
+	script := fmt.Sprintf(`(function(target, base){
+		var rows = %s();
+		if (!Array.isArray(rows)) return [];
+		var out = [];
+		for (var i = 0; i < rows.length; i++) {
+			try {
+				if (%s(base + i) === target) out.push("(" + (base + i) + ")");
+			} catch (e) {}
+		}
+		return out;
+	})(__markerTarget, %d)`, table, decoder, offset)
+	if err := guard(vm, budget, func() error {
+		if err := vm.Set("__markerTarget", target); err != nil {
+			return err
+		}
+		v, err := vm.RunString(script)
+		raw = v
+		return err
+	}); err != nil || raw == nil {
+		return nil
+	}
+	exported, ok := raw.Export().([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(exported))
+	for _, item := range exported {
+		if text, ok := item.(string); ok && text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
 }
 
 func installCatalogURLTypes(vm *goja.Runtime) error {

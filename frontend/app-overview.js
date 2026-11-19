@@ -275,9 +275,131 @@ function renderOverview(data) {
   setText(dom.metricUptime, typeof metrics.startedAt === 'number' ? fmtDuration(Date.now() - metrics.startedAt) : '—');
   renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
   renderRoutingFacts(data);
+  renderCompatibility(data);
   renderOverviewIssue(data);
   renderOverviewToday();
   void refreshOverviewToday();
+}
+
+function compatToneOf(compat) {
+  const st = compat?.status || 'checking';
+  if (st === 'verified') return 'ok';
+  if (st === 'new_version_ok' || st === 'unavailable') return 'warn';
+  if (st === 'degraded') return 'bad';
+  return 'neutral';
+}
+
+function compatStoreLabel(store) {
+  const format = store?.format || '';
+  if (format === 'accounts') return 'accounts（3.2.28+ 格式）';
+  if (format === 'profiles') return 'profiles（兼容旧格式）';
+  if (format === 'absent') return '尚未生成（首次同步后创建）';
+  if (format === 'unknown') return '无法识别的新格式';
+  if (format === 'invalid') return '文件损坏或不可读';
+  return '未检查';
+}
+
+function renderCompatibility(data) {
+  const compat = data?.compatibility || null;
+  const bar = $('overview-compat-bar');
+  const dot = $('compat-dot');
+  const summary = $('compat-summary');
+  const version = $('compat-version');
+  const note = $('compat-note');
+
+  if (!compat) {
+    if (bar) bar.dataset.tone = 'neutral';
+    setDot(dot, 'neutral');
+    setText(summary, '尚未检查');
+    if (version) setHidden(version, true);
+    setText(note, '启动与官方版本变化时自动执行只读自检（模型目录、账号接口、存储格式）。');
+    return;
+  }
+
+  const tone = compatToneOf(compat);
+  const st = compat.status || 'checking';
+  if (bar) bar.dataset.tone = tone;
+  setDot(dot, tone);
+
+  let headline = compat.summary || '';
+  if (!headline) {
+    if (st === 'verified') headline = '兼容';
+    else if (st === 'new_version_ok') headline = '新版本，基础检查通过';
+    else if (st === 'degraded') headline = '部分功能不可用';
+    else if (st === 'unavailable') headline = '未检测到官方 Kimi';
+    else headline = '正在检查…';
+  }
+  setText(summary, headline);
+
+  if (version) {
+    const verText = compat.officialVersion ? 'Kimi ' + compat.officialVersion : '';
+    setHidden(version, !verText);
+    if (verText) setText(version, verText);
+  }
+
+  let noteText = '';
+  if (st === 'degraded') {
+    const affected = Array.isArray(compat.affectedFeatures) && compat.affectedFeatures.length
+      ? compat.affectedFeatures.map((item) => item.label).filter(Boolean).join('、')
+      : headline;
+    noteText = `${affected}。已停止受影响功能的写入，本机网关和其他功能照常运行。`;
+  } else if (st === 'new_version_ok') {
+    noteText = compat.versionChanged && compat.previousVersion
+      ? `检测到官方 Kimi 已从 ${compat.previousVersion} 更新至 ${compat.officialVersion}，目录、账号接口与存储格式检查全部通过。`
+      : '该官方版本尚未列入已验证清单，但目录、账号接口与存储格式检查已全部通过。';
+  } else if (st === 'verified') {
+    const format = compat.checks?.storeFormat?.format;
+    const formatHint = format === 'accounts' ? 'accounts 格式' : format === 'profiles' ? 'profiles 格式' : '待首次同步';
+    noteText = compat.versionChanged && compat.previousVersion
+      ? `检测到官方 Kimi 已从 ${compat.previousVersion} 更新至 ${compat.officialVersion}，全部只读检查通过（存储：${formatHint}）。`
+      : `已验证兼容版本；模型目录、账号接口与存储格式（${formatHint}）只读检查通过。`;
+  } else if (st === 'unavailable') {
+    noteText = '未在本机检测到官方 Kimi 桌面版安装；本机网关可继续独立运行。';
+  } else {
+    noteText = '正在对官方 Kimi 执行只读自检…';
+  }
+  setText(note, noteText);
+
+  const diagDot = $('diag-compat-dot');
+  setDot(diagDot, tone);
+  const verLabel = compat.officialVersion
+    ? `${compat.officialVersion}（${compat.verifiedVersion ? '已验证兼容' : '新版本'}）`
+    : '未检测到安装';
+  setText($('diag-compat-version'), verLabel);
+  const kernelBits = [];
+  if (compat.kernelVersion || compat.kernelCommit) {
+    kernelBits.push('内核 ' + [compat.kernelVersion, compat.kernelCommit].filter(Boolean).join(' / '));
+  }
+  if (Array.isArray(compat.verifiedVersions) && compat.verifiedVersions.length) {
+    kernelBits.push('已验证版本：' + compat.verifiedVersions.join('、'));
+  }
+  if (compat.checkedAt) kernelBits.push('检查于 ' + fmtTime(compat.checkedAt));
+  setText($('diag-compat-kernel'), kernelBits.join(' · ') || '—');
+
+  const catalog = compat.checks?.catalog || {};
+  setText($('diag-compat-catalog'), catalog.status === 'pass' ? '通过' : catalog.status === 'unavailable' ? '未检测到' : '失败');
+  const catalogSub = catalog.status === 'pass'
+    ? `已接受 ${fmtCount(catalog.acceptedCount || 0)} / ${fmtCount(catalog.modelCount || 0)} 个样本模型`
+    : (catalog.reason ? '原因：' + reasonText(catalog.reason) : '目录解析器未通过验证');
+  setText($('diag-compat-catalog-sub'), catalogSub);
+
+  const apis = compat.checks?.accountApi || {};
+  setText($('diag-compat-apis'), apis.status === 'pass' ? '通过' : apis.status === 'unavailable' ? '未检测到' : '部分缺失');
+  const apiBits = [
+    `账号识别(getUserProfile)：${apis.getUserProfile ? '正常' : '缺失'}`,
+    `模型读回：${apis.byokSourcesList ? 'byokSources.list' : apis.getByokProfile ? 'getByokProfile' : '缺失'}`,
+  ];
+  if (apis.source === 'live') apiBits.push('来源：运行中页面');
+  else if (apis.source === 'preload') apiBits.push('来源：预加载脚本');
+  setText($('diag-compat-apis-sub'), apiBits.join(' · '));
+
+  const store = compat.checks?.storeFormat || {};
+  setText($('diag-compat-store'), compatStoreLabel(store));
+  const guards = compat.guards || {};
+  const blocked = [];
+  if (guards.modelSyncWriteBlocked) blocked.push('已停止模型同步写入');
+  if (guards.accountSwitchWriteBlocked) blocked.push('已停止账号切换写入');
+  setText($('diag-compat-guards'), blocked.length ? blocked.join('；') + '，其余功能照常运行。' : '所有功能正常，无需停止写入。');
 }
 
 function renderOverviewToday() {
@@ -334,6 +456,16 @@ function computeOverviewIssue(data) {
       note: '模型请求当前无法发出，可在设置页重启后台服务。',
       actionLabel: '前往设置',
       action: { type: 'view', view: 'maintenance' },
+    };
+  }
+  const compat = data && data.compatibility;
+  if (compat && compat.status === 'degraded') {
+    return {
+      tone: 'bad',
+      title: compat.summary || '官方 Kimi 兼容异常',
+      note: '已停止受影响功能的写入，本机网关和其他功能照常运行。请在设置页查看版本自检详情。',
+      actionLabel: '查看版本自检',
+      action: { type: 'section', view: 'maintenance', section: 'compat-diagnostics-panel' },
     };
   }
   const apply = applyState(data);
@@ -623,6 +755,7 @@ function renderActions(data) {
   const busy = running || state.modelsSaving || state.connsSaving;
   const ready = configReady(data);
   const alreadyRunning = data?.kimiProcess?.running === true;
+  const modelSyncBlocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
   for (const button of state.actionButtons) {
     const reuseLogin = button.dataset.profileMode === 'existing-authorized';
     if (button.id === 'native-launch') {
@@ -631,8 +764,9 @@ function renderActions(data) {
     const action = button.dataset.action;
     if (reuseLogin) setHidden(button, data?.profile?.canReuseLogin !== true);
     const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
+    const compatBlocked = modelSyncBlocked && (action === 'connect-kimi' || action === 'prepare-native');
     const pending = state.pendingAction === action;
-    button.disabled = busy || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
+    button.disabled = busy || compatBlocked || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
     if (button.id === 'native-launch') setText(button, ACTION_LABEL[action]);
     if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
     button.classList.toggle('is-busy', pending);
@@ -644,6 +778,12 @@ function renderActions(data) {
 function renderWorkspaceSync(data) {
   const integration = data.integration || {};
   const models = Array.isArray(data.models) ? data.models : [];
+  if (data?.compatibility?.guards?.modelSyncWriteBlocked === true) {
+    setText($('workspace-sync-state'), '模型同步不可用（已停止写入）');
+    setText($('workspace-sync-note'), '当前官方 Kimi 版本未通过目录或存储格式自检，已暂停模型同步写入；本机网关与其他功能照常运行。');
+    setHidden($('workspace-restart'), true);
+    return;
+  }
   const imported = Object.keys(integration.aliases || {}).sort();
   const saved = models.map(model => model.id).sort();
   const matches = JSON.stringify(imported) === JSON.stringify(saved);

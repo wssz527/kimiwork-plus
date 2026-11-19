@@ -351,29 +351,49 @@ func quoteJS(value string) string {
 	return out.String()
 }
 
-func findRouteCatalogParser(text string, decode func(string) string, index sourceIndex) (string, bool) {
+func findRouteCatalogParser(text string, decode func(string) string, index sourceIndex, extraMarkers ...string) (string, bool) {
 	const marker = `"byok-incomplete-catalog"`
-	for at := 0; ; {
-		found := strings.Index(text[at:], marker)
-		if found < 0 {
-			return "", false
-		}
-		position := at + found
-		at = position + len(marker)
-		start := strings.LastIndex(text[:position], "\nfunction ") + 1
-		match := reFuncDecl.FindStringSubmatch(text[start:min(start+60, len(text))])
-		if match == nil {
+	markers := make([]string, 0, 1+len(extraMarkers))
+	markers = append(markers, marker)
+	markers = append(markers, extraMarkers...)
+	seen := map[string]bool{}
+	for _, needle := range markers {
+		if needle == "" {
 			continue
 		}
-		source, ok := functionAt(index, text, match[1])
-		if !ok || len(source) > maxFunctionBytes || !strings.Contains(source, marker) {
-			continue
-		}
-		decoded := decode(source)
-		if strings.Contains(decoded, `"base_url"`) && strings.Contains(decoded, `"models"`) && !strings.Contains(decoded, "await ") {
-			return match[1], true
+		for at := 0; ; {
+			found := strings.Index(text[at:], needle)
+			if found < 0 {
+				break
+			}
+			position := at + found
+			at = position + len(needle)
+			before := strings.LastIndex(text[:position], "\nfunction ")
+			if before < 0 {
+				continue
+			}
+			start := before + 1
+			match := reFuncDecl.FindStringSubmatch(text[start:min(start+60, len(text))])
+			if match == nil || seen[match[1]] {
+				continue
+			}
+			seen[match[1]] = true
+			source, ok := functionAt(index, text, match[1])
+			if !ok || len(source) > maxFunctionBytes {
+				continue
+			}
+			if open := strings.IndexByte(source, '('); open >= 0 {
+				if close := strings.IndexByte(source[open:], ')'); close >= 0 && strings.Contains(source[open:open+close], ",") {
+					continue
+				}
+			}
+			decoded := decode(source)
+			if strings.Contains(decoded, marker) && strings.Contains(decoded, `"base_url"`) && strings.Contains(decoded, `"models"`) && !strings.Contains(decoded, "await ") {
+				return match[1], true
+			}
 		}
 	}
+	return "", false
 }
 
 func findParser(text string, decode func(string) string, index sourceIndex) (name string, source string, ok bool) {

@@ -89,6 +89,43 @@ function _0xfee1(data) {
 	}
 }
 
+func TestRouteCatalogParserFindsObfuscatedMarker(t *testing.T) {
+	source := `
+function _0x1002() {
+  const _0x1002 = ["fixture", "byok-incomplete-catalog", "models", "api", "type"];
+  return _0x1002;
+}
+function _0x1001(_0x1, _0x2) {
+  _0x1 = _0x1 - 100;
+  return _0x1002()[_0x1];
+}
+(function(_0xa, _0xb) { return _0xa(); })(_0x1002, 0);
+function _0x9999(data) {
+  const _0xd = _0x1001;
+  if (!data || !Object.keys(data).length) throw new Error(_0xd(101));
+  const out = {};
+  for (const [k, v] of Object.entries(data)) {
+    out[k] = { "type": v[_0xd(104)], "base_url": v[_0xd(103)], "models": v[_0xd(102)] };
+  }
+  const routes = [], blocked = [];
+  for (const g of Object.values(out)) {
+    const ms = [];
+    for (const [id, m] of Object.entries(g.models)) {
+      if (!g.base_url || m.tool_call === false) blocked.push({modelId: id});
+      else ms.push({model: id});
+    }
+    if (ms.length) routes.push({protocol: g.type, models: ms});
+  }
+  return {routes, blocked};
+}
+`
+	outcome := runContractPipeline(Job{Source: source, Catalog: renderedCatalog(t)}, 5*time.Second)
+	got := verdict(ContractResult{Contracts: RuntimeContracts(source)}, outcome.Result, SampleModels())
+	if outcome.Error != "" || got.Parser != "_0x9999" || got.State != StateVerified {
+		t.Fatalf("outcome=%+v verdict=%+v", outcome, got)
+	}
+}
+
 func TestValidateModelsRejectsProtocolConflict(t *testing.T) {
 	_, err := ValidateModels([]Model{{ID: "kimi-x", Protocol: "responses", ContextWindow: 1024}})
 	if err == nil || err.Error() != "protocol_conflict" {

@@ -796,3 +796,43 @@ test('a masthead refresh in the usage view re-reads the live quota instead of th
     assert.equal(codeRefresh.body.action, 'refresh');
   } finally { env.restore(); }
 });
+
+test('account switching controls are disabled when compatibility guard blocks account writes', () => {
+  const env = makePlus({
+    data: {
+      accounts: {
+        state: 'ready',
+        currentId: 'acc-1',
+        accounts: [
+          { id: 'acc-1', name: 'A' },
+          { id: 'acc-2', name: 'B' },
+        ],
+      },
+      compatibility: {
+        status: 'degraded',
+        summary: '账号切换不可用',
+        guards: { modelSyncWriteBlocked: false, accountSwitchWriteBlocked: true },
+      },
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const findNode = (root, pred) => {
+      if (!root) return null;
+      if (pred(root)) return root;
+      for (const child of root.children || []) {
+        const hit = findNode(child, pred);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const select = findNode(env.byId('plus-account-bar'), node => node.tagName === 'SELECT');
+    assert.ok(select && select.disabled, 'top account switcher should be disabled');
+    const body = env.byId('plus-accounts-body');
+    assert.match(textOf(body), /账号切换与写入已暂停/);
+    const switchBtn = findNode(body, node => node.tagName === 'BUTTON' && textOf(node) === '切换');
+    const addBtn = findNode(body, node => node.tagName === 'BUTTON' && textOf(node) === '添加账号');
+    assert.ok(switchBtn && switchBtn.disabled, 'switch button should be disabled');
+    assert.ok(addBtn && addBtn.disabled, 'add button should be disabled');
+  } finally { env.restore(); }
+});
