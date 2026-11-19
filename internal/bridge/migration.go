@@ -422,7 +422,7 @@ func MigrateCredentials(targetDir, sourceDir string, oldStore, newStore KeyStore
 	for ref, code := range state.FailedCredentials {
 		pending = append(pending, ref)
 		switch code {
-		case "credential_authorization_required", "credential_session_unavailable", "credential_authorization_cancelled":
+		case "credential_authorization_required", "credential_authorization_failed", "credential_session_unavailable", "credential_authorization_cancelled":
 			needsAuth = true
 		}
 	}

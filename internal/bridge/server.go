@@ -151,7 +151,7 @@ func message(code string) string {
 	case "configuration_conflict":
 		return "配置已在其他窗口修改，请刷新后再保存。"
 	case "native_preview_unavailable":
-		return "此项原生能力尚未通过迁移验收，请继续使用稳定版 0.12.1。"
+		return "此项原生能力当前不可用，请检查后台服务状态后重试。"
 	case "connection_in_use":
 		return "仍有模型使用此连接，请先修改模型。"
 	case "credentials_unavailable":
