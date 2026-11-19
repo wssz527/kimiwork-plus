@@ -67,14 +67,6 @@
           <label class="field" for="usage-to"><span class="field__label">结束日期（含当天）</span><input id="usage-to" type="date" required></label>
           <button class="btn btn--outline" type="submit">应用时间范围</button>
         </form>
-        <div class="usage-toolbar">
-          <label class="field" for="usage-filter-provider"><span class="field__label">服务商</span><select id="usage-filter-provider" data-usage-filter="providerId"><option value="">全部服务商</option></select></label>
-          <label class="field" for="usage-filter-connection"><span class="field__label">连接</span><select id="usage-filter-connection" data-usage-filter="connectionId"><option value="">全部连接</option></select></label>
-          <div class="field"><span class="field__label" id="usage-model-label">模型</span><details class="usage-picker" id="usage-filter-model"><summary aria-labelledby="usage-model-label usage-model-current"><span id="usage-model-current">全部</span></summary><div class="usage-picker__options" id="usage-model-options" role="group" aria-label="可用模型"></div></details></div>
-          <label class="field" for="usage-filter-account"><span class="field__label">账户标识</span><select id="usage-filter-account" data-usage-filter="account"><option value="">全部已识别账户</option></select><span class="field__hint">仅显示不可逆标识，不显示 API Key。</span></label>
-          <label class="field" for="usage-filter-conversation"><span class="field__label">会话</span><select id="usage-filter-conversation" data-usage-filter="conversationId"><option value="">全部会话</option></select><span class="field__hint" id="usage-conversation-hint">只使用有可靠来源的会话 ID。</span></label>
-        </div>
-        <p class="note usage-coverage" id="usage-coverage">仅统计经过本机网关的可观察请求；官方直连和接入前历史不会补算。</p>
         <dl class="usage-summary" id="usage-summary">
           <div class="usage-stat"><dt>输入 Token</dt><dd id="usage-stat-input">—</dd></div>
           <div class="usage-stat"><dt>输出 Token</dt><dd id="usage-stat-output">—</dd></div>
@@ -90,6 +82,14 @@
           <div id="usage-chart-body"><p class="usage-chart__empty">正在读取所选时间段。</p></div>
           <figcaption class="hint">选择数据点可查看该时间段明细；空缺表示没有可确认的 Token 数值。</figcaption>
         </figure>
+        <div class="usage-toolbar usage-toolbar--compact" aria-label="筛选条件">
+          <label class="field" for="usage-filter-provider"><span class="field__label">服务商</span><select id="usage-filter-provider" data-usage-filter="providerId"><option value="">全部服务商</option></select></label>
+          <label class="field" for="usage-filter-connection"><span class="field__label">连接</span><select id="usage-filter-connection" data-usage-filter="connectionId"><option value="">全部连接</option></select></label>
+          <div class="field"><span class="field__label" id="usage-model-label">模型</span><details class="usage-picker" id="usage-filter-model"><summary aria-labelledby="usage-model-label usage-model-current"><span id="usage-model-current">全部</span></summary><div class="usage-picker__options" id="usage-model-options" role="group" aria-label="可用模型"></div></details></div>
+          <label class="field" for="usage-filter-account"><span class="field__label">账户标识</span><select id="usage-filter-account" data-usage-filter="account"><option value="">全部已识别账户</option></select></label>
+          <label class="field" id="usage-filter-conversation-wrap" for="usage-filter-conversation" hidden><span class="field__label">会话</span><select id="usage-filter-conversation" data-usage-filter="conversationId"><option value="">全部会话</option></select><span class="field__hint" id="usage-conversation-hint">只使用有可靠来源的会话 ID。</span></label>
+        </div>
+        <p class="note usage-coverage" id="usage-coverage">仅统计经过本机网关的可观察请求；官方直连和接入前历史不会补算。</p>
         <section class="usage-detail" id="usage-bucket-detail" hidden><h3 class="usage-detail__title" id="usage-bucket-title"></h3><div id="usage-bucket-records"></div></section>
         <section class="usage-detail" aria-labelledby="usage-records-title">
           <div class="band__head"><div><h3 class="usage-detail__title" id="usage-records-title">请求明细</h3><p>按时间倒序，不保存或展示 prompt、响应正文和 API Key。</p></div><div><button class="btn btn--outline btn--sm" id="usage-export" type="button">导出脱敏 JSON</button><button class="btn btn--quiet btn--sm" id="usage-clear" type="button">清除历史</button></div></div>
@@ -215,8 +215,12 @@
       }
       select.value = current;
       select.disabled = name === 'conversationId' && !rows.length;
+      if (name === 'conversationId') {
+        const wrap = $('usage-filter-conversation-wrap');
+        if (wrap) wrap.hidden = !rows.length && !current;
+      }
     }
-    text('usage-conversation-hint', optionsFor('conversationId').length ? '仅列出账本中具有可信会话 ID 的请求。' : '当前记录没有可靠会话 ID，不按模型或时间猜测归属。');
+    text('usage-conversation-hint', optionsFor('conversationId').length ? '仅列出账本中具有可信会话 ID 的请求。' : '');
   }
 
   function renderUsage() {

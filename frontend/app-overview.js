@@ -1,0 +1,773 @@
+import { applyState, configInfo, configReady, onboardBusy, renderOnboard } from './app-connections.js';
+import { $, ACTION_LABEL, ACTION_STATE, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
+import { connectionRowsOf } from './app-models.js';
+import { loadState, runAction, setView } from './app.js';
+
+/* ---------- render: shell ---------- */
+
+function renderShell(data) {
+  const gw = (data && data.gateway) || {};
+  const running = gw.state === 'running';
+  setDot(dom.railGatewayDot, running ? 'ok' : 'bad');
+  setText(dom.railGatewayText, running ? '网关运行中' : '网关已停止');
+  setText(dom.railGatewayUrl, typeof gw.url === 'string' && gw.url ? gw.url : '—');
+  setText(dom.sync, state.lastSync ? '同步于 ' + fmtTime(state.lastSync) : '尚未同步');
+
+  const config = (data && data.configuration) || {};
+  setHidden(dom.restartBanner, config.state !== 'changed');
+  if (config.state === 'changed') {
+    setText(dom.restartBannerText, '连接配置已修改，当前网关仍在使用启动时的设置。请到「模型」页点「应用已保存的连接」，由后台服务在安全时应用；页面会如实显示是否生效。');
+  }
+  setText(dom.navModelCount, fmtCount((data.models || []).length));
+  const budgetMessage = budgetNotice(data.budget);
+  setHidden(dom.budgetBanner, !budgetMessage);
+  setText(dom.budgetBannerText, budgetMessage);
+}
+
+function budgetNotice(budget) {
+  if (budget?.enabled !== true) return '';
+  const notices = [];
+  for (const [period, label] of [['daily', '今日'], ['monthly', '本月']]) {
+    const window = budget.spend?.[period];
+    if (window?.reached !== true) continue;
+    notices.push(label + '已达预算上限' + (window.action === 'block' ? '，新请求会被拒绝' : '，此上限仅提醒'));
+  }
+  if (notices.length && budget.warning === 'unpriced_models_not_limited') notices.push('未定价费用未计入');
+  return notices.length ? notices.join('。') + '。' : '';
+}
+
+function desktopScopeInfo(data) {
+  const info = (data && data.integration) || {};
+  if (!info.desktop && info.imported !== true) return null;
+  return { tone: 'neutral', word: '仅桌面', note: '只接入本机官方 Kimi 桌面 Work，不同步模型或登录态到 Kimi 手机端。' };
+}
+
+/* 接入是否完成只能由原生导入回执与原生目录证据说明。文件已保存、目录已拉取
+   都不是同步完成；这里把每种真实状态收敛成同一个 verdict，供概览卡片与连接
+   页共用，避免两处各写一套判断而给出互相矛盾的结论。 */
+function syncState(data) {
+  const info = (data && data.integration) || {};
+  const preparation = info.preparation || {};
+  const receipt = info.nativeImport || {};
+  const models = Array.isArray(data && data.models) ? data.models : [];
+  if (preparation.state === 'preparing') {
+    return { code: 'authorizing', tone: 'warn', word: '等待系统授权',
+      note: '正在准备首次接入，请在本机窗口处理系统授权。' };
+  }
+  if (preparation.state === 'cancelled') {
+    return { code: 'authorization', tone: 'warn', word: '需要授权',
+      note: '上次系统授权已取消。点「打开 / 启动 Kimi」或「重新准备接入」可继续；不会反复弹窗。' };
+  }
+  if (preparation.state === 'failed' || preparation.state === 'interrupted') {
+    return { code: 'authorization', tone: 'bad', word: '接入准备失败',
+      note: '准备本地接入时中断。检查系统授权后可重试，已保存的连接不受影响。' };
+  }
+  const reasons = [receipt.reason, info.onboarding?.reason, info.desktop?.reason, info.reason]
+    .filter((value) => typeof value === 'string');
+  const phases = [info.onboarding?.state, info.onboarding?.stage, info.stage, info.state]
+    .filter((value) => typeof value === 'string');
+  const has = (...values) => values.some((value) => reasons.includes(value) || phases.includes(value));
+  /* Kimi 由系统直接启动时，产品没有它的子进程：这时说「受管进程已加载」是错的，
+     即使磁盘上的模型配置确实已经同步过。 */
+  const unmanagedRunning = data?.kimiProcess?.running === true && info.desktop?.managed === false;
+  if (info.readback && info.applied === true) {
+    return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
+      note: unmanagedRunning
+        ? '已同步的模型配置仍保留在磁盘；当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」可恢复完整受管能力。'
+        : info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
+  }
+  if (info.desktop?.state === 'failed' && /^(work_storage_|existing_login_|profile_mode_)/.test(info.desktop.reason || '')) {
+    return { code: 'conflict', tone: 'bad', word: '隔离启动未完成', note: nativeConnectionText(data) };
+  }
+  if (info.desktop?.state === 'needs_user_close') {
+    return { code: 'manual-exit', tone: 'warn', word: '可以受管重启 Kimi',
+      note: '点击「正常退出并重启 Kimi」，产品会请求系统正常退出当前实例，再使用官方登录和真实 Work 数据受管启动。' };
+  }
+  if (has('account_changed', 'native_import_account_changed') && info.readback?.accountVerified === true) {
+    return { code: 'pending', tone: 'warn', word: '当前账号待同步',
+      note: '当前账号已登录，模型目录还未与此账号完成核对。请在模型页同步到 Work。' };
+  }
+  if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
+    'native_import_account_changed')) {
+    if (data?.profile?.canReuseLogin === true && !has('account_changed', 'native_import_account_changed')) {
+      if (info.desktop?.state === 'ready' && (data.profile.mode === 'official' || data.profile.mode === 'existing-authorized')) {
+        return { code: 'login', tone: 'warn', word: '尚未确认官方登录',
+          note: '请查看官方窗口。已有登录有效时无需扫码；当前尚未读到账号，模型接入还没有继续。' };
+      }
+      const opening = data.operation?.action === 'launch-kimi' && isInFlight(data.operation);
+      return { code: 'ready-launch', tone: opening ? 'warn' : 'neutral', word: opening ? '正在打开官方 Work' : '可沿用已有登录',
+        note: opening ? '正在沿用官方登录和真实 Work 数据，请等待启动完成。' : '点击「打开 / 启动 Kimi」，沿用官方登录、对话、技能和已导入模型。' };
+    }
+    return { code: 'login', tone: 'warn', word: '需要登录',
+      note: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。' };
+  }
+  /* 先回应后台回执里可识别的下一步。state=pending 只是容器，不能盖过
+     manual-exit / daimon 各自的动作；这些文案也不把内部 reason code 直接摆给用户。 */
+  if (has('native_import_manual_exit_required', 'manual-exit', 'translation_kimi_running', 'waiting-kimi-exit')) {
+    return { code: 'manual-exit', tone: 'warn', word: '等待完全退出 Kimi',
+      note: '只需从 Kimi 托盘（macOS 为应用菜单）完全退出一次，关窗口不算；退出后本软件会自动重新打开并继续接入，不需要再点或重启桌面。' };
+  }
+  if (has('waiting-quit', 'translation_waiting_quit')) {
+    return { code: 'waiting-quit', tone: 'warn', word: '等待 Kimi 退出',
+      note: '退出请求已发出；关闭完成后本软件会自动重新打开并继续，不用再退出一次或重复点击。' };
+  }
+  if (has('daimon-pending', 'native_import_daimon_pending', 'native_import_daimon_unreconciled',
+    'native_profile_pending')) {
+    return { code: 'daimon', tone: 'warn', word: '后台正在对齐模型',
+      note: '模型目录已交给 Kimi，后台还没有对齐完成、暂时不能选择；后台会自动继续，不必重复点击或重启桌面。' };
+  }
+  if (receipt.requiresRestart === true || receipt.restartDeferred === true) {
+    return { code: 'restart', tone: 'warn', word: '等待 Kimi 重启',
+      note: '模型已写入原生目录，但 Kimi Work 需要重启后才会显示；空闲后会自动完成。' };
+  }
+  /* 只有 synchronized 声明原生 profile 已核对。已保存、已导入和已核对是三件
+     不同的事：目录证据也不能被夸大成已经真实选模或已经收到回复。 */
+  if (has('synchronized')) {
+    return { code: 'synced', tone: 'ok', word: '已核对目录',
+      note: models.length
+        ? '已核对 Kimi Work 原生模型目录，共 ' + fmtCount(models.length) + ' 个模型；这不等同于已经选模或收到回复。'
+        : '已核对 Kimi Work 原生模型目录；这不等同于已经选模或收到回复。' };
+  }
+  if (has('imported') || (info.stage === undefined && info.imported === true)) {
+    return { code: 'imported', tone: 'warn', word: '已导入，待核对',
+      note: '原生接口已确认导入且不欠重启，但还没有完成原生目录核对；这一步由后台继续。' };
+  }
+  if (has('requires-restart')) {
+    return { code: 'restart', tone: 'warn', word: '等待 Kimi 重启',
+      note: '模型已写入原生目录，Kimi Work 重启后才会显示。' };
+  }
+  if (has('login')) {
+    return { code: 'login', tone: 'warn', word: '需要登录',
+      note: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。' };
+  }
+  if (has('waiting-kimi', 'launch', 'apply')) {
+    return { code: 'busy', tone: 'warn', word: '等待 Kimi',
+      note: '后台正在等待 Kimi 就绪；不会打断正在进行的任务。' };
+  }
+  if (has('paused', 'cancelled', 'disabled')) {
+    return { code: 'authorization', tone: 'warn', word: '接入已暂停',
+      note: '自动接入已暂停。点「打开 / 启动 Kimi」或「重新准备接入」可恢复；不会反复请求授权。' };
+  }
+  if (has('importing')) {
+    return { code: 'importing', tone: 'warn', word: '正在导入', note: '正在把模型写入 Kimi 原生目录。' };
+  }
+  if (has('models')) {
+    return { code: 'pending', tone: 'neutral', word: '等待模型',
+      note: '还没有可导入的模型；先保存至少一个真实模型。' };
+  }
+  const busyReason = has('native_bridge_busy', 'waiting-idle') || info.desktop?.state === 'waiting-idle'
+    || info.desktop?.state === 'waiting-quit' || info.state === 'pending';
+  if (busyReason) {
+    return { code: 'busy', tone: 'warn', word: '等待 Kimi 空闲',
+      note: 'Kimi 正在处理任务或尚未退出；空闲后会自动同步，不会打断正在进行的请求。' };
+  }
+  if (info.state === 'conflict') {
+    return { code: 'conflict', tone: 'bad', word: '接入冲突',
+      note: '原生配置中已有其他来源的接入，未覆盖。请核对后重试；本产品不会替你覆盖。' };
+  }
+  if (!models.length) {
+    return { code: 'empty', tone: 'neutral', word: '等待模型',
+      note: '还没有保存任何模型。先加入至少一个真实模型，同步才有内容可导入。' };
+  }
+  return { code: 'pending', tone: 'neutral', word: '已保存，待接入',
+    note: '模型目录已保存，但还没有交给 Kimi 完成核对；用「打开 / 启动 Kimi」继续，后台会在空闲时接入。' };
+}
+
+function nativeConnectionText(data) {
+  const info = data.integration || {};
+  const preparation = info.preparation || {};
+  if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
+  if (preparation.state === 'cancelled') return '上次系统授权已取消。点「打开 / 启动 Kimi」或「重新准备接入」可继续。';
+  if (preparation.state === 'failed' || preparation.state === 'interrupted') return '接入准备未完成，请检查系统授权后重试。';
+  const importReceipt = info.nativeImport || {};
+  if (importReceipt.requiresRestart === true || importReceipt.restartDeferred === true) {
+    return '模型已接入 Kimi 原生选择器，但需要重启 Kimi Work 后才会生效。';
+  }
+  /* 系统直接启动的 Kimi 不是首次使用：模型配置可能已在磁盘上，只是没有受管进程。
+     落到末尾兜底会把它说成「首次使用」，反而让用户重复点启动。 */
+  if (data?.kimiProcess?.running === true && info.desktop?.managed === false) {
+    return info.imported && info.readback
+      ? '当前 Kimi 由系统直接启动，未受本产品托管；已同步的模型配置仍保留在磁盘。点「正常退出并重启 Kimi」可恢复完整受管能力。'
+      : '当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」后，模型接入会在受管启动中继续。';
+  }
+  if (info.imported && info.readback) return info.adopted ? '目录、账号与配置代次已读回；官方菜单采用请在 Kimi 窗口确认。' : '目录、账号与地址已读回，等待官方运行时采用。';
+  if (info.imported) return '原生接口已接受模型目录，等待目录、账号与地址读回。';
+  const reason = info.nativeImport?.reason || info.desktop?.reason || info.reason;
+  const reasons = {
+    work_storage_contract_unverified: '当前官方版本的不扫码隔离尚未验证，已恢复原数据位置。请先正常使用官方 Kimi，等待兼容更新。',
+    work_storage_target_conflict: '独立 Work 目录与原数据目录重叠，未更改原数据位置。请使用独立的增强服务数据目录。',
+    work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
+    work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
+    work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
+    work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
+    native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧预览或其他接入实例，再重新准备。',
+    native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
+    native_byok_intranet_unavailable: '指定域名的私网解析尚未生效。请重新准备原生入口；若仍失败，请检查诊断中的 DNS 状态。',
+    native_byok_reveal_failed: '官方功能标记未能写入或读回，未继续导入。请检查诊断信息。',
+    invalid_setup_flag: '官方功能标记文件不可读或格式无效，未继续导入。',
+    kimi_data_missing: '未找到官方 Kimi 数据目录。请先正常启动官方 Kimi，再重新准备。',
+    setup_report_missing: '系统解析操作没有返回可验证的结果，未继续导入。',
+    unsupported_hosts_encoding: '系统 hosts 文件编码不受支持，未修改原文件。',
+    hosts_verify_failed: '系统 hosts 文件写入后校验失败，请查看诊断信息。',
+    resolver_conflict: '检测到不是本工具写入的解析配置，未覆盖或移除。请先核对现有配置。',
+    setup_cancelled: '系统管理员授权已取消，未继续接入。需要时可重新点击准备。',
+    native_setup_failed: '系统解析准备未完成，原配置未被故意覆盖。请查看诊断后重试。',
+    existing_login_profile_invalid: '无法安全使用已有的官方登录目录，已暂停启动。',
+    existing_login_profile_unavailable: '未找到可用的官方登录目录，请先正常打开官方 Kimi。',
+    profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
+    native_bridge_unavailable: '正在等待 Kimi 接入通道，空闲后会自动恢复。',
+    native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',
+    native_bridge_waiting_launch: '等待 Kimi 启动并建立接入通道。',
+    native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
+    native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
+    native_scope_unverified: '当前自定义 Kimi 目录无法确认归属，自动接管已暂停。',
+    account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
+    native_import_account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
+    native_bridge_busy: 'Kimi 正在处理任务，空闲后会自动同步。',
+    native_import_retry_pending: '正在等待上一次接入完成。',
+  };
+  if (reason === 'native_import_manual_exit_required') {
+    return '只需从 Kimi 托盘完全退出一次；退出后会自动重拉并继续，不用再点一次。';
+  }
+  if (reason === 'native_import_daimon_pending' || reason === 'native_import_daimon_unreconciled'
+    || reason === 'native_profile_pending') {
+    return '模型暂时还不能选择；后台会自动对齐，不用重复点击或重启桌面。';
+  }
+  if (reasons[reason]) return reasons[reason];
+  if (reason === 'waiting-login') return '请在刚打开的当前 Kimi 窗口登录；本产品不会复制原账号 Cookie 或令牌。';
+  if (info.state === 'account-unverified') return '等待在当前 Kimi 窗口登录并确认账号，再点「重新准备接入」。';
+  if (info.state === 'pending') return '原生目录已接受，等待 Kimi 内核完成切换。';
+  if (info.state === 'conflict') return '接入配置存在冲突，已保留当前内容；请检查配置后重试。';
+  if (info.state === 'account-unverified') return '请登录 Kimi Work 并确认当前账户，然后点「打开 / 启动 Kimi」继续。';
+  if (info.desktop?.state === 'waiting-idle' || info.desktop?.state === 'waiting-quit') return '等待 Kimi 空闲后恢复接入。';
+  return '正在检查模型接入；首次使用请点「打开 / 启动 Kimi」，在打开的 Kimi Work 中登录。';
+}
+
+
+function renderOverview(data) {
+  setText($('native-state'), nativeConnectionText(data));
+  const scope = desktopScopeInfo(data);
+  setHidden(dom.nativeRemote, !scope);
+  if (scope) {
+    setDot(dom.nativeRemoteDot, scope.tone);
+    setText(dom.nativeRemoteWord, scope.word);
+    setText(dom.nativeRemoteNote, scope.note);
+  }
+  const gw = (data && data.gateway) || {};
+  const running = gw.state === 'running';
+  setDot(dom.factGatewayDot, running ? 'ok' : 'bad');
+  setText(dom.factGateway, running ? '运行中' : '已停止');
+  setText(dom.factGatewayUrl, gw.url || '—');
+
+  const models = Array.isArray(data.models) ? data.models : [];
+  setText(dom.factModels, fmtCount(models.length) + ' 个模型');
+  const rows = connectionRowsOf(data);
+  setText(dom.factModelsSub, '来自 ' + fmtCount(rows ? rows.filter((row) => !row.legacy).length : 0) + ' 条模型服务');
+
+  const info = configInfo(data);
+  setDot(dom.factConfigDot, info.tone);
+  setText(dom.factConfig, info.word);
+  setText(dom.factConfigFile, (data.configuration && data.configuration.file) || '—');
+
+  const metrics = data.metrics || {};
+  setText(dom.metricRequests, fmtCount(metrics.requests || 0));
+  setText(dom.metricFailures, fmtCount(metrics.failures || 0));
+  setText(dom.metricUptime, typeof metrics.startedAt === 'number' ? fmtDuration(Date.now() - metrics.startedAt) : '—');
+  renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
+  renderRoutingFacts(data);
+  renderOverviewIssue(data);
+  renderOverviewToday();
+  void refreshOverviewToday();
+}
+
+function renderOverviewToday() {
+  const today = state.overviewToday;
+  if (!today || today.requests === null) {
+    setText(dom.overviewTodayRequests, today?.loading ? '读取中…' : '—');
+    setText(dom.overviewTodayTokens, today?.loading ? '今日 Token：读取中…' : '今日 Token：未提供');
+    return;
+  }
+  setText(dom.overviewTodayRequests, fmtCount(today.requests) + ' 次请求');
+  const tokensText = typeof today.totalTokens === 'number' && Number.isFinite(today.totalTokens)
+    ? fmtTokens(today.totalTokens) : '未提供';
+  setText(dom.overviewTodayTokens, '今日 Token：' + tokensText);
+}
+
+async function refreshOverviewToday({ force = false } = {}) {
+  if (!state.key) return;
+  const today = state.overviewToday;
+  if (today.loading) return;
+  const reqCount = Number(state.data?.metrics?.requests ?? -1);
+  const now = Date.now();
+  const stale = today.key !== state.key || today.requests === null || today.requestCount !== reqCount;
+  if (!force && !stale && (now - today.fetchedAt) < 15000) return;
+  if (!force && stale && today.fetchedAt > 0 && (now - today.fetchedAt) < 3000) return;
+  const key = state.key;
+  const epoch = state.stateReadEpoch;
+  today.loading = true;
+  if (today.requests === null) renderOverviewToday();
+  try {
+    const result = await request('/api/usage/query', { method: 'POST', body: { range: 'today' } });
+    if (state.key !== key || state.stateReadEpoch !== epoch) return;
+    const summary = (result && result.summary) || {};
+    const requests = Number(summary.requests ?? summary.requestCount);
+    const totalTokens = Number(summary.totalTokens ?? summary.tokens);
+    today.key = key;
+    today.requests = Number.isFinite(requests) ? requests : 0;
+    today.totalTokens = Number.isFinite(totalTokens) ? totalTokens : null;
+    today.requestCount = reqCount;
+    today.fetchedAt = Date.now();
+  } catch {
+    if (state.key === key && state.stateReadEpoch === epoch) today.fetchedAt = Date.now();
+  } finally {
+    today.loading = false;
+    renderOverviewToday();
+  }
+}
+
+function computeOverviewIssue(data) {
+  const gw = (data && data.gateway) || {};
+  if (gw.state !== 'running') {
+    return {
+      tone: 'bad',
+      title: '本机网关未运行',
+      note: '模型请求当前无法发出，可在设置页重启后台服务。',
+      actionLabel: '前往设置',
+      action: { type: 'view', view: 'maintenance' },
+    };
+  }
+  const apply = applyState(data);
+  if (['连接需要系统授权', '应用失败', '应用已超时', '等待应用', '自动应用不可用'].includes(apply.word)) {
+    return {
+      tone: apply.tone || 'warn',
+      title: apply.word,
+      note: apply.note,
+      actionLabel: '前往模型页处理',
+      action: { type: 'section', view: 'models', section: 'restart-panel' },
+    };
+  }
+  const budgetMessage = budgetNotice(data && data.budget);
+  if (budgetMessage) {
+    return {
+      tone: 'warn',
+      title: '已达到预算上限',
+      note: budgetMessage,
+      actionLabel: '查看预算',
+      action: { type: 'budget' },
+    };
+  }
+  const verdict = syncState(data);
+  if (verdict.code === 'empty') {
+    return {
+      tone: 'neutral',
+      title: '尚未添加模型',
+      note: '先在模型页添加服务商与模型，保存后同步到 Kimi Work。',
+      actionLabel: '添加模型',
+      action: { type: 'view', view: 'models' },
+    };
+  }
+  if (verdict.code === 'manual-exit' || verdict.code === 'restart') {
+    return {
+      tone: verdict.tone || 'warn',
+      title: verdict.word,
+      note: verdict.note,
+      actionLabel: '重启 Kimi',
+      action: { type: 'action', action: 'restart-kimi' },
+    };
+  }
+  if (verdict.code !== 'synced') {
+    return {
+      tone: verdict.tone || 'warn',
+      title: verdict.word,
+      note: verdict.note,
+      actionLabel: '接入与恢复',
+      action: { type: 'view', view: 'maintenance' },
+    };
+  }
+  const recent = Array.isArray(data?.metrics?.recent) ? data.metrics.recent : [];
+  const failed = recent.find((row) => row && ((typeof row.status === 'number' && row.status >= 400) || row.error || row.failure?.reason));
+  if (failed) {
+    const modelName = displayModelId((failed.upstreamModelId || failed.model) || '模型');
+    const detail = requestErrorText(failed) || '请求未完成，请检查模型配置或稍后重试。';
+    const budgetHit = failed.error === 'budget_limit_reached' || failed.failure?.reason === 'budget_limit_reached';
+    return {
+      tone: 'bad',
+      title: '最近请求失败',
+      note: modelName + '：' + detail,
+      actionLabel: budgetHit ? '查看预算' : '检查模型与连接',
+      action: budgetHit ? { type: 'budget' } : { type: 'view', view: 'models' },
+    };
+  }
+  return {
+    tone: 'ok',
+    title: '状态正常',
+    note: '最近没有未处理的连接或请求失败。',
+    actionLabel: '',
+    action: null,
+  };
+}
+
+function renderOverviewIssue(data) {
+  const issue = computeOverviewIssue(data);
+  state.overviewIssueAction = issue.action;
+  setDot(dom.overviewIssueDot, issue.tone);
+  setText(dom.overviewIssueTitle, issue.title);
+  setText(dom.overviewIssueNote, issue.note);
+  if (dom.overviewIssueAction) {
+    setHidden(dom.overviewIssueAction, !issue.action);
+    if (issue.actionLabel) setText(dom.overviewIssueAction, issue.actionLabel);
+  }
+}
+
+function runOverviewIssueAction() {
+  const target = state.overviewIssueAction;
+  if (!target) return;
+  if (target.type === 'budget') {
+    setView('usage');
+    const tab = $('usage-tab-budget');
+    tab?.click();
+    tab?.focus();
+    return;
+  }
+  if (target.type === 'section') {
+    setView(target.view || 'models');
+    revealWorkspaceSection(target.section);
+    return;
+  }
+  if (target.type === 'action' && target.action) {
+    void runAction(target.action);
+    return;
+  }
+  if (target.type === 'view' && target.view) {
+    setView(target.view);
+  }
+}
+
+/* 概览只汇报可从状态中直接读到的路由事实：连接数、当前子代理路由与上游 ID、
+   上下文策略状态、原生工具可用性。任何未知值都写「未知」而不是留空。 */
+function renderRoutingFacts(data) {
+  const rows = connectionRowsOf(data);
+  const modelCount = Array.isArray(data.models) ? data.models.length : 0;
+  if (!rows) {
+    setText(dom.factConnections, '旧版单上游');
+    setText(dom.factConnectionsSub, modelCount + ' 个模型路由到同一个上游');
+  } else {
+    const named = rows.filter((row) => !row.legacy);
+    setText(dom.factConnections, named.length + ' 条连接' + (rows.some((row) => row.legacy) ? ' + 旧版' : ''));
+    const unset = rows.filter((row) => !row.apiKeySet).length;
+    setText(dom.factConnectionsSub, unset ? unset + ' 条连接的 Key 未在运行环境中' : '所有连接的 Key 已就绪');
+  }
+}
+
+function requestErrorText(row) {
+  const code = row?.error || row?.failure?.reason || '';
+  const status = row?.failure?.status ?? row?.status;
+  const side = row?.failure?.side ?? row?.side;
+  const type = row?.upstreamErrorType || row?.failure?.upstreamType || '';
+  const upstream = side === 'upstream' || code.startsWith('upstream_');
+  let text = '';
+  if (code === 'budget_limit_reached') {
+    return '本机网关已拒绝请求。请在「用量 → 预算保护」查看上限与重置时间。';
+  }
+  if (type === 'insufficient_quota' || code === 'upstream_rate_limited' || (upstream && status === 429)) {
+    text = '上游限流或账户额度不足，请稍后重试或检查账户额度';
+  } else if (code === 'upstream_unauthorized' || code === 'upstream_forbidden' || (upstream && (status === 401 || status === 403))) {
+    text = '上游 API 密钥无效、已过期或无权访问，请重新保存连接密钥';
+  } else if (code === 'upstream_connection_failed' || code === 'upstream_timeout' || code === 'response_stream_interrupted' || side === 'connection') {
+    text = '无法连接上游或响应中断，请检查连接地址、网络和服务状态';
+  } else if (upstream && status >= 500) {
+    text = '上游服务暂时异常，请稍后重试';
+  }
+  return text || code;
+}
+
+let recentSignature = '';
+
+function renderRecent(recent) {
+  setText(dom.recentEmpty, '尚无推理请求。Kimi 开始调用模型后，这里会出现最近的 20 条记录。');
+  const signature = JSON.stringify(recent);
+  if (signature === recentSignature) {
+    setHidden(dom.recentEmpty, recent.length > 0);
+    return;
+  }
+  recentSignature = signature;
+  const rows = recent.map((row) => {
+    const tr = document.createElement('tr');
+    const time = document.createElement('td');
+    time.className = 'mono';
+    time.textContent = fmtTime(row && row.at);
+    const model = document.createElement('td');
+    model.className = 'mono cell-id cell-model';
+    model.textContent = (row && (row.upstreamModelId || row.model)) || '—';
+    if (row && row.connectionId) {
+      const connection = document.createElement('span');
+      connection.className = 'cell-name';
+      connection.textContent = row.connectionId;
+      model.append(connection);
+    }
+    const protocol = document.createElement('td');
+    protocol.className = 'col-proto';
+    protocol.textContent = row && row.protocol === 'chat' ? 'chat' : 'responses';
+    const status = document.createElement('td');
+    status.className = 'num mono';
+    status.textContent = row && typeof row.status === 'number' ? String(row.status) : '—';
+    status.dataset.tone = row && row.status >= 400 ? 'bad' : 'neutral';
+    /* 首字节不是首 token：流式首个事件才算 TTFT，这里只报告实际测到的耗时。 */
+    const firstByte = document.createElement('td');
+    firstByte.className = 'num mono col-firstbyte';
+    firstByte.textContent = row && typeof row.firstByteMs === 'number' ? fmtMs(row.firstByteMs) : '未测';
+    const total = document.createElement('td');
+    total.className = 'num mono col-total';
+    total.textContent = row && typeof row.ms === 'number' ? fmtMs(row.ms) : '—';
+    const usage = document.createElement('td');
+    usage.className = 'num mono col-usage';
+    usage.textContent = usageText(row && row.usage);
+    usage.setAttribute('title', usage.textContent);
+    /* 平均输出速率是整段请求的平均值，含等待首字节的时间；不是 TPOT，也不是
+       首 token 速度。没有可测的完成请求就没有速率，写「未提供」而不是 0。 */
+    const rate = document.createElement('td');
+    rate.className = 'num mono col-rate';
+    rate.textContent = rateText(row && row.rate);
+    rate.setAttribute('title', rateText(row && row.rate));
+    /* 上下文占用是**上一次请求**的输入量，不是运行中会话的实时占用。 */
+    const requestContext = document.createElement('td');
+    requestContext.className = 'num mono col-reqctx';
+    requestContext.textContent = requestContextText(row && row.context);
+    requestContext.setAttribute('title', requestContextText(row && row.context));
+    if (row && (row.error || row.failure?.reason)) {
+      const error = document.createElement('span');
+      error.className = 'cell-error';
+      error.textContent = requestErrorText(row);
+      const rawCode = row.error || row.failure?.reason || '';
+      if (rawCode) error.setAttribute('title', rawCode);
+      status.append(error);
+    }
+    tr.append(time, model, protocol, status, firstByte, total, rate, usage, requestContext);
+    return tr;
+  });
+  if (dom.recentBody) dom.recentBody.replaceChildren(...rows);
+  setHidden(dom.recentEmpty, rows.length > 0);
+}
+
+/* 速率只认契约里的字段与口径；`basis` 不认识时不猜单位，直接说明未提供。 */
+function rateText(rate) {
+  if (!rate || typeof rate !== 'object') return '未提供';
+  if (rate.basis !== 'total_request_time') return '未提供';
+  const value = Number(rate.averageOutputTokensPerSecond);
+  if (!Number.isFinite(value) || value <= 0) return '未提供';
+  return (value >= 100 ? String(Math.round(value)) : value.toFixed(1)) + ' tok/s';
+}
+
+/* `context.limitTokens` 是这条模型**已设定的上下文窗口**，不是上游硬上限
+   `contextLimit`：所以这里只说「占预算多少」，不写成「距上限还剩多少」。
+   比例优先用后端算好的值，缺失时才用两个实测数相除。 */
+function requestContextText(context) {
+  if (!context || typeof context !== 'object') return '未提供';
+  const used = Number(context.usedTokens);
+  const budget = Number(context.limitTokens);
+  if (!Number.isFinite(used) || used < 0) return '未提供';
+  const head = fmtCount(used) + ' tokens';
+  if (!Number.isFinite(budget) || budget <= 0) return head + ' · 预算未知';
+  const ratio = Number.isFinite(Number(context.ratio)) ? Number(context.ratio) : used / budget;
+  return head + ' · 占预算 ' + Math.round(ratio * 100) + '%（' + fmtK(budget) + '）';
+}
+
+/* 用量只在收到上游真实 usage 时显示；缺失时写「未提供」，绝不当成 0。 */
+function usageText(usage) {
+  if (!usage || typeof usage !== 'object') return '未提供';
+  const input = Number.isFinite(usage.inputTokens) ? usage.inputTokens
+    : Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null;
+  const output = Number.isFinite(usage.outputTokens) ? usage.outputTokens
+    : Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : null;
+  if (input === null && output === null) return '未提供';
+  return (input === null ? '?' : fmtCount(input)) + ' / ' + (output === null ? '?' : fmtCount(output));
+}
+
+/* ---------- render: operation ---------- */
+
+function isInFlight(op) {
+  return Boolean(op && op.state === 'running');
+}
+
+function operationNote(op) {
+  if (op && op.state === 'waiting-kimi-exit') {
+    return '检测到另一个 Kimi 实例。点击「正常退出并重启 Kimi」后，产品会发送正常退出请求并完成受管重启。';
+  }
+  if (op?.action === 'open-work' && op.state === 'failed') return '请从官方 Kimi 窗口进入 Work，或检查接入状态。';
+  const code = op && typeof op.reason === 'string' && op.reason ? op.reason : '';
+  if (!code) return '';
+  return reasonText(code);
+}
+
+function renderOperation(data) {
+  const op = data && data.operation;
+  if (!op) {
+    setHidden(dom.opbar, true);
+    return;
+  }
+  const label = ACTION_LABEL[op.action] || op.action || '操作';
+  const word = ACTION_STATE[op.state] || op.state || '未知';
+  const running = isInFlight(op);
+  const bad = op.state === 'failed' || op.state === 'interrupted' || op.state === 'unavailable' || op.state === 'incompatible';
+  setHidden(dom.opbar, false);
+  setDot(dom.opbarDot, running ? 'warn' : bad ? 'bad' : 'ok');
+  setText(dom.opbarName, label + ' · ' + word);
+  setText(dom.opbarNote, operationNote(op) || '');
+  dom.opbar.dataset.running = running ? 'true' : 'false';
+}
+
+function renderActions(data) {
+  if (data && !onboardBusy()) renderOnboard();
+  if (!state.actionButtons.length) return;
+  const running = isInFlight(data && data.operation);
+  const busy = running || state.modelsSaving || state.connsSaving;
+  const ready = configReady(data);
+  const alreadyRunning = data?.kimiProcess?.running === true;
+  for (const button of state.actionButtons) {
+    const reuseLogin = button.dataset.profileMode === 'existing-authorized';
+    if (button.id === 'native-launch') {
+      button.dataset.action = alreadyRunning ? 'restart-kimi' : 'launch-kimi';
+    }
+    const action = button.dataset.action;
+    if (reuseLogin) setHidden(button, data?.profile?.canReuseLogin !== true);
+    const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
+    const pending = state.pendingAction === action;
+    button.disabled = busy || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
+    if (button.id === 'native-launch') setText(button, ACTION_LABEL[action]);
+    if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
+    button.classList.toggle('is-busy', pending);
+    button.setAttribute('aria-busy', pending ? 'true' : 'false');
+  }
+}
+
+
+function renderWorkspaceSync(data) {
+  const integration = data.integration || {};
+  const models = Array.isArray(data.models) ? data.models : [];
+  const imported = Object.keys(integration.aliases || {}).sort();
+  const saved = models.map(model => model.id).sort();
+  const matches = JSON.stringify(imported) === JSON.stringify(saved);
+  const restart = matches && integration.applied && !integration.adopted;
+  const synced = matches && integration.adopted;
+  setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Work' : restart ? '需要重启 Kimi' : '待同步到 Work');
+  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced ? '已读回当前模型配置，可在 Work 的模型选择器中使用。' : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '本机网关已保存模型。点击「同步到 Work」更新官方模型选择器。');
+  setHidden($('workspace-restart'), !restart);
+}
+
+
+let trackedServiceOperation = '';
+
+function renderPreviewLifecycle(data) {
+  const current = $('upd-current');
+  if (current) current.textContent = data.updates?.currentVersion || '未知预览版本';
+  setText($('upd-current-sub'), '独立 Go/Wails 预览 · ' + (data.service?.buildId || 'development'));
+  setText($('preview-service-state'), data.service?.state === 'running' ? '后台运行中' : '后台状态未确认');
+  const operation = data.service?.operation;
+  const busy = operation && ['pending', 'running'].includes(operation.phase);
+  setText($('preview-service-sub'), busy ? '后台操作进行中，正在读回结果；登录启动与当前运行状态分开管理。' : data.service?.loginStartup === 'enabled' ? '已允许登录时启动；更改此偏好不会重启当前后台' : '未开启登录时启动；窗口关闭不停止网关');
+  const register = $('service-register');
+  if (register) register.textContent = data.service?.registered ? '更新服务注册' : '注册后台服务';
+  const enable = $('service-enable');
+  if (enable) enable.disabled = Boolean(busy) || data.service?.loginStartup === 'enabled';
+  const disable = $('service-disable');
+  if (disable) disable.disabled = Boolean(busy) || data.service?.loginStartup !== 'enabled';
+  if (busy && trackedServiceOperation !== operation.id) {
+    trackedServiceOperation = operation.id;
+    void trackServiceOperation(operation.id, operation.action, operation);
+  }
+}
+
+function applyPreviewServiceResult(result) {
+  const operation = result.operation;
+  if (!state.data) return operation;
+  const service = result.service || operation?.state;
+  if (service) {
+    state.data.service = { ...state.data.service, ...service, loginStartup: service.enabled ? 'enabled' : 'manual' };
+  }
+  if (operation) state.data.service.operation = operation;
+  renderPreviewLifecycle(state.data);
+  return operation;
+}
+
+async function trackServiceOperation(id, action, initial) {
+  let operation = initial;
+  const deadline = Date.now() + 30000;
+  try {
+    while (!operation || !['succeeded', 'failed'].includes(operation.phase)) {
+      if (Date.now() >= deadline) {
+        showToast('后台操作尚未完成，请稍后从设置页读回结果；配置与账本未删除。', 'error');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        const result = await request('/api/service', { method: 'POST', body: { action: 'read-service-operation', operationId: id } });
+        operation = applyPreviewServiceResult(result);
+      } catch (error) {
+        if (action === 'stop-service' || action === 'uninstall-service') {
+          showToast('后台连接已断开，停止结果尚未由本窗口读回。重新打开窗口后可核对服务状态；官方 Kimi 不会因此被关闭。');
+          return;
+        }
+        if (Date.now() >= deadline) throw error;
+      }
+    }
+    applyPreviewServiceResult({ operation });
+    if (operation.phase === 'failed') {
+      showToast('后台操作未完成，请在设置页查看诊断并核对实际状态；未确认的更改不会显示为成功。', 'error');
+      return;
+    }
+    if (action === 'enable-login-service' || action === 'disable-login-service') {
+      showToast(operation.loginStart ? '已允许下次登录时启动；当前后台没有因此重启。' : '已禁止下次登录时启动；当前后台和模型请求未因此中断。', 'ok');
+    } else if (action === 'register-service') {
+      showToast('后台注册定义已保存；注册不等于已开启登录启动。', 'ok');
+    } else {
+      showToast('后台操作已完成并读回状态；官方 Kimi 不会因此被关闭。', 'ok');
+    }
+    try { await loadState({ silent: true }); } catch {}
+  } finally {
+    if (trackedServiceOperation === id) trackedServiceOperation = '';
+  }
+}
+
+async function previewServiceAction(action) {
+  const result = await request('/api/service', { method: 'POST', body: { action } });
+  const operation = applyPreviewServiceResult(result);
+  if (action === 'restart-daemon') {
+    showToast('后台正在同地址重启，页面将在健康读回后恢复。官方 Kimi 不会因此被关闭。', 'ok');
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        if (await loadState({ silent: true })) return;
+      } catch {}
+      if (Date.now() >= deadline) {
+        showToast('后台未在限定时间内恢复；请查看设置页诊断，原配置与账本未删除。', 'error');
+        return;
+      }
+    }
+  }
+  if (operation?.id) {
+    trackedServiceOperation = operation.id;
+    await trackServiceOperation(operation.id, operation.action, operation);
+    return;
+  }
+  showToast('预览后台状态已更新；登录启动与进程运行分开显示。', 'ok');
+  await loadState({ silent: true });
+}
+
+
+function resetRecentSignature() { recentSignature = ''; }
+
+export {
+  isInFlight,
+  previewServiceAction,
+  refreshOverviewToday,
+  renderActions,
+  renderOperation,
+  renderOverview,
+  renderPreviewLifecycle,
+  renderShell,
+  renderWorkspaceSync,
+  resetRecentSignature,
+  runOverviewIssueAction,
+  syncState,
+};

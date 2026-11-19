@@ -67,3 +67,41 @@ globalThis.clawBridgeAPI={byokSources:{
 		})
 	}
 }
+
+func TestSourceImportUpgradesDefaultKTHDisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{"empty displayName becomes Kimi Work+", "", "Kimi Work+"},
+		{"legacy KTH displayName upgrades to Kimi Work+", "KTH", "Kimi Work+"},
+		{"custom displayName is preserved", "My Gateway", "My Gateway"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			if _, err := vm.RunString(`
+let seenName = "";
+const initial={scopeToken:"account", accountRevision:"r1", sources:[{id:"byok-kth",kind:"kth",displayName:` + `"` + tc.existing + `"` + `,revision:"s1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"}]};
+const preview={scopeToken:"account",accountRevision:"r1",sourceRevision:"s1",sourceId:"byok-kth",previewId:"p1",canSave:true,candidates:[{modelId:"m1"}]};
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){return ok(initial);},
+  preview(req){seenName=req.draft.displayName;return ok(preview);},
+  discard(){},
+  save(){return ok({sourceId:"byok-kth",accountRevision:"r2",status:"pending"});},
+  applyPending(){return ok({status:"applied"});},
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1/") + `).then(r=>globalThis.res=r);`); err != nil {
+				t.Fatal(err)
+			}
+			got := vm.Get("seenName").String()
+			if got != tc.want {
+				t.Fatalf("displayName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

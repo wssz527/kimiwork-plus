@@ -624,7 +624,7 @@ const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="ap
   snapshot.sources.some(source=>source.id!==existing?.id);
 const result=await sources.preview({sourceId:existing?.id,sourceRevision:existing?.revision??null,
   accountRevision:snapshot.accountRevision,
-  draft:{kind:"kth",displayName:existing?.displayName||"Kimi Work+",registryUrl:catalogURL,
+  draft:{kind:"kth",displayName:(existing?.displayName&&existing.displayName!=="KTH")?existing.displayName:"Kimi Work+",registryUrl:catalogURL,
     registryKey:{mode:"set",value:token},reuseRegistryCredential:true}});
 const preview=unwrap(result);
 if(!preview?.canSave||typeof preview.previewId!=="string"||!Array.isArray(preview.candidates)||!preview.candidates.length||

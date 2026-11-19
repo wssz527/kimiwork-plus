@@ -55,10 +55,10 @@ function mountLegacy() {
   roles.className = 'growth-disclosure';
   roles.id = 'role-contract';
   const summaryRole = document.createElement('summary');
-  summaryRole.textContent = '角色默认模型：当前内核契约';
+  summaryRole.textContent = '角色默认模型说明';
   const body = document.createElement('div');
   body.className = 'growth-disclosure__body';
-  body.innerHTML = '<p>已只读核对 Kimi Work 3.2.25 当前内核：coder、plan、explore 等 profile 决定提示词与工具权限，profile 接口没有 model、modelAlias 或 thinking 默认字段。模型由单次显式参数、全局池默认或调用方继承决定。</p><p>因此本轮不实现角色默认或强制角色模型，不添加无效下拉框。单次指定模型不等同于已接管所有官方自动子代理；实际契约与版本摘要见交付的 ROLE_CONTRACT.txt。</p><p>日常子代理继续使用上面的“继承主模型”基线，本页不会借角色调查重新启用全局模型池。</p>';
+  body.innerHTML = '<p>当前 Kimi Work 内核中，不同子代理角色（如 coder、plan、explore）只决定提示词与工具权限，不单独绑定模型。普通新子代理统一使用上方的目标模型或模型池，已有会话继续保留原模型。</p>';
   roles.append(summaryRole, body);
   diagnostics.append(roles);
 }

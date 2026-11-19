@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+const appFiles = ['./app-core.js', './app-overview.js', './app-models.js', './app-connections.js', './app-work.js', './app.js'];
+const source = '\n' + appFiles.map(file => readFileSync(new URL(file, import.meta.url), 'utf8')).join('\n');
 const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
+const htmlSource = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 
 function extractFunction(text, name, indent = '') {
   const declaration = [`\n${indent}function `, `\n${indent}async function `].map(prefix => prefix + name + '(').find(token => text.includes(token));
@@ -395,7 +397,7 @@ test('switching the private panel session clears the visible catalogue query and
   const state = { key: 'old-session', onboard: { advanced: false, query: 'vision' } };
   const dom = { onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const code = [
-    'let modelSignature = "", recentSignature = "", saModelSignature = "", saEffortSignature = "";',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -415,7 +417,7 @@ function rotatedKeyHarness(loadState, calls) {
   const dom = { conn: {}, onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const usagePanel = { reset() { calls.push('reset'); }, show() { calls.push('show'); }, reload: async () => {} };
   const code = [
-    'let modelSignature = "", recentSignature = "", saModelSignature = "", saEffortSignature = "";',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -563,24 +565,9 @@ function makeDomTree() {
   return { byId, makeNode, document };
 }
 
-test('mounting the merged views is idempotent and keeps one recent-requests table', () => {
-  const { byId, makeNode, document } = makeDomTree();
+test('mountUsageRequests is idempotent and keeps one recent-requests table', () => {
+  const { makeNode, document } = makeDomTree();
   const root = (id, tag) => makeNode(id, tag);
-  const modelsBody = root('models-services-body');
-  const connectionsPanel = root('connections-panel');
-  const maintenance = root('view-maintenance');
-  const restartPanel = root('restart-panel');
-  const work = root('view-work');
-  const extensions = root('view-extensions');
-  const subagentHeading = root('subagents-heading', 'H2');
-  const subagentView = root('view-subagents');
-  subagentView.append(subagentHeading, root('sa-target-panel'));
-  const settingsView = root('view-settings');
-  settingsView.append(root('settings-heading', 'H2'), root('context-panel'));
-  const toolsView = root('view-tools');
-  toolsView.append(root('tools-heading', 'H2'), root('web-panel'));
-  const translationView = root('view-translation');
-  translationView.append(root('translation-panel'));
   const usagePane = root('usage-pane-requests');
   const recentSection = root('recent-section');
   const recentTable = root('recent-table', 'TABLE');
@@ -591,25 +578,50 @@ test('mounting the merged views is idempotent and keeps one recent-requests tabl
   const code = [
     'const $ = id => document.getElementById(id);',
     sourceFunction('mountUsageRequests'),
-    sourceFunction('mountWorkspace'),
-    'return mountWorkspace;',
+    'return mountUsageRequests;',
   ].join('\n');
   const mount = new Function('document', code)(document);
 
   mount();
-  assert.equal(connectionsPanel.parent, modelsBody);
-  assert.equal(restartPanel.parent, maintenance);
-  assert.equal(byId.get('view-subagents'), undefined);
-  assert.equal(byId.get('sa-target-panel').parent, work);
-  assert.equal(byId.get('context-panel').parent, work);
-  assert.equal(byId.get('web-panel').parent, work);
-  assert.equal(byId.get('translation-panel').parent, extensions);
-  assert.equal(byId.get('subagents-heading'), undefined);
+  mount();
+  assert.deepEqual(usagePane.children.map(node => node.id), ['recent-section']);
+  assert.equal(records.children.length, 0);
+});
 
-  mount();
-  mount();
-  assert.deepEqual(usagePane.children.sort((a, b) => a.id.localeCompare(b.id)).map(node => node.id).filter(id => id === 'recent-section'), ['recent-section']);
-  assert.equal(work.children.filter(node => node.id === 'context-panel').length, 1);
+test('index.html lays out six flat tabs and static views without runtime mountWorkspace', () => {
+  for (const id of ['nav-overview', 'nav-models', 'nav-usage', 'nav-work', 'nav-extensions', 'nav-maintenance']) {
+    assert.ok(htmlSource.includes(`id="${id}"`), 'missing top tab ' + id);
+  }
+  assert.equal(htmlSource.includes('id="work-index"'), false);
+  assert.equal(htmlSource.includes('id="quick-models"'), false);
+  assert.equal(htmlSource.includes('id="models-services"'), false);
+  assert.equal(source.includes('function mountWorkspace('), false);
+  const modelsIdx = htmlSource.indexOf('id="view-models"');
+  const usageIdx = htmlSource.indexOf('id="view-usage"');
+  const modelsSlice = htmlSource.slice(modelsIdx, usageIdx);
+  assert.ok(modelsSlice.includes('id="connections-panel"'));
+  assert.ok(modelsSlice.includes('id="restart-panel"'));
+  assert.ok(modelsSlice.indexOf('id="model-table"') < modelsSlice.indexOf('id="connections-panel"'));
+});
+
+test('computeOverviewIssue prioritizes gateway, connection apply, budget, integration and recent failures', () => {
+  const compute = new Function(`
+    const displayModelId = id => id;
+    const applyState = data => data._apply || { tone: 'ok', word: '已应用', note: '' };
+    const budgetNotice = b => b?.msg || '';
+    const syncState = data => data._sync || { code: 'synced', tone: 'ok', word: '已同步', note: '' };
+    const requestErrorText = row => row.msg || row.error || '';
+    ${sourceFunction('computeOverviewIssue')}
+    return computeOverviewIssue;
+  `)();
+  assert.equal(compute({ gateway: { state: 'stopped' } }).action.view, 'maintenance');
+  assert.equal(compute({ gateway: { state: 'running' }, _apply: { tone: 'warn', word: '等待应用', note: '待应用' } }).action.section, 'restart-panel');
+  assert.equal(compute({ gateway: { state: 'running' }, budget: { msg: '今日已达预算上限。' } }).action.type, 'budget');
+  assert.equal(compute({ gateway: { state: 'running' }, _sync: { code: 'restart', tone: 'warn', word: '需要重启', note: '重启' } }).action.action, 'restart-kimi');
+  const failed = compute({ gateway: { state: 'running' }, metrics: { recent: [{ model: 'deepseek/r1', status: 401, error: 'upstream_unauthorized', msg: '密钥无效' }] } });
+  assert.equal(failed.tone, 'bad');
+  assert.match(failed.note, /deepseek\/r1：密钥无效/);
+  assert.equal(compute({ gateway: { state: 'running' }, metrics: { recent: [{ model: 'm', status: 200 }] } }).action, null);
 });
 
 test('section links open every collapsed ancestor before scrolling to the panel', () => {

@@ -1209,7 +1209,7 @@
       }));
     }
     box.append(line);
-    box.append(node('p', 'field__hint', 'Swarm 与普通子代理共用模型策略（[secondary_model]），不会单独保存另一套模型。'));
+    box.append(node('p', 'field__hint', '并行子代理与普通子代理共用模型策略，不会单独保存另一套模型。'));
     box.append(node('p', 'field__hint', '开启需要你的账号有对应权限；没有权限时官方页面会拒绝，这里照实显示原因。'));
     return box;
   }

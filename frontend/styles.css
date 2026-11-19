@@ -145,42 +145,25 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); opacity: 1; }
 .shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 /* The reserved window-control band uses the same background as the panel. */
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: var(--kimi-work-titlebar-height, 0px); z-index: 31; background: var(--bg); pointer-events: none; }
-.masthead { position: relative; top: auto; z-index: 30; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; flex: none; min-height: 54px; padding: 8px 24px; border-bottom: 1px solid var(--rule); background: var(--bg); --wails-draggable: drag; user-select: none; -webkit-user-select: none; }
-html[data-platform="mac"]:not([data-fullscreen="true"]) .masthead { padding-left: 90px; }
-.masthead button, .masthead a, .masthead select, .masthead input, .masthead summary, .masthead label, .masthead .plus-account-bar, .masthead .work-index, .masthead .theme-field { --wails-draggable: no-drag; }
-.brand { display: inline-flex; align-items: center; padding: 3px 0; border: 0; background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; }
-.brand__name { font: 700 22px/1.1 var(--display); letter-spacing: -.025em; }
+.masthead { position: relative; top: auto; z-index: 30; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; flex: none; min-height: 54px; padding: 8px 20px; border-bottom: 1px solid var(--rule); background: var(--bg); --wails-draggable: drag; user-select: none; -webkit-user-select: none; }
+html[data-platform="mac"]:not([data-fullscreen="true"]) .masthead { padding-left: 88px; }
+.masthead button, .masthead a, .masthead select, .masthead input, .masthead summary, .masthead label, .masthead .plus-account-bar, .masthead .masthead__nav, .masthead .theme-field { --wails-draggable: no-drag; }
+.brand { display: inline-flex; align-items: center; padding: 3px 0; border: 0; background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; flex: none; }
+.brand__name { font: 700 17px/1.1 var(--display); letter-spacing: -.02em; }
 .brand__plus, .product-lockup__plus { color: var(--accent); }
-.work-index { flex: none; justify-self: start; }
-.work-index__summary { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--rule-strong); border-radius: 999px; color: var(--ink-2); font-size: 12px; font-weight: 620; white-space: nowrap; cursor: pointer; list-style: none; }
-.work-index__summary::-webkit-details-marker { display: none; }
-.work-index__summary .icon { width: 13px; height: 13px; transition: transform var(--fast) var(--ease); }
-.work-index[open] .work-index__summary { border-color: var(--accent); color: var(--accent); }
-.work-index[open] .work-index__summary .icon { transform: rotate(45deg); }
-/* The whole viewport below the sticky masthead belongs to the open index. The
-   top inset is the window-chrome band plus the masthead's measured height: the
-   fixed panel is positioned against the viewport, so a hard-coded 66px drifts
-   away from the row as soon as the header wraps or the shell band is present,
-   leaving either a cut first entry or a strip of the page above the panel.
-   `--kwg-masthead-height` is written by app.js after layout (66px is only the
-   first-paint fallback). The opaque panel itself is the backdrop. */
-.nav { position: fixed; inset: calc(var(--kimi-work-titlebar-height, 0px) + var(--kwg-masthead-height, 66px)) 0 0; z-index: 29; display: grid; align-content: start; width: 100%; padding: 24px max(32px, calc((100vw - 960px) / 2)); overflow: auto; overscroll-behavior: contain; background: var(--bg); }
-.nav__item { display: grid; grid-template-columns: minmax(180px, .55fr) minmax(0, 1fr); align-items: center; gap: 24px; min-height: 72px; padding: 14px 4px; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
-.nav__item:first-child { border-top: 1px solid var(--rule); }
-.nav__item:hover { background: var(--hover); }
-.nav__item[aria-current="page"] { color: var(--accent); }
-.nav__label { font: 700 34px/1.1 var(--display); letter-spacing: -.025em; }
-.nav__item[aria-current="page"] .nav__label::after { content: "当前"; display: inline-block; margin-left: 14px; padding: 2px 6px; border: 1px solid var(--accent-rule); border-radius: 999px; font: 500 11px/1.5 var(--ui); vertical-align: middle; }
-.nav__note { color: var(--ink-3); font-size: 13px; }
-.nav__count { color: var(--ink-4); font-size: 12px; }
-.masthead__tools { display: flex; align-items: center; gap: 14px; }
-.gateway-chip { display: flex; align-items: center; gap: 7px; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
-.theme-field select { appearance: none; width: 106px; min-height: 36px; padding-right: 26px; background: var(--bg); border-color: var(--rule-strong); }
+.masthead__nav { display: flex; align-items: center; gap: 2px; min-width: 0; flex-wrap: wrap; }
+.masthead__tab { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 5px 10px; border: 1px solid transparent; border-radius: var(--r-control); background: transparent; color: var(--ink-2); font-size: 13px; font-weight: 560; white-space: nowrap; cursor: pointer; transition: background var(--fast) var(--ease), color var(--fast) var(--ease), border-color var(--fast) var(--ease); }
+.masthead__tab:hover { background: var(--hover); color: var(--ink); }
+.masthead__tab[aria-current="page"] { border-color: var(--accent-rule); background: var(--accent-soft); color: var(--accent); font-weight: 660; }
+.nav__count { color: var(--ink-4); font-size: 11px; }
+.masthead__tab[aria-current="page"] .nav__count { color: var(--accent); }
+.masthead__tools { display: flex; align-items: center; gap: 10px; flex: none; }
+.gateway-chip { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.theme-field select { appearance: none; width: 96px; min-height: 32px; padding: 4px 24px 4px 10px; background: var(--bg); border-color: var(--rule-strong); font-size: 12px; }
 .theme-field { position: relative; }
-.theme-field::after { content: ""; position: absolute; right: 12px; top: 14px; width: 6px; height: 6px; border-right: 1px solid var(--ink-3); border-bottom: 1px solid var(--ink-3); transform: rotate(45deg); pointer-events: none; }
+.theme-field::after { content: ""; position: absolute; right: 10px; top: 12px; width: 6px; height: 6px; border-right: 1px solid var(--ink-3); border-bottom: 1px solid var(--ink-3); transform: rotate(45deg); pointer-events: none; }
 .theme-field select:hover { background: var(--hover); }
-.masthead__navigation { display: flex; align-items: center; gap: 16px; min-width: 0; flex-wrap: wrap; row-gap: 8px; }
-.masthead__separator { color: var(--rule-strong); }
+.masthead__navigation { display: flex; align-items: center; gap: 14px; min-width: 0; flex-wrap: nowrap; }
 
 .main { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 0 max(32px, calc((100% - 1240px) / 2)) 32px; }
 .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex: none; padding: 24px 0 20px; border-bottom: 1px solid var(--rule); }
@@ -210,8 +193,23 @@ body[data-view="overview"] .topbar { display: none; }
 .section-links + .band, .workspace-sync + .band, .growth-disclosure + .band { border-top: 0; }
 /* 运行记录的外层已有强调上边框，内部第一块不必再画一条。 */
 .overview-records__body > .band:first-child { border-top: 0; }
-#models-services .band { padding-top: 0; }
 #view-models .growth-disclosure { margin-top: 24px; }
+
+.overview-dash { display: grid; gap: 20px; padding: 24px 0 8px; }
+.overview-head { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
+.overview-head__title h1 { font: 700 32px/1.15 var(--display); letter-spacing: -.025em; }
+.overview-head__sub { margin-top: 6px; color: var(--ink-3); font-size: 13px; }
+.overview-head__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.overview-card { display: flex; flex-direction: column; gap: 8px; min-height: 144px; padding: 18px 20px; border: 1px solid var(--rule); border-radius: var(--r-group); background: var(--surface); }
+.overview-card__label { color: var(--ink-3); font-size: 12px; font-weight: 560; }
+.overview-card__value { display: flex; align-items: center; gap: 8px; color: var(--ink); font: 700 20px/1.25 var(--display); letter-spacing: -.015em; overflow-wrap: anywhere; }
+.overview-card .overview-card__verdict { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; font: 700 20px/1.25 var(--display); letter-spacing: -.015em; color: var(--ink); }
+.overview-card .overview-card__verdict strong { font-weight: 700; font-size: 20px; }
+.overview-card__meta { color: var(--ink-3); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.overview-card__foot { margin-top: auto; padding-top: 6px; display: flex; align-items: center; gap: 8px; }
+.overview-card #plus-overview-account .plus-overview { margin-top: 0; gap: 6px; }
+.overview-card #plus-overview-account .plus-overview__value { font-size: 18px; }
 @media (max-width: 1024px) {
   .workspace-sync { align-items: flex-start; flex-direction: column; }
   .workspace-sync .action-line { flex-wrap: wrap; }
@@ -355,7 +353,7 @@ option { background: var(--surface-strong); color: var(--ink); }
 .onboard-disclosure > summary::-webkit-details-marker, .overview-records > summary::-webkit-details-marker { display: none; }
 .summary-action { color: var(--ink-3); font-size: 12px; font-weight: 400; }
 .onboard-disclosure[open] .summary-action { font-size: 0; }
-.onboard-disclosure[open] .summary-action::after { content: "收起工作单"; font-size: 12px; }
+.onboard-disclosure[open] .summary-action::after { content: "收起"; font-size: 12px; }
 .onboard-disclosure__body { padding: 18px 0 30px; }
 .onboard-form { display: grid; gap: 22px; margin-top: 24px; }
 .advanced-body { padding-top: 16px; border-top: 1px solid var(--rule); }
@@ -556,33 +554,25 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--sunk); color: var
 .toast[data-tone="error"] { background: var(--bad-fill); color: #fff; }
 
 @media (max-width: 1120px) {
-  .masthead { gap: 14px; padding-inline: 22px; }
+  .masthead { gap: 10px; padding-inline: 16px; }
+  .masthead__navigation { gap: 10px; }
+  .masthead__tab { padding: 5px 8px; font-size: 12px; }
   .gateway-chip { display: flex; }
-  .takeover__stage { grid-template-columns: minmax(0, 1fr) minmax(320px, .8fr); gap: 30px; }
-  .product-lockup { font-size: 80px; }
-  .takeover__claim { font-size: 27px; }
   .table--models .col-efforts { display: none; }
   #recent-table .col-reqctx { display: none; }
 }
 
-/* 640–1024px 之间原本没有任何顶栏规则：导航胶囊可以被压到只剩一个字的宽度，
-   于是「全部功能」逐字竖排，并与右侧工具挤在一起。胶囊保持单行、整枚换行，
-   空间实在不够时（<=780px）把工具整行移到下面。 */
 @media (max-width: 1024px) {
-  .masthead { gap: 12px; }
-  .masthead__navigation { flex-wrap: wrap; row-gap: 8px; }
-  .masthead__tools { margin-left: auto; }
-}
-
-@media (max-width: 780px) {
-  .masthead { grid-template-columns: minmax(0, 1fr); align-items: start; row-gap: 10px; }
-  .masthead__tools { justify-content: space-between; width: 100%; margin-left: 0; }
+  .masthead { gap: 8px; }
+  .masthead__navigation { gap: 8px; }
+  .masthead__tab { padding: 5px 7px; font-size: 12px; }
+  .masthead__tools { gap: 8px; margin-left: auto; }
+  .theme-field select { width: 84px; }
 }
 
 @media (max-width: 900px) {
-  .main { padding-inline: 28px; }
-  .takeover__stage { grid-template-columns: 1fr; min-height: 0; padding: 54px 0; }
-  .registration { justify-self: center; width: min(100%, 390px); }
+  .main { padding-inline: 24px; }
+  .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .facts, .facts--overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .choices--three { grid-template-columns: 1fr; }
   .conn-row, .mcp-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
@@ -592,19 +582,21 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--sunk); color: var
   #recent-table .col-rate { display: none; }
 }
 
+@media (max-width: 780px) {
+  .masthead { grid-template-columns: minmax(0, 1fr); align-items: start; row-gap: 8px; }
+  .masthead__navigation { flex-wrap: wrap; row-gap: 6px; }
+  .masthead__tools { justify-content: space-between; width: 100%; margin-left: 0; }
+}
+
 @media (max-width: 640px) {
   :root { --kwg-masthead-height: 64px; }
-  .masthead { gap: 9px; min-height: 64px; padding-inline: 14px; }
-  .brand__name { font-size: 18px; }
-  .work-index__summary { min-height: 34px; padding-inline: 9px; }
-  .theme-field select { width: 88px; min-height: 34px; font-size: 12px; }
-  .nav { padding: 24px 20px; align-content: start; }
-  .nav__item { grid-template-columns: 1fr; gap: 7px; min-height: 82px; padding: 18px 4px; }
-  .nav__label { font-size: 30px; }
-  .nav__item[aria-current="page"] .nav__label::after { margin-left: 10px; }
-  .main { padding: 0 18px; }
-  .topbar { flex-wrap: wrap; gap: 16px; padding: 34px 0 24px; }
-  .topbar h1 { font-size: 40px; }
+  .masthead { gap: 8px; min-height: 54px; padding-inline: 14px; }
+  .brand__name { font-size: 16px; }
+  .theme-field select { width: 84px; min-height: 32px; font-size: 12px; }
+  .main { padding: 0 18px 24px; }
+  .overview-grid { grid-template-columns: 1fr; }
+  .topbar { flex-wrap: wrap; gap: 16px; padding: 24px 0 18px; }
+  .topbar h1 { font-size: 36px; }
   .topbar__meta { width: 100%; justify-content: space-between; }
   .takeover__stage { gap: 34px; padding: 38px 0 30px; }
   .takeover__main { gap: 24px; }
@@ -695,6 +687,10 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 .usage-tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 650; }
 .usage-pane { padding-top: 24px; }
 .usage-toolbar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 18px; margin: 20px 0 24px; }
+.usage-toolbar--compact { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); align-items: end; gap: 10px 14px; margin: 16px 0 18px; }
+.usage-toolbar--compact select { min-height: 36px; height: 36px; padding: 6px 10px; }
+.usage-toolbar--compact .usage-picker > summary { min-height: 36px; padding: 7px 10px; line-height: 1.4; }
+.usage-toolbar--compact [hidden] { display: none; }
 .usage-toolbar .field__label, .usage-filter__label { margin-bottom: 6px; }
 .usage-ranges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
 .usage-ranges button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
@@ -754,7 +750,7 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
   .topbar { padding-block: 18px 14px; }
   .topbar h1 { font-size: 44px; }
 }
-@media (max-width: 780px) { .masthead__shortcut, .masthead__separator { display: none; } .masthead__navigation { gap: 12px; } }
+@media (max-width: 780px) { .masthead__navigation { gap: 10px; } }
 
 .usage-picker { border: 1px solid var(--rule-input); border-radius: var(--r-control); background: var(--surface-strong); color: var(--ink); font-size: 13px; }
 .usage-picker > summary { min-height: 40px; padding: 10px 11px; cursor: pointer; }
