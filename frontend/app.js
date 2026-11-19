@@ -896,10 +896,20 @@ function truncate(value, max) {
   return value.length > max ? value.slice(0, max - 1) + '…' : value;
 }
 
+function displayModelId(id) {
+  const text = typeof id === 'string' ? id : '';
+  if (!text || !text.includes('%')) return text;
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 function modelLabel(model, alias) {
-  if (!model) return typeof alias === 'string' && alias ? alias : '—';
+  if (!model) return typeof alias === 'string' && alias ? displayModelId(alias) : '—';
   if (model.name && model.name !== model.id) return model.name;
-  return model.id;
+  return displayModelId(model.id);
 }
 
 function reasonText(code) {
@@ -2662,7 +2672,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       const route = document.createElement('span');
       route.className = 'field__hint onboard__route mono';
       route.textContent = row.protocol
-        ? '本机路由 ' + routeIdFor(connectionId, row.upstreamModelId, row.protocol)
+        ? '本机路由 ' + displayModelId(routeIdFor(connectionId, row.upstreamModelId, row.protocol))
         : '选择协议后生成本机路由；上游 ID 保持原样';
       protocolField.append(route);
     }
@@ -3361,7 +3371,7 @@ function renderActions(data) {
 
 function matchesQuery(model, needle) {
   if (!needle) return true;
-  const fields = [model.id, model.name, model.protocol, ...(model.reasoningEfforts || [])]
+  const fields = [model.id, displayModelId(model.id), model.name, model.protocol, ...(model.reasoningEfforts || [])]
     .filter((value) => typeof value === 'string');
   return fields.some((value) => value.toLowerCase().includes(needle));
 }
@@ -3440,8 +3450,9 @@ function buildModelRow(model) {
   const idCell = document.createElement('td');
   const id = document.createElement('span');
   id.className = 'mono cell-id';
-  id.textContent = model.id;
-  id.setAttribute('title', model.id);
+  const shownId = displayModelId(model.id);
+  id.textContent = shownId;
+  id.setAttribute('title', shownId);
   idCell.append(id);
   if (model.name && model.name !== model.id) {
     const name = document.createElement('span');
@@ -4943,8 +4954,9 @@ function renderPoolList(draft, capable) {
     head.className = 'pool__head';
     const id = document.createElement('span');
     id.className = 'mono cell-id';
-    id.textContent = row.id;
-    id.setAttribute('title', row.id);
+    const shownId = displayModelId(row.id);
+    id.textContent = shownId;
+    id.setAttribute('title', shownId);
     head.append(id);
     if (row.id === draft.model) {
       const flag = document.createElement('span');
@@ -5028,7 +5040,7 @@ function renderSubagents() {
     syncSelectOptions(dom.saPoolAdd, [{ value: '',
       label: missingCapable ? '目录中没有声明支持工具的模型' : '选择要加入的模型',
     }].concat(remaining.map((model) => ({
-      value: model.id, label: modelLabel(model, model.id) + ' · ' + model.id,
+      value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
     }))), pendingAdd);
     if (dom.saPoolAdd) dom.saPoolAdd.disabled = !ready || busy || state.subagentSaving
       || missingCapable || poolIds.size >= 32;
@@ -5040,7 +5052,7 @@ function renderSubagents() {
     const defaultOptions = poolIds.size
       ? Array.from(poolIds).map((id) => {
         const model = capable.find((entry) => entry.id === id) || null;
-        return { value: id, label: modelLabel(model, id) + ' · ' + id };
+        return { value: id, label: modelLabel(model, id) + ' · ' + displayModelId(id) };
       })
       : [{ value: '', label: '先加入候选模型' }];
     syncSelectOptions(dom.saPoolDefault, defaultOptions, draft.model || '');
@@ -5065,10 +5077,10 @@ function renderSubagents() {
       const options = [{ value: '',
         label: capable.length ? '选择模型' : '目录中没有声明支持工具的模型',
       }].concat(capable.map((model) => ({
-        value: model.id, label: modelLabel(model, model.id) + ' · ' + model.id,
+        value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
       })));
       if (draft.model && !capable.some((model) => model.id === draft.model)) {
-        options.push({ value: draft.model, label: '（不在目录）' + draft.model });
+        options.push({ value: draft.model, label: '（不在目录）' + displayModelId(draft.model) });
       }
       if (dom.saModel) {
         dom.saModel.replaceChildren(...options.map((option) => {

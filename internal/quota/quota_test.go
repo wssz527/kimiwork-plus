@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -791,7 +792,11 @@ func TestSourcesAndReadingsSurviveARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if stat.Mode().Perm() != 0o600 {
+	if runtime.GOOS == "windows" {
+		if !stat.Mode().IsRegular() || stat.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("mode %o", stat.Mode().Perm())
+		}
+	} else if stat.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", stat.Mode().Perm())
 	}
 }

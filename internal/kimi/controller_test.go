@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -105,7 +106,11 @@ func TestBridgeHostPublishesALoopbackDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS == "windows" {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("descriptor mode: %v", info.Mode().Perm())
+		}
+	} else if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("descriptor is group/other readable: %v", info.Mode().Perm())
 	}
 

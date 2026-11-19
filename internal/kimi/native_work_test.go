@@ -433,3 +433,65 @@ func TestNativeStableDigestIgnoresKeyOrder(t *testing.T) {
 		t.Fatal("digest ignores a value change")
 	}
 }
+
+func TestCatalogAndNativeConfigPreserveChineseModelNames(t *testing.T) {
+	models := []Model{
+		{
+			ID:            "magpie/kimi-group%2Fglm-5-3-flash",
+			Name:          "GLM-5.3 Flash · 路由",
+			Protocol:      "chat",
+			ContextWindow: 358400,
+			Tools:         true,
+			Reasoning:     true,
+		},
+		{
+			ID:            "magpie/kimi-group%2Fdeepseek-v4-1-flash",
+			Name:          "深度求索 V4.1 · 路由",
+			Protocol:      "chat",
+			ContextWindow: 300000,
+			Tools:         true,
+			Reasoning:     true,
+		},
+	}
+	validated, err := ValidateModels(models)
+	if err != nil {
+		t.Fatalf("ValidateModels: %v", err)
+	}
+	raw, err := json.Marshal(Catalog(validated))
+	if err != nil {
+		t.Fatalf("Marshal catalog: %v", err)
+	}
+	for _, want := range []string{"GLM-5.3 Flash · 路由", "深度求索 V4.1 · 路由"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("catalog JSON lost Chinese model name %q: %s", want, string(raw))
+		}
+	}
+	fixture := newNativeFixture(t)
+	storePath := filepath.Join(fixture.dir, NativeWorkStore)
+	fixture.writeJSON(t, storePath, map[string]any{
+		"v": 1,
+		"accounts": map[string]any{
+			"user-zh": map[string]any{
+				"sources": []any{
+					map[string]any{
+						"id":          "source-zh",
+						"kind":        "kth",
+						"displayName": "Kimi Work+",
+						"registryUrl": "http://127.0.0.1:43117/models/api.json",
+						"models": []any{
+							map[string]any{"alias": "byok-kth-kimi/magpie/kimi-group%2Fglm-5-3-flash", "name": "GLM-5.3 Flash · 路由"},
+							map[string]any{"alias": "byok-kth-kimi/magpie/kimi-group%2Fdeepseek-v4-1-flash", "name": "深度求索 V4.1 · 路由"},
+						},
+					},
+				},
+			},
+		},
+	})
+	doc := fixture.readJSON(t, storePath)
+	encoded, _ := json.Marshal(doc)
+	for _, want := range []string{"GLM-5.3 Flash · 路由", "深度求索 V4.1 · 路由"} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("byok-providers.json readback lost Chinese name %q", want)
+		}
+	}
+}

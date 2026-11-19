@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -560,7 +561,11 @@ func TestServicesIntentNeverAppearsInTheConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS == "windows" {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("intent mode: %v", info.Mode().Perm())
+		}
+	} else if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("intent is group/other readable: %v", info.Mode().Perm())
 	}
 	if strings.Count(readConfig(t, kimiHome), "key-search-123") != 1 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,8 +42,15 @@ func TestAccountVaultRotatesSecretsWithoutPersistingThem(t *testing.T) {
 	if err != nil || !strings.Contains(string(session), "secret-rotated") {
 		t.Fatal("latest rotated credential was not restored", err)
 	}
-	info, _ := os.Stat(vault.path)
-	if info.Mode().Perm() != 0600 {
+	info, err := os.Stat(vault.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o600 != 0o600 {
+			t.Fatal(info.Mode())
+		}
+	} else if info.Mode().Perm() != 0600 {
 		t.Fatal(info.Mode())
 	}
 }

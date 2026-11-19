@@ -1266,3 +1266,11 @@ test('an unmanaged Kimi started from the Dock is not reported as a managed load'
   const managed = { ...base, integration: { ...base.integration, adopted: true, desktop: { state: 'ready', managed: true } } };
   assert.match(syncState(managed).note, /受管进程已加载对应配置代次/);
 });
+
+test('displayModelId decodes percent-encoded route IDs while falling back safely on malformed escapes', () => {
+  const fn = new Function(sourceFunction('displayModelId') + '\nreturn displayModelId;')();
+  assert.equal(fn('magpie/kimi-group%2Fglm-5-3-flash'), 'magpie/kimi-group/glm-5-3-flash');
+  assert.equal(fn('magpie/kimi-group/glm-5-3-flash'), 'magpie/kimi-group/glm-5-3-flash');
+  assert.equal(fn('bad%ZZescape'), 'bad%ZZescape');
+  assert.equal(fn(''), '');
+});
