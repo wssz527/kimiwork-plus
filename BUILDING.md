@@ -1,6 +1,6 @@
 # KimiWork + 构建与开发说明（Go / Wails）
 
-本目录是 KimiWork + 1.0.0 正式实现（Go + Wails v3）的完整源码。产品通过官方配置文件、官方页面接口、受管 CDP 管道与本地回环网关接入官方 Kimi 桌面版 Work，不修改官方程序包体，也不代理官方更新。对外使用说明见 [README.md](README.md)，许可与第三方声明见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
+本目录是 KimiWork +（Go + Wails v3）的完整源码。产品通过官方配置文件、官方页面接口、受管 CDP 管道与本地回环网关接入官方 Kimi 桌面版 Work，不修改官方程序包体，也不代理官方更新。对外使用说明见 [README.md](README.md)，许可与第三方声明见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
 
 ## 工具链与打包
 

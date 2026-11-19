@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -433,6 +434,68 @@ func TestGitHubManifestProviderChannels(t *testing.T) {
 	if st2["autoCheck"] != false || st2["channel"] != "preview" {
 		t.Fatalf("settings did not persist: %#v", st2)
 	}
+}
+
+type githubTestTransport func(*http.Request) (*http.Response, error)
+
+func (f githubTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestGitHubStableManifestWhenAPIRateLimited(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digest, sig := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	manifest, err := json.Marshal(testManifestDoc{
+		SchemaVersion: 1, Version: "1.1.0", Channel: "stable",
+		Artifacts: []testManifestArtifact{{
+			URL: "https://github.com/org/kwp/releases/download/v1.1.0/pkg.zip", Filename: "pkg.zip", Filetype: "zip",
+			Size: int64(len(zipBytes)), Platform: runtime.GOOS, Arch: runtime.GOARCH,
+			DigestAlgo: "sha256", Digest: digest, SignatureAlgo: "ed25519", Signature: sig,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: githubTestTransport(func(req *http.Request) (*http.Response, error) {
+		resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req}
+		var body []byte
+		switch req.URL.Host + req.URL.Path {
+		case "api.github.com/repos/org/kwp/releases/latest":
+			resp.StatusCode = http.StatusForbidden
+			resp.Header.Set("X-RateLimit-Remaining", "0")
+		case "github.com/org/kwp/releases/latest/download/update-manifest.json":
+			body = manifest
+		case "github.com/org/kwp/releases/download/v1.1.0/pkg.zip":
+			body = zipBytes
+		default:
+			resp.StatusCode = http.StatusNotFound
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return resp, nil
+	})}
+	mgr, err := NewManager(Options{
+		StateDir: t.TempDir(), CurrentVersion: "1.0.0", GitHubRepo: "org/kwp",
+		PublicKey: pub, HTTPClient: client, DisableAutoRun: true,
+		ValidateStaged: func(string) error { return nil },
+		IdleCheck:      func() (bool, string) { return false, "busy" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	st, err := mgr.CheckNow(context.Background())
+	if err != nil || st["state"] != "available" {
+		t.Fatalf("stable check: %v, %v", st, err)
+	}
+	if _, err := mgr.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
 }
 
 func TestRollbackMetadataAvailabilityGuardsSelfVersion(t *testing.T) {

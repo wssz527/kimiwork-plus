@@ -114,6 +114,20 @@ func post(t *testing.T, url, path string, payload any, headers map[string]string
 	return reply, string(raw)
 }
 
+func waitForRecentRecord(t *testing.T, gateway *protocol.Gateway) *protocol.Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if recent := gateway.Metrics().Recent; len(recent) > 0 {
+			return recent[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no record was written")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func errorCode(t *testing.T, body string) string {
 	t.Helper()
 	var payload struct {
@@ -634,14 +648,7 @@ func TestClientDisconnectIsRecordedAsCancelled(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for len(gateway.Metrics().Recent) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("no record was written")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	record := gateway.Metrics().Recent[0]
+	record := waitForRecentRecord(t, gateway)
 	if record.Status != 499 || record.LedgerStatus() != "cancelled" {
 		t.Fatalf("status %d ledger %q", record.Status, record.LedgerStatus())
 	}
@@ -661,7 +668,7 @@ func TestFirstByteIncludesTheUpstreamHeadDelay(t *testing.T) {
 	if reply.StatusCode != 200 {
 		t.Fatalf("status %d", reply.StatusCode)
 	}
-	record := gateway.Metrics().Recent[0]
+	record := waitForRecentRecord(t, gateway)
 	if record.FirstByteMS == nil {
 		t.Fatal("first byte was not measured")
 	}
@@ -685,7 +692,7 @@ func TestFirstByteIsMeasuredForABodylessResponse(t *testing.T) {
 	if reply.StatusCode != http.StatusNoContent {
 		t.Fatalf("status %d", reply.StatusCode)
 	}
-	record := gateway.Metrics().Recent[0]
+	record := waitForRecentRecord(t, gateway)
 	if record.FirstByteMS == nil {
 		t.Fatal("a bodyless response left the first byte unmeasured")
 	}

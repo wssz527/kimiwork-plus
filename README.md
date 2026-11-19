@@ -26,9 +26,11 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ## 安装与首次打开
 
+打开 [GitHub 最新发行版](https://github.com/wssz527/kimiwork-plus/releases/latest)，在「Assets」中选择对应系统的安装包。可用同页的 `SHA256SUMS.txt` 核验下载文件。
+
 ### macOS 安装与首次打开
 
-1. 从 Releases 下载 `KimiWorkPlus-1.0.0-macos-universal.dmg` 并打开，将 `Kimi Work+.app` 拖入右侧的 `Applications`（应用程序）文件夹。
+1. 下载文件名以 `-macos-universal.dmg` 结尾的安装包并打开，将 `Kimi Work+.app` 拖入右侧的 `Applications`（应用程序）文件夹。
 2. 由于本应用使用项目固定自签名证书签名、未购买 Apple 开发者公证，通过浏览器下载后首次打开会被 macOS Gatekeeper 拦截（macOS 15+ 已不再提供右键“打开”绕过）。只需按以下任一方式放行一次：
    - **方法 A（系统设置）**：先在「应用程序」中双击一次 `Kimi Work+.app`，出现拦截弹窗后点「完成」关闭；随后打开「系统设置 → 隐私与安全性」，滑到页面下方找到 `KimiWork +`，点击「仍要打开」并输入开机密码确认。
    - **方法 B（终端命令）**：
@@ -41,20 +43,18 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ### Windows 安装与首次打开
 
-1. 从 Releases 下载用户级安装程序 `KimiWorkPlus-1.0.0-windows-amd64-setup.exe`（或便携包 `KimiWorkPlus-1.0.0-windows-amd64.zip`）。
-2. 由于安装包未使用商业 EV 代码签名证书，浏览器下载后首次运行可能触发 Windows Defender SmartScreen 提示「Windows 已保护你的电脑」：
-   - 点击提示文字下方的 **「更多信息」**；
-   - 点击右下角出现的 **「仍要运行」** 完成用户级安装（无需管理员权限）。
-3. 若使用便携 ZIP 或希望提前解除下载锁定标记，可在 PowerShell 中执行一次：
+1. 下载文件名以 `-windows-amd64-setup.exe` 结尾的用户级安装程序。也可下载 `-windows-amd64.zip` 便携包，完整解压后运行 `KimiWorkPlus.exe`。
+2. 浏览器下载后，首次运行可能触发 Windows Defender SmartScreen 提示「Windows 已保护你的电脑」。点击「更多信息」，再点击「仍要运行」。安装无需管理员权限。
+3. 如需清除下载标记，在 PowerShell 中运行以下命令，按提示输入实际下载的 EXE 或 ZIP 完整路径。使用 ZIP 时先清除标记再解压。
    ```powershell
-   Unblock-File -Path "$env:USERPROFILE\Downloads\KimiWorkPlus-1.0.0-windows-amd64-setup.exe"
+   Unblock-File -LiteralPath (Read-Host '输入下载文件的完整路径')
    ```
 
 ![Windows 安装与首次打开指引](docs/windows-first-open.png)
 
 ### 从预览版（Kimi Work+ Preview）升级
 
-正式版（`1.0.0`）首次启动会自动检测旧预览版目录与钥匙串凭据：
+正式版首次启动会自动检测旧预览版目录与钥匙串凭据：
 
 - 自动迁移配置、用量账本、账号索引及系统钥匙串中的服务商 API Key 与账号凭据；
 - 迁移全部确认完成前不删除旧预览版数据，旧后台服务标签会被平稳切换；
@@ -77,14 +77,14 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ### 3. 自动更新与回滚
 
-- 在 **设置 → 版本与更新** 中可查看当前版本、更新渠道、上次检查时间，并开关自动检查更新。
+- 在 **设置 → 版本与更新** 中可查看当前版本、更新渠道、上次检查时间，并开关自动检查更新。应用内检查失败时，可从 [GitHub 最新发行版](https://github.com/wssz527/kimiwork-plus/releases/latest) 下载当前系统的安装包。
 - 发现新版本后需用户主动点击 **下载并更新**；下载完成后程序会校验 SHA-256 与内置 Ed25519 签名，并等待 Kimi Work 与网关空闲后再替换重启。
 - 若新版本启动失败或后台未就绪，启动保护会自动回滚到上一版本；你也可以随时在设置页点击 **回退到上一版本**。
 - 自动更新只管理 KimiWork + 自身，不代理、不拦截、不修改官方 Kimi 的更新流程。
 
 ## 隐私与安全说明
 
-- **凭据隔离存储**：所有模型服务商 API Key、翻译/搜索 Key、以及多账号登录凭据（Cookie、刷新令牌、Kimi Code Key）均仅保存在操作系统原生凭据存储中（macOS Keychain / Windows DPAPI），不以明文写入配置文件或日志。
+- **凭据隔离存储**：KimiWork + 把服务商、翻译和搜索的 API Key 以及保存的账号快照放在 macOS 钥匙串或由 Windows DPAPI 加密保存。切换账号时会将当前登录所需的凭据写回官方 Kimi 的会话与配置，由官方客户端继续管理。
 - **仅本机回环监听**：本机网关与面板接口只绑定 `127.0.0.1` 回环地址，并要求私有会话令牌与来源校验，不向局域网或公网暴露端口。
 - **账本与诊断脱敏**：本地用量账本（`ledger.jsonl`）、版本兼容报告（`official-compat.json`）及诊断信息不包含任何 API Key、Cookie 或令牌原文。
 - **零官方包篡改**：不修改官方 `Kimi.app` / `Kimi.exe` 文件与签名；修改官方配置前保留备份机制，并拒绝静默覆盖来自其他来源的第三方配置。

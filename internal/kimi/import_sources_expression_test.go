@@ -68,7 +68,7 @@ globalThis.clawBridgeAPI={byokSources:{
 	}
 }
 
-func TestSourceImportUpgradesDefaultKTHDisplayName(t *testing.T) {
+func TestSourceImportUpgradesDefaultDisplayNames(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		existing string
@@ -76,6 +76,7 @@ func TestSourceImportUpgradesDefaultKTHDisplayName(t *testing.T) {
 	}{
 		{"empty displayName becomes KimiWork +", "", "KimiWork +"},
 		{"legacy KTH displayName upgrades to KimiWork +", "KTH", "KimiWork +"},
+		{"v1.0.0 default displayName upgrades to KimiWork +", "Kimi Work+", "KimiWork +"},
 		{"custom displayName is preserved", "My Gateway", "My Gateway"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

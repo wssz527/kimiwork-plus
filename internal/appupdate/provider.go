@@ -127,6 +127,11 @@ func (p *githubManifestProvider) resolveManifestAssetURL(ctx context.Context) (s
 	if resp.StatusCode == http.StatusNotFound {
 		return "", nil
 	}
+	rateLimited := resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden && (resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""))
+	if rateLimited && p.channel == "stable" && p.apiBase == DefaultGitHubAPIBase {
+		return "https://github.com/" + p.repo + "/releases/latest/download/update-manifest.json", nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github-releases: HTTP %d", resp.StatusCode)
 	}

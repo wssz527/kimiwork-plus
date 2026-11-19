@@ -622,9 +622,10 @@ if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existin
 }
 const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&
   snapshot.sources.some(source=>source.id!==existing?.id);
+const displayName=existing?.displayName;
 const result=await sources.preview({sourceId:existing?.id,sourceRevision:existing?.revision??null,
   accountRevision:snapshot.accountRevision,
-  draft:{kind:"kth",displayName:(existing?.displayName&&existing.displayName!=="KTH")?existing.displayName:"KimiWork +",registryUrl:catalogURL,
+  draft:{kind:"kth",displayName:(!displayName||displayName==="KTH"||displayName==="Kimi Work+")?"KimiWork +":displayName,registryUrl:catalogURL,
     registryKey:{mode:"set",value:token},reuseRegistryCredential:true}});
 const preview=unwrap(result);
 if(!preview?.canSave||typeof preview.previewId!=="string"||!Array.isArray(preview.candidates)||!preview.candidates.length||
