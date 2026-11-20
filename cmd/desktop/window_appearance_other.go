@@ -4,6 +4,14 @@ package main
 
 import "github.com/wailsapp/wails/v3/pkg/application"
 
+func platformAppIcon() []byte {
+	return nil
+}
+
+func configurePlatformTray(tray *application.SystemTray) {
+	tray.SetLabel("K+")
+}
+
 func platformWindowOptions(opts application.WebviewWindowOptions) application.WebviewWindowOptions {
 	opts.BackgroundColour = themeLightBG
 	return opts

@@ -31,10 +31,12 @@ const (
 )
 
 var (
-	advapi32UpdateDLL  = syscall.NewLazyDLL("advapi32.dll")
-	procRegOpenKeyExW  = advapi32UpdateDLL.NewProc("RegOpenKeyExW")
-	procRegSetValueExW = advapi32UpdateDLL.NewProc("RegSetValueExW")
-	procRegCloseKey    = advapi32UpdateDLL.NewProc("RegCloseKey")
+	advapi32UpdateDLL        = syscall.NewLazyDLL("advapi32.dll")
+	procRegOpenKeyExW        = advapi32UpdateDLL.NewProc("RegOpenKeyExW")
+	procRegSetValueExW       = advapi32UpdateDLL.NewProc("RegSetValueExW")
+	procRegCloseKey          = advapi32UpdateDLL.NewProc("RegCloseKey")
+	shell32UpdateDLL         = syscall.NewLazyDLL("shell32.dll")
+	procUpdateSHChangeNotify = shell32UpdateDLL.NewProc("SHChangeNotify")
 )
 
 func configureDetachedHelper(cmd *exec.Cmd) {
@@ -225,6 +227,13 @@ func launchInstallation(targetDir, stateDir, launchMode string, logf func(string
 }
 
 func postInstallUpdateMetadata(plan ApplyPlan, health daemonHealth) {
+	defer func() {
+		const (
+			shcneAssocChanged = 0x08000000
+			shcnfIDList       = 0x0000
+		)
+		_, _, _ = procUpdateSHChangeNotify.Call(shcneAssocChanged, shcnfIDList, 0, 0)
+	}()
 	if health.Version == "" {
 		return
 	}

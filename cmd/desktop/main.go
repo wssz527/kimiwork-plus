@@ -40,7 +40,7 @@ func main() {
 	if startupErr == nil {
 		encryptionKey = sha256.Sum256([]byte(ep.Key))
 	}
-	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", Icon: platformAppIcon(), SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
 			openWindow()
 		}
@@ -134,7 +134,7 @@ func main() {
 	menu.AddRole(application.EditMenu)
 	app.Menu.Set(menu)
 	tray := app.SystemTray.New()
-	tray.SetLabel("K+")
+	configurePlatformTray(tray)
 	tray.SetTooltip("KimiWork +")
 	diagnostics := &windowDiagnostics{}
 	window.OnWindowEvent(events.Mac.WebViewWebContentProcessDidTerminate, func(*application.WindowEvent) {

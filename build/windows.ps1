@@ -71,6 +71,22 @@ try {
     $s1 = [System.IO.File]::OpenRead($StubExe); try { $s1.CopyTo($outStream) } finally { $s1.Dispose() }
     $s2 = [System.IO.File]::OpenRead($PayloadZip); try { $s2.CopyTo($outStream) } finally { $s2.Dispose() }
   } finally { $outStream.Dispose() }
+
+  if (-not ("KwpIconCheck" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class KwpIconCheck {
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  public static extern uint ExtractIconEx(string lpszFile, int nIconIndex, IntPtr[] phiconLarge, IntPtr[] phiconSmall, uint nIcons);
+}
+"@
+  }
+  foreach ($exe in @($DesktopExe, $DaemonExe, $SetupPath)) {
+    if ([KwpIconCheck]::ExtractIconEx($exe, -1, $null, $null, 0) -lt 1) {
+      throw "Missing embedded icon resource in $exe"
+    }
+  }
 } finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $TmpDir
 }

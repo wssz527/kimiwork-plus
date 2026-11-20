@@ -35,6 +35,8 @@ var (
 	procRegSetValueExW  = advapi32DLL.NewProc("RegSetValueExW")
 	procRegCloseKey     = advapi32DLL.NewProc("RegCloseKey")
 	procRegDeleteTreeW  = advapi32DLL.NewProc("RegDeleteTreeW")
+	shell32DLL          = syscall.NewLazyDLL("shell32.dll")
+	procSHChangeNotify  = shell32DLL.NewProc("SHChangeNotify")
 )
 
 const (
@@ -210,6 +212,7 @@ func runInstall(opt options) error {
 	if err := writeUninstallRegistry(installDir, desktopPath, uninstallPath, version); err != nil {
 		return fmt.Errorf("写入系统卸载信息失败：%w", err)
 	}
+	notifyShellIconChange()
 
 	if stateDir != "" {
 		if mgr, mErr := platform.OpenManager(platform.ManagerOptions{
@@ -288,6 +291,7 @@ func runUninstall(opt options) error {
 		_ = os.Remove(scPath)
 	}
 	deleteUninstallRegistry()
+	notifyShellIconChange()
 
 	for _, name := range []string{"KimiWorkPlus.exe", "gateway-daemon.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"} {
 		p := filepath.Join(installDir, name)
@@ -377,6 +381,14 @@ func createStartMenuShortcut(targetExe, workDir string) error {
 
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func notifyShellIconChange() {
+	const (
+		shcneAssocChanged = 0x08000000
+		shcnfIDList       = 0x0000
+	)
+	_, _, _ = procSHChangeNotify.Call(shcneAssocChanged, shcnfIDList, 0, 0)
 }
 
 func writeUninstallRegistry(installDir, desktopPath, uninstallPath, version string) error {

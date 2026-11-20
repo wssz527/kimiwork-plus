@@ -40,6 +40,14 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
+func platformAppIcon() []byte {
+	return nil
+}
+
+func configurePlatformTray(tray *application.SystemTray) {
+	tray.SetLabel("K+")
+}
+
 func platformWindowOptions(opts application.WebviewWindowOptions) application.WebviewWindowOptions {
 	opts.BackgroundColour = themeLightBG
 	opts.Mac = application.MacWindow{

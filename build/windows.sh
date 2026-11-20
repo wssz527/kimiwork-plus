@@ -57,6 +57,8 @@ PY
 
 cat "$TMP_WIN/wininstaller-stub.exe" "$TMP_WIN/payload.zip" > "$SETUP_PATH"
 
+env -u GOOS -u GOARCH CGO_ENABLED=0 "$GO" run ./cmd/wininstaller --check-icon "$OUTPUT_DIR/KimiWorkPlus.exe"
+env -u GOOS -u GOARCH CGO_ENABLED=0 "$GO" run ./cmd/wininstaller --check-icon "$OUTPUT_DIR/gateway-daemon.exe"
 env -u GOOS -u GOARCH CGO_ENABLED=0 "$GO" run ./cmd/wininstaller --check-payload "$SETUP_PATH"
 
 (
