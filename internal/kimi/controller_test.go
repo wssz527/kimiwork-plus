@@ -487,3 +487,52 @@ func TestBridgeClientTimesOutRatherThanHangs(t *testing.T) {
 		t.Fatalf("call took %v", elapsed)
 	}
 }
+
+func TestRepairIntegrationImportsOwnLoopbackDriftOnce(t *testing.T) {
+	h := newAccountHarness(t)
+	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"
+	h.controller.settings.GatewayToken = "synthetic-not-a-real-key"
+	h.controller.settings.Models = testCatalog()
+	account := sha256Hex("account-old")
+	fixture := &nativeFixture{dir: h.home, state: h.stateDir}
+	seed := func(url string) {
+		fixture.seedV3Store(t, account, url, "cred-1")
+		config := fixture.readJSON(t, filepath.Join(h.home, NativeWorkConfig))
+		config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-old"}
+		fixture.writeJSON(t, filepath.Join(h.home, NativeWorkConfig), config)
+	}
+	seed("http://127.0.0.1:9998/v1")
+	actions := &fakeActions{connected: true, imported: ImportResult{OK: false, Reason: "stop_after_import"}}
+	host, err := StartBridgeHost(h.home, 1, actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+	observed := IntegrationResult{State: IntegrationNeedsImport, Reason: "base_url_changed",
+		Readback: &ImportReadback{Active: true, AccountVerified: true, AccountDigest: account, URL: "http://127.0.0.1:9998/v1"}}
+	h.controller.RepairIntegration(context.Background(), observed)
+	h.controller.bridge = host
+	h.controller.RepairIntegration(context.Background(), observed)
+	h.controller.RepairIntegration(context.Background(), observed)
+	if len(actions.imports) != 1 {
+		t.Fatalf("same drift imported %d times", len(actions.imports))
+	}
+	seed("http://127.0.0.1:9997/v1")
+	observed.Readback.URL = "http://127.0.0.1:9997/v1"
+	h.controller.RepairIntegration(context.Background(), observed)
+	if len(actions.imports) != 2 {
+		t.Fatalf("new drift was not repaired: %d imports", len(actions.imports))
+	}
+	observed.Readback.Active = false
+	seed("http://127.0.0.1:9996/v1")
+	h.controller.RepairIntegration(context.Background(), observed)
+	if len(actions.imports) != 2 {
+		t.Fatal("inactive integration was repaired")
+	}
+	observed.Readback.Active = true
+	h.controller.settings.GatewayToken = "different-token"
+	h.controller.RepairIntegration(context.Background(), observed)
+	if len(actions.imports) != 2 {
+		t.Fatal("drift with a different gateway credential was repaired")
+	}
+}

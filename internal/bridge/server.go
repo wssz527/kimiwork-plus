@@ -74,15 +74,17 @@ func RandomKey() string {
 }
 func (s *Service) Start(port string, setup ...func() error) error {
 	previous, previousErr := ReadEndpoint(s.StateDir)
+	reusePreviousPort := port == "" && previousErr == nil
+	if reusePreviousPort {
+		port = previous.URL[len("http://127.0.0.1:"):]
+	}
 	if port == "" {
-		if previousErr == nil {
-			port = previous.URL[len("http://127.0.0.1:"):]
-		}
-		if port == "" {
-			port = "0"
-		}
+		port = "0"
 	}
 	l, e := net.Listen("tcp4", "127.0.0.1:"+port)
+	if e != nil && reusePreviousPort {
+		l, e = net.Listen("tcp4", "127.0.0.1:0")
+	}
 	if e != nil {
 		return e
 	}

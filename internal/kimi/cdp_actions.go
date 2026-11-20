@@ -617,7 +617,9 @@ if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="st
   return {ok:false,code:"contract-changed"};
 }
 const existing=snapshot.sources.find(source=>source.id==="byok-kth");
-if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL))){
+const ownPreviousLoopback=existing&&existing.kind==="kth"&&
+  /^http:\/\/(?:127\.0\.0\.1|\[::1\]):\d+\/v1(?:\/models\/api\.json)?\/?$/.test(existing.registryUrl||"");
+if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL&&!ownPreviousLoopback))){
   return {ok:false,code:"foreign-url"};
 }
 const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&

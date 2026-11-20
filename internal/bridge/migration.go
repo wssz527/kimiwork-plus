@@ -68,7 +68,7 @@ func isTransientMigrationEntry(rel string) bool {
 	}
 	top := parts[0]
 	switch top {
-	case "daemon.lock", "daemon.log", "desktop-endpoint.json", "service-definition.json",
+	case "daemon.lock", "daemon.log", "service-definition.json",
 		"service-operations", "service", "secrets", migrationStateFile, ".DS_Store":
 		return true
 	}

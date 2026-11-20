@@ -183,6 +183,16 @@ func ParseDiscovered(rows []any, presetID, sourceURL, checkedAt string) []any {
 		if efforts == nil {
 			efforts = Rows(r["reasoningEfforts"])
 		}
+		if efforts == nil {
+			efforts = Rows(r["reasoning_levels"])
+		}
+		if efforts == nil {
+			for _, row := range Rows(r["supported_reasoning_levels"]) {
+				if effort := String(Object(row)["effort"]); effort != "" {
+					efforts = append(efforts, effort)
+				}
+			}
+		}
 		es := uniqueStrings(efforts, 32, 16, effortPattern.MatchString)
 		if len(es) > 0 {
 			m["reasoningEfforts"] = es

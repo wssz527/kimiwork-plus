@@ -295,6 +295,30 @@ func TestAccountCatalogReadsTheAccountStore(t *testing.T) {
 	}
 }
 
+func TestAccountCatalogRecognizesOwnPreviousLoopbackURL(t *testing.T) {
+	fixture := newNativeFixture(t)
+	key := sha256Hex("account-new")
+	fixture.seedV3Store(t, key, "http://127.0.0.1:9998/v1", "cred-1")
+	settings := ControllerSettings{GatewayURL: "http://127.0.0.1:9999/v1", GatewayToken: "synthetic-not-a-real-key", Models: testCatalog()}
+
+	_, reason, needsImport := fixture.integration(t).accountCatalog(settings, key)
+	if reason != "base_url_changed" || !needsImport {
+		t.Fatalf("own previous loopback URL: reason=%s needsImport=%v", reason, needsImport)
+	}
+}
+
+func TestAccountCatalogStillRefusesForeignURL(t *testing.T) {
+	fixture := newNativeFixture(t)
+	key := sha256Hex("account-new")
+	fixture.seedV3Store(t, key, "https://other.example/v1", "cred-1")
+	settings := ControllerSettings{GatewayURL: "http://127.0.0.1:9999/v1", GatewayToken: "synthetic-not-a-real-key", Models: testCatalog()}
+
+	_, reason, needsImport := fixture.integration(t).accountCatalog(settings, key)
+	if reason != "foreign_url" || needsImport {
+		t.Fatalf("foreign URL: reason=%s needsImport=%v", reason, needsImport)
+	}
+}
+
 func (f *nativeFixture) rawConfig(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(f.dir, NativeWorkConfig))

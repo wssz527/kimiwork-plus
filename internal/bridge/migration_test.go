@@ -96,8 +96,12 @@ func TestMigrateStateDirCopiesPersistentAndPreservesLegacy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacy, "usage", "ledger.jsonl"), []byte("{\"ts\":1}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Transient files must not be copied into the formal state dir.
-	for _, transient := range []string{"daemon.lock", "daemon.log", "desktop-endpoint.json", "service-operations/op1.json", "gateway.json.tmp"} {
+	endpoint := `{"url":"http://127.0.0.1:49152","key":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","pid":123,"version":"1.0.0","buildId":"preview"}`
+	if err := os.WriteFile(filepath.Join(legacy, "desktop-endpoint.json"), []byte(endpoint), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Runtime records and temporary files must not be copied into the formal state dir.
+	for _, transient := range []string{"daemon.lock", "daemon.log", "service-operations/op1.json", "gateway.json.tmp"} {
 		if err := os.WriteFile(filepath.Join(legacy, transient), []byte("transient"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +114,7 @@ func TestMigrateStateDirCopiesPersistentAndPreservesLegacy(t *testing.T) {
 	if !state.StateFilesCopied || !state.LegacyDirPreserved || state.SourceDir != legacy {
 		t.Fatalf("unexpected migration state: %+v", state)
 	}
-	for _, want := range []string{"gateway.json", "accounts.json", filepath.Join("usage", "ledger.jsonl")} {
+	for _, want := range []string{"gateway.json", "accounts.json", "desktop-endpoint.json", filepath.Join("usage", "ledger.jsonl")} {
 		if _, err := os.Stat(filepath.Join(target, want)); err != nil {
 			t.Fatalf("expected %s in target dir: %v", want, err)
 		}
@@ -118,7 +122,11 @@ func TestMigrateStateDirCopiesPersistentAndPreservesLegacy(t *testing.T) {
 			t.Fatalf("legacy file %s must be preserved: %v", want, err)
 		}
 	}
-	for _, skip := range []string{"daemon.lock", "daemon.log", "desktop-endpoint.json", "service-operations", "gateway.json.tmp"} {
+	migratedEndpoint, err := ReadEndpoint(target)
+	if err != nil || migratedEndpoint.URL != "http://127.0.0.1:49152" {
+		t.Fatalf("the loopback endpoint must survive migration: %+v, err=%v", migratedEndpoint, err)
+	}
+	for _, skip := range []string{"daemon.lock", "daemon.log", "service-operations", "gateway.json.tmp"} {
 		if _, err := os.Stat(filepath.Join(target, skip)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("transient entry %s must not be copied", skip)
 		}

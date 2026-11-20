@@ -291,6 +291,10 @@ Kimi 3.2.28 stores model sources under `accounts` in `byok-providers.json`.
 For this format, reconciliation checks the selected account's active models and
 provider declarations against the official generated configuration. It records
 verified ownership in the intent and leaves the generated configuration to Kimi.
+When that verified account and current gateway credential still match, a previous
+loopback URL is treated as this product's own stale import. The background loop may
+repair that drift once per account and old/new address pair through the official
+import API; external URLs, inactive intents and account changes remain excluded.
 The account transition checks the published model directory through
 `kimiAgentAPI.byokSources.list()` on the Work shell, with the desktop page's
 `clawBridgeAPI.byokSources.list()` as a fallback. Only entries marked `available`

@@ -230,16 +230,18 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		return nil, "profile_delisted", true
 	}
 	target := normalizeNativeURL(settings.GatewayURL)
+	staleURL := false
 	if account != nil {
 		// A v3 account states a base URL per provider, so every provider this
 		// account holds must already point at the gateway.
 		for _, value := range account.baseURLs {
 			if value != target {
-				return nil, "foreign_url", false
+				staleURL = true
+				break
 			}
 		}
 	} else if normalizeNativeURL(stringField(profile, "baseUrl")) != target {
-		return nil, "foreign_url", false
+		staleURL = true
 	}
 	config, configErr := readJSONFile(filepath.Join(n.kimiDir, NativeWorkConfig), maxConfigBytes)
 	if configErr != "" {
@@ -247,7 +249,22 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 	}
 	credentialRef := stringField(profile, "credentialRef")
 	credential, _ := section(config, "credentials")[credentialRef].(map[string]any)
-	if credentialRef == "" || settings.GatewayToken == "" || stringField(credential, "apiKey") != settings.GatewayToken {
+	credentialMatches := credentialRef != "" && settings.GatewayToken != "" && stringField(credential, "apiKey") == settings.GatewayToken
+	if staleURL {
+		ownLoopback := credentialMatches
+		if account != nil {
+			for _, value := range account.baseURLs {
+				ownLoopback = ownLoopback && isLoopbackGateway(value)
+			}
+		} else {
+			ownLoopback = ownLoopback && isLoopbackGateway(normalizeNativeURL(stringField(profile, "baseUrl")))
+		}
+		if ownLoopback {
+			return nil, "base_url_changed", true
+		}
+		return nil, "foreign_url", false
+	}
+	if !credentialMatches {
 		return nil, "credential_changed", true
 	}
 	catalog, ok := normalizeCatalog(settings.Models)

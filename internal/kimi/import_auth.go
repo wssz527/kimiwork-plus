@@ -13,10 +13,10 @@ import (
 // A page that answers `ok` has only done the first. The second is read back from
 // the files Kimi itself owns, so `Applied` is never set from the page's word.
 //
-// Authorisation is one shot. Opening Kimi's settings overlay is a visible act the
-// user asked for once, so the grant is consumed by the call that carries it and
-// cleared afterwards whether the import succeeded, failed or never reached the
-// page. A caller that wants to try again asks the user again.
+// Authorisation is one shot. The public action consumes its grant whether the
+// import succeeds, fails or never reaches the page. The automatic repair path uses
+// the same grant only after proving the account, current gateway credential and
+// previous loopback URL; it also suppresses repeated attempts for the same drift.
 
 // The reason codes the panel already knows. They stay stable; the coarse state
 // below is what a renderer switches on.
@@ -71,10 +71,24 @@ var ErrImportBusy = errors.New("native_import_busy")
 // so a second call — from a retry, a periodic reconcile or a stale UI event —
 // can never reopen the overlay on its own.
 func (c *Controller) ImportModelsAuthorized(ctx context.Context) (ImportResult, error) {
+	return c.importModelsAuthorized(ctx, "", "")
+}
+
+func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount, repairSignature string) (ImportResult, error) {
+	if repairSignature != "" {
+		c.reapChild()
+	}
 	c.mu.Lock()
-	if c.importGranted {
+	if c.importGranted || (repairSignature != "" && c.repairSignature == repairSignature) {
 		c.mu.Unlock()
 		return ImportResult{State: ImportStateFailed, Reason: ErrImportBusy.Error()}, ErrImportBusy
+	}
+	if repairSignature != "" && c.bridge == nil {
+		c.mu.Unlock()
+		return ImportResult{State: ImportStateWaitingWork, Reason: "native_bridge_unavailable"}, errors.New("native_bridge_unavailable")
+	}
+	if repairSignature != "" {
+		c.repairSignature = repairSignature
 	}
 	c.importGranted = true
 	c.mu.Unlock()
@@ -83,19 +97,52 @@ func (c *Controller) ImportModelsAuthorized(ctx context.Context) (ImportResult, 
 		c.importGranted = false
 		c.mu.Unlock()
 	}()
-	return c.importModels(ctx, true)
+	return c.importModels(ctx, true, expectedAccount)
+}
+
+// RepairIntegration restores a verified existing import after its loopback port
+// changes. It never repairs a foreign URL, an inactive intent or another account.
+func (c *Controller) RepairIntegration(ctx context.Context, observed IntegrationResult) {
+	readback := observed.Readback
+	if observed.State != IntegrationNeedsImport || observed.Reason != "base_url_changed" ||
+		readback == nil || !readback.Active || !readback.AccountVerified || readback.AccountDigest == "" ||
+		!isLoopbackGateway(readback.URL) {
+		return
+	}
+	account, verified := c.profileAccount()
+	if !verified || account != readback.AccountDigest {
+		return
+	}
+	c.mu.Lock()
+	settings := c.settings
+	c.mu.Unlock()
+	native, err := NewNativeIntegration(settings.StateDir, c.kimiHome(), "gateway")
+	if err != nil {
+		return
+	}
+	_, reason, needsImport := native.accountCatalog(settings, account)
+	if !needsImport || reason != "base_url_changed" {
+		return
+	}
+	previous := normalizeNativeURL(native.Readback(account).URL)
+	target := normalizeNativeURL(settings.GatewayURL)
+	if target == "" || previous == target {
+		return
+	}
+	signature := account + "\x00" + previous + "\x00" + target
+	_, _ = c.importModelsAuthorized(ctx, account, signature)
 }
 
 // ImportModels runs the import without opening anything. It keeps the released
 // build's default: the settings page has to be open already, or the answer is
 // waiting-settings for the caller to act on.
 func (c *Controller) ImportModels(ctx context.Context) (ImportResult, error) {
-	return c.importModels(ctx, false)
+	return c.importModels(ctx, false, "")
 }
 
-// importModels is the one import path. `authorized` is true only for the call
-// that carries the user's explicit consent to open the overlay.
-func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportResult, error) {
+// importModels is the one import path. `authorized` permits opening the overlay
+// for an explicit action or a verified own-loopback repair.
+func (c *Controller) importModels(ctx context.Context, authorized bool, expectedAccount string) (ImportResult, error) {
 	// A child that already exited must not be imported into, and its state must
 	// not stay `ready`.
 	c.reapChild()
@@ -119,7 +166,10 @@ func (c *Controller) importModels(ctx context.Context, authorized bool) (ImportR
 	if !verified {
 		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
 	}
-	if settings.AccountScope != "" && settings.AccountScope != account {
+	if expectedAccount == "" {
+		expectedAccount = settings.AccountScope
+	}
+	if expectedAccount != "" && expectedAccount != account {
 		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 

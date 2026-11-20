@@ -64,10 +64,9 @@ type ControllerSettings struct {
 	// compared against the account read from the selected profile; it never
 	// supplies one.
 	AccountScope string
-	// AllowNativeImport is retained for callers that still set it, but it no
-	// longer opens anything: the settings overlay is opened only by
-	// ImportModelsAuthorized, for one call, as an explicit user action. A
-	// permanently-on flag is exactly the behaviour this replaces.
+	// AllowNativeImport is retained for callers that still set it. Overlay opening
+	// is limited to one authorized import call or a verified own-loopback repair.
+	// A permanently-on flag cannot authorize repeated overlays.
 	AllowNativeImport bool
 	// ProfileMode selects the profile the managed child runs against. Empty means
 	// official. Existing-authorized retains login while isolating Work storage.
@@ -155,6 +154,9 @@ type Controller struct {
 	// what makes the authorisation one-shot: a second call waits rather than
 	// opening a second overlay.
 	importGranted bool
+	// repairSignature suppresses repeated automatic imports for the same observed
+	// account and old/new loopback addresses. A new drift or process restart may retry.
+	repairSignature string
 	// loadedGeneration is the intent generation the running child was started
 	// against. A child started before an import cannot have loaded it, so
 	// adoption is decided by this number rather than by "a child is running".

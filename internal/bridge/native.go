@@ -184,10 +184,14 @@ func (n *Native) watch(ctx context.Context) {
 				}
 			}
 			n.controller.Tick(ctx)
+			var integration kimi.IntegrationResult
 			if !modelBlocked {
-				n.controller.ReconcileWithReadback(ctx)
+				integration = n.controller.ReconcileWithReadback(ctx)
 			}
 			n.mu.Unlock()
+			if !modelBlocked {
+				n.controller.RepairIntegration(ctx, integration)
+			}
 			if err := n.syncWorkHome(); err == nil {
 				configObserved = n.reconcile(configObserved)
 			}
@@ -231,6 +235,24 @@ func (n *Native) UpdateIdleCheck(gateway *Runtime) (bool, string) {
 	return true, ""
 }
 
+func refreshKimiInstallation(settings kimi.ControllerSettings, discover func() []kimi.Installation) kimi.ControllerSettings {
+	if settings.Installation.Application != "" {
+		return settings
+	}
+	if installs := discover(); len(installs) > 0 {
+		settings.Installation = installs[0]
+	}
+	return settings
+}
+
+func nativeDesktopState(status kimi.ControllerStatus) core.Document {
+	desktop := core.Document{"state": string(status.State), "reason": status.Reason, "managed": status.ManagedPID > 0}
+	if status.Native != nil && status.Reason == "" {
+		desktop["reason"] = status.Native.Reason
+	}
+	return desktop
+}
+
 func (n *Native) State() core.Document {
 	n.mu.Lock()
 	status := n.controller.Status(context.Background())
@@ -238,7 +260,7 @@ func (n *Native) State() core.Document {
 	for k, v := range n.process {
 		process[k] = v
 	}
-	desktop := core.Document{"state": string(status.State), "reason": status.Reason, "managed": status.ManagedPID > 0}
+	desktop := nativeDesktopState(status)
 	integration := core.Document{"state": "unchecked", "imported": false, "desktop": desktop, "reason": "native_import_not_verified"}
 	if status.Integration != nil {
 		raw, _ := json.Marshal(status.Integration)
@@ -374,10 +396,17 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				n.refreshAccountQuota(deadline)
 			}
 		case "launch-kimi":
-			if profileMode == kimi.ProfileModeExistingAuthorized {
-				err = n.controller.StartWithExistingLogin(deadline)
-			} else {
-				err = n.controller.StartOfficial(deadline)
+			settings := n.controller.Settings()
+			refreshed := refreshKimiInstallation(settings, func() []kimi.Installation { return kimi.Detect(runtime.GOOS, currentEnvMap()) })
+			if refreshed.Installation != settings.Installation {
+				err = n.controller.Configure(refreshed)
+			}
+			if err == nil {
+				if profileMode == kimi.ProfileModeExistingAuthorized {
+					err = n.controller.StartWithExistingLogin(deadline)
+				} else {
+					err = n.controller.StartOfficial(deadline)
+				}
 			}
 			if err == nil {
 				err = n.syncWorkHome()

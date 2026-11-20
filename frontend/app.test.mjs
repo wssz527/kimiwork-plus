@@ -64,6 +64,14 @@ test('a verified account change requests model synchronization instead of anothe
   assert.equal(syncState({ integration: { reason: 'native_import_waiting_login', readback: { accountVerified: true } } }).code, 'login');
 });
 
+test('missing official Kimi has an explicit installation next step', () => {
+  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
+  const verdict = syncState({ integration: { state: 'stopped', reason: 'not_installed', desktop: { state: 'stopped', reason: 'not_installed' } }, models: [] });
+  assert.equal(verdict.code, 'not-installed');
+  assert.match(verdict.note, /安装官方 Kimi/);
+  assert.match(verdict.note, /已有登录和 Work 数据会保留/);
+});
+
 test('overview only promotes restart when it is needed', () => {
   const launch = { dataset: {}, setAttribute() {} };
   const renderLaunch = new Function('dom', `

@@ -70,6 +70,10 @@ function syncState(data) {
   /* Kimi 由系统直接启动时，产品没有它的子进程：这时说「受管进程已加载」是错的，
      即使磁盘上的模型配置确实已经同步过。 */
   const unmanagedRunning = data?.kimiProcess?.running === true && info.desktop?.managed === false;
+  if (has('not_installed', 'application_not_found', 'kimi_application_missing')) {
+    return { code: 'not-installed', tone: 'warn', word: '尚未安装官方 Kimi',
+      note: '请先安装官方 Kimi 并正常打开一次，再回到本面板继续；已有登录和 Work 数据会保留。' };
+  }
   if (info.readback && info.applied === true) {
     return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
       note: unmanagedRunning
@@ -214,6 +218,9 @@ function nativeConnectionText(data) {
     native_setup_failed: '系统解析准备未完成，原配置未被故意覆盖。请查看诊断后重试。',
     existing_login_profile_invalid: '无法安全使用已有的官方登录目录，已暂停启动。',
     existing_login_profile_unavailable: '未找到可用的官方登录目录，请先正常打开官方 Kimi。',
+    not_installed: '尚未安装官方 Kimi。请先安装并正常打开官方 Kimi，再回到本面板继续。',
+    application_not_found: '官方 Kimi 应用入口不可用。请重新安装官方 Kimi 后再试。',
+    base_url_changed: '检测到本机网关地址变化，正在通过官方接口恢复已有接入。',
     profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
     native_bridge_unavailable: '正在等待 Kimi 接入通道，空闲后会自动恢复。',
     native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',

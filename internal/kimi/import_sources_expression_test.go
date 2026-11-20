@@ -16,7 +16,8 @@ func TestSourceImportUsesPreviewRevisionAndAppliesOnce(t *testing.T) {
 		{"same account and revisions", "", "list,preview,save,list,apply", true},
 		{"account changes before save", `preview.scopeToken="another"`, "list,preview,discard", false},
 		{"account changes before apply", `updated.scopeToken="another"`, "list,preview,save,list", false},
-		{"foreign registry", `initial.sources[0].registryUrl="http://127.0.0.1:8100/v1/models/api.json"`, "list", false},
+		{"own previous loopback registry", `initial.sources[0].registryUrl="http://127.0.0.1:8100/v1/models/api.json"`, "list,preview,save,list,apply", true},
+		{"foreign registry", `initial.sources[0].registryUrl="https://other.example/v1/models/api.json"`, "list", false},
 		{"pending changes from another source", `initial.applyState="prepared";initial.sources.push({id:"other",kind:"registry"})`, "list,preview,save", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,7 +33,7 @@ globalThis.clawBridgeAPI={byokSources:{
   list(){calls.push("list");return ok(saved?updated:initial);},
   preview(request){
     calls.push("preview");
-    if(request.accountRevision!=="before"||request.sourceRevision!=="source"||request.sourceId!=="byok-kth"||request.draft.registryUrl!==initial.sources[0].registryUrl||request.draft.registryKey.value!=="fixture")throw new Error("invalid preview request");
+    if(request.accountRevision!=="before"||request.sourceRevision!=="source"||request.sourceId!=="byok-kth"||request.draft.registryUrl!=="http://127.0.0.1:9100/v1/models/api.json"||request.draft.registryKey.value!=="fixture")throw new Error("invalid preview request");
     return ok(preview);
   },
   discard(id){if(id!=="preview")throw new Error("wrong preview");calls.push("discard");},

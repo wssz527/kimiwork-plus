@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,6 +38,40 @@ func TestServiceStopReusesEndpoint(t *testing.T) {
 	}
 	if !Healthy(second.Endpoint) {
 		t.Fatal("new service not healthy")
+	}
+}
+
+func TestServiceStartFallsBackWhenSavedPortIsOccupied(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	store, err := core.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &Service{Store: store, StateDir: dir}
+	if err := first.Start("0"); err != nil {
+		t.Fatal(err)
+	}
+	first.SetStop(func() { go first.Close(context.Background()) })
+	saved := first.Endpoint
+	if err := StopDaemon(dir); err != nil {
+		t.Fatal(err)
+	}
+	occupied, err := net.Listen("tcp4", strings.TrimPrefix(saved.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	second := &Service{Store: store, StateDir: dir}
+	if err := second.Start(""); err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close(context.Background())
+	if second.Endpoint.URL == saved.URL || second.Endpoint.Key != saved.Key {
+		t.Fatalf("fallback endpoint = %+v, saved = %+v", second.Endpoint, saved)
+	}
+	if !Healthy(second.Endpoint) {
+		t.Fatal("fallback service not healthy")
 	}
 }
 
