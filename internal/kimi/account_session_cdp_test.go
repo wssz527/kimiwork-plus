@@ -603,3 +603,42 @@ func TestCDPAccountSurfaceClassificationMatchesTheRealShellURL(t *testing.T) {
 		t.Fatal("a kimi.com page was refused")
 	}
 }
+
+func TestCDPAccountStorageReadMergesBridgeSnapshotAndAwaitsPromise(t *testing.T) {
+	recorder := &cdpRecorder{evaluated: map[string]any{
+		"access_token":  "rotated-access",
+		"refresh_token": "rotated-refresh",
+		"msh_user_id":   "user-1",
+	}}
+	actions := NewCDPActions(newCDPRecorderPipe(t, recorder), t.TempDir(), t.TempDir()).(*cdpActions)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	page := accountPage{targetID: "chat", sessionID: "session-chat", origin: "https://www.kimi.com", credentials: true}
+
+	items, err := actions.accountStorage(ctx, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items["access_token"] != "rotated-access" || items["refresh_token"] != "rotated-refresh" {
+		t.Fatalf("storage: %+v", items)
+	}
+	params := recorder.find("Runtime.evaluate")
+	if params == nil || params["awaitPromise"] != true || params["returnByValue"] != true {
+		t.Fatalf("Runtime.evaluate params: %+v", params)
+	}
+	expression, _ := params["expression"].(string)
+	for _, want := range []string{
+		"(async function()",
+		"globalThis.__KIMI_DESKTOP_BRIDGE",
+		"await api.getLocalStorageSnapshot()",
+		"row.value === null",
+		"delete out[row.key]",
+	} {
+		if !strings.Contains(expression, want) {
+			t.Fatalf("storage read expression missing %q: %s", want, expression)
+		}
+	}
+	if !strings.Contains(accountIdentityExpression, "__KIMI_DESKTOP_BRIDGE.getLocalStorageSnapshot") {
+		t.Fatalf("identity expression missing bridge snapshot fallback: %s", accountIdentityExpression)
+	}
+}

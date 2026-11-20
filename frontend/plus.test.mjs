@@ -836,3 +836,94 @@ test('account switching controls are disabled when compatibility guard blocks ac
     assert.ok(addBtn && addBtn.disabled, 'add button should be disabled');
   } finally { env.restore(); }
 });
+
+test('interrupted restore remains recoverable after removing the failed target account', async () => {
+  const locked = {
+    state: 'ready',
+    currentId: 'acct-a',
+    adding: false,
+    restoreAccountId: 'acct-a',
+    accounts: [{ id: 'acct-a', name: '原账号' }],
+    activation: {
+      state: 'failed',
+      reason: 'account_session_rollback_unverified',
+      failureReason: 'account_session_restart_failed',
+    },
+  };
+  const actions = [];
+  let step = 0;
+  let operation = null;
+  const env = makePlus({
+    data: { accounts: locked },
+    routes: {
+      '/api/actions': body => {
+        actions.push(body.action);
+        step++;
+        if (step === 1) {
+          operation = { id: 'op-1', action: body.action, state: 'failed', reason: 'account_session_rollback_unverified' };
+        } else {
+          operation = { id: 'op-' + step, action: body.action, state: 'done' };
+        }
+        return { operation };
+      },
+      '/api/state': () => ({
+        accounts: step >= 2 ? { ...locked, restoreAccountId: '', activation: { state: 'restored', rolledBack: true } } : locked,
+        operation,
+      }),
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const bar = env.byId('plus-account-bar');
+    const body = env.byId('plus-accounts-body');
+    assert.ok(findButton(bar, '恢复原账号'), 'top bar must offer direct restore button');
+    assert.ok(findButton(body, '恢复原账号'), 'pending card must offer restore button');
+    assert.ok(findButton(body, '正常重启 Kimi 并恢复原账号'), 'pending card must offer restart-and-restore button');
+    assert.ok(findButton(body, '保存当前登录并解除待恢复'), 'pending card must offer capture unlock button');
+
+    await findButton(bar, '恢复原账号').listeners.click[0]();
+    assert.match(textOf(env.byId('plus-accounts-body')), /暂未确认原账号登录状态/);
+    assert.doesNotMatch(textOf(env.byId('plus-accounts-body')), /account_session_rollback_unverified/);
+
+    await findButton(env.byId('plus-accounts-body'), '保存当前登录并解除待恢复').listeners.click[0]();
+    assert.deepEqual(actions, ['account-cancel-add', 'account-capture']);
+    assert.equal(env.getState().accounts.restoreAccountId, '');
+    assert.ok(findButton(env.byId('plus-accounts-body'), '添加账号'));
+  } finally { env.restore(); }
+});
+
+test('failed switch after verified rollback offers plain Kimi restart instead of begin-add', async () => {
+  const book = {
+    state: 'ready',
+    currentId: 'acct-a',
+    adding: false,
+    restoreAccountId: '',
+    accounts: [{ id: 'acct-a', name: 'A' }, { id: 'acct-b', name: 'B' }],
+  };
+  const actions = [];
+  let operation = null;
+  const env = makePlus({
+    data: { accounts: book },
+    routes: {
+      '/api/actions': body => {
+        actions.push(body.action);
+        operation = body.action === 'account-switch'
+          ? { id: 'op-1', action: 'account-switch', state: 'failed', reason: 'account_session_restart_failed' }
+          : { id: 'op-2', action: body.action, state: 'done' };
+        return { operation };
+      },
+      '/api/state': () => ({ accounts: book, operation }),
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    findButton(env.byId('plus-accounts-body'), '切换').listeners.click[0]();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    const body = env.byId('plus-accounts-body');
+    assert.equal(findButton(body, '正常重启 Kimi 并继续添加'), null);
+    const restartBtn = findButton(body, '正常重启 Kimi');
+    assert.ok(restartBtn);
+    await restartBtn.listeners.click[0]();
+    assert.deepEqual(actions, ['account-switch', 'restart-kimi']);
+  } finally { env.restore(); }
+});

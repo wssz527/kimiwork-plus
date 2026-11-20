@@ -583,6 +583,14 @@
     }
     if (data?.compatibility?.guards?.accountSwitchWriteBlocked === true) {
       parts.push(node('span', 'plus-account-bar__hint', '账号切换已暂停'));
+    } else if (book.adding) {
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在处理…' : '等待完成新账号登录'));
+    } else if (book.restoreAccountId) {
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在恢复…' : '待恢复原账号'));
+      parts.push(button('恢复原账号', {
+        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy),
+        onClick: () => runAccount('account-cancel-add'),
+      }));
     } else if (book.accounts.length > 1 || account.busy) {
       parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '必要时重启 Work'));
     }
@@ -679,12 +687,19 @@
     account_session_work_busy: 'Work 有任务正在运行，请先结束任务再添加或切换账号。',
     account_work_busy: 'Work 有任务正在运行，请先结束任务再添加或切换账号。',
     kimi_quit_timeout: 'Kimi 尚未退出，当前登录未被清除。请检查 Kimi 窗口后重试。',
+    kimi_quit_refused: 'Kimi 尚未完成退出，请关闭 Kimi 窗口或稍后重试。',
     unmanaged_kimi_running: '当前 Kimi 尚未接入，请正常重启 Kimi 后继续。',
-    account_login_pending: '有一个添加流程还没结束，请先完成或取消它',
+    account_login_pending: '有一个添加或恢复流程还没结束，请先完成恢复或保存当前登录。',
     account_login_not_pending: '当前没有进行中的添加流程',
     account_login_unchanged: '登录的还是同一个账号，没有新账号可保存',
     account_switch_unavailable: '这台机器上没有可用的账号切换接口',
-    account_switch_restore_failed: '切换失败且恢复原账号也失败了，请按提示手动恢复',
+    account_switch_restore_failed: '切换失败且恢复原账号也失败了，请按下方恢复入口处理。',
+    account_credentials_rejected: '所选账号的登录凭据已失效，已恢复原账号并标记该账号需要重新登录。',
+    account_session_expired: '所选账号的登录凭据已过期，请重新登录后再保存。',
+    account_credentials_unavailable: '无法读取所选账号的已保存凭据，请重新登录后再保存。',
+    account_session_restart_failed: '切换时重启 Kimi 未完成，请点击下方按钮恢复原账号或正常重启后恢复。',
+    account_session_rollback_unverified: '切换未完成，且暂未确认原账号登录状态。请点击「恢复原账号」或「正常重启 Kimi 并恢复原账号」解除锁定。',
+    account_session_identity_mismatch: '切换后读到的账号与所选不一致，已恢复原账号',
     account_identity_mismatch: '切换后读到的账号与所选不一致，已恢复原账号',
     operation_busy: '已有操作在进行，等它结束再试',
     credentials_unavailable: '系统凭据存储不可用',
@@ -745,15 +760,25 @@
     const box = node('div', 'plus-pending plus-pending--warn');
     box.setAttribute('role', 'alert');
     box.append(node('p', null, ACCOUNT_REASON[reason] || message));
-    if (['account-begin-add', 'account-capture', 'account-cancel-add'].includes(action)
-      && ['account_session_unavailable', 'account_session_page_timeout', 'unmanaged_kimi_running'].includes(reason)) {
-      const restoring = Boolean(accountsOf(stateData())?.restoreAccountId);
-      box.append(node('p', 'hint', restoring
-        ? '请先结束正在运行的任务。正常重启后会核对并恢复已保存的原账号。'
-        : '请先结束正在运行的任务。正常重启后会先保存当前登录，再打开另一个账号的登录页。'));
-      box.append(button(restoring ? '正常重启 Kimi 并恢复原账号' : '正常重启 Kimi 并继续添加', {
-        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: restartAndContinueAccount,
-      }));
+    const book = accountsOf(stateData());
+    const restoring = Boolean(book?.restoreAccountId);
+    const pendingCardHandlesRestart = restoring && !book?.adding;
+    if (!pendingCardHandlesRestart
+      && ['account-begin-add', 'account-capture', 'account-cancel-add', 'account-switch'].includes(action)
+      && ['account_session_unavailable', 'account_session_page_timeout', 'unmanaged_kimi_running', 'account_session_restart_failed'].includes(reason)) {
+      if (action === 'account-switch' && !restoring) {
+        box.append(node('p', 'hint', '请先结束正在运行的任务。正常重启并接入 Kimi 后即可重新切换账号。'));
+        box.append(button('正常重启 Kimi', {
+          className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('restart-kimi'),
+        }));
+      } else {
+        box.append(node('p', 'hint', restoring
+          ? '请先结束正在运行的任务。正常重启后会核对并恢复已保存的原账号。'
+          : '请先结束正在运行的任务。正常重启后会先保存当前登录，再打开另一个账号的登录页。'));
+        box.append(button(restoring ? '正常重启 Kimi 并恢复原账号' : '正常重启 Kimi 并继续添加', {
+          className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: restartAndContinueAccount,
+        }));
+      }
     }
     wrap.append(box);
   }
@@ -783,14 +808,26 @@
       pending.append(node('strong', null, book.adding ? '正在等你完成官方登录' : '待恢复原账号'));
       pending.append(node('p', 'hint', book.adding
         ? '请在刚打开的 Kimi Work 窗口完成登录。登录完成后这边会自动识别；也可以手动确认。'
-        : '上次切换未能恢复原账号。请先重试恢复，再开始其他账号操作。'));
+        : '上次切换未能确认恢复原账号。可点击「恢复原账号」重试；若 Kimi 窗口未连接可正常重启后恢复，若已在 Kimi 窗口完成登录也可直接保存当前登录解除锁定。'));
       const line = node('div', 'action-line action-line--start');
-      if (book.adding) line.append(button('已完成登录，保存这个账号', {
-        className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('account-complete-add'),
-      }));
-      line.append(button(book.adding ? '取消并恢复原账号' : '恢复原账号', {
-        className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('account-cancel-add'),
-      }));
+      if (book.adding) {
+        line.append(button('已完成登录，保存这个账号', {
+          className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('account-complete-add'),
+        }));
+        line.append(button('取消并恢复原账号', {
+          className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('account-cancel-add'),
+        }));
+      } else {
+        line.append(button('恢复原账号', {
+          className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy), onClick: () => runAccount('account-cancel-add'),
+        }));
+        line.append(button('正常重启 Kimi 并恢复原账号', {
+          className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy), onClick: restartAndContinueAccount,
+        }));
+        line.append(button('保存当前登录并解除待恢复', {
+          className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy || accountCompatBlocked), onClick: () => runAccount('account-capture'),
+        }));
+      }
       pending.append(line);
       wrap.append(pending);
     }

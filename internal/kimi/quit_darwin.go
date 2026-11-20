@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+func filterQuitRootPIDs(pids []int) []int { return pids }
+
 func requestApplicationQuit(ctx context.Context, pid int) error {
 	script := `ObjC.import("AppKit"); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(` + strconv.Itoa(pid) + `); if (!app || app.isNil()) { "missing" } else { String(app.terminate) }`
 	output, err := exec.CommandContext(ctx, "/usr/bin/osascript", "-l", "JavaScript", "-e", script).Output()

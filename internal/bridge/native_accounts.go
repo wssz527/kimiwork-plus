@@ -1,14 +1,18 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
+
+var accountRotationSyncInterval = 30 * time.Second
 
 func (n *Native) initAccounts(gateway *Runtime) error {
 	manager, err := newAccountManager(newAccountVault(n.service.StateDir, n.service.Keys), accountHooks{
@@ -125,7 +129,7 @@ func (n *Native) observeAccounts(ctx context.Context) {
 	if err != nil || !identity.PageVerified || !identity.SignedIn || identity.Source != "page+config" {
 		return
 	}
-	_, current, err := n.accounts.vault.summaries()
+	rows, current, err := n.accounts.vault.summaries()
 	if err != nil {
 		return
 	}
@@ -133,7 +137,11 @@ func (n *Native) observeAccounts(ctx context.Context) {
 	restore, adding := n.accounts.restoreID, n.accounts.adding
 	n.accounts.mu.Unlock()
 	id := accountID(identity.UserID)
-	if (adding && id == restore) || (restore == "" && current == id) {
+	if adding && id == restore {
+		return
+	}
+	if restore == "" && current == id {
+		n.syncCurrentAccountCredentials(deadline, id, rows)
 		return
 	}
 	if _, _, err := n.accounts.captureBackground(deadline); err != nil {
@@ -145,4 +153,176 @@ func (n *Native) observeAccounts(ctx context.Context) {
 		}
 	}
 	n.refreshAccountQuota(deadline)
+}
+
+func (n *Native) syncCurrentAccountCredentials(ctx context.Context, id string, rows []AccountSummary) {
+	var currentRow *AccountSummary
+	for i := range rows {
+		if rows[i].ID == id {
+			currentRow = &rows[i]
+			break
+		}
+	}
+	if currentRow == nil {
+		return
+	}
+	now := time.Now()
+	if accountRotationSyncInterval > 0 {
+		if !currentRow.NeedsLogin && now.Sub(time.UnixMilli(currentRow.CapturedAt)) < accountRotationSyncInterval {
+			return
+		}
+		n.mu.Lock()
+		throttled := n.accountSyncID == id && !n.accountSyncAt.IsZero() && now.Sub(n.accountSyncAt) < accountRotationSyncInterval
+		if !throttled {
+			n.accountSyncID = id
+			n.accountSyncAt = now
+		}
+		n.mu.Unlock()
+		if throttled {
+			return
+		}
+	}
+	storedRaw, err := n.accounts.vault.sessionBackground(id)
+	if err != nil {
+		return
+	}
+	captureFn := n.captureAccount
+	if n.accounts.hooks.Capture != nil {
+		captureFn = n.accounts.hooks.Capture
+	}
+	fresh, err := captureFn(ctx)
+	if err != nil || accountID(fresh.UserID) != id {
+		return
+	}
+	merged, changed := mergeRotatedAccountSession(storedRaw, fresh.Session)
+	if len(merged) == 0 || (!changed && !currentRow.NeedsLogin) {
+		return
+	}
+	fresh.Session = merged
+	_, _ = n.accounts.vault.captureBackground(fresh)
+}
+
+func mergeRotatedAccountSession(storedRaw, freshRaw json.RawMessage) (json.RawMessage, bool) {
+	var fresh kimi.AccountSession
+	if json.Unmarshal(freshRaw, &fresh) != nil || fresh.UserID == "" {
+		return nil, false
+	}
+	var stored kimi.AccountSession
+	if json.Unmarshal(storedRaw, &stored) != nil || stored.UserID != fresh.UserID {
+		return freshRaw, true
+	}
+	storedAT := accountSessionToken(stored, "access_token", "accessToken")
+	storedRT := accountSessionToken(stored, "refresh_token", "refreshToken")
+	freshAT := accountSessionToken(fresh, "access_token", "accessToken")
+	freshRT := accountSessionToken(fresh, "refresh_token", "refreshToken")
+	if (storedAT != "" && freshAT == "") || (storedRT != "" && freshRT == "") {
+		return nil, false
+	}
+	if len(fresh.Cookies) == 0 && len(stored.Cookies) > 0 {
+		fresh.Cookies = stored.Cookies
+	}
+	if len(fresh.LocalStorage) == 0 && len(stored.LocalStorage) > 0 {
+		fresh.LocalStorage = mergeStoredAccountTokens(stored.LocalStorage, fresh.KimiWeb)
+	}
+	if len(fresh.CodeKey) == 0 && len(stored.CodeKey) > 0 {
+		fresh.CodeKey = stored.CodeKey
+	}
+	if strings.TrimSpace(fresh.Name) == "" && strings.TrimSpace(stored.Name) != "" {
+		fresh.Name = stored.Name
+	}
+	if strings.TrimSpace(fresh.AvatarURL) == "" && strings.TrimSpace(stored.AvatarURL) != "" {
+		fresh.AvatarURL = stored.AvatarURL
+	}
+	changed := strings.TrimSpace(stored.Name) != strings.TrimSpace(fresh.Name) ||
+		strings.TrimSpace(stored.AvatarURL) != strings.TrimSpace(fresh.AvatarURL) ||
+		!bytes.Equal(bytes.TrimSpace(stored.CodeKey), bytes.TrimSpace(fresh.CodeKey)) ||
+		!accountStorageEntriesEqual(stored.LocalStorage, fresh.LocalStorage) ||
+		!accountCookiesEqual(stored.Cookies, fresh.Cookies)
+	if !changed {
+		for _, key := range []string{"accessToken", "refreshToken"} {
+			if accountCredentialString(stored.KimiWeb, key) != accountCredentialString(fresh.KimiWeb, key) ||
+				accountCredentialString(stored.KimiCode, key) != accountCredentialString(fresh.KimiCode, key) {
+				changed = true
+				break
+			}
+		}
+	}
+	encoded, err := json.Marshal(fresh)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, changed
+}
+
+func mergeStoredAccountTokens(stored []kimi.AccountStorageEntry, web map[string]any) []kimi.AccountStorageEntry {
+	out := make([]kimi.AccountStorageEntry, len(stored))
+	copy(out, stored)
+	for key, field := range map[string]string{"access_token": "accessToken", "refresh_token": "refreshToken"} {
+		value := accountCredentialString(web, field)
+		if value == "" {
+			continue
+		}
+		updated := false
+		for i := range out {
+			if out[i].Key == key {
+				out[i].Value = value
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			out = append(out, kimi.AccountStorageEntry{Key: key, Value: value})
+		}
+	}
+	return out
+}
+
+func accountSessionToken(session kimi.AccountSession, storageKey, webField string) string {
+	for _, entry := range session.LocalStorage {
+		if entry.Key == storageKey && entry.Value != "" {
+			return entry.Value
+		}
+	}
+	return accountCredentialString(session.KimiWeb, webField)
+}
+
+func accountCredentialString(entry map[string]any, key string) string {
+	if entry == nil {
+		return ""
+	}
+	value, _ := entry[key].(string)
+	return value
+}
+
+func accountStorageEntriesEqual(a, b []kimi.AccountStorageEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	items := make(map[string]string, len(a))
+	for _, entry := range a {
+		items[entry.Key] = entry.Value
+	}
+	for _, entry := range b {
+		if value, ok := items[entry.Key]; !ok || value != entry.Value {
+			return false
+		}
+	}
+	return true
+}
+
+func accountCookiesEqual(a, b []kimi.AccountCookie) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	items := make(map[string]string, len(a))
+	for _, cookie := range a {
+		items[strings.ToLower(cookie.Name)+"|"+strings.ToLower(cookie.Domain)+"|"+cookie.Path] = cookie.Value
+	}
+	for _, cookie := range b {
+		key := strings.ToLower(cookie.Name) + "|" + strings.ToLower(cookie.Domain) + "|" + cookie.Path
+		if value, ok := items[key]; !ok || value != cookie.Value {
+			return false
+		}
+	}
+	return true
 }

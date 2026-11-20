@@ -1069,6 +1069,55 @@ func TestActivateAccountReportsNeedsLoginWhenTheTargetCannotSignIn(t *testing.T)
 	}
 }
 
+func TestActivateAccountAbortsBeforeConfigAndRestartWhenTargetSignsOut(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("user-1", "access-1", "refresh-1"))
+	harness.page.put("kimi-1", "access_token", "access-1")
+	harness.page.put("kimi-1", "refresh_token", "refresh-1")
+	harness.page.put("kimi-1", "msh_user_id", "user-1")
+
+	harness.page.onActivation = func() {
+		if harness.page.storage["kimi-1"]["msh_user_id"] == "user-2" {
+			delete(harness.page.storage["kimi-1"], "access_token")
+			delete(harness.page.storage["kimi-1"], "refresh_token")
+			delete(harness.page.storage["kimi-1"], "msh_user_id")
+			delete(harness.page.user, "work")
+			delete(harness.page.user, "kimi-1")
+		}
+	}
+	restarts := 0
+	restartAccountProcess = func(*Controller, context.Context) error {
+		restarts++
+		return nil
+	}
+
+	target := AccountSession{
+		SchemaVersion: AccountSessionSchema,
+		UserID:        "user-2",
+		LocalStorage: []AccountStorageEntry{
+			{Key: "access_token", Value: "expired-access-2"},
+			{Key: "refresh_token", Value: "expired-refresh-2"},
+			{Key: "msh_user_id", Value: "user-2"},
+		},
+	}
+	result, err := harness.controller.ActivateAccount(context.Background(), target)
+	if err != nil {
+		t.Fatalf("expected hot rollback without hard error, got: %v", err)
+	}
+	if result.State != AccountStateRestored || !result.RolledBack || !result.RequiresLogin || result.Verified {
+		t.Fatalf("unexpected activation result: %+v", result)
+	}
+	if restarts != 0 {
+		t.Fatalf("restarts = %d, want 0 when target immediately signed out", restarts)
+	}
+	if !accountConfigMatches(harness.home, "user-1") {
+		t.Fatal("config.json did not remain on user-1")
+	}
+	if harness.page.user["work"] != "user-1" {
+		t.Fatalf("work shell user = %q, want user-1", harness.page.user["work"])
+	}
+}
+
 func TestBeginAccountLoginClearsBothCredentialEntriesAndRestores(t *testing.T) {
 	harness := newAccountHarness(t)
 	harness.writeConfig(t, accountConfigFixture("user-1", "access-1", "refresh-1"))

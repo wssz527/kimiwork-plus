@@ -44,6 +44,8 @@ type Native struct {
 	accounts            *accountManager
 	accountActivation   core.Document
 	accountReason       string
+	accountSyncID       string
+	accountSyncAt       time.Time
 	swarm               kimi.SwarmSnapshot
 }
 

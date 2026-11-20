@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	wmClose           = 0x0010
 	wmQueryEndSession = 0x0011
 	wmEndSession      = 0x0016
 	smtoAbortIfHung   = 0x0002
@@ -49,8 +50,11 @@ func requestApplicationQuit(ctx context.Context, pid int) error {
 
 	hwnds := collectProcessWindows(uint32(pid))
 	if len(hwnds) == 0 {
-		if processExited(handle) {
+		if waitProcessExited(ctx, handle, 1500*time.Millisecond) {
 			return nil
+		}
+		if ctx.Err() != nil {
+			return errors.New("kimi_quit_timeout")
 		}
 		return errors.New("kimi_quit_refused")
 	}
@@ -65,12 +69,93 @@ func requestApplicationQuit(ctx context.Context, pid int) error {
 		var result uintptr
 		_, _, _ = procSendMessageTimeoutW.Call(hwnd, wmQueryEndSession, 0, 0, smtoAbortIfHung, timeoutMs, uintptr(unsafe.Pointer(&result)))
 		_, _, _ = procSendMessageTimeoutW.Call(hwnd, wmEndSession, 1, 0, smtoAbortIfHung, timeoutMs, uintptr(unsafe.Pointer(&result)))
+		if waitProcessExited(ctx, handle, 300*time.Millisecond) {
+			return nil
+		}
+		if ctx.Err() == nil {
+			_, _, _ = procSendMessageTimeoutW.Call(hwnd, wmClose, 0, 0, smtoAbortIfHung, quitMessageTimeoutMs(ctx), uintptr(unsafe.Pointer(&result)))
+		}
 	}
 	return nil
 }
 
+func filterQuitRootPIDs(pids []int) []int {
+	if len(pids) == 0 {
+		return pids
+	}
+	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return pids
+	}
+	defer syscall.CloseHandle(snapshot)
+
+	parents := make(map[uint32]uint32, 64)
+	names := make(map[uint32]string, 64)
+	var entry syscall.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	for err = syscall.Process32First(snapshot, &entry); err == nil; err = syscall.Process32Next(snapshot, &entry) {
+		parents[entry.ProcessID] = entry.ParentProcessID
+		names[entry.ProcessID] = strings.ToLower(syscall.UTF16ToString(entry.ExeFile[:]))
+	}
+	return selectWindowsQuitRoots(pids, parents, names)
+}
+
+func selectWindowsQuitRoots(pids []int, parents map[uint32]uint32, names map[uint32]string) []int {
+	inTargets := make(map[uint32]bool, len(pids))
+	for _, pid := range pids {
+		if pid > 0 {
+			inTargets[uint32(pid)] = true
+		}
+	}
+	roots := make([]int, 0, len(pids))
+	skippedExternalParent := false
+	for _, pid := range pids {
+		if pid <= 0 {
+			roots = append(roots, pid)
+			continue
+		}
+		parentPID, ok := parents[uint32(pid)]
+		if ok && parentPID != 0 && parentPID != uint32(pid) {
+			if inTargets[parentPID] {
+				continue
+			}
+			if parentName := names[parentPID]; parentName == "kimi.exe" || parentName == "kimi-desktop.exe" {
+				skippedExternalParent = true
+				continue
+			}
+		}
+		roots = append(roots, pid)
+	}
+	if len(roots) == 0 && !skippedExternalParent {
+		return pids
+	}
+	return roots
+}
+
 func processExited(handle syscall.Handle) bool {
 	state, err := syscall.WaitForSingleObject(handle, 0)
+	return err == nil && state == uint32(syscall.WAIT_OBJECT_0)
+}
+
+func waitProcessExited(ctx context.Context, handle syscall.Handle, maxWait time.Duration) bool {
+	if processExited(handle) {
+		return true
+	}
+	wait := maxWait
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return processExited(handle)
+		}
+		if remaining < wait {
+			wait = remaining
+		}
+	}
+	ms := wait.Milliseconds()
+	if ms <= 0 {
+		return processExited(handle)
+	}
+	state, err := syscall.WaitForSingleObject(handle, uint32(ms))
 	return err == nil && state == uint32(syscall.WAIT_OBJECT_0)
 }
 

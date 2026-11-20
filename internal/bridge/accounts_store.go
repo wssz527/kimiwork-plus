@@ -208,6 +208,14 @@ func (v *accountVault) stage(snapshot accountCapture, background bool) (AccountS
 }
 
 func (v *accountVault) session(id string) (json.RawMessage, error) {
+	return v.readSession(id, false)
+}
+
+func (v *accountVault) sessionBackground(id string) (json.RawMessage, error) {
+	return v.readSession(id, true)
+}
+
+func (v *accountVault) readSession(id string, background bool) (json.RawMessage, error) {
 	v.mu.Lock()
 	index, err := v.read()
 	v.mu.Unlock()
@@ -221,7 +229,12 @@ func (v *accountVault) session(id string) (json.RawMessage, error) {
 		if v.keys == nil {
 			return nil, errors.New("credentials_unavailable")
 		}
-		value, err := getVisibleCredential(v.keys, row.CredentialRef)
+		var value string
+		if background {
+			value, err = v.keys.Get(row.CredentialRef)
+		} else {
+			value, err = getVisibleCredential(v.keys, row.CredentialRef)
+		}
 		if err != nil {
 			return nil, errors.New("account_credentials_unavailable")
 		}

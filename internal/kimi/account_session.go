@@ -380,7 +380,8 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 		defer runtime.accountStopRuntimeWatch(context.WithoutCancel(ctx), runtimePage)
 	}
 	pageErr := c.applyPageState(ctx, surface, session)
-	pagePrepared := pageErr == nil || pageErr.Error() == AccountErrIdentityMismatch
+	targetSignedOut := pageErr != nil && accountPageSignedOut(ctx, surface)
+	pagePrepared := !targetSignedOut && (pageErr == nil || pageErr.Error() == AccountErrIdentityMismatch)
 	if pagePrepared && watching && waitAccountRuntime(ctx, surface, runtime, runtimePage, home, session.UserID, true) {
 		result.State, result.Hot, result.Verified = AccountStateHot, true, true
 		return result, nil
@@ -395,7 +396,7 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 			restarted = restartAccountProcess(c, ctx) == nil
 		}
 	}
-	pageReadable := false
+	pageReadable := targetSignedOut
 	if restarted {
 		pageOK := false
 		if fresh, err := c.accountSurface(); err == nil {
@@ -412,12 +413,17 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 			result.State, result.Restarted, result.Verified = AccountStateRestarted, true, true
 			return result, nil
 		}
+		if pageReadable && accountPageSignedOut(ctx, surface) {
+			targetSignedOut = true
+		}
 	}
 
 	reason := AccountErrIdentityMismatch
 	switch {
 	case ctx.Err() != nil:
 		reason = AccountErrPageTimeout
+	case targetSignedOut:
+		reason = AccountErrIdentityMismatch
 	case !pagePrepared:
 		reason = pageErr.Error()
 	case !configOK:
@@ -428,13 +434,21 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 
 	rolledBack := false
 	if originalErr == nil {
-		rolledBack = c.applyPageState(ctx, surface, original) == nil &&
-			c.applyAccountConfig(home, original) == nil &&
+		if fresh, err := c.accountSurface(); err == nil {
+			surface = fresh
+			pageReadable = true
+		}
+		pageRestored := c.applyPageState(ctx, surface, original) == nil
+		configRestored := c.applyAccountConfig(home, original) == nil &&
 			accountConfigMatches(home, original.UserID)
+		rolledBack = pageRestored && configRestored
 	}
 	result.RolledBack = rolledBack
 	result.Reason = reason
 	result.FailureReason = reason
+	if targetSignedOut {
+		result.RequiresLogin = true
+	}
 
 	if rolledBack {
 		// The previous account is back and verified: nothing changed for the user.

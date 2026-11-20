@@ -145,6 +145,11 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 		if _, _, err := a.capture(ctx); err != nil {
 			return nil, err
 		}
+		if restore != "" && !adding {
+			if err := a.setRestore("", false); err != nil {
+				return nil, err
+			}
+		}
 	case "account-begin-add":
 		if restore != "" {
 			return nil, errors.New("account_login_pending")

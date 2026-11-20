@@ -338,10 +338,12 @@ func preserveRestartProbes(t *testing.T) {
 	t.Helper()
 	list := listOfficialProcesses
 	identity := officialProcessIdentity
+	selectTargets := selectQuitTargets
 	quit := requestOfficialQuit
 	t.Cleanup(func() {
 		listOfficialProcesses = list
 		officialProcessIdentity = identity
+		selectQuitTargets = selectTargets
 		requestOfficialQuit = quit
 	})
 }
@@ -411,5 +413,38 @@ func TestStopOfficialProcessesReportsTimeout(t *testing.T) {
 	requestOfficialQuit = func(context.Context, int) error { cancel(); return nil }
 	if err := stopOfficialProcesses(ctx, "/Kimi"); err == nil || err.Error() != "kimi_quit_timeout" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestStopOfficialProcessesQuitsSelectedRootsAndWaitsForChildren(t *testing.T) {
+	preserveRestartProbes(t)
+	alive := map[int]int{100: 1, 201: 2, 202: 2}
+	var quitPIDs []int
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) {
+		return []int{100, 201, 202}, true, ""
+	}
+	selectQuitTargets = func(pids []int) []int { return []int{100} }
+	officialProcessIdentity = func(_ context.Context, pid int) ProcessIdentity {
+		remaining := alive[pid]
+		if remaining <= 0 {
+			return ProcessIdentity{Kind: IdentityNotFound}
+		}
+		return ProcessIdentity{Kind: IdentityDarwinLStart, Value: "start-" + string(rune('0'+pid%10))}
+	}
+	requestOfficialQuit = func(_ context.Context, pid int) error {
+		quitPIDs = append(quitPIDs, pid)
+		if pid != 100 {
+			return errors.New("kimi_quit_refused")
+		}
+		alive[100] = 0
+		alive[201] = 0
+		alive[202] = 0
+		return nil
+	}
+	if err := stopOfficialProcesses(context.Background(), `C:\Program Files\Kimi\Kimi.exe`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(quitPIDs) != 1 || quitPIDs[0] != 100 {
+		t.Fatalf("quit requested for %v, want [100]", quitPIDs)
 	}
 }

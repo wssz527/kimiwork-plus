@@ -443,6 +443,16 @@ try {
           return out;
         }
       }
+    } else if (globalThis.__KIMI_DESKTOP_BRIDGE && typeof globalThis.__KIMI_DESKTOP_BRIDGE.getLocalStorageSnapshot === "function") {
+      try {
+        var snap = await globalThis.__KIMI_DESKTOP_BRIDGE.getLocalStorageSnapshot();
+        if (Array.isArray(snap)) {
+          var accessRow = snap.find(function(row){ return row && row.key === "access_token"; });
+          var refreshRow = snap.find(function(row){ return row && row.key === "refresh_token"; });
+          if (accessRow) out.accessToken = Boolean(accessRow.value);
+          if (refreshRow) out.refresh = Boolean(refreshRow.value);
+        }
+      } catch (error) {}
     }
     if (answered || !out.accessToken) return out;
     return collectToken().then(function(){ return out; });
@@ -451,23 +461,39 @@ try {
 return out;
 })()`
 
-const accountStorageReadExpression = `(function(){
+const accountStorageReadExpression = `(async function(){
 try {
-  var store = globalThis.localStorage;
-  if (!store) return {};
   var exact = {
     "access_token": 1, "refresh_token": 1, "anonymous_access_token": 1,
     "anonymous_refresh_token": 1, "msh_user_id": 1, "msh_user_subscription_data": 1
   };
+  function isAllowed(key){
+    return Boolean(key) && (Object.prototype.hasOwnProperty.call(exact, key) ||
+      key.indexOf("msh_user_") === 0 || /_token$/.test(key));
+  }
   var out = {};
-  for (var index = 0; index < store.length; index++) {
-    var key = store.key(index);
-    if (!key) continue;
-    var allowed = Object.prototype.hasOwnProperty.call(exact, key) ||
-      key.indexOf("msh_user_") === 0 || /_token$/.test(key);
-    if (!allowed) continue;
-    var value = store.getItem(key);
-    if (typeof value === "string") out[key] = value;
+  var store = globalThis.localStorage;
+  if (store) {
+    for (var index = 0; index < store.length; index++) {
+      var key = store.key(index);
+      if (!isAllowed(key)) continue;
+      var value = store.getItem(key);
+      if (typeof value === "string" && value) out[key] = value;
+    }
+  }
+  var api = globalThis.__KIMI_DESKTOP_BRIDGE;
+  if (api && typeof api.getLocalStorageSnapshot === "function") {
+    try {
+      var snapshot = await api.getLocalStorageSnapshot();
+      if (Array.isArray(snapshot)) {
+        for (var i = 0; i < snapshot.length; i++) {
+          var row = snapshot[i];
+          if (!row || typeof row !== "object" || !isAllowed(row.key)) continue;
+          if (typeof row.value === "string" && row.value) out[row.key] = row.value;
+          else if (row.value === null) delete out[row.key];
+        }
+      }
+    } catch (error) {}
   }
   return out;
 } catch (error) { return {}; }

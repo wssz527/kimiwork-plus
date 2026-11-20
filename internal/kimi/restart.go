@@ -9,6 +9,7 @@ import (
 var (
 	listOfficialProcesses   = processPIDs
 	officialProcessIdentity = ProcessStartIdentity
+	selectQuitTargets       = filterQuitRootPIDs
 	requestOfficialQuit     = requestApplicationQuit
 )
 
@@ -48,8 +49,12 @@ func stopOfficialProcesses(ctx context.Context, application string) error {
 		}
 		targets = append(targets, target{pid: pid, identity: identity})
 	}
+	quitPIDs := make([]int, 0, len(targets))
 	for _, item := range targets {
-		if err := requestOfficialQuit(ctx, item.pid); err != nil {
+		quitPIDs = append(quitPIDs, item.pid)
+	}
+	for _, pid := range selectQuitTargets(quitPIDs) {
+		if err := requestOfficialQuit(ctx, pid); err != nil {
 			return err
 		}
 	}

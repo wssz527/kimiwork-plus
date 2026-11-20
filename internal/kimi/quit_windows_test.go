@@ -51,3 +51,30 @@ func TestWindowsRequestApplicationQuitHandlesMissingAndCanceled(t *testing.T) {
 		t.Fatalf("missing pid quit = %v, want nil", err)
 	}
 }
+
+func TestSelectWindowsQuitRootsFiltersChildrenAndSingleOrphanedHelper(t *testing.T) {
+	parents := map[uint32]uint32{
+		1724:  800,
+		19504: 1724,
+		20628: 1724,
+		21708: 19504,
+	}
+	names := map[uint32]string{
+		800:   "explorer.exe",
+		1724:  "kimi.exe",
+		19504: "kimi.exe",
+		20628: "kimi.exe",
+		21708: "kimi.exe",
+	}
+	roots := selectWindowsQuitRoots([]int{1724, 19504, 20628, 21708}, parents, names)
+	if len(roots) != 1 || roots[0] != 1724 {
+		t.Fatalf("roots = %v, want [1724]", roots)
+	}
+
+	// When the main process already exited from the target slice, a single helper
+	// child whose recorded parent was Kimi.exe must not receive its own quit call.
+	singleHelper := selectWindowsQuitRoots([]int{19504}, parents, names)
+	if len(singleHelper) != 0 {
+		t.Fatalf("single helper roots = %v, want []", singleHelper)
+	}
+}
