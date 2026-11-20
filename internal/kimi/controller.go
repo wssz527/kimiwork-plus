@@ -155,7 +155,8 @@ type Controller struct {
 	// opening a second overlay.
 	importGranted bool
 	// repairSignature suppresses repeated automatic imports for the same observed
-	// account and old/new loopback addresses. A new drift or process restart may retry.
+	// account and old/new loopback addresses once Work is ready. A new drift or
+	// process restart may retry; a Work/settings readiness wait may retry too.
 	repairSignature string
 	// loadedGeneration is the intent generation the running child was started
 	// against. A child started before an import cannot have loaded it, so

@@ -488,6 +488,38 @@ func TestBridgeClientTimesOutRatherThanHangs(t *testing.T) {
 	}
 }
 
+func TestRepairIntegrationRetriesWhenWorkIsNotReady(t *testing.T) {
+	h := newAccountHarness(t)
+	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"
+	h.controller.settings.GatewayToken = strings64()
+	h.controller.settings.Models = testCatalog()
+	account := sha256Hex("account-old")
+	fixture := &nativeFixture{dir: h.home, state: h.stateDir}
+	fixture.seedV3Store(t, account, "http://127.0.0.1:9998/v1", "cred-1")
+	config := fixture.readJSON(t, filepath.Join(h.home, NativeWorkConfig))
+	h.controller.settings.GatewayToken = config["credentials"].(map[string]any)["cred-1"].(map[string]any)["apiKey"].(string)
+	config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-old"}
+	fixture.writeJSON(t, filepath.Join(h.home, NativeWorkConfig), config)
+	actions := &fakeActions{connected: true, imported: ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}}
+	host, err := StartBridgeHost(h.home, 1, actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+	h.controller.bridge = host
+	observed := IntegrationResult{State: IntegrationNeedsImport, Reason: "base_url_changed",
+		Readback: &ImportReadback{Active: true, AccountVerified: true, AccountDigest: account, URL: "http://127.0.0.1:9998/v1"}}
+	h.controller.RepairIntegration(context.Background(), observed)
+	actions.mu.Lock()
+	actions.imported = ImportResult{OK: false, Reason: "stop_after_import"}
+	actions.mu.Unlock()
+	h.controller.RepairIntegration(context.Background(), observed)
+	h.controller.RepairIntegration(context.Background(), observed)
+	if len(actions.imports) != 2 {
+		t.Fatalf("ready Work retry imported %d times, want 2", len(actions.imports))
+	}
+}
+
 func TestRepairIntegrationImportsOwnLoopbackDriftOnce(t *testing.T) {
 	h := newAccountHarness(t)
 	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"

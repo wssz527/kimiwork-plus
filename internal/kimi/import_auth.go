@@ -97,7 +97,15 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 		c.importGranted = false
 		c.mu.Unlock()
 	}()
-	return c.importModels(ctx, true, expectedAccount)
+	result, err := c.importModels(ctx, true, expectedAccount)
+	if repairSignature != "" && (result.State == ImportStateWaitingWork || result.State == ImportStateWaitingSettings) {
+		c.mu.Lock()
+		if c.repairSignature == repairSignature {
+			c.repairSignature = ""
+		}
+		c.mu.Unlock()
+	}
+	return result, err
 }
 
 // RepairIntegration restores a verified existing import after its loopback port
