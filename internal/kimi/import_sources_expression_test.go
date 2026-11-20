@@ -107,3 +107,117 @@ globalThis.clawBridgeAPI={byokSources:{
 		})
 	}
 }
+
+func TestSourceImportResolvesRouteSelectionRequired(t *testing.T) {
+	t.Run("retries preview with deduplicated selectedCandidates", func(t *testing.T) {
+		vm := goja.New()
+		if _, err := vm.RunString(`
+const calls=[];
+let selectedSeen=null;
+const initial={scopeToken:"account",accountRevision:"before",sources:[{id:"byok-kth",kind:"kth",revision:"source",registryUrl:"http://127.0.0.1:49958/v1/models/api.json"}]};
+const updated={...initial,accountRevision:"after"};
+let saved=false;
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok(saved?updated:initial);},
+  preview(request){
+    calls.push("preview");
+    if(!request.draft.selectedCandidates){
+      return ok({
+        scopeToken:"account",accountRevision:"before",sourceRevision:"source",sourceId:"byok-kth",
+        previewId:"preview-1",canSave:true,
+        source:{notices:[{groupId:"kimi",modelId:"m1",protocol:"kimi",reason:"route-selection-required"}]},
+        candidates:[
+          {id:"cand-1",modelId:"m1"},
+          {id:"cand-2",modelId:"m2"},
+          {id:"cand-2-alt",modelId:"m2"},
+        ],
+      });
+    }
+    selectedSeen=request.draft.selectedCandidates.join(",");
+    return ok({
+      scopeToken:"account",accountRevision:"before",sourceRevision:"source",sourceId:"byok-kth",
+      previewId:"preview-2",canSave:true,
+      source:{notices:[]},
+      candidates:[{id:"cand-1",modelId:"m1"},{id:"cand-2",modelId:"m2"},{id:"cand-2-alt",modelId:"m2"}],
+    });
+  },
+  discard(id){calls.push("discard:"+id);},
+  save(request){
+    calls.push("save:"+request.previewId);
+    saved=true;
+    return ok({sourceId:"byok-kth",accountRevision:"after",status:"pending"});
+  },
+  applyPending(revision){
+    calls.push("apply:"+revision);
+    return ok({status:"applied"});
+  },
+}};
+`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1") + `).then(result=>globalThis.importResult=result);`); err != nil {
+			t.Fatal(err)
+		}
+		result := vm.Get("importResult").ToObject(vm)
+		if !result.Get("ok").ToBoolean() || result.Get("models").ToInteger() != 2 {
+			t.Fatalf("unexpected import result: ok=%v models=%v code=%v", result.Get("ok"), result.Get("models"), result.Get("code"))
+		}
+		if got := vm.Get("selectedSeen").String(); got != "cand-1,cand-2" {
+			t.Fatalf("selectedCandidates = %q, want cand-1,cand-2", got)
+		}
+		calls, err := vm.RunString(`calls.join(",")`)
+		if err != nil || calls.String() != "list,preview,discard:preview-1,preview,save:preview-2,list,apply:after" {
+			t.Fatalf("calls = %v, err=%v", calls, err)
+		}
+	})
+
+	t.Run("fails closed without saving when route selection cannot be resolved", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			candidate string
+			wantCalls string
+		}{
+			{"missing candidate ids", `[{modelId:"m1"}]`, "list,preview,discard:preview-1"},
+			{"still blocked after selection", `[{id:"cand-1",modelId:"m1"}]`, "list,preview,discard:preview-1,preview,discard:preview-2"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				vm := goja.New()
+				if _, err := vm.RunString(`
+const calls=[];
+let count=0;
+const initial={scopeToken:"account",accountRevision:"before",sources:[{id:"byok-kth",kind:"kth",revision:"source",registryUrl:"http://127.0.0.1:49958/v1/models/api.json"}]};
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok(initial);},
+  preview(){
+    calls.push("preview");
+    count++;
+    return ok({
+      scopeToken:"account",accountRevision:"before",sourceRevision:"source",sourceId:"byok-kth",
+      previewId:"preview-"+count,canSave:true,
+      source:{notices:[{groupId:"kimi",modelId:"m1",protocol:"kimi",reason:"route-selection-required"}]},
+      candidates:` + tc.candidate + `,
+    });
+  },
+  discard(id){calls.push("discard:"+id);},
+  save(){calls.push("save");return ok({sourceId:"byok-kth",accountRevision:"after",status:"applied"});},
+}};
+`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1") + `).then(result=>globalThis.importResult=result);`); err != nil {
+					t.Fatal(err)
+				}
+				result := vm.Get("importResult").ToObject(vm)
+				if result.Get("ok").ToBoolean() || result.Get("code").String() != "route-selection-required" {
+					t.Fatalf("unexpected result: ok=%v code=%v", result.Get("ok"), result.Get("code"))
+				}
+				calls, err := vm.RunString(`calls.join(",")`)
+				if err != nil || calls.String() != tc.wantCalls {
+					t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+				}
+			})
+		}
+	})
+}

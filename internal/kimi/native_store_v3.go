@@ -97,28 +97,46 @@ func kthSourceOf(account map[string]any) (map[string]any, bool) {
 func accountProfile(key string, account, source map[string]any) (profileCandidate, bool) {
 	active, _ := account["active"].(map[string]any)
 	pending, _ := account["pending"].(map[string]any)
+	sourceID := stringField(source, "id")
 	facts := providerFacts(active, pending)
-	rows := usableAccountRows(account, active)
+	rows := usableAccountRows(account, active, sourceID)
 	if len(facts) == 0 || len(rows) == 0 {
+		return profileCandidate{}, false
+	}
+	usedFacts := map[string]nativeProviderV3{}
+	normalized := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		providerID := stringField(row, "providerId")
+		fact, ok := facts[providerID]
+		if !ok {
+			continue
+		}
+		usedFacts[providerID] = fact
+		normalized = append(normalized, normalizeAccountRow(row, fact))
+	}
+	if len(usedFacts) == 0 || len(normalized) == 0 {
 		return profileCandidate{}, false
 	}
 	// A pending model that is not applied yet is the transaction in flight the
 	// legacy shape reports through `profile.pending`.
 	applied := map[string]bool{}
-	for _, row := range rows {
+	for _, row := range normalized {
 		applied[stringField(row, "alias")] = true
 	}
 	blocking := false
 	for _, row := range modelRows(pending) {
+		if rowSource := stringField(row, "sourceId"); sourceID != "" && rowSource != "" && rowSource != sourceID {
+			continue
+		}
 		if alias := stringField(row, "alias"); alias != "" && !applied[alias] {
 			blocking = true
 			break
 		}
 	}
-	account3 := &nativeAccountV3{providers: facts, pending: blocking,
+	account3 := &nativeAccountV3{providers: usedFacts, pending: blocking,
 		quarantined: source["quarantined"] == true}
 	seen := map[string]bool{}
-	for _, fact := range facts {
+	for _, fact := range usedFacts {
 		if fact.credential != "" && !seen[fact.credential] {
 			seen[fact.credential] = true
 			account3.refs = append(account3.refs, fact.credential)
@@ -130,7 +148,7 @@ func accountProfile(key string, account, source map[string]any) (profileCandidat
 	sort.Strings(account3.refs)
 	sort.Strings(account3.baseURLs)
 
-	profile := map[string]any{"kind": "kth", "id": "byok-kth", "models": rowsAsAny(rows)}
+	profile := map[string]any{"kind": "kth", "id": "byok-kth", "models": rowsAsAny(normalized)}
 	if value := singleValue(account3.baseURLs); value != "" {
 		profile["baseUrl"] = value
 	}
@@ -146,14 +164,38 @@ func accountProfile(key string, account, source map[string]any) (profileCandidat
 	return profileCandidate{key: key, profile: profile, v3: account3}, true
 }
 
+func normalizeAccountRow(row map[string]any, fact nativeProviderV3) map[string]any {
+	family := ""
+	switch fact.protocol {
+	case "kimi":
+		family = "kimi"
+	case "openai_responses":
+		family = "responses"
+	default:
+		return row
+	}
+	if stringField(row, "family") == family {
+		return row
+	}
+	copyRow := make(map[string]any, len(row)+1)
+	for k, v := range row {
+		copyRow[k] = v
+	}
+	copyRow["family"] = family
+	return copyRow
+}
+
 // usableAccountRows is the applied model set minus the aliases the account
 // blocks. `active` alone is not enough: a blocked alias keeps its status even
 // while an entry for it is still present.
-func usableAccountRows(account, active map[string]any) []map[string]any {
+func usableAccountRows(account, active map[string]any, sourceID string) []map[string]any {
 	blocked, _ := account["blockedAliases"].(map[string]any)
 	seen := map[string]bool{}
 	var out []map[string]any
 	for _, row := range modelRows(active) {
+		if rowSource := stringField(row, "sourceId"); sourceID != "" && rowSource != "" && rowSource != sourceID {
+			continue
+		}
 		alias := stringField(row, "alias")
 		if alias == "" || seen[alias] {
 			continue

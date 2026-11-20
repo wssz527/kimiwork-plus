@@ -370,3 +370,119 @@ func TestNativeAccountStoreWithoutModelsIsNotAProfile(t *testing.T) {
 		t.Fatalf("empty account: %s/%s", result.State, result.Reason)
 	}
 }
+
+func TestNativeAccountStoreIgnoresUnreferencedProvidersAfterPortMigration(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const oldURL = "http://127.0.0.1:49958/v1"
+	const newURL = "http://127.0.0.1:63501/v1"
+	key := sha256Hex("account-migrated")
+	models := []Model{
+		{ID: "magpie/deepseek-v4-1-flash", Protocol: "chat", ContextWindow: 300000, MaxOutputTokens: 131072, Tools: true},
+		{ID: "magpie/gpt-5", Protocol: "responses", ContextWindow: 262144},
+	}
+
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), map[string]any{
+		"v": 3,
+		"accounts": map[string]any{
+			key: map[string]any{
+				"revision": "account-rev-2",
+				"sources": []any{
+					map[string]any{
+						"id": "byok-kth", "kind": "kth", "displayName": "KimiWork +",
+						"revision": "source-rev-2", "discoveryMode": "managed-registry",
+						"registryUrl": newURL + "/models/api.json",
+					},
+					map[string]any{
+						"id": "byok-source-other", "kind": "custom", "displayName": "User Custom",
+						"revision": "source-other-1", "discoveryMode": "manual-models",
+					},
+				},
+				"active": map[string]any{
+					"rev": "active-rev-2",
+					"providers": []any{
+						map[string]any{"id": "byok-kth-kimi", "sourceId": "byok-kth", "protocol": "kimi",
+							"baseUrl": oldURL, "credentialRef": "cred-old", "credentialVersion": "cv-old",
+							"publicHeaders": map[string]any{}},
+						map[string]any{"id": "byok-kth-resp", "sourceId": "byok-kth", "protocol": "openai_responses",
+							"baseUrl": oldURL, "credentialRef": "cred-old", "credentialVersion": "cv-old",
+							"publicHeaders": map[string]any{}},
+						map[string]any{"id": "byok-new-kimi", "sourceId": "byok-kth", "protocol": "kimi",
+							"baseUrl": newURL, "credentialRef": "cred-new-kimi", "credentialVersion": "cv-new-1",
+							"publicHeaders": map[string]any{}},
+						map[string]any{"id": "byok-new-resp", "sourceId": "byok-kth", "protocol": "openai_responses",
+							"baseUrl": newURL, "credentialRef": "cred-new-resp", "credentialVersion": "cv-new-2",
+							"publicHeaders": map[string]any{}},
+						map[string]any{"id": "byok-other-prov", "sourceId": "byok-source-other", "protocol": "openai",
+							"baseUrl": "https://api.openai.com/v1", "credentialRef": "cred-other", "credentialVersion": "cv-o",
+							"publicHeaders": map[string]any{}},
+					},
+					"models": []any{
+						map[string]any{"alias": "byok-new-kimi/magpie/deepseek-v4-1-flash", "providerId": "byok-new-kimi",
+							"model": "magpie/deepseek-v4-1-flash", "family": "other", "maxContextSize": 300000,
+							"maxOutputSize": 131072, "capabilities": []any{"tool_use"}, "sourceId": "byok-kth"},
+						map[string]any{"alias": "byok-new-resp/magpie/gpt-5", "providerId": "byok-new-resp",
+							"model": "magpie/gpt-5", "family": "gpt", "maxContextSize": 262144,
+							"sourceId": "byok-kth"},
+						map[string]any{"alias": "byok-other-prov/gpt-4o", "providerId": "byok-other-prov",
+							"model": "gpt-4o", "family": "gpt", "maxContextSize": 128000,
+							"sourceId": "byok-source-other"},
+					},
+				},
+				"blockedAliases": map[string]any{
+					"byok-kth-kimi/magpie/deepseek-v4-1-flash": "delisted",
+					"byok-kth-resp/magpie/gpt-5":               "delisted",
+				},
+			},
+		},
+	})
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), map[string]any{
+		"model": map[string]any{
+			"providers": map[string]any{
+				"byok-kth-kimi":   map[string]any{"type": "kimi", "baseUrl": oldURL, "credential": "cred-old"},
+				"byok-kth-resp":   map[string]any{"type": "openai_responses", "baseUrl": oldURL, "credential": "cred-old"},
+				"byok-new-kimi":   map[string]any{"type": "kimi", "baseUrl": newURL, "credential": "cred-new-kimi"},
+				"byok-new-resp":   map[string]any{"type": "openai_responses", "baseUrl": newURL, "credential": "cred-new-resp"},
+				"byok-other-prov": map[string]any{"type": "openai", "baseUrl": "https://api.openai.com/v1", "credential": "cred-other"},
+			},
+			"models": map[string]any{
+				"byok-new-kimi/magpie/deepseek-v4-1-flash": map[string]any{"provider": "byok-new-kimi",
+					"model": "magpie/deepseek-v4-1-flash", "maxContextSize": float64(300000),
+					"maxOutputSize": float64(131072), "capabilities": []any{"tool_use"}},
+				"byok-new-resp/magpie/gpt-5": map[string]any{"provider": "byok-new-resp",
+					"model": "magpie/gpt-5", "maxContextSize": float64(262144)},
+				"byok-other-prov/gpt-4o": map[string]any{"provider": "byok-other-prov",
+					"model": "gpt-4o", "maxContextSize": float64(128000)},
+			},
+		},
+		"credentials": map[string]any{
+			"cred-old":      map[string]any{"apiKey": "stale-token"},
+			"cred-new-kimi": map[string]any{"apiKey": "current-token"},
+			"cred-new-resp": map[string]any{"apiKey": "current-token"},
+			"cred-other":    map[string]any{"apiKey": "other-token"},
+		},
+	})
+
+	result := fixture.integration(t).Reconcile(ReconcileOptions{
+		Enabled: true, URL: newURL, Models: models, AccountScope: key,
+	})
+	if result.State != IntegrationReady || result.Reason != "" {
+		t.Fatalf("migrated v3 reconcile: %s/%s", result.State, result.Reason)
+	}
+	readback := fixture.integration(t).Readback(key)
+	if !readback.Holds(newURL) || readback.Models != 2 || readback.URL != newURL {
+		t.Fatalf("migrated v3 readback: %+v", readback)
+	}
+	settings := ControllerSettings{GatewayURL: newURL, GatewayToken: "current-token", Models: models}
+	entries, reason, needsImport := fixture.integration(t).accountCatalog(settings, key)
+	if reason != "" || needsImport || len(entries) != 2 {
+		t.Fatalf("migrated v3 accountCatalog: reason=%q needsImport=%v entries=%d", reason, needsImport, len(entries))
+	}
+
+	// A stale key on any active provider must still require a refresh.
+	cfg := fixture.readJSON(t, filepath.Join(fixture.dir, NativeWorkConfig))
+	cfg["credentials"].(map[string]any)["cred-new-resp"].(map[string]any)["apiKey"] = "stale-second-token"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), cfg)
+	if _, reason, needsImport := fixture.integration(t).accountCatalog(settings, key); reason != "credential_changed" || !needsImport {
+		t.Fatalf("mismatched second active credential: reason=%q needsImport=%v", reason, needsImport)
+	}
+}

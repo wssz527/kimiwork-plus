@@ -625,16 +625,45 @@ if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existin
 const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&
   snapshot.sources.some(source=>source.id!==existing?.id);
 const displayName=existing?.displayName;
-const result=await sources.preview({sourceId:existing?.id,sourceRevision:existing?.revision??null,
-  accountRevision:snapshot.accountRevision,
-  draft:{kind:"kth",displayName:(!displayName||displayName==="KTH"||displayName==="Kimi Work+")?"KimiWork +":displayName,registryUrl:catalogURL,
-    registryKey:{mode:"set",value:token},reuseRegistryCredential:true}});
-const preview=unwrap(result);
-if(!preview?.canSave||typeof preview.previewId!=="string"||!Array.isArray(preview.candidates)||!preview.candidates.length||
-  preview.scopeToken!==snapshot.scopeToken||preview.accountRevision!==snapshot.accountRevision||
-  preview.sourceRevision!==(existing?.revision??null)){
-  if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
-  return {ok:false,code:result?.reasonCode||"catalog-unconfirmed"};
+const draft={kind:"kth",displayName:(!displayName||displayName==="KTH"||displayName==="Kimi Work+")?"KimiWork +":displayName,registryUrl:catalogURL,
+  registryKey:{mode:"set",value:token},reuseRegistryCredential:true};
+const runPreview=async body=>{
+  const result=await sources.preview({sourceId:existing?.id,sourceRevision:existing?.revision??null,
+    accountRevision:snapshot.accountRevision,draft:body});
+  const preview=unwrap(result);
+  if(!preview?.canSave||typeof preview.previewId!=="string"||!Array.isArray(preview.candidates)||!preview.candidates.length||
+    preview.scopeToken!==snapshot.scopeToken||preview.accountRevision!==snapshot.accountRevision||
+    preview.sourceRevision!==(existing?.revision??null)){
+    if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
+    return {ok:false,code:result?.reasonCode||"catalog-unconfirmed"};
+  }
+  return {ok:true,preview};
+};
+let step=await runPreview(draft);
+if(!step.ok)return step;
+let preview=step.preview;
+const hasRouteSelection=p=>Array.isArray(p?.source?.notices)&&p.source.notices.some(n=>n?.reason==="route-selection-required");
+let modelCount=preview.candidates.length;
+if(hasRouteSelection(preview)){
+  const selected=[];
+  const seen=new Set();
+  for(const candidate of preview.candidates){
+    if(typeof candidate?.id!=="string"||!candidate.id)continue;
+    const key=typeof candidate.modelId==="string"&&candidate.modelId?candidate.modelId:candidate.id;
+    if(seen.has(key))continue;
+    seen.add(key);
+    selected.push(candidate.id);
+  }
+  if(typeof sources.discard==="function")await sources.discard(preview.previewId);
+  if(!selected.length)return {ok:false,code:"route-selection-required"};
+  step=await runPreview({...draft,selectedCandidates:selected});
+  if(!step.ok)return step;
+  preview=step.preview;
+  if(hasRouteSelection(preview)){
+    if(typeof sources.discard==="function")await sources.discard(preview.previewId);
+    return {ok:false,code:"route-selection-required"};
+  }
+  modelCount=selected.length;
 }
 const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
 if(!saved?.ok||saved.value?.sourceId!==preview.sourceId)return {ok:false,code:saved?.reasonCode||"import-failed"};
@@ -649,7 +678,7 @@ if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function
   status=applied.value?.status;
 }
 if(!["applied","pending","deferred"].includes(status))return {ok:false,code:"import-failed"};
-return {ok:true,requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:preview.candidates.length};
+return {ok:true,requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount};
 })(` + quoteJS(token) + `,` + quoteJS(baseURL) + `)`
 }
 

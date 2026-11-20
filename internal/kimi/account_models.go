@@ -248,8 +248,20 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		return nil, "config_" + configErr, false
 	}
 	credentialRef := stringField(profile, "credentialRef")
-	credential, _ := section(config, "credentials")[credentialRef].(map[string]any)
-	credentialMatches := credentialRef != "" && settings.GatewayToken != "" && stringField(credential, "apiKey") == settings.GatewayToken
+	credentialMatches := false
+	if account != nil && len(account.refs) > 0 {
+		credentialMatches = settings.GatewayToken != ""
+		for _, ref := range account.refs {
+			credential, _ := section(config, "credentials")[ref].(map[string]any)
+			if stringField(credential, "apiKey") != settings.GatewayToken {
+				credentialMatches = false
+				break
+			}
+		}
+	} else {
+		credential, _ := section(config, "credentials")[credentialRef].(map[string]any)
+		credentialMatches = credentialRef != "" && settings.GatewayToken != "" && stringField(credential, "apiKey") == settings.GatewayToken
+	}
 	if staleURL {
 		ownLoopback := credentialMatches
 		if account != nil {
