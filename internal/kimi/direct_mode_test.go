@@ -118,8 +118,10 @@ globalThis.seenDraft=null;
 globalThis.seenPreviewRequest=null;
 globalThis.clawBridgeAPI={byokSources:{
   list(){calls.push("list");
-    custom.models=[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}];
-    if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId:"byok-prov-existing",model:"catalog-extra",alias:"byok-prov-existing/catalog-extra",status:"pending",provenance:"catalog"});
+    const providerId=globalThis.rejectClearedEffort&&saved?"byok-prov-fresh":"byok-prov-existing";
+    custom.providers[0].id=providerId;
+    custom.models=[{providerId,model:"model-a",alias:providerId+"/model-a",status:"available"}];
+    if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId,model:"catalog-extra",alias:providerId+"/catalog-extra",status:"pending",provenance:"catalog"});
     return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:globalThis.snapshotApplyState||"applied",
     sources:(gatewayConnected?[kth]:[]).concat([custom])});},
   preview(request){
@@ -181,6 +183,37 @@ func TestDirectImportRetriesClearedEffortWithFreshProvider(t *testing.T) {
 	calls, err := vm.RunString(`calls.join(",")`)
 	if err != nil || calls.String() != "list,preview,preview,save,list,apply:r2" {
 		t.Fatalf("want one save after validated retry, got %v (%v)", calls, err)
+	}
+}
+
+func TestDirectImportCleansGatewayAfterOfficiallyAssignedProviderID(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, calls string
+	}{
+		{"immediate", "", "list,preview,preview,save,list,apply:r2,list,disconnect:byok-kth"},
+		{"catalog refresh", `globalThis.pendingCatalog=true;`, "list,preview,preview,save,list,apply:r2,list,disconnect:byok-kth,list,preview,save,list,disconnect:byok-kth"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validDirectImportRequest()
+			request.DisconnectGateway = true
+			request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+			vm := runDirectExpression(t, request, `globalThis.rejectClearedEffort=true;`+tc.extra)
+			result := vm.Get("directResult").ToObject(vm)
+			if !result.Get("ok").ToBoolean() || !result.Get("gatewayDisconnected").ToBoolean() || result.Get("routeCleanupPending").ToBoolean() {
+				t.Fatalf("unexpected direct result: %v", result.Export())
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.calls {
+				t.Fatalf("unexpected calls: %v (%v)", calls, err)
+			}
+			if tc.extra != "" {
+				draft := vm.Get("seenDraft").ToObject(vm)
+				provider := draft.Get("providers").ToObject(vm).Get("0").ToObject(vm)
+				if provider.Get("id").String() != "byok-prov-fresh" {
+					t.Fatalf("re-save must reuse official provider ID: %v", provider.Export())
+				}
+			}
+		})
 	}
 }
 

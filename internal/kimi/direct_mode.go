@@ -378,14 +378,29 @@ if(imported.previewFailed&&imported.error==="byok-invalid-source"&&existing){
 if(imported.error)return {ok:false,code:imported.error};
 let saved=imported.saved,status=imported.status;
 if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};
+const officialProviderIDs=source=>{
+  if(!Array.isArray(source?.providers))return null;
+  const ids=new Map();
+  const used=new Set();
+  for(const wanted of draft.providers){
+    const matches=source.providers.filter(provider=>provider.protocol===wanted.protocol&&
+      normalizeURL(provider.baseUrl,provider.protocol)===normalizeURL(wanted.baseUrl,wanted.protocol));
+    const id=matches[0]?.id;
+    if(matches.length!==1||typeof id!=="string"||!id||used.has(id))return null;
+    ids.set(wanted.id,id);
+    used.add(id);
+  }
+  return ids;
+};
 const cleanupGateway=async()=>{
   if(!request.disconnectGateway||status!=="applied")return hadManagedGateway;
   const current=await readSnapshot();
   if(!current||current.scopeToken!==snapshot.scopeToken)return {error:"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
   const directModels=Array.isArray(direct?.models)?direct.models:[];
-  const ready=!direct?.quarantined&&draftModels.every(wanted=>directModels.some(model=>
-    model.providerId===wanted.providerId&&model.model===wanted.model&&model.status==="available"));
+  const ids=officialProviderIDs(direct);
+  const ready=!direct?.quarantined&&ids&&draftModels.every(wanted=>directModels.some(model=>
+    model.providerId===ids.get(wanted.providerId)&&model.model===wanted.model&&model.status==="available"));
   if(!ready)return hadManagedGateway;
   const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
   if(!ownGateway(gateway))return false;
@@ -406,7 +421,10 @@ if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
     (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
   // A background catalog refresh can race the first disconnect. Re-save only
   // our exact manual draft when no other source has a pending confirmation.
-  if(direct&&directPending&&!foreignPending){
+  const ids=officialProviderIDs(direct);
+  if(ids&&directPending&&!foreignPending){
+    for(const provider of draft.providers)provider.id=ids.get(provider.id);
+    for(const model of draft.models)model.providerId=ids.get(model.providerId);
     imported=await importDraft(current,direct,true);
     if(imported.error)return {ok:false,code:imported.error};
     saved=imported.saved;status=imported.status;
