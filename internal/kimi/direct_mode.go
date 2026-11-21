@@ -332,43 +332,70 @@ const draftModels=wantedModels.map(model=>{
 });
 const draft={kind:"custom",displayName:request.displayName||"` + DirectDisplayName + `",providers:draftProviders,models:draftModels};
 const otherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&snapshot.sources.some(source=>source.id!==existing?.id);
-const previewRequest={accountRevision:snapshot.accountRevision,sourceRevision:existing?.revision??null,draft:draft};
-if(existing)previewRequest.sourceId=existing.id;
-const previewReply=await sources.preview(previewRequest);
-const preview=unwrap(previewReply);
-if(!preview||preview.canSave!==true||typeof preview.previewId!=="string"||preview.scopeToken!==snapshot.scopeToken||preview.accountRevision!==snapshot.accountRevision){
-  if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
-  return {ok:false,code:previewReply?.reasonCode||"direct-preview-refused"};
-}
-const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
-if(!saved?.ok||typeof saved.value?.sourceId!=="string"||!saved.value.sourceId)return {ok:false,code:saved?.reasonCode||"import-failed"};
-let status=saved.value.status;
-if(status==="pending"&&!otherPending&&typeof sources.applyPending==="function"){
-  const current=await readSnapshot();
-  if(!current||current.scopeToken!==snapshot.scopeToken||current.accountRevision!==saved.value.accountRevision)return {ok:false,code:"byok-source-stale"};
-  const applied=await sources.applyPending(saved.value.accountRevision);
-  if(!applied?.ok)return {ok:false,code:applied?.reasonCode||"import-failed"};
-  status=applied.value?.status;
-}
+const importDraft=async(current,existing,allowApply)=>{
+  const previewRequest={accountRevision:current.accountRevision,sourceRevision:existing?.revision??null,draft:draft};
+  if(existing)previewRequest.sourceId=existing.id;
+  const previewReply=await sources.preview(previewRequest);
+  const preview=unwrap(previewReply);
+  if(!preview||preview.canSave!==true||typeof preview.previewId!=="string"||preview.scopeToken!==current.scopeToken||preview.accountRevision!==current.accountRevision){
+    if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
+    return {error:previewReply?.reasonCode||"direct-preview-refused"};
+  }
+  const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
+  if(!saved?.ok||typeof saved.value?.sourceId!=="string"||!saved.value.sourceId)return {error:saved?.reasonCode||"import-failed"};
+  let status=saved.value.status;
+  if(status==="pending"&&allowApply&&typeof sources.applyPending==="function"){
+    const latest=await readSnapshot();
+    if(!latest||latest.scopeToken!==current.scopeToken||latest.accountRevision!==saved.value.accountRevision)return {error:"byok-source-stale"};
+    const applied=await sources.applyPending(saved.value.accountRevision);
+    if(!applied?.ok)return {error:applied?.reasonCode||"import-failed"};
+    status=applied.value?.status;
+  }
+  return {saved:saved.value,status:status};
+};
+let imported=await importDraft(snapshot,existing,!otherPending);
+if(imported.error)return {ok:false,code:imported.error};
+let saved=imported.saved,status=imported.status;
 if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};
-let routeCleanupPending=false;
-if(request.disconnectGateway&&status==="applied"){
+const cleanupGateway=async()=>{
+  if(!request.disconnectGateway||status!=="applied")return hadManagedGateway;
   const current=await readSnapshot();
-  if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:"contract-changed"};
-  const direct=current.sources.find(source=>source.id===saved.value.sourceId&&source.kind==="custom");
+  if(!current||current.scopeToken!==snapshot.scopeToken)return {error:"contract-changed"};
+  const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
   const directModels=Array.isArray(direct?.models)?direct.models:[];
   const ready=!direct?.quarantined&&draftModels.every(wanted=>directModels.some(model=>
     model.providerId===wanted.providerId&&model.model===wanted.model&&model.status==="available"));
-  if(ready){
-    const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
-    if(ownGateway(gateway)){
-        const reply=await sources.disconnect({sourceId:gateway.id,accountRevision:current.accountRevision,sourceRevision:gateway.revision??null});
-        if(reply?.ok)gatewayDisconnected=true;
-        else routeCleanupPending=true;
-    }
-  }else routeCleanupPending=hadManagedGateway;
-}else if(request.disconnectGateway)routeCleanupPending=hadManagedGateway;
-return {ok:true,sourceId:saved.value.sourceId,gatewayDisconnected:gatewayDisconnected,routeCleanupPending:routeCleanupPending,
+  if(!ready)return hadManagedGateway;
+  const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
+  if(!ownGateway(gateway))return false;
+  const reply=await sources.disconnect({sourceId:gateway.id,accountRevision:current.accountRevision,sourceRevision:gateway.revision??null});
+  if(reply?.ok){gatewayDisconnected=true;return false;}
+  return true;
+};
+let cleanup=await cleanupGateway();
+if(cleanup?.error)return {ok:false,code:cleanup.error};
+let routeCleanupPending=cleanup===true;
+if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
+  const current=await readSnapshot();
+  if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:"contract-changed"};
+  const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
+  const directModels=Array.isArray(direct?.models)?direct.models:[];
+  const directPending=directModels.some(model=>model.status==="pending");
+  const foreignPending=current.sources.some(source=>source.id!==saved.sourceId&&
+    (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
+  // A background catalog refresh can race the first disconnect. Re-save only
+  // our exact manual draft when no other source has a pending confirmation.
+  if(direct&&directPending&&!foreignPending){
+    imported=await importDraft(current,direct,true);
+    if(imported.error)return {ok:false,code:imported.error};
+    saved=imported.saved;status=imported.status;
+    if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};
+    cleanup=await cleanupGateway();
+    if(cleanup?.error)return {ok:false,code:cleanup.error};
+    routeCleanupPending=cleanup===true;
+  }
+}
+return {ok:true,sourceId:saved.sourceId,gatewayDisconnected:gatewayDisconnected,routeCleanupPending:routeCleanupPending,
   models:draftModels.length,requiresRestart:status!=="applied",restartDeferred:status==="deferred"};
 })(` + quoteJS(string(encoded)) + `)`, nil
 }
@@ -589,6 +616,11 @@ func directPendingBlocks(account map[string]any, sourceID string) bool {
 	}
 	for _, row := range modelRows(pending) {
 		if rowSource := stringField(row, "sourceId"); sourceID == "" || rowSource != sourceID {
+			continue
+		}
+		// Kimi discovers the provider catalog after a manual save. Those
+		// unconfirmed discoveries are not part of our requested direct import.
+		if stringField(row, "provenance") == "catalog" {
 			continue
 		}
 		if alias := stringField(row, "alias"); alias != "" && !applied[alias] {

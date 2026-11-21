@@ -109,22 +109,27 @@ const custom={id:"byok-src-1",kind:"custom",displayName:"KimiWork + 直连",revi
   models:[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}]};
 const ok=value=>({ok:true,value});
 let saved=false;
+let saveCount=0;
 globalThis.seenDraft=null;
 globalThis.seenPreviewRequest=null;
 globalThis.clawBridgeAPI={byokSources:{
-  list(){calls.push("list");return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:"applied",
+  list(){calls.push("list");
+    custom.models=[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}];
+    if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId:"byok-prov-existing",model:"catalog-extra",alias:"byok-prov-existing/catalog-extra",status:"pending",provenance:"catalog"});
+    return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:"applied",
     sources:(gatewayConnected?[kth]:[]).concat([custom])});},
   preview(request){
     calls.push("preview");
     globalThis.seenDraft=request.draft;
     globalThis.seenPreviewRequest=request;
-    return ok({scopeToken:"account-1",accountRevision:"r1",sourceRevision:"s1",sourceId:"byok-src-1",
+    return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",sourceRevision:"s1",sourceId:"byok-src-1",
       previewId:"p1",canSave:true,candidates:[]});
   },
   discard(id){calls.push("discard:"+id);},
-  save(request){calls.push("save");if(globalThis.failSave)return {ok:false,reasonCode:"save-refused"};saved=true;return ok({sourceId:"byok-src-1",accountRevision:"r2",status:"pending"});},
+  save(request){calls.push("save");if(globalThis.failSave)return {ok:false,reasonCode:"save-refused"};saveCount++;saved=true;
+    return ok({sourceId:"byok-src-1",accountRevision:"r2",status:globalThis.pendingCatalog&&saveCount>1?"applied":"pending"});},
   applyPending(revision){calls.push("apply:"+revision);return ok({status:"applied"});},
-  disconnect(request){calls.push("disconnect:"+request.sourceId);if(globalThis.failDisconnect)return {ok:false,reasonCode:"disconnect-refused"};gatewayConnected=false;return ok({});},
+  disconnect(request){calls.push("disconnect:"+request.sourceId);if(globalThis.failDisconnect||(globalThis.pendingCatalog&&saveCount===1))return {ok:false,reasonCode:"disconnect-refused"};gatewayConnected=false;return ok({});},
 }};
 `
 
@@ -785,8 +790,57 @@ func TestDirectImportFailurePreservesTheOldGateway(t *testing.T) {
 	result = vm.Get("directResult").ToObject(vm)
 	calls, _ = vm.RunString(`calls.join(",")`)
 	if !result.Get("ok").ToBoolean() || !result.Get("routeCleanupPending").ToBoolean() ||
-		calls.String() != "list,preview,save,list,apply:r2,list,disconnect:byok-kth" || !gatewayConnected(vm) {
+		calls.String() != "list,preview,save,list,apply:r2,list,disconnect:byok-kth,list" || !gatewayConnected(vm) {
 		t.Fatalf("failed cleanup was not retryable: result=%v calls=%v", result, calls)
+	}
+}
+
+func TestDirectImportExpressionSettlesCatalogRefreshBeforeCleanup(t *testing.T) {
+	request := validDirectImportRequest()
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+	vm := runDirectExpression(t, request, `globalThis.pendingCatalog=true;`)
+	result := vm.Get("directResult").ToObject(vm)
+	calls, _ := vm.RunString(`calls.join(",")`)
+	want := "list,preview,save,list,apply:r2,list,disconnect:byok-kth,list,preview,save,list,disconnect:byok-kth"
+	if !result.Get("ok").ToBoolean() || !result.Get("gatewayDisconnected").ToBoolean() ||
+		result.Get("routeCleanupPending").ToBoolean() || result.Get("requiresRestart").ToBoolean() ||
+		calls.String() != want || gatewayConnected(vm) {
+		t.Fatalf("catalog refresh blocked cleanup: result=%v calls=%v", result, calls)
+	}
+}
+
+func TestDirectReconcileIgnoresOnlyUnrequestedCatalogPending(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		provenance string
+		wantState  string
+	}{
+		{"catalog discovery", "catalog", IntegrationReady},
+		{"requested manual model", "manual", IntegrationPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newNativeFixture(t)
+			key := sha256Hex("direct-account")
+			store := directStoreFixture(key)
+			account := store["accounts"].(map[string]any)[key].(map[string]any)
+			account["pending"] = map[string]any{"applyState": "prepared", "models": []any{map[string]any{
+				"alias": "byok-uuid/catalog-extra", "sourceId": directSourceID,
+				"providerId": "prov-1", "model": "catalog-extra", "provenance": tc.provenance,
+			}}}
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+			spec := directSpecFixture()
+			if tc.provenance == "manual" {
+				spec.Models = append(spec.Models, DirectModel{ID: "kimi-extra", ProviderID: "prov-1",
+					Model: "catalog-extra", MaxContextSize: 128000, Capabilities: []string{"tool_use"}})
+			}
+			result := fixture.integration(t).Reconcile(ReconcileOptions{Enabled: true,
+				Mode: IntegrationModeDirect, DirectSpec: spec, AccountScope: key})
+			if string(result.State) != tc.wantState {
+				t.Fatalf("pending %s: %s/%s", tc.provenance, result.State, result.Reason)
+			}
+		})
 	}
 }
 

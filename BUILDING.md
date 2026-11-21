@@ -82,7 +82,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 - 提权通过 `/usr/bin/osascript ... with administrator privileges`（macOS）或 PowerShell `Start-Process -Verb RunAs`（Windows）完成。macOS 在已有本产品条目且解析探测通过时不弹授权；`RequireStaticHosts` 只决定 macOS 是否愿意复用旧版本安装的 `/etc/resolver` 条目，网关模式仍可复用它，直连模式必须换成 hosts 条目。Windows 的 `prepare` 每次都经提权脚本写入，不做无提权的复用判断。
 - 导入走 `clawBridgeAPI.byokSources` 的 `list` / `preview` / `save` / `applyPending` / `discard` / `disconnect`。页面答案只是候选，`gradeDirectImport` 仍以官方 store 与生成的 `config.json` 读回为准确认 `applied`。
 - 直连判定 `ready` 同时要求模式为直连、官方 store 与生成配置校验通过、以及静态 hosts 就绪（Windows 还要一次通过的解析探测）。只缺 hosts 时是「待补齐静态 hosts」，不是已就绪。
-- 双向切换都先预览、保存、应用并读回新来源，再断开旧来源。预览或保存失败不触碰旧路由；清理失败用 `routeCleanupPending` / `route_cleanup_pending` 报告待收尾，可通过再次同步重试。两个方向的导入各自拒绝错误的模式（`native_import_direct_mode` / `native_import_gateway_mode`）。
+- 双向切换都先预览、保存、应用并读回新来源，再断开旧来源。预览或保存失败不触碰旧路由；若官方后台目录发现与首次直连清理竞争，且没有其他来源待确认，同一次操作会按精确手工草稿自动收尾一次。未请求的目录 pending 不阻塞读回，手工模型 pending 仍会阻塞；剩余清理失败用 `routeCleanupPending` / `route_cleanup_pending` 报告，可通过再次同步重试。两个方向的导入各自拒绝错误的模式（`native_import_direct_mode` / `native_import_gateway_mode`）。
 - 排障：`/api/state` 的 `directMode` 给出 `supported`、`staticHostsReady`、`routeCleanupPending`、`eligibleModelIds`、`eligibleModels`、`skippedModels` 与 `activeFeaturesBypassed`。跳过原因是固定的代码值（缺连接、地址不合规、协议不支持、未声明工具调用、上下文长度无效、端点重复、缺密钥），不要按文案反推。macOS 可用 `grep kimi-work-gateway /etc/hosts` 确认条目是否在位；`{"action":"remove-dns"}` 会移除本产品写入的那一条并停止 DNS 监听。
 
 以上是代码路径与实际写入规则。直连模式的真机验收结论不写在本文档里，以对应版本的交接记录和发布说明为准。

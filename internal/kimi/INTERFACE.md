@@ -278,9 +278,13 @@ unchanged.
 unknown value is `gateway`; the two import directions refuse each other
 (`native_import_direct_mode`, `native_import_gateway_mode`). Switching either way
 applies and verifies the new source before disconnecting the previous managed
-source. A cleanup failure is reported as `route_cleanup_pending` and is retried
-by the next explicit sync; it never turns a failed new import into a disconnected
-old route. Runtime reads follow mode and source-id updates on the existing CDP
+source. If Kimi's background catalog discovery races the first direct cleanup,
+the same action re-saves the exact manual draft once, but only when no other
+source has a pending confirmation. Unrequested catalog discoveries do not block
+readback; a pending manual model still does. Any remaining cleanup failure is
+reported as `route_cleanup_pending` and is retried by the next explicit sync; it
+never turns a failed new import into a disconnected old route. Runtime reads
+follow mode and source-id updates on the existing CDP
 actions, protected by their mutex.
 
 `POST /api/actions` also accepts `{"action":"remove-dns"}`. It removes only the
