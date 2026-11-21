@@ -376,10 +376,10 @@ func TestCDPActionsSurfaceProbeReadsOnlyVisibility(t *testing.T) {
 	if !strings.Contains(openSettingsExpression, `openSettings("general")`) {
 		t.Fatal("the open expression does not call openSettings")
 	}
-	if !strings.Contains(importExpression("t", "http://127.0.0.1:1/v1"), "importByokModels") {
+	if !strings.Contains(importExpression("t", "http://127.0.0.1:1/v1", ""), "importByokModels") {
 		t.Fatal("the import expression does not call importByokModels")
 	}
-	if !strings.Contains(importExpression("t", "http://127.0.0.1:1/v1"), "revealByok") {
+	if !strings.Contains(importExpression("t", "http://127.0.0.1:1/v1", ""), "revealByok") {
 		t.Fatal("the import expression does not consult revealByok")
 	}
 }

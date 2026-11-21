@@ -1,14 +1,12 @@
 package byokdns
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"unicode/utf16"
 )
@@ -29,67 +27,6 @@ func DefaultHostsPath(env map[string]string) string {
 		root = `C:\Windows`
 	}
 	return strings.TrimRight(root, `\/`) + `\System32\drivers\etc\hosts`
-}
-
-func HostsEntry() string { return Address + " " + Domain }
-
-var hostsLines = regexp.MustCompile(`[^\r\n]*(?:\r\n|\r|\n|$)`)
-
-func UpdateHosts(content []byte, action string) ([]byte, bool, error) {
-	if action != "prepare" && action != "remove-dns" {
-		return nil, false, errors.New("invalid_setup_action")
-	}
-	if bytes.IndexByte(content, 0) >= 0 {
-		return nil, false, errors.New("unsupported_hosts_encoding")
-	}
-	original := string(content)
-	prefix := ""
-	if strings.HasPrefix(original, "\xef\xbb\xbf") {
-		prefix = "\xef\xbb\xbf"
-	}
-	body := original[len(prefix):]
-	eol := "\r\n"
-	if match := regexp.MustCompile(`\r\n|\r|\n`).FindString(body); match != "" {
-		eol = match
-	}
-	lines := hostsLines.FindAllString(body, -1)
-	kept := []string{}
-	sawEntry := false
-	for at := 0; at < len(lines); at++ {
-		line := lines[at]
-		if line == "" {
-			continue
-		}
-		if strings.TrimSpace(line) == HostsMarker {
-			if at+1 >= len(lines) || strings.TrimSpace(lines[at+1]) != HostsEntry() {
-				return nil, false, errors.New("resolver_conflict")
-			}
-			sawEntry = true
-			if action == "prepare" {
-				kept = append(kept, line, lines[at+1])
-			}
-			at++
-			continue
-		}
-		uncommented := strings.Split(line, "#")[0]
-		fields := strings.Fields(uncommented)
-		if len(fields) > 1 {
-			for _, name := range fields[1:] {
-				if strings.EqualFold(name, Domain) {
-					if fields[0] != Address || len(fields) != 2 {
-						return nil, false, errors.New("resolver_conflict")
-					}
-					sawEntry = true
-				}
-			}
-		}
-		kept = append(kept, line)
-	}
-	result := prefix + strings.Join(kept, "")
-	if action == "prepare" && !sawEntry {
-		result = prefix + HostsMarker + eol + HostsEntry() + eol + body
-	}
-	return []byte(result), result != original, nil
 }
 
 func powershellLiteral(value string) string {

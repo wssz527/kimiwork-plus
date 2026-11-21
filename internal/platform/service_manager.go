@@ -363,12 +363,29 @@ func launchdPlan(action string, options ServiceOptions, definition, uid string) 
 	case actionStatus:
 		return []step{{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"print", target}}}}, nil
 	case actionUninstall:
-		return []step{
+		plan := []step{
 			{Command: &commandStep{Name: "/bin/launchctl", Args: []string{"bootout", target}}, IgnoreFailure: true},
 			{RemovePath: definition, IgnoreFailure: true},
-		}, nil
+		}
+		// Older releases defaulted the daemon log into the same LaunchAgents
+		// directory as the plist. Removing the definition must take that stale log
+		// with it, or the user is left with a file nothing reads or rotates.
+		for _, path := range legacyLaunchAgentLogPaths(serviceHome(options)) {
+			plan = append(plan, step{RemovePath: path, IgnoreFailure: true})
+		}
+		return plan, nil
 	}
 	return nil, fmt.Errorf("service_action_unknown")
+}
+
+// legacyLaunchAgentLogPaths are the log files older releases wrote next to the
+// LaunchAgent definitions. They are best-effort cleanup targets only: the current
+// rendering never puts a log there.
+func legacyLaunchAgentLogPaths(home string) []string {
+	return []string{
+		filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".log"),
+		filepath.Join(home, "Library", "LaunchAgents", LegacyPreviewServiceLabel+".log"),
+	}
 }
 
 // windowsPlan is the Windows action plan.
@@ -734,6 +751,8 @@ func (m *serviceManager) uninstallLegacyPreviewService(ctx context.Context) {
 		target := "gui/" + m.uid() + "/" + LegacyPreviewServiceLabel
 		_, _ = m.host.Run(ctx, "/bin/launchctl", "bootout", target)
 		_ = m.host.Remove(legacyDef)
+		// Older preview builds wrote their log beside the plist.
+		_ = m.host.Remove(filepath.Join(m.home(), "Library", "LaunchAgents", LegacyPreviewServiceLabel+".log"))
 	case "windows":
 		_, _ = m.host.Run(ctx, registryProgram, legacyRegistryDeleteArgs...)
 		_ = m.host.Remove(legacyDef)

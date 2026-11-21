@@ -16,10 +16,10 @@ go test -race -count=1 ./...
 node --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs
 
 # 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
-VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/macos-dmg.sh
+VERSION=1.1.0 BUILD_ID=1.1.0-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 二进制、便携 .zip 与用户级 setup.exe 安装程序
-VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/windows.sh
+VERSION=1.1.0 BUILD_ID=1.1.0-local bash build/windows.sh
 ```
 
 可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output` 指定本地工具链与独立输出目录，并用 `CODESIGN_IDENTITY="<证书名或 SHA-1>"`、`UPDATE_PUBLIC_KEY="<hex>"`、`UPDATE_GITHUB_REPO="<owner/repo>"` 绑定发布证书与自动更新源。固定自签名证书可用 `build/create-signing-cert.sh` 在仓库外生成；自动更新清单位与 Ed25519 签名由 `cmd/signrelease` 生成（签名私钥必须保存在仓库之外）。脚本不安装、不启动、不覆盖本机既有安装，并会自动把根目录的 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt` 打入应用包、DMG 与 Windows 安装器。
@@ -34,7 +34,9 @@ VERSION=1.0.0 BUILD_ID=1.0.0-local bash build/windows.sh
 
 后台地址来自私有 `desktop-endpoint.json`。首次启动可用 `--port 0` 选择空闲端口；正常停止、重开与同构建重启默认沿用已保存的 loopback 地址和面板令牌，避免已导入的官方地址失效。健康读回同时核对 PID、版本和 buildId。`--stop-daemon` 使用鉴权接口排空本服务请求，不会把另一个端口响应者当作本服务停止成功。
 
-维护页可以显式注册、启停、允许登录启动和卸载预览自己的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。连接、翻译和 Tavily 密钥写入系统 Keychain/DPAPI，配置只保存新引用；写入后从系统存储读回再提交，不解密旧版 safeStorage。ad-hoc 更新导致 ACL 拒绝时，连接可通过界面的“重新授权并应用连接”读取原有凭据，不显示或改写 Key；凭据确实缺失时仍需要重新保存。
+守护进程日志默认写在状态目录下的 `launchd-daemon.log`；没有状态目录时落到 `~/Library/Logs/KimiWorkPlus/`。旧版本把日志放在 `~/Library/LaunchAgents` 与 plist 并列，卸载时会一并删除那些遗留文件。排障时先看状态目录里的日志与 `service-operations/<operationId>.helper.log`，不要假设 `LaunchAgents` 里还有当前日志。
+
+维护页可以显式注册、启停、允许登录启动和卸载本产品注册的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。连接、翻译和 Tavily 密钥写入系统 Keychain/DPAPI，配置只保存新引用；写入后从系统存储读回再提交，不解密旧版 safeStorage。ad-hoc 更新导致 ACL 拒绝时，连接可通过界面的“重新授权并应用连接”读取原有凭据，不显示或改写 Key；凭据确实缺失时仍需要重新保存。
 
 ### 生命周期操作由独立执行者完成
 
@@ -72,6 +74,19 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 
 私有 CDP 在 Windows 上通过继承的两条管道 HANDLE 传递，不使用 `ExtraFiles`，也不回退到开放 TCP 调试端口。交叉构建只证明编译成功，不证明官方 CDP、DPAPI 或 WebView2 真机行为。
 
+### 零网关直连模式
+
+接入模式保存在私有配置的 `integrationMode` 中，缺失或非法值一律按 `gateway` 处理，因此旧配置和手改文件不会意外进入直连数据路径。`bridge.buildDirectSpec` 只在直连下产出非密钥目录（服务商、协议、地址、模型）。
+
+- 直连导入先准备静态解析：macOS 走 `byokdns.Setup{RequireStaticHosts: true}`，把 `dev.msh.team` 的带标记条目写进 `/etc/hosts`，并在同一次提权步骤里删除旧版本安装的 `/etc/resolver/dev.msh.team`；Windows 只写带标记的 hosts 对。两种平台都保留文件原有 BOM、行尾和无关条目，遇到同域名的其他写法报 `resolver_conflict` 而不是覆盖。
+- 提权通过 `/usr/bin/osascript ... with administrator privileges`（macOS）或 PowerShell `Start-Process -Verb RunAs`（Windows）完成。macOS 在已有本产品条目且解析探测通过时不弹授权；`RequireStaticHosts` 只决定 macOS 是否愿意复用旧版本安装的 `/etc/resolver` 条目，网关模式仍可复用它，直连模式必须换成 hosts 条目。Windows 的 `prepare` 每次都经提权脚本写入，不做无提权的复用判断。
+- 导入走 `clawBridgeAPI.byokSources` 的 `list` / `preview` / `save` / `applyPending` / `discard` / `disconnect`。页面答案只是候选，`gradeDirectImport` 仍以官方 store 与生成的 `config.json` 读回为准确认 `applied`。
+- 直连判定 `ready` 同时要求模式为直连、官方 store 与生成配置校验通过、以及静态 hosts 就绪（Windows 还要一次通过的解析探测）。只缺 hosts 时是「待补齐静态 hosts」，不是已就绪。
+- 双向切换都先预览、保存、应用并读回新来源，再断开旧来源。预览或保存失败不触碰旧路由；清理失败用 `routeCleanupPending` / `route_cleanup_pending` 报告待收尾，可通过再次同步重试。两个方向的导入各自拒绝错误的模式（`native_import_direct_mode` / `native_import_gateway_mode`）。
+- 排障：`/api/state` 的 `directMode` 给出 `supported`、`staticHostsReady`、`routeCleanupPending`、`eligibleModelIds`、`eligibleModels`、`skippedModels` 与 `activeFeaturesBypassed`。跳过原因是固定的代码值（缺连接、地址不合规、协议不支持、未声明工具调用、上下文长度无效、端点重复、缺密钥），不要按文案反推。macOS 可用 `grep kimi-work-gateway /etc/hosts` 确认条目是否在位；`{"action":"remove-dns"}` 会移除本产品写入的那一条并停止 DNS 监听。
+
+以上是代码路径与实际写入规则。直连模式的真机验收结论不写在本文档里，以对应版本的交接记录和发布说明为准。
+
 ## 阶段 2–6 集成候选
 
 导航为总览、模型、用量、Work 能力、扩展、设置。服务商与模型共用一次保存事务；保存本机目录与同步到 Work 是不同操作，新增/删除模型后按同步状态重新导入，必要时正常重启 Kimi。
@@ -101,6 +116,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 | Windows 1.0.0 全链路（安装/卸载、预览升级迁移、三主题外观、双 exe 自动更新/回滚、3.2.28 兼容自检与双账号实测） | 真机已验证（见工作区交接记录） |
 | 登录时启动 | 注册/启停与读回已验证；真实注销再登录后是否自启未测 |
 | 长期闲置令牌寿命 | 未验证 |
+| 零网关直连模式（1.1.0 候选） | 候选功能；真机验收状态以工作区交接记录为准，表中其他行的结论不适用于它 |
 
 系统直接启动的官方 Kimi 不受本产品托管。此时已同步的模型配置仍保留在磁盘，但面板不会声称受管进程已加载配置代次，需点「正常退出并重启 Kimi」恢复完整受管能力。
 

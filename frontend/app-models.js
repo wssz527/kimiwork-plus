@@ -1,5 +1,5 @@
 import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, discoveryReasonText, protocolLabel, providerPreset, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
-import { API, BUDGET_PRESETS, CONNECTION_ID_PATTERN, EFFORT_PATTERN, MODEL_ALIAS_PREFIXES, actionUUID, displayModelId, dom, fmtK, fmtTime, fmtTokens, iconUse, request, setHidden, setText, showToast, state, syncDefaultOptions, syncSelectOptions, truncate } from './app-core.js';
+import { API, BUDGET_PRESETS, CONNECTION_ID_PATTERN, EFFORT_PATTERN, MODEL_ALIAS_PREFIXES, actionUUID, displayModelId, dom, fmtK, fmtTime, fmtTokens, iconUse, request, setHidden, setText, showToast, state, stripModelAliasPrefix, syncDefaultOptions, syncSelectOptions, truncate } from './app-core.js';
 import { renderActions } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
 
@@ -29,7 +29,24 @@ function modelIdFromAlias(alias) {
       if (index.has(rest)) return rest;
     }
   }
+  /* Kimi 3.2.28 也可能把模型写成 `byok-<uuid>/<modelId>`。 */
+  const stripped = stripModelAliasPrefix(alias);
+  if (stripped !== alias) {
+    if (index.has(stripped)) return stripped;
+    const nested = modelIdFromAlias(stripped);
+    if (nested) return nested;
+  }
   return null;
+}
+
+/* 显示与查找共用的别名解析：命中目录时返回目录里的真实路由 ID；
+   未命中时退回去掉前缀后的名字，而不是把 UUID 前缀摆给用户。 */
+function resolveAlias(alias) {
+  if (typeof alias !== 'string' || !alias) return '';
+  const model = modelIdFromAlias(alias);
+  if (model) return model;
+  const stripped = stripModelAliasPrefix(alias);
+  return displayModelId(stripped || alias);
 }
 
 function modelFamilyFor(id) {
@@ -1880,6 +1897,7 @@ export {
   renderModels,
   renderPicker,
   resetModelSignature,
+  resolveAlias,
   routeIdFor,
   runConnectionCheck,
   runDiscovery,

@@ -12,6 +12,7 @@ const API = {
   discovery: '/api/discovery',
   context: '/api/context',
   tools: '/api/tools',
+  integrationMode: '/api/integration-mode',
 };
 
 const POLL_MS = 2000;
@@ -19,6 +20,38 @@ const KEY_STORE = 'kwg.panel.key';
 const THEME_STORE = 'kwg.panel.theme';
 const VIEW_STORE = 'kwg.panel.view';
 const MODEL_ALIAS_PREFIXES = ['byok-kth-kimi/', 'byok-kth-resp/'];
+/* Kimi 3.2.28 的自定义源别名是 `byok-<uuid>/<modelId>`；UUID 每台机器不同，
+   所以只能按形状匹配，不能写死成一个值。 */
+const MODEL_ALIAS_UUID_PREFIX = /^byok-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\//i;
+const INTEGRATION_MODES = ['gateway', 'direct'];
+const DIRECT_SKIP_REASON = {
+  tools_required: '未声明工具调用',
+  missing_connection: '未绑定连接',
+  invalid_base_url: '地址不支持直连',
+  invalid_context_window: '上下文窗口无效',
+  missing_api_key: '未配置密钥',
+  duplicate_endpoint: '端点与协议重复',
+  unsupported_protocol: '协议不支持直连',
+};
+const DIRECT_BYPASS_WORD = {
+  budget: '预算限制',
+  failover: '备用故障转移',
+  shared_instructions: '共享指令',
+  web_tools: '网关侧联网搜索',
+};
+
+/* 别名（`byok-kth-kimi/x`、`byok-<uuid>/x`）在显示与查找时都应还原成路由 ID；
+   其他 `byok-` 开头的名字（例如 `byok-custom/`）属于用户自己的命名，原样保留。 */
+function stripModelAliasPrefix(value) {
+  if (typeof value !== 'string' || !value) return value;
+  for (const prefix of MODEL_ALIAS_PREFIXES) {
+    if (value.startsWith(prefix)) {
+      const rest = value.slice(prefix.length);
+      if (rest) return rest;
+    }
+  }
+  return value.replace(MODEL_ALIAS_UUID_PREFIX, '');
+}
 const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 const ENV_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -204,7 +237,54 @@ const DIAG_REASON = {
   existing_login_profile_unavailable: '未找到官方登录目录。请先正常打开官方 Kimi。',
   compat_model_sync_blocked: '当前官方 Kimi 版本未通过模型同步兼容性检查，已停止写入模型配置；本机网关和其他功能照常运行。',
   compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；本机网关和其他功能照常运行。',
+  invalid_integration_mode: '接入模式不被接受，只支持本机网关或零网关直连；当前模式未更改。',
 };
+
+/* 直连失败码有三个来源：官方页面给连字符代码，Go 侧再包一层
+   native_import_/native_ 前缀，主程序自己用下划线代码。三者指向同一张表，
+   归一化后查一次，文案才不会按调用路径变来变去。 */
+const DIRECT_REASON = {
+  direct_import_required: '直连配置还没有写入官方 Kimi；请在模型页点「同步到 Work」。',
+  direct_mode_unsupported: '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。',
+  direct_preview_refused: '官方 Kimi 拒绝了这次直连写入，现有配置未被改动；请确认官方窗口没有正在同步或编辑模型源，再重新同步。',
+  direct_no_eligible_models: '没有可直连的模型：至少需要一个已声明工具调用、已绑定连接且有密钥的模型。',
+  direct_duplicate_endpoint: '多个模型与同一个服务商端点重复，直连模式只保留其中一个；请检查服务商地址后重新同步。',
+  direct_missing_api_key: '有模型缺少可用的 API Key，直连模式无法写入；请在模型页补齐密钥后重新同步。',
+  direct_import_failed: '官方 Kimi 没有接受这次直连写入，现有配置未被改动；请稍后重新同步，仍失败时查看诊断信息。',
+  direct_gateway_disconnect_failed: '没能断开旧的网关接入源，官方 Kimi 可能仍指向本机网关；请重新同步，确认直连已生效后再退出后台服务。',
+  direct_disconnect_failed: '没能断开旧的接入源，官方 Kimi 可能仍走原来的路由；请重新同步，并在官方窗口确认模型来源。',
+  direct_foreign_source: '官方 Kimi 中已有不是本产品写入的模型源，未覆盖；请先核对现有来源后再同步。',
+  direct_catalog_too_large: '这次要导入的模型目录超过了官方 Kimi 单次接受的上限，本次未写入；请减少单次导入的模型，或拆分连接后分批同步。',
+  models_removed: '官方 Kimi 里已经没有这次要导入的部分模型，可能是官方更新或来源被改动；请重新同步到 Work。',
+  route_cleanup_pending: '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。',
+  direct_spec_missing: '当前没有可直连的模型或连接；请在模型页补齐后重新同步。',
+  /* 旧 Go 版本与页面直接给出的代码；归一化后和上面的下划线代码指向同一句。 */
+  foreign_source: '官方 Kimi 中已有不是本产品写入的模型源，未覆盖；请先核对现有来源后再同步。',
+  gateway_disconnect_failed: '没能断开旧的网关接入源，官方 Kimi 可能仍指向本机网关；请重新同步，确认直连已生效后再退出后台服务。',
+  import_failed: '官方 Kimi 没有接受这次直连写入，现有配置未被改动；请稍后重新同步，仍失败时查看诊断信息。',
+  models_missing: '官方 Kimi 里还缺这次要导入的模型；请重新同步到 Work，仍失败时查看诊断信息。',
+  contract_changed: '官方 Kimi 的模型源接口与预期不同，本次未写入任何内容；请更新官方 Kimi 或本软件后重试。',
+  byok_source_stale: '官方 Kimi 的模型源在写入期间被更新，本次未继续；请重新同步。',
+  native_import_direct_mode: '直连模式会把服务商地址与密钥直接写入官方 Kimi，不再经过本机网关。',
+  native_import_gateway_mode: '已恢复本机网关模式，同步会把官方 Kimi 改回通过本机网关访问模型。',
+};
+
+/* `native_import_` 前缀后面可能还是连字符形式（`direct-preview-refused`），
+   所以先剥前缀，再把连字符还原成统一的下划线代码。 */
+function normalizeReasonCode(code) {
+  if (typeof code !== 'string' || !code) return '';
+  let value = code;
+  if (value.startsWith('native_import_')) value = value.slice('native_import_'.length);
+  else if (value.startsWith('native_')) value = value.slice('native_'.length);
+  return value.replace(/-/g, '_');
+}
+
+function directReasonText(code) {
+  if (typeof code !== 'string' || !code) return '';
+  if (DIRECT_REASON[code]) return DIRECT_REASON[code];
+  const normalized = normalizeReasonCode(code);
+  return normalized && DIRECT_REASON[normalized] ? DIRECT_REASON[normalized] : '';
+}
 
 const ERROR_HINT = {
   configuration_conflict: '配置在别处被修改，已刷新状态；你的编辑仍然保留，请确认后重新保存。',
@@ -251,6 +331,7 @@ const ERROR_HINT = {
   subagent_policy_unavailable: '无法读取当前子代理策略或配置归属存在冲突，请检查状态目录后重启面板。',
   subagent_policy_apply_failed: '目标已保存，但当前策略未能应用，请查看运行时状态。',
   invalid_subagent_effort: '此模型未声明所选思考档位，请重新选择。',
+  invalid_integration_mode: '接入模式不被接受，只支持本机网关或零网关直连；当前模式未更改。',
 };
 
 /* configured（已保存）/ policy（文件与策略）/ runtime（内核运行时）三层，
@@ -547,6 +628,19 @@ const dom = {
   nativeRemoteWord: $('native-remote-word'),
   nativeRemoteNote: $('native-remote-note'),
 
+  integrationModeGroup: $('integration-mode-group'),
+  modeGateway: $('mode-gateway'),
+  modeDirect: $('mode-direct'),
+  integrationModeState: $('integration-mode-state'),
+  directModeNotice: $('direct-mode-notice'),
+  directModeSupport: $('direct-mode-support'),
+  directModeHosts: $('direct-mode-hosts'),
+  directModeBypassed: $('direct-mode-bypassed'),
+  directModeSkipped: $('direct-mode-skipped'),
+  nativeSync: $('native-sync'),
+  nativeSyncLabel: $('native-sync-label'),
+  factGatewayMode: $('fact-gateway-mode'),
+
   updCurrent: $('upd-current'),
   updCurrentSub: $('upd-current-sub'),
 
@@ -679,7 +773,7 @@ async function request(path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     const code = payload && payload.error && payload.error.code;
     const message = payload && payload.error && payload.error.message;
-    const error = new ApiError(ERROR_HINT[code] || message || '请求失败，请稍后重试。', code || 'http_' + res.status, res.status);
+    const error = new ApiError(ERROR_HINT[code] || directReasonText(code) || message || '请求失败，请稍后重试。', code || 'http_' + res.status, res.status);
     error.saved = Boolean(payload && payload.error && payload.error.saved);
     error.reason = payload && payload.error && payload.error.reason;
     throw error;
@@ -905,7 +999,7 @@ function modelLabel(model, alias) {
 
 function reasonText(code) {
   if (typeof code !== 'string' || !code) return '';
-  return DIAG_REASON[code] || code;
+  return DIAG_REASON[code] || directReasonText(code) || code;
 }
 
 
@@ -1040,11 +1134,16 @@ export {
   CONFIG_STATE,
   CONNECTION_ID_PATTERN,
   DIAG_REASON,
+  DIRECT_BYPASS_WORD,
+  DIRECT_REASON,
+  DIRECT_SKIP_REASON,
   DISCOVERY_REASON,
   EFFORT_PATTERN,
+  INTEGRATION_MODES,
   KEY_STORE,
   LOOPBACK,
   MODEL_ALIAS_PREFIXES,
+  MODEL_ALIAS_UUID_PREFIX,
   POLICY_MODE_WORD,
   POLICY_TRANSPORT_WORD,
   POLL_MS,
@@ -1057,6 +1156,7 @@ export {
   applyTheme,
   clearKey,
   displayModelId,
+  directReasonText,
   dom,
   fmtCount,
   fmtDuration,
@@ -1083,6 +1183,7 @@ export {
   showGate,
   showToast,
   state,
+  stripModelAliasPrefix,
   syncDefaultOptions,
   syncSelectOptions,
   truncate,

@@ -73,10 +73,15 @@ func TestSetupRevealsFlagWithoutReplacingOtherValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: filepath.Join(t.TempDir(), Domain), Admin: func(context.Context, string, string) error {
-		calls++
-		return nil
-	}}
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: filepath.Join(t.TempDir(), Domain),
+		HostsPath: hosts, Admin: func(context.Context, string, string) error {
+			calls++
+			return nil
+		}}
 	if err := setup.Run(context.Background(), "prepare"); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +100,10 @@ func TestSetupRevealsFlagWithoutReplacingOtherValues(t *testing.T) {
 
 func TestSetupMapsFailures(t *testing.T) {
 	profile := t.TempDir()
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		failure error
 		want    string
@@ -107,7 +116,7 @@ func TestSetupMapsFailures(t *testing.T) {
 		{errors.New("administrator name or password was incorrect (-60007)"), "setup_authorization_failed"},
 		{errors.New("other"), "native_setup_failed"},
 	} {
-		setup := Setup{FlagFile: filepath.Join(profile, "kimi-agent", "byok-availability.json"), Platform: "darwin", Admin: func(context.Context, string, string) error { return test.failure }}
+		setup := Setup{FlagFile: filepath.Join(profile, "kimi-agent", "byok-availability.json"), Platform: "darwin", HostsPath: hosts, Admin: func(context.Context, string, string) error { return test.failure }}
 		if err := setup.Run(context.Background(), "prepare"); err == nil || err.Error() != test.want {
 			t.Fatalf("error = %v, want %s", err, test.want)
 		}
@@ -296,9 +305,13 @@ func TestSetupReusesReadyResolverWithoutAdministrator(t *testing.T) {
 	if err := os.WriteFile(resolver, []byte(configuration), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	adminCalls := 0
 	probeCalls := 0
-	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver,
+	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver, HostsPath: hosts,
 		Admin: func(context.Context, string, string) error { adminCalls++; return nil },
 		Probe: &Probe{Lookup: func(context.Context, string) (string, error) {
 			probeCalls++
@@ -324,8 +337,12 @@ func TestSetupDoesNotReuseResolverWithoutPrivateProbe(t *testing.T) {
 	if err := os.WriteFile(resolver, []byte(configuration), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	adminCalls := 0
-	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver,
+	setup := Setup{FlagFile: flag, Platform: "darwin", ResolverPath: resolver, HostsPath: hosts,
 		Admin: func(context.Context, string, string) error { adminCalls++; return nil },
 		Probe: &Probe{Lookup: func(context.Context, string) (string, error) { return "8.8.8.8", nil }}}
 	if err := setup.Run(context.Background(), "prepare"); err != nil {

@@ -75,6 +75,14 @@ type ControllerSettings struct {
 	Translation TranslationSettings
 	// Executor bounds the contract probe.
 	Executor ExecutorConfig
+	// IntegrationMode selects how models reach Kimi. Empty means the gateway,
+	// which is the released behaviour; `direct` imports the user's own
+	// providers through the official API with no local gateway in between.
+	IntegrationMode string
+	// DirectSpec is the non-secret Direct Mode catalog: providers and models
+	// without any key. Reconciliation and readback use it; the import itself
+	// receives keys in its own DirectImportRequest.
+	DirectSpec *DirectSpec
 }
 
 // TranslationSettings is the public renderer configuration.
@@ -204,13 +212,22 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 		return errors.New("controller_state_dir_invalid")
 	}
 	c.mu.Lock()
+	if c.importGranted && settings.integrationMode() != c.settings.integrationMode() {
+		c.mu.Unlock()
+		return ErrImportBusy
+	}
 	if (c.child != nil || c.isolation != nil) && (settings.profileMode() != c.settings.profileMode() || settings.LoginDataDir != c.settings.LoginDataDir || settings.UserDataDir != c.settings.UserDataDir || settings.StateDir != c.settings.StateDir) {
 		c.mu.Unlock()
 		return errors.New("profile_mode_change_requires_exit")
 	}
+	c.mu.Unlock()
+	sourceID := c.directSourceID(settings)
+	c.mu.Lock()
 	c.settings = settings
+	actions := c.actions
 	host := c.host
 	c.mu.Unlock()
+	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
 	if host != nil {
 		// Configure takes the host's own lock and invalidates the sessions whose
 		// scope changed, so this cannot race a concurrent Sync.
@@ -418,17 +435,17 @@ func (c *Controller) start(ctx context.Context) error {
 // without writing anything. It answers 0 when there is no intent yet.
 func (c *Controller) currentGeneration() int {
 	c.mu.Lock()
-	stateDir := c.settings.StateDir
+	settings := c.settings
 	c.mu.Unlock()
 	home := c.kimiHome()
 	if home == "" {
 		return 0
 	}
-	integration, err := NewNativeIntegration(stateDir, home, "gateway")
+	integration, err := NewNativeIntegration(settings.StateDir, home, settings.integrationMode())
 	if err != nil {
 		return 0
 	}
-	return integration.Readback("").Generation
+	return integration.ReadbackMode("", settings.integrationMode(), "").Generation
 }
 
 // managedChildAlive reports whether this controller still holds a child that has
@@ -631,8 +648,13 @@ func (c *Controller) startNativeBridge(child *Child) string {
 	// The native bridge shares this child's pipe, so it is published as part of
 	// the launch rather than as a separate step a caller could forget. The
 	// actions run over CDP against the pages this child serves.
-	actions := NewCDPActions(child.Pipe(), c.kimiHome(), c.kimiHome())
-	bridge, err := StartBridgeHost(c.kimiHome(), child.PID(), actions)
+	c.mu.Lock()
+	settings := c.settings
+	c.mu.Unlock()
+	home := c.kimiHome()
+	actions := NewCDPActionsForMode(child.Pipe(), home, home,
+		settings.integrationMode(), c.directSourceID(settings))
+	bridge, err := StartBridgeHost(home, child.PID(), actions)
 	if err != nil {
 		return "native_bridge_unavailable"
 	}
@@ -641,6 +663,47 @@ func (c *Controller) startNativeBridge(child *Child) string {
 	c.actions = actions
 	c.mu.Unlock()
 	return ""
+}
+
+// directSourceID reads the managed custom source from this tool's own intent.
+// It is only used to aim a runtime read at the right source; the display-name
+// fallback still covers a source whose id changed.
+func (c *Controller) directSourceID(settings ControllerSettings) string {
+	if settings.integrationMode() != IntegrationModeDirect {
+		return ""
+	}
+	return c.previousDirectSourceID(settings)
+}
+
+func updateActionsIntegrationRoute(actions PageActions, mode, sourceID string) {
+	if configurable, ok := actions.(interface{ setIntegrationMode(string, string) }); ok {
+		configurable.setIntegrationMode(mode, sourceID)
+	}
+}
+
+func (c *Controller) syncActionsIntegrationRoute(settings ControllerSettings, sourceID string) {
+	if settings.integrationMode() == IntegrationModeDirect && sourceID == "" {
+		sourceID = c.directSourceID(settings)
+	}
+	c.mu.Lock()
+	actions := c.actions
+	c.mu.Unlock()
+	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
+}
+
+// previousDirectSourceID answers the source a still-active Direct Mode intent
+// records. Switching back to the gateway uses it to disconnect that source; a
+// non-direct or inactive intent answers nothing.
+func (c *Controller) previousDirectSourceID(settings ControllerSettings) string {
+	native, err := NewNativeIntegration(settings.StateDir, c.kimiHome(), IntegrationModeGateway)
+	if err != nil {
+		return ""
+	}
+	intent, err := native.readIntent()
+	if err != nil || intent == nil || !intent.Active || intent.Mode != IntegrationModeDirect {
+		return ""
+	}
+	return intent.DirectSourceID
 }
 
 // Stop ends the managed child. It never touches any other process.
@@ -654,6 +717,7 @@ func (c *Controller) Stop(ctx context.Context) error {
 	c.child = nil
 	c.host = nil
 	c.bridge = nil
+	c.actions = nil
 	c.mu.Unlock()
 
 	if host != nil {
@@ -801,20 +865,28 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 	}
 
 	kimiDir := c.kimiHome()
-	integration, err := NewNativeIntegration(settings.StateDir, kimiDir, "gateway")
+	mode := settings.integrationMode()
+	integration, err := NewNativeIntegration(settings.StateDir, kimiDir, mode)
 	if err != nil {
-		result := IntegrationResult{State: IntegrationConflict, Reason: "invalid_integration_path"}
+		result := IntegrationResult{State: IntegrationConflict, Reason: "invalid_integration_path", Mode: mode}
 		c.mu.Lock()
 		c.integration = &result
 		c.mu.Unlock()
 		return result
 	}
-	result := integration.Reconcile(ReconcileOptions{
-		Enabled: settings.GatewayURL != "", URL: settings.GatewayURL, Models: settings.Models,
-		AccountScope: scope, AllowAccountRebind: confirmedAccount != "",
-	})
+	options := ReconcileOptions{AccountScope: scope, AllowAccountRebind: confirmedAccount != "", Mode: mode}
+	if mode == IntegrationModeDirect {
+		options.Enabled = settings.DirectSpec != nil && len(settings.DirectSpec.Models) > 0
+		options.DirectSpec = settings.DirectSpec
+	} else {
+		options.Enabled = settings.GatewayURL != ""
+		options.URL = settings.GatewayURL
+		options.Models = settings.Models
+	}
+	result := integration.Reconcile(options)
+	c.syncActionsIntegrationRoute(settings, result.DirectSourceID)
 	if withReadback {
-		readback := integration.Readback(account)
+		readback := integration.ReadbackMode(account, mode, result.DirectSourceID)
 		result.Readback = &readback
 		if readback.AccountDigest != "" {
 			// The digest is the profile's own identity, so the result says which
@@ -822,9 +894,14 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 			result.AccountDigest = readback.AccountDigest
 		}
 		// `Applied` is the readback's answer, not the reconcile's: the profile and
-		// the generated config must both hold the models at the configured URL.
-		result.Applied = readback.Holds(settings.GatewayURL) &&
-			(result.State == IntegrationReady || result.State == IntegrationRepaired)
+		// the generated config must both hold the models. In Direct Mode the
+		// evidence is the managed custom source, never the gateway URL.
+		if mode == IntegrationModeDirect {
+			result.Applied = readback.HoldsDirect(settings.DirectSpec)
+		} else {
+			result.Applied = readback.Holds(settings.GatewayURL)
+		}
+		result.Applied = result.Applied && (result.State == IntegrationReady || result.State == IntegrationRepaired)
 		result.Adopted = result.Applied && c.runtimeLoaded(readback.Generation)
 	}
 	c.mu.Lock()

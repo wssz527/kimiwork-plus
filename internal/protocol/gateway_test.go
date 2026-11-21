@@ -269,6 +269,68 @@ func TestMalformedJSONIsRefused(t *testing.T) {
 	}
 }
 
+// The official client now names a BYOK provider by UUID. Both the fixed legacy
+// aliases and a well-formed UUID provider id must resolve to the configured model,
+// while a hand-written "byok-custom/" prefix must not be stripped.
+func TestModelAliasPrefixesResolveTheConfiguredModel(t *testing.T) {
+	fake := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	models := []protocol.Model{chatModel("kimi-probe"), responsesModel("vendor/model")}
+	_, url := startGateway(t, fake.server.URL, models, nil)
+	const uuid = "byok-3d8250d1-cbbc-4f1f-991e-be98b216f34f"
+	for _, test := range []struct {
+		name      string
+		route     string
+		model     string
+		payload   map[string]any
+		status    int
+		wantModel string
+	}{
+		{name: "legacy chat prefix", route: "/chat/completions", model: "byok-kth-kimi/kimi-probe",
+			payload: map[string]any{"messages": []any{}}, status: 200, wantModel: "kimi-probe"},
+		{name: "legacy responses prefix", route: "/responses", model: "byok-kth-resp/vendor/model",
+			payload: map[string]any{"input": "hi"}, status: 200, wantModel: "vendor/model"},
+		{name: "uuid chat prefix", route: "/chat/completions", model: uuid + "/kimi-probe",
+			payload: map[string]any{"messages": []any{}}, status: 200, wantModel: "kimi-probe"},
+		{name: "uppercase uuid responses prefix", route: "/responses",
+			model:   "byok-3D8250D1-CBBC-4F1F-991E-BE98B216F34F/vendor/model",
+			payload: map[string]any{"input": "hi"}, status: 200, wantModel: "vendor/model"},
+		{name: "unknown byok prefix", route: "/chat/completions", model: "byok-custom/kimi-probe",
+			payload: map[string]any{"messages": []any{}}, status: 409},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.payload["model"] = test.model
+			before := len(fake.captured())
+			reply, body := post(t, url, test.route, test.payload, nil)
+			if reply.StatusCode != test.status {
+				t.Fatalf("status %d, want %d: %s", reply.StatusCode, test.status, body)
+			}
+			requests := fake.captured()
+			if test.status != 200 {
+				if len(requests) != before {
+					t.Fatalf("a refused request reached the upstream")
+				}
+				if code := errorCode(t, body); code != "model_not_enabled_for_kimi" {
+					t.Fatalf("error code %q", code)
+				}
+				return
+			}
+			if len(requests) != before+1 {
+				t.Fatalf("upstream saw %d requests, want %d", len(requests), before+1)
+			}
+			var sent map[string]any
+			if err := json.Unmarshal([]byte(requests[len(requests)-1].Body), &sent); err != nil {
+				t.Fatalf("upstream body is not JSON: %v", err)
+			}
+			if sent["model"] != test.wantModel {
+				t.Fatalf("upstream model = %v, want %s", sent["model"], test.wantModel)
+			}
+		})
+	}
+}
+
 // --- payload fidelity ------------------------------------------------------
 
 func TestForwardedBodyKeepsEveryByteExceptModel(t *testing.T) {

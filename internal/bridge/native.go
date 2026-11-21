@@ -39,14 +39,17 @@ type Native struct {
 	admin               byokdns.Administrator
 	dnsReason           string
 	resolverPath        string
-	workCapabilities    kimi.WorkCapabilities
-	quota               *nativeQuota
-	accounts            *accountManager
-	accountActivation   core.Document
-	accountReason       string
-	accountSyncID       string
-	accountSyncAt       time.Time
-	swarm               kimi.SwarmSnapshot
+	// hostsPath overrides the static hosts file a Direct Mode prepare writes. It
+	// exists so a test never writes the machine's real /etc/hosts.
+	hostsPath         string
+	workCapabilities  kimi.WorkCapabilities
+	quota             *nativeQuota
+	accounts          *accountManager
+	accountActivation core.Document
+	accountReason     string
+	accountSyncID     string
+	accountSyncAt     time.Time
+	swarm             kimi.SwarmSnapshot
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -139,9 +142,19 @@ func (n *Native) Configure(d core.Document) error {
 	defer n.mu.Unlock()
 	settings := n.controller.Settings()
 	settings.Models = models
+	mode := core.IntegrationMode(d)
+	settings.IntegrationMode = mode
+	if mode == core.IntegrationModeDirect {
+		settings.DirectSpec = buildDirectSpec(d, n.credentialAvailability(d))
+	} else {
+		settings.DirectSpec = nil
+	}
 	settings.Translation = kimi.TranslationSettings{Enabled: translation.Enabled, Provider: translation.Provider, TargetLanguage: translation.TargetLanguage, View: translation.View}
 	if e := n.controller.Configure(settings); e != nil {
 		return e
+	}
+	if runtime.GOOS == "darwin" && mode == core.IntegrationModeDirect && n.dns != nil && n.directDNSCanStop() {
+		_ = n.dns.Close()
 	}
 	if n.web == nil {
 		if e := n.initEnhancements(); e != nil {
@@ -164,6 +177,12 @@ func (n *Native) watch(ctx context.Context) {
 	n.process = processView(native.Application)
 	n.mu.Unlock()
 	n.runCompatibilityCheck(ctx, native.Contract, false)
+	if !n.modelSyncWriteBlocked() {
+		// An installation upgraded from the Node prototype carries dead
+		// `byok-kwp-*` providers that no store owns, so nothing else will ever
+		// remove them.
+		n.cleanupOrphanedLegacy()
+	}
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	var configObserved os.FileInfo
@@ -278,6 +297,22 @@ func (n *Native) State() core.Document {
 		for k, v := range n.operation {
 			operation[k] = v
 		}
+		var receipt kimi.ImportResult
+		switch value := operation["result"].(type) {
+		case kimi.ImportResult:
+			receipt = value
+		case *kimi.ImportResult:
+			if value != nil {
+				receipt = *value
+			}
+		}
+		if receipt.State != "" || receipt.Reason != "" || receipt.OK {
+			raw, _ := json.Marshal(receipt)
+			var published core.Document
+			if json.Unmarshal(raw, &published) == nil {
+				integration["nativeImport"] = published
+			}
+		}
 	}
 	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "compatibility": n.compatibilitySnapshot(), "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
 	out["workCapabilities"] = n.workCapabilities
@@ -295,9 +330,11 @@ func (n *Native) State() core.Document {
 	out["accounts"] = n.accountsState()
 	out["setup"] = n.byokState()
 	if d, _, e := n.service.Store.Read(); e == nil {
-		for k, v := range n.policies.State(d) {
+		policies := n.policies.State(d)
+		for k, v := range policies {
 			out[k] = v
 		}
+		out["directMode"] = n.directModeState(d, integration, core.Object(policies["search"]))
 	}
 	out["tools"] = n.toolsState(context.Background())
 	out["webTools"] = n.web.State(core.Object(out["search"]))
@@ -370,6 +407,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		timeout := 45 * time.Second
 		if action == "prepare-native" || action == "remove-dns" {
 			timeout = 180 * time.Second
+		} else if action == "connect-kimi" && n.isDirectMode() {
+			// A direct import settles the static hosts entry first, and that can
+			// need one administrator prompt; the gateway path never does.
+			timeout = 180 * time.Second
 		} else if strings.HasPrefix(action, "account-") {
 			timeout = 90 * time.Second
 		}
@@ -395,6 +436,12 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 			result, err = n.accounts.Action(deadline, in)
 			if err == nil {
+				if action == "account-remove" || action == "account-capture" || action == "account-complete-add" {
+					// A removal or a fresh capture resolves whatever the previous
+					// activation reported. Keeping it would leave the overview page
+					// showing a failure or a rollback that no longer describes anything.
+					n.clearStaleAccountActivation()
+				}
 				n.refreshAccountQuota(deadline)
 			}
 		case "launch-kimi":
@@ -425,8 +472,18 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = errors.New(kimi.CompatErrModelSyncBlocked)
 				break
 			}
+			n.cleanupOrphanedLegacy()
 			var imported kimi.ImportResult
-			imported, err = n.controller.ImportModelsAuthorized(deadline)
+			if n.isDirectMode() {
+				// The import needs the intranet name to resolve without this
+				// product's listener, so the static entry is settled first. A
+				// machine that already has it costs no administrator prompt.
+				if err = n.prepareBYOK(deadline); err == nil {
+					imported, err = n.importDirect(deadline)
+				}
+			} else {
+				imported, err = n.controller.ImportModelsAuthorized(deadline)
+			}
 			if err == nil {
 				err = importResultError(imported)
 			}
@@ -440,10 +497,17 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = errors.New(kimi.CompatErrModelSyncBlocked)
 				break
 			}
+			n.cleanupOrphanedLegacy()
 			err = n.prepareBYOK(deadline)
 			var imported *kimi.ImportResult
 			if err == nil {
-				value, importErr := n.controller.ImportModelsAuthorized(deadline)
+				var value kimi.ImportResult
+				var importErr error
+				if n.isDirectMode() {
+					value, importErr = n.importDirect(deadline)
+				} else {
+					value, importErr = n.controller.ImportModelsAuthorized(deadline)
+				}
 				imported = &value
 				err = importErr
 			}
@@ -481,6 +545,19 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		n.finishOperation(id, state, result, err)
 	}()
 	return core.Document{"operation": initial}, nil
+}
+
+// importDirect runs one Direct Mode import. The request holds the provider keys,
+// so it stays local to this call: it is never stored on the operation, in a
+// state file or in the settings.
+func (n *Native) importDirect(ctx context.Context) (kimi.ImportResult, error) {
+	request, err := n.directImportFor()
+	if err != nil {
+		return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(err)}, err
+	}
+	result, err := n.controller.ImportDirectAuthorized(ctx, request)
+	request = kimi.DirectImportRequest{}
+	return result, err
 }
 
 func (n *Native) finishOperation(id, state string, result any, err error) {

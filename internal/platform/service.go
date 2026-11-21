@@ -101,10 +101,19 @@ func serviceArguments(options ServiceOptions) []string {
 // is what decides to start it again, and a restart loop would hide the failure
 // instead of reporting it.
 func describeLaunchd(options ServiceOptions, loginStart bool) ServiceDescription {
-	definition := filepath.Join(homeDirectory(), "Library", "LaunchAgents", ServiceLabel+".plist")
+	home := serviceHome(options)
+	definition := filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".plist")
 	logPath := options.LogPath
 	if logPath == "" {
-		logPath = filepath.Join(filepath.Dir(definition), ServiceLabel+".log")
+		// The log belongs with the daemon's state, or in the user's Logs
+		// directory. It must never sit next to the plist in LaunchAgents: that
+		// directory holds definitions, and a log file there is neither read by
+		// launchd nor removed with the definition.
+		if options.StateDir != "" {
+			logPath = filepath.Join(options.StateDir, "launchd-daemon.log")
+		} else {
+			logPath = filepath.Join(home, "Library", "Logs", "KimiWorkPlus", ServiceLabel+".log")
+		}
 	}
 	var program strings.Builder
 	program.WriteString("    <key>ProgramArguments</key>\n    <array>\n")
@@ -175,11 +184,11 @@ func describeLaunchd(options ServiceOptions, loginStart bool) ServiceDescription
 // documents for a program the signed-in user starts at login, and it is what the
 // Explorer shell launches.
 //
-// The definition file is written next to the preview's own configuration. It
+// The definition file is written next to the product's own configuration. It
 // records what the registration was for, and it is what Status reads the build from
 // without trusting the daemon's own report.
 func describeWindowsRegistry(options ServiceOptions, loginStart bool) ServiceDescription {
-	definition := definitionPathFor("windows", windowsHome(options))
+	definition := definitionPathFor("windows", serviceHome(options))
 	commandLine := windowsCommandLine(options)
 	install := [][]string{
 		{"<write-definition>", definition},
@@ -187,7 +196,7 @@ func describeWindowsRegistry(options ServiceOptions, loginStart bool) ServiceDes
 	}
 	notes := []string{
 		"A per-user Run key needs no elevation: a medium integrity process cannot create an ONLOGON task at all.",
-		"Deleting the value removes only this preview's entry; nothing else in the Run key is touched.",
+		"Deleting the value removes only this product's entry; nothing else in the Run key is touched.",
 	}
 	if loginStart {
 		install = [][]string{
@@ -215,15 +224,17 @@ func describeWindowsRegistry(options ServiceOptions, loginStart bool) ServiceDes
 	}
 }
 
-// windowsHome is the home directory a definition path is rendered against.
-func windowsHome(options ServiceOptions) string {
+// serviceHome is the home directory a definition path is rendered against. Both
+// platforms honor the override for the same reason: a rendering must be
+// inspectable without touching the real home.
+func serviceHome(options ServiceOptions) string {
 	if options.Home != "" {
 		return options.Home
 	}
 	return homeDirectory()
 }
 
-// windowsDefinitionContent is the JSON record written next to the preview's own
+// windowsDefinitionContent is the JSON record written next to the product's own
 // configuration. It is deliberately not the login-start mechanism: the Run value
 // is, and this file only says what was registered and by which build.
 func windowsDefinitionContent(options ServiceOptions, loginStart bool) string {
@@ -250,8 +261,8 @@ func windowsTerminateCommand(options ServiceOptions) []string {
 
 // windowsCommandLine is what the Run value holds: the daemon started in the
 // background, quoted the way CommandLineToArgvW parses it. Explorer passes the
-// value to CreateProcess unchanged, so an unquoted path with a space — the preview
-// is "Kimi Work+ Preview.app" on macOS and a folder with the same name on Windows —
+// value to CreateProcess unchanged, so an unquoted path with a space — the
+// product is "Kimi Work+.app" on macOS and a folder with the same name on Windows —
 // would be split into the wrong executable.
 func windowsCommandLine(options ServiceOptions) string {
 	arguments := append([]string{"--start-background"}, serviceArguments(options)...)
@@ -295,7 +306,7 @@ func boolTag(value bool) string {
 //   - a run of backslashes followed by a quote is doubled and the quote escaped;
 //   - a run of backslashes immediately before the closing quote is doubled.
 //
-// The preview's own path contains a space and a "+", which is exactly the case an
+// The product's own path contains a space and a "+", which is exactly the case an
 // unquoted value breaks.
 func quoteWindows(value string) string {
 	var out strings.Builder

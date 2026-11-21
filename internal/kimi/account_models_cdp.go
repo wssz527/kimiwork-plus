@@ -42,6 +42,7 @@ func (a *cdpActions) legacyAccountModelConfig(ctx context.Context, page accountP
 // The Work shell exposes the read-only model source list in 3.2.28. The desktop
 // target is a fallback for builds that expose the same list on clawBridgeAPI.
 func (a *cdpActions) accountModelConfigV3(ctx context.Context, page accountPage) (accountModelConfig, error) {
+	mode, directSourceID := a.integrationRoute()
 	for _, session := range a.modelSessions(ctx, page) {
 		value, err := a.evaluate(ctx, session, accountModelStoreV3Expression)
 		if err != nil {
@@ -51,7 +52,7 @@ func (a *cdpActions) accountModelConfigV3(ctx context.Context, page accountPage)
 		if ok, _ := raw["ok"].(bool); !ok {
 			continue
 		}
-		if config, err := accountStoreV3Config(raw); err == nil {
+		if config, err := accountStoreV3ConfigFor(raw, mode, directSourceID); err == nil {
 			return config, nil
 		}
 	}
@@ -104,8 +105,19 @@ func accountProfileConfig(profile map[string]any) (accountModelConfig, error) {
 // own word for applied and not blocked; `pending`, `unconfirmed`, `delisted` and
 // `disconnected` are not.
 func accountStoreV3Config(raw map[string]any) (accountModelConfig, error) {
+	return accountStoreV3ConfigFor(raw, IntegrationModeGateway, "")
+}
+
+// accountStoreV3ConfigFor reads either the gateway's kth source or, in Direct
+// Mode, the managed custom source. In Direct Mode the runtime check must look
+// at that source: reading byok-kth there would report the models as missing even
+// when the direct import is loaded.
+func accountStoreV3ConfigFor(raw map[string]any, mode, directSourceID string) (accountModelConfig, error) {
 	sources, _ := raw["sources"].([]any)
 	source := kthSourceRow(sources)
+	if mode == IntegrationModeDirect {
+		source = directSourceRow(sources, directSourceID)
+	}
 	if source == nil {
 		return accountModelConfig{}, errors.New(AccountErrUnavailable)
 	}
@@ -166,6 +178,26 @@ func kthSourceRow(sources []any) map[string]any {
 		}
 	}
 	return fallback
+}
+
+// directSourceRow finds the managed direct custom source in a page snapshot. The
+// id may have changed across a sync, so the display name is the fallback.
+func directSourceRow(sources []any, sourceID string) map[string]any {
+	if sourceID != "" {
+		for _, row := range sources {
+			source, ok := row.(map[string]any)
+			if ok && stringField(source, "id") == sourceID && stringField(source, "kind") == "custom" {
+				return source
+			}
+		}
+	}
+	for _, row := range sources {
+		source, ok := row.(map[string]any)
+		if ok && stringField(source, "kind") == "custom" && stringField(source, "displayName") == DirectDisplayName {
+			return source
+		}
+	}
+	return nil
 }
 
 // accountModelConfigExpression reads the released build's own profile call.

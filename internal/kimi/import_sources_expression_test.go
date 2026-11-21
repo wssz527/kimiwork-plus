@@ -54,7 +54,7 @@ globalThis.clawBridgeAPI={byokSources:{
 			if value, err := vm.RunString(importProbeExpression); err != nil || !value.ToBoolean() {
 				t.Fatalf("new source API was not detected: %v, %v", value, err)
 			}
-			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1/") + `).then(result=>globalThis.importResult=result);`); err != nil {
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1/", "") + `).then(result=>globalThis.importResult=result);`); err != nil {
 				t.Fatal(err)
 			}
 			result := vm.Get("importResult")
@@ -97,7 +97,7 @@ globalThis.clawBridgeAPI={byokSources:{
 `); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1/") + `).then(r=>globalThis.res=r);`); err != nil {
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1/", "") + `).then(r=>globalThis.res=r);`); err != nil {
 				t.Fatal(err)
 			}
 			got := vm.Get("seenName").String()
@@ -156,7 +156,7 @@ globalThis.clawBridgeAPI={byokSources:{
 `); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1") + `).then(result=>globalThis.importResult=result);`); err != nil {
+		if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1", "") + `).then(result=>globalThis.importResult=result);`); err != nil {
 			t.Fatal(err)
 		}
 		result := vm.Get("importResult").ToObject(vm)
@@ -206,7 +206,7 @@ globalThis.clawBridgeAPI={byokSources:{
 `); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1") + `).then(result=>globalThis.importResult=result);`); err != nil {
+				if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:63501/v1", "") + `).then(result=>globalThis.importResult=result);`); err != nil {
 					t.Fatal(err)
 				}
 				result := vm.Get("importResult").ToObject(vm)
@@ -220,4 +220,69 @@ globalThis.clawBridgeAPI={byokSources:{
 			})
 		}
 	})
+}
+
+func TestGatewayImportDisconnectsDirectOnlyAfterReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failPreview    bool
+		failDisconnect bool
+		wantCalls      string
+		wantOK         bool
+		wantPending    bool
+	}{
+		{name: "applied before cleanup", wantCalls: "list,preview,save,list,apply,list,disconnect", wantOK: true},
+		{name: "preview failure preserves direct", failPreview: true, wantCalls: "list,preview"},
+		{name: "cleanup failure is retryable", failDisconnect: true,
+			wantCalls: "list,preview,save,list,apply,list,disconnect", wantOK: true, wantPending: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			if _, err := vm.RunString(`
+const calls=[];
+let directConnected=true;
+let imported=false;
+const direct={id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"};
+const gateway={id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"};
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok({scopeToken:"scope",accountRevision:imported?"r2":"r1",sources:(directConnected?[direct]:[]).concat([gateway])});},
+  preview(){calls.push("preview");if(` + boolString(tc.failPreview) + `)return {ok:false,reasonCode:"preview-refused"};
+    return ok({scopeToken:"scope",accountRevision:"r1",sourceRevision:"k1",sourceId:"byok-kth",previewId:"p1",canSave:true,candidates:[{id:"m1"}]});},
+  save(){calls.push("save");imported=true;return ok({sourceId:"byok-kth",accountRevision:"r2",status:"pending"});},
+  applyPending(){calls.push("apply");return ok({status:"applied"});},
+  disconnect(request){calls.push("disconnect");if(` + boolString(tc.failDisconnect) + `)return {ok:false,reasonCode:"disconnect-refused"};
+    if(request.sourceId!=="direct-source")throw new Error("wrong source");directConnected=false;return ok({});},
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1", "direct-source") + `).then(result=>globalThis.result=result,error=>globalThis.failure=String(error&&error.stack||error));`); err != nil {
+				t.Fatal(err)
+			}
+			if vm.Get("result") == nil {
+				t.Fatalf("page expression rejected: %v", vm.Get("failure"))
+			}
+			result := vm.Get("result").ToObject(vm)
+			pending := result.Get("routeCleanupPending") != nil && result.Get("routeCleanupPending").ToBoolean()
+			if result.Get("ok").ToBoolean() != tc.wantOK || pending != tc.wantPending {
+				t.Fatalf("result = %v, failure = %v", result, vm.Get("failure"))
+			}
+			calls, _ := vm.RunString(`calls.join(",")`)
+			if calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s", calls, tc.wantCalls)
+			}
+			connected, _ := vm.RunString(`directConnected`)
+			if tc.failPreview && !connected.ToBoolean() {
+				t.Fatal("a failed gateway preview disconnected the working direct source")
+			}
+		})
+	}
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }

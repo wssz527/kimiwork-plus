@@ -927,3 +927,46 @@ test('failed switch after verified rollback offers plain Kimi restart instead of
     assert.deepEqual(actions, ['account-switch', 'restart-kimi']);
   } finally { env.restore(); }
 });
+
+/* 热回滚后凭据失效的是「刚才想切过去的那个账号」，原账号已经恢复。
+   这里守住两个方向：不能说成当前窗口需要登录，也不能把正常的待登录状态吞掉。 */
+test('a rolled-back switch blames the target account instead of the restored one', () => {
+  const env = makePlus({ data: { accounts: {
+    state: 'ready', currentId: 'acct-a', accounts: [{ id: 'acct-a', name: '原账号' }],
+    activation: { state: 'restored', rolledBack: true, requiresLogin: true },
+  } } });
+  try {
+    env.panel.render(env.getState());
+    const text = textOf(env.byId('plus-overview-account'));
+    assert.match(text, /已恢复原账号/);
+    assert.match(text, /所选账号需重新登录/);
+    assert.doesNotMatch(text, /需要在该窗口登录/);
+  } finally { env.restore(); }
+});
+
+test('a switch that still needs a login keeps the login prompt', () => {
+  const env = makePlus({ data: { accounts: {
+    state: 'ready', currentId: 'acct-a', accounts: [{ id: 'acct-a', name: 'A' }],
+    activation: { state: 'needs-login', requiresLogin: true },
+  } } });
+  try {
+    env.panel.render(env.getState());
+    const text = textOf(env.byId('plus-overview-account'));
+    assert.match(text, /需要在该窗口登录/);
+    assert.doesNotMatch(text, /所选账号需重新登录/);
+  } finally { env.restore(); }
+});
+
+/* state=failed 但已明确 rolledBack 时，同样属于回到原账号回执。 */
+test('a rolled-back failure keeps the target-account wording', () => {
+  const env = makePlus({ data: { accounts: {
+    state: 'ready', currentId: 'acct-a', accounts: [{ id: 'acct-a', name: '原账号' }],
+    activation: { state: 'failed', rolledBack: true, requiresLogin: true },
+  } } });
+  try {
+    env.panel.render(env.getState());
+    const text = textOf(env.byId('plus-overview-account'));
+    assert.match(text, /所选账号需重新登录/);
+    assert.doesNotMatch(text, /需要在该窗口登录/);
+  } finally { env.restore(); }
+});

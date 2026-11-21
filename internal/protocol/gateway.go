@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -670,12 +669,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		refuse(http.StatusBadRequest, "invalid_model")
 		return nil
 	}
-	for _, prefix := range Aliases {
-		if strings.HasPrefix(modelName, prefix) {
-			modelName = modelName[len(prefix):]
-			break
-		}
-	}
+	modelName = stripModelAliasPrefix(modelName)
 	var selected *Model
 	for i := range models {
 		if models[i].ID == modelName {

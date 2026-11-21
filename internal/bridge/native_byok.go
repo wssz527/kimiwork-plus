@@ -44,7 +44,8 @@ func (n *Native) byokFlagFile() string {
 }
 
 func (n *Native) byokSetup() *byokdns.Setup {
-	return &byokdns.Setup{FlagFile: n.byokFlagFile(), Admin: n.admin, Probe: n.probe, ResolverPath: n.resolverPath}
+	return &byokdns.Setup{FlagFile: n.byokFlagFile(), Admin: n.admin, Probe: n.probe, ResolverPath: n.resolverPath,
+		HostsPath: n.hostsPath, RequireStaticHosts: n.isDirectMode()}
 }
 
 func (n *Native) byokState() core.Document {
@@ -60,6 +61,10 @@ func (n *Native) byokState() core.Document {
 	_ = json.Unmarshal(raw, &out)
 	dns := core.Document{"state": "hosts"}
 	if runtime.GOOS == "darwin" {
+		// A static /etc/hosts entry answers the lookup with no listener running,
+		// which is the state Direct Mode needs; the listener's own state stays
+		// reported, because a gateway-mode installation still uses it.
+		staticHosts := byokdns.HasManagedHostsEntry(n.darwinHostsPath())
 		dns["state"] = "stopped"
 		if n.dns != nil && n.dns.Port() != 0 {
 			dns["state"] = "ready"
@@ -68,6 +73,14 @@ func (n *Native) byokState() core.Document {
 			dns["state"] = "unavailable"
 			dns["reason"] = dnsReason
 		}
+		if staticHosts {
+			dns["state"] = "hosts"
+			dns["staticHosts"] = true
+		} else {
+			dns["staticHosts"] = false
+		}
+	} else {
+		dns["staticHosts"] = true
 	}
 	out["dns"] = dns
 	return out
@@ -75,6 +88,24 @@ func (n *Native) byokState() core.Document {
 
 func (n *Native) prepareBYOK(ctx context.Context) error {
 	n.probe.Invalidate()
+	// Direct Mode resolves the intranet name from a static hosts entry, so a
+	// listener that cannot bind is not a failure: the port is not used at all.
+	// The one administrator step writes that entry and removes the resolver an
+	// earlier release installed; once the entry is in place the call costs none.
+	if runtime.GOOS == "darwin" && n.isDirectMode() {
+		if err := n.byokSetup().Run(ctx, "prepare"); err != nil {
+			return err
+		}
+		if n.dns != nil {
+			_ = n.dns.Close()
+		}
+		n.probe.Invalidate()
+		status := n.probe.Check(ctx, n.byokFlagFile())
+		if !status.Intranet.Passed {
+			return errors.New("native_byok_intranet_unavailable")
+		}
+		return nil
+	}
 	if runtime.GOOS == "darwin" {
 		if err := n.dns.Start(byokdns.DNSPort); err != nil {
 			n.mu.Lock()

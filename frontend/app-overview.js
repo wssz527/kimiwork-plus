@@ -1,7 +1,7 @@
 import { applyState, configInfo, configReady, onboardBusy, renderOnboard } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, INTEGRATION_MODES, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
-import { loadState, runAction, setView } from './app.js';
+import { handleSaveFailure, loadState, runAction, setView } from './app.js';
 
 /* ---------- render: shell ---------- */
 
@@ -19,7 +19,8 @@ function renderShell(data) {
     setText(dom.restartBannerText, '连接配置已修改，当前网关仍在使用启动时的设置。请到「模型」页点「应用已保存的连接」，由后台服务在安全时应用；页面会如实显示是否生效。');
   }
   setText(dom.navModelCount, fmtCount((data.models || []).length));
-  const budgetMessage = budgetNotice(data.budget);
+  /* 直连模式下预算保护不参与请求，再显示「已达预算」只会让用户以为被拦住了。 */
+  const budgetMessage = savedIntegrationMode(data) === 'direct' ? '' : budgetNotice(data.budget);
   setHidden(dom.budgetBanner, !budgetMessage);
   setText(dom.budgetBannerText, budgetMessage);
 }
@@ -50,6 +51,10 @@ function syncState(data) {
   const preparation = info.preparation || {};
   const receipt = info.nativeImport || {};
   const models = Array.isArray(data && data.models) ? data.models : [];
+  /* 直连模式的判断必须排在网关分支之前：在直连下，官方 Kimi 直接访问服务商，
+     网关是否运行、有没有受管子进程都不影响模型可用性。 */
+  const direct = directModeState(data);
+  if (direct) return direct;
   if (preparation.state === 'preparing') {
     return { code: 'authorizing', tone: 'warn', word: '等待系统授权',
       note: '正在准备首次接入，请在本机窗口处理系统授权。' };
@@ -177,9 +182,143 @@ function syncState(data) {
     note: '模型目录已保存，但还没有交给 Kimi 完成核对；用「打开 / 启动 Kimi」继续，后台会在空闲时接入。' };
 }
 
+/* ---------- 接入模式：本机网关 / 零网关直连 ---------- */
+
+/* 缺省一律按网关处理：老后端不会返回这两个字段，界面必须保持旧行为。 */
+function savedIntegrationMode(data) {
+  return data?.integrationMode === 'direct' ? 'direct' : 'gateway';
+}
+
+function effectiveIntegrationMode(data) {
+  return data?.integration?.mode === 'direct' ? 'direct' : 'gateway';
+}
+
+function directModeOf(data) {
+  const direct = data?.directMode;
+  return direct && typeof direct === 'object' ? direct : null;
+}
+
+/* 切换收尾：新配置已写入并读回，但旧的受管来源还没清理掉。
+   directMode 的布尔值来自最近一次导入回执，回执本身也要看（旧后端只给后者）。
+   这时说「直连已就绪」「切换全部完成」都会让人以为可以退出后台。 */
+function directRouteCleanupPending(data) {
+  if (directModeOf(data)?.routeCleanupPending === true) return true;
+  const receipt = data?.integration?.nativeImport;
+  return receipt?.routeCleanupPending === true || receipt?.reason === 'route_cleanup_pending';
+}
+
+/* 直连写入是否已经落到官方 Kimi。skippedModels 里的模型本来就不会被写入，
+   所以不能拿别名总数和 totalModels 比；必须按后端给出的可导入模型 ID 逐个
+   核对，且回执要同时是 ready 与 applied（applied 才代表官方 store 和生成的
+   config 都读到了，不只是请求被接受）。旧后端没有 eligibleModelIds 时用
+   readback.modelAliases 作为 spec 已被读回覆盖的证据；两者都没有时只采信
+   adopted 回执，不凭数量猜测当前内容。 */
+function directImportComplete(data) {
+  const info = data?.integration || {};
+  if (info.mode !== 'direct') return false;
+  if (info.state !== 'ready' || info.applied !== true) return false;
+  const aliases = info.aliases && typeof info.aliases === 'object' ? info.aliases : {};
+  const hasAlias = (id) => Object.prototype.hasOwnProperty.call(aliases, id);
+  const direct = directModeOf(data);
+  if (Array.isArray(direct?.eligibleModelIds)) {
+    const ids = direct.eligibleModelIds.filter((id) => typeof id === 'string' && id);
+    return ids.length > 0 && ids.every(hasAlias);
+  }
+  const readbackAliases = info.readback?.modelAliases;
+  if (readbackAliases && typeof readbackAliases === 'object') {
+    const recorded = Object.keys(readbackAliases)
+      .filter((id) => typeof readbackAliases[id] === 'string' && readbackAliases[id]);
+    return recorded.length > 0 && recorded.every(hasAlias);
+  }
+  return info.adopted === true;
+}
+
+/* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
+   默认值是 hosts，拿它回退等于跳过真实检查。只有老后端根本没有 directMode
+   行时才允许看 setup。 */
+function directStaticHostsReady(data) {
+  const direct = directModeOf(data);
+  if (direct) return direct.staticHostsReady === true;
+  return data?.setup?.dns?.state === 'hosts';
+}
+
+/* 直连模式下 syncState 的唯一入口。返回 null 表示「这句话交给网关分支说」。 */
+function directModeState(data) {
+  if (savedIntegrationMode(data) !== 'direct') return null;
+  const info = data?.integration || {};
+  const direct = directModeOf(data);
+  /* 官方版本不支持直连时，任何「待写入」都是误导：再同步也不会成功。 */
+  if (direct?.supported === false) {
+    return { code: 'unsupported', tone: 'bad', word: '当前官方 Kimi 不支持直连',
+      note: '原生直连需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。' };
+  }
+  /* directImportComplete 已经要求 integration.mode === 'direct'。 */
+  const synced = directImportComplete(data);
+  /* 一个可直连模型都没有：无论回执怎么写，模型目录都进不了官方 Kimi。
+     新后端给 eligibleModelIds 时它就是更精确的答案（空数组同样是证据）。 */
+  const noEligible = Array.isArray(direct?.eligibleModelIds)
+    ? direct.eligibleModelIds.every((id) => typeof id !== 'string' || !id)
+    : direct?.eligibleModels === 0;
+  if (direct && noEligible) {
+    return { code: 'pending', tone: 'warn', word: '没有可直连的模型',
+      note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在模型页补齐，再同步到 Work。' };
+  }
+  /* 切换收尾未完成：新配置已写入，但旧来源还在。必须排在「待写入」之前：
+     这时说「待写入直连配置」同样会让人以为还没写，而实际上只差清理。
+     说「已就绪」则更糟，会让人直接退出后台并以为旧路由已经清理。 */
+  if (directRouteCleanupPending(data)) {
+    return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
+      note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
+  }
+  /* 还没同步到官方 Kimi：无论 Kimi 是否在跑，下一步都是写入直连配置。 */
+  if (!synced) {
+    return { code: 'pending', tone: 'warn', word: '待写入直连配置',
+      note: '已选择零网关直连模式；请打开 Kimi 并点「同步到 Work」写入服务商地址与静态 hosts。' };
+  }
+  /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
+     默认值是 hosts，拿它回退等于跳过真实检查。 */
+  if (directStaticHostsReady(data)) {
+    /* 用户直接双击官方 Kimi 时没有受管子进程，但直连本来就不依赖它：
+       这时给警告让人「重启成受管进程」是错的。 */
+    if (data?.kimiProcess?.running === true && info.desktop?.managed === false) {
+      return { code: 'ready', tone: 'ok', word: '直连运行中（免开本软件）',
+        note: '官方 Kimi 正直连第三方模型，无需保持 KimiWork + 运行。如需思考翻译或多账号切换，再从这里重启托管。' };
+    }
+    return { code: 'ready', tone: 'ok', word: '直连已就绪',
+      note: '已写入直连模型与静态 hosts，退出本软件及后台服务后也可直接在官方 Kimi 中使用。' };
+  }
+  /* 模型写进去了、静态 hosts 还没补齐：这时说「已就绪」会让人以为能退出后台。 */
+  return { code: 'pending', tone: 'warn', word: '待补齐静态 hosts',
+    note: '直连模型已写入官方 Kimi；请再点一次「同步到 Work」写入静态 hosts，之后才能彻底退出后台服务。' };
+}
+
 function nativeConnectionText(data) {
   const info = data.integration || {};
   const preparation = info.preparation || {};
+  /* 直连模式下官方 Kimi 不经过网关，所以网关侧的 DNS/桥接文案都不成立。 */
+  if (savedIntegrationMode(data) === 'direct') {
+    const direct = directModeOf(data);
+    if (direct?.supported === false) {
+      return '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。';
+    }
+    const reason = info.reason || info.nativeImport?.reason || '';
+    /* 收尾未完成不等同导入失败：新配置已写入，只是旧来源还留着。
+       这句话必须排在失败码之前，否则 reason 会把它说成一次失败。 */
+    if (directRouteCleanupPending(data)) {
+      return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
+    }
+    /* 失败码由 app-core 统一归一化（native_import_ 前缀、连字符形式），
+       这里不再维护第二张码表，避免两处文案各说一套。 */
+    const directText = directReasonText(reason);
+    if (directText) return directText;
+    if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
+    if (directImportComplete(data)) {
+      return directStaticHostsReady(data)
+        ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出本软件与后台服务后仍可直接使用这些模型。'
+        : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。';
+    }
+    return '已选择零网关直连模式，但还没有写入官方 Kimi；请在模型页点「同步到 Work」。';
+  }
   if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
   if (preparation.state === 'cancelled') return '上次系统授权已取消。点「打开 / 启动 Kimi」或「重新准备接入」可继续。';
   if (preparation.state === 'failed' || preparation.state === 'interrupted') return '接入准备未完成，请检查系统授权后重试。';
@@ -251,6 +390,27 @@ function nativeConnectionText(data) {
 }
 
 
+/* 直连模式下网关仍在运行是正常的（翻译、账号切换还要用它），
+   但必须说清楚：退出后台不影响第三方模型。 */
+function renderGatewayModeFact(data) {
+  const el = dom.factGatewayMode;
+  if (!el) return;
+  const direct = savedIntegrationMode(data) === 'direct';
+  if (!direct) {
+    setHidden(el, true);
+    setText(el, '');
+    return;
+  }
+  setHidden(el, false);
+  const ready = directImportComplete(data) && directStaticHostsReady(data);
+  setText(el, directRouteCleanupPending(data)
+    ? '直连模式 · 切换收尾未完成，暂不要退出后台'
+    : ready
+      ? '直连模式 · 退出后台后第三方模型仍可用'
+      : '直连模式 · 尚未写入直连配置');
+}
+
+
 function renderOverview(data) {
   setText($('native-state'), nativeConnectionText(data));
   const scope = desktopScopeInfo(data);
@@ -265,6 +425,7 @@ function renderOverview(data) {
   setDot(dom.factGatewayDot, running ? 'ok' : 'bad');
   setText(dom.factGateway, running ? '运行中' : '已停止');
   setText(dom.factGatewayUrl, gw.url || '—');
+  renderGatewayModeFact(data);
 
   const models = Array.isArray(data.models) ? data.models : [];
   setText(dom.factModels, fmtCount(models.length) + ' 个模型');
@@ -456,7 +617,14 @@ async function refreshOverviewToday({ force = false } = {}) {
 
 function computeOverviewIssue(data) {
   const gw = (data && data.gateway) || {};
-  if (gw.state !== 'running') {
+  const directMode = savedIntegrationMode(data) === 'direct';
+  const directVerdict = directMode ? directModeState(data) : null;
+  /* 直连配置已读回且 hosts 就绪时，旧来源待清理不会让新直连失效。
+     此时应展示收尾提示，不能误报成「模型请求当前无法发出」。 */
+  const directReady = directMode && directImportComplete(data) && directStaticHostsReady(data);
+  /* 官方版本不支持直连时，重起网关解决不了这个限制：先说清版本前提。 */
+  const directUnsupported = directVerdict?.code === 'unsupported';
+  if (gw.state !== 'running' && !directReady && !directUnsupported) {
     return {
       tone: 'bad',
       title: '本机网关未运行',
@@ -485,7 +653,8 @@ function computeOverviewIssue(data) {
       action: { type: 'section', view: 'models', section: 'restart-panel' },
     };
   }
-  const budgetMessage = budgetNotice(data && data.budget);
+  /* 直连模式下预算不参与请求：这里报「已达到上限」会让人误以为请求被拒。 */
+  const budgetMessage = savedIntegrationMode(data) === 'direct' ? '' : budgetNotice(data && data.budget);
   if (budgetMessage) {
     return {
       tone: 'warn',
@@ -514,7 +683,9 @@ function computeOverviewIssue(data) {
       action: { type: 'action', action: 'restart-kimi' },
     };
   }
-  if (verdict.code !== 'synced') {
+  /* 直连成功用的是 ready，网关成功用的是 synced：两者都是「没有待处理
+     接入问题」，不能因为码名不同就把正常的直连当成问题。 */
+  if (verdict.code !== 'synced' && verdict.code !== 'ready') {
     return {
       tone: verdict.tone || 'warn',
       title: verdict.word,
@@ -759,7 +930,9 @@ function renderActions(data) {
   if (data && !onboardBusy()) renderOnboard();
   if (!state.actionButtons.length) return;
   const running = isInFlight(data && data.operation);
-  const busy = running || state.modelsSaving || state.connsSaving;
+  /* 保存模式期间也锁定同步按钮：否则 renderActions 会把 renderIntegrationMode
+     刚设好的禁用态改回可用，用户能在半保存状态下点同步。 */
+  const busy = running || state.modelsSaving || state.connsSaving || integrationModeSaving;
   const ready = configReady(data);
   const alreadyRunning = data?.kimiProcess?.running === true;
   const modelSyncBlocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
@@ -791,6 +964,35 @@ function renderWorkspaceSync(data) {
     setHidden($('workspace-restart'), true);
     return;
   }
+  const mode = savedIntegrationMode(data);
+  const effective = effectiveIntegrationMode(data);
+  /* 模式改了但官方 Kimi 还停在另一种走法：先说「需要再同步一次」，
+     不能因为旧别名还在就显示成已同步。 */
+  const modeChanged = models.length > 0 && mode !== effective;
+  // Direct mode can legitimately leave models behind (no tools, no key, ...),
+  // so completeness is measured against the eligible set, never the total.
+  if (mode === 'direct') {
+    /* directImportComplete 已经要求官方 Kimi 处于 direct，所以模式改了这里必然是 false。 */
+    const synced = directImportComplete(data);
+    const hosts = directStaticHostsReady(data);
+    const cleanup = directRouteCleanupPending(data);
+    setText($('workspace-sync-state'), cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Work' : '待写入直连配置');
+    setText($('workspace-sync-note'), cleanup
+      ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
+      : synced
+        ? (hosts
+          ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出 KimiWork + 与后台服务后仍可直接使用这些模型。'
+          : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
+        : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
+    setHidden($('workspace-restart'), cleanup || !(synced && integration.applied && !integration.adopted));
+    return;
+  }
+  if (modeChanged) {
+    setText($('workspace-sync-state'), '待切回网关并同步');
+    setText($('workspace-sync-note'), '已切回本机网关模式。点击「同步到 Work」将官方 Kimi 恢复为本机网关路由。');
+    setHidden($('workspace-restart'), true);
+    return;
+  }
   const imported = Object.keys(integration.aliases || {}).sort();
   const saved = models.map(model => model.id).sort();
   const matches = JSON.stringify(imported) === JSON.stringify(saved);
@@ -801,6 +1003,129 @@ function renderWorkspaceSync(data) {
   setHidden($('workspace-restart'), !restart);
 }
 
+
+/* ---------- 设置页：接入模式选择器 ---------- */
+
+let integrationModeSaving = false;
+
+function integrationModeBusy(data) {
+  return integrationModeSaving || isInFlight(data?.operation);
+}
+
+function renderIntegrationMode(data) {
+  const saved = savedIntegrationMode(data);
+  const effective = effectiveIntegrationMode(data);
+  const busy = integrationModeBusy(data);
+  for (const input of [dom.modeGateway, dom.modeDirect]) {
+    if (!input) continue;
+    /* 保存中不回写选中态：否则用户刚点的选项会在轮询里弹回旧值。 */
+    if (!integrationModeSaving) input.checked = input.value === saved;
+    input.disabled = busy;
+  }
+  if (dom.integrationModeGroup) dom.integrationModeGroup.dataset.saving = integrationModeSaving ? 'true' : 'false';
+
+  const direct = directModeOf(data);
+  const directSaved = saved === 'direct';
+  /* 未同步时把话说在按钮上：用户点的是同一次同步动作，但结果不同。 */
+  const pendingSync = directSaved !== (effective === 'direct') || (directSaved && !directImportComplete(data));
+  if (dom.integrationModeState) {
+    const showState = pendingSync || (directSaved && direct?.supported === false);
+    setHidden(dom.integrationModeState, !showState);
+    dom.integrationModeState.classList.toggle('note--warn', showState);
+    setText(dom.integrationModeState, !showState ? ''
+      : direct?.supported === false && directSaved
+        ? '模式已更改，尚未同步到 Kimi Work：当前官方 Kimi 版本不支持原生直连，请改用本机网关模式。'
+        : '模式已更改，尚未同步到 Kimi Work。');
+  }
+  if (dom.nativeSyncLabel) {
+    setText(dom.nativeSyncLabel, directSaved
+      ? (directRouteCleanupPending(data) ? '重试清理旧来源并同步' : '写入直连配置并同步')
+      : pendingSync ? '切回网关并同步' : '重新准备接入');
+  }
+  if (dom.nativeSync) {
+    const blocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
+    dom.nativeSync.disabled = busy || blocked;
+    dom.nativeSync.classList.toggle('is-busy', integrationModeSaving);
+    dom.nativeSync.setAttribute('aria-busy', integrationModeSaving ? 'true' : 'false');
+  }
+
+  const notice = dom.directModeNotice;
+  if (!notice) return;
+  setHidden(notice, !directSaved);
+  if (!directSaved) return;
+  notice.dataset.tone = direct?.supported === false || directRouteCleanupPending(data) ? 'warn' : 'neutral';
+  setText(dom.directModeSupport, direct?.supported === false
+    ? '当前官方 Kimi 版本不支持原生直连：需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。'
+    : directRouteCleanupPending(data)
+      ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
+      : directImportComplete(data)
+        ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
+        : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
+  setText(dom.directModeHosts, directRouteCleanupPending(data)
+    ? '重新点「同步到 Work」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
+    : directStaticHostsReady(data)
+      ? '静态 hosts 已就绪，直连同步完成后可彻底停止后台服务与退出 KimiWork +。'
+      : '首次同步直连模式时将写入一次静态 hosts（并清理旧单域名 DNS 配置），之后不再依赖后台 DNS。');
+
+  const bypassed = Array.isArray(direct?.activeFeaturesBypassed) ? direct.activeFeaturesBypassed : [];
+  const bypassNames = bypassed.map((key) => DIRECT_BYPASS_WORD[key]).filter(Boolean);
+  if (dom.directModeBypassed) {
+    setHidden(dom.directModeBypassed, bypassNames.length === 0);
+    dom.directModeBypassed.classList.add('direct-notice__line--list');
+    setText(dom.directModeBypassed, bypassNames.length
+      ? '以下已开启的功能在直连模式下不生效：' + bypassNames.join('、') + '。'
+      : '');
+  }
+
+  const skipped = Array.isArray(direct?.skippedModels) ? direct.skippedModels : [];
+  if (dom.directModeSkipped) {
+    setHidden(dom.directModeSkipped, skipped.length === 0);
+    dom.directModeSkipped.classList.add('direct-notice__line--list');
+    const details = skipped.slice(0, 4).map((row) => {
+      const id = typeof row?.id === 'string' && row.id ? row.id : '';
+      const reason = DIRECT_SKIP_REASON[row?.reason] || row?.reason || '原因未知';
+      return id ? id + '（' + reason + '）' : reason;
+    });
+    const more = skipped.length > details.length ? ' 等 ' + skipped.length + ' 个' : '';
+    setText(dom.directModeSkipped, skipped.length
+      ? '有 ' + skipped.length + ' 个模型未能写入直连：' + details.join('、') + more + '。'
+      : '');
+  }
+}
+
+/* 切换模式只是保存偏好；真正写入官方 Kimi 仍是「同步到 Work」那一步。 */
+async function chooseIntegrationMode(mode, { onSaved } = {}) {
+  if (!INTEGRATION_MODES.includes(mode)) return false;
+  const data = state.data;
+  if (!data || integrationModeBusy(data)) return false;
+  if (savedIntegrationMode(data) === mode) return true;
+  integrationModeSaving = true;
+  renderIntegrationMode(data);
+  renderActions(data);
+  try {
+    const res = await request(API.integrationMode, { method: 'POST', body: { revision: data.revision, mode } });
+    if (res && res.state) {
+      onSaved?.(res.state);
+      showToast(mode === 'direct'
+        ? '已切换为直连模式，请点「同步到 Work」写入服务商与静态 hosts。'
+        : '已切换为本机网关模式，请点「同步到 Work」恢复网关接入。', 'ok');
+    }
+    return true;
+  } catch (error) {
+    await handleSaveFailure(error, 'integration-mode');
+    return false;
+  } finally {
+    integrationModeSaving = false;
+    if (state.data) {
+      renderIntegrationMode(state.data);
+      renderActions(state.data);
+    }
+  }
+}
+
+function resetIntegrationModeSignature() {
+  integrationModeSaving = false;
+}
 
 let trackedServiceOperation = '';
 let updateReconnectActive = false;
@@ -1180,18 +1505,27 @@ async function previewServiceAction(action) {
 function resetRecentSignature() { recentSignature = ''; }
 
 export {
+  chooseIntegrationMode,
+  directImportComplete,
+  directModeState,
+  directRouteCleanupPending,
+  directStaticHostsReady,
+  effectiveIntegrationMode,
   isInFlight,
   previewServiceAction,
   refreshOverviewToday,
   renderActions,
+  renderIntegrationMode,
   renderOperation,
   renderOverview,
   renderPreviewLifecycle,
   renderShell,
   renderUpdates,
   renderWorkspaceSync,
+  resetIntegrationModeSignature,
   resetRecentSignature,
   runOverviewIssueAction,
+  savedIntegrationMode,
   syncState,
   updateAction,
 };

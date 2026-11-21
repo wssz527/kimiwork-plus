@@ -115,6 +115,26 @@ func (n *Native) accountsState() core.Document {
 	return state
 }
 
+// clearStaleAccountActivation drops an activation record that describes an
+// account which has since been removed or re-captured. Only the outcomes that
+// ask the user to do something are dropped: an applied, verified activation
+// stays visible as the record of a working switch.
+func (n *Native) clearStaleAccountActivation() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.accountActivation == nil {
+		return
+	}
+	switch core.String(n.accountActivation["state"]) {
+	case "restored", "needs-login", "failed":
+		n.accountActivation = nil
+		return
+	}
+	if n.accountActivation["rolledBack"] == true || n.accountActivation["requiresLogin"] == true {
+		n.accountActivation = nil
+	}
+}
+
 func (n *Native) observeAccounts(ctx context.Context) {
 	n.mu.Lock()
 	operating := n.operation != nil && n.operation["state"] == "running"

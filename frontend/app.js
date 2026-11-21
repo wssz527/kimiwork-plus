@@ -1,7 +1,7 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, resetRecentSignature, runOverviewIssueAction, updateAction } from './app-overview.js';
+import { chooseIntegrationMode, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 
 let renderGrowth = () => {};
@@ -118,6 +118,7 @@ function settlePending(next) {
 function renderAll() {
   if (!state.data) return;
   renderWorkspaceSync(state.data);
+  renderIntegrationMode(state.data);
   renderShell(state.data);
   renderOverview(state.data);
   renderOnboard();
@@ -564,6 +565,19 @@ function bindEvents() {
   }).catch(() => {});
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
+
+  /* 接入模式：切换只保存偏好，写入官方 Kimi 仍由「同步到 Work」完成。 */
+  if (dom.integrationModeGroup) dom.integrationModeGroup.addEventListener('change', (event) => {
+    const target = event.target;
+    if (!target || target.name !== 'integration-mode') return;
+    void chooseIntegrationMode(target.value, {
+      onSaved: (next) => {
+        /* 成功回执就是最新状态：直接采纳，避免轮询把模式与提示短暂改回旧值。 */
+        adoptState(next, { external: true });
+        renderAll();
+      },
+    });
+  });
 
   /* 子代理目标 */
   if (dom.saModes) dom.saModes.addEventListener('change', (event) => {
@@ -1033,6 +1047,7 @@ function adoptLocationKey() {
   resetModelSignature();
   resetRecentSignature();
   resetSubagentSignatures();
+  resetIntegrationModeSignature();
   stopPolling();
   setHidden(dom.conn, true);
   dom.toast.hidden = true;

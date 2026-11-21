@@ -22,6 +22,8 @@ type fakeActions struct {
 	surface   WorkSurface
 	imports   []ImportRequest
 	imported  ImportResult
+	directs   []DirectImportRequest
+	direct    ImportResult
 	closed    int
 	activated int
 	opened    int
@@ -45,6 +47,16 @@ func (f *fakeActions) ImportModels(_ context.Context, request ImportRequest) (Im
 		return ImportResult{}, f.failWith
 	}
 	return f.imported, nil
+}
+
+func (f *fakeActions) ImportDirect(_ context.Context, request DirectImportRequest) (ImportResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.directs = append(f.directs, request)
+	if f.failWith != nil {
+		return ImportResult{}, f.failWith
+	}
+	return f.direct, nil
 }
 
 func (f *fakeActions) CloseWorkSettings(context.Context) (ActionResult, error) {
@@ -463,6 +475,28 @@ func TestControllerCloseIsIdempotent(t *testing.T) {
 	}
 	if err := controller.Close(context.Background()); err != nil {
 		t.Fatalf("second close: %v", err)
+	}
+}
+
+func TestControllerStopClearsThePageActions(t *testing.T) {
+	controller, err := NewController(ControllerSettings{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The actions are what the published bridge would keep calling into. A
+	// stopped controller that still holds them can be driven against a page
+	// that no longer exists, so Stop must clear them exactly like reapChild and
+	// abortStart do.
+	controller.mu.Lock()
+	controller.actions = &fakeActions{connected: true}
+	controller.mu.Unlock()
+	if err := controller.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.actions != nil {
+		t.Fatal("Stop left the page actions published")
 	}
 }
 

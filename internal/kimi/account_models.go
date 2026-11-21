@@ -30,15 +30,27 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	c.mu.Lock()
 	settings := c.settings
 	c.mu.Unlock()
-	if settings.GatewayURL == "" || len(settings.Models) == 0 {
+	mode := settings.integrationMode()
+	if mode == IntegrationModeDirect {
+		if settings.DirectSpec == nil || len(settings.DirectSpec.Models) == 0 {
+			return "", ""
+		}
+	} else if settings.GatewayURL == "" || len(settings.Models) == 0 {
 		return "", ""
 	}
-	native, err := NewNativeIntegration(settings.StateDir, home, "gateway")
+	native, err := NewNativeIntegration(settings.StateDir, home, mode)
 	if err != nil {
 		return "failed", "invalid_integration_path"
 	}
 	intent, err := native.readIntent()
-	if err != nil || intent == nil || !intent.Active || normalizeNativeURL(intent.URL) != normalizeNativeURL(settings.GatewayURL) {
+	if err != nil || intent == nil || !intent.Active {
+		return "", ""
+	}
+	if mode == IntegrationModeDirect {
+		if intent.Mode != IntegrationModeDirect {
+			return "", ""
+		}
+	} else if normalizeNativeURL(intent.URL) != normalizeNativeURL(settings.GatewayURL) {
 		return "", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -62,6 +74,12 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 		}
 		catalog, pending, needsImport := native.accountCatalog(settings, scope)
 		if needsImport && !imported {
+			if mode == IntegrationModeDirect {
+				// A direct import carries provider keys, which settings never keep.
+				// Only the explicit user action can supply them, so this reports the
+				// outstanding import instead of inventing one.
+				return "pending", firstNonEmpty(pending, "direct_import_required")
+			}
 			imported = true
 			runtime, page, watching := watchAccountRuntime(ctx, surface)
 			if watching {
@@ -128,7 +146,7 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 	if !verified || sha256Hex(user) != result.Readback.AccountDigest || !accountConfigMatches(home, user) {
 		return result
 	}
-	native, err := NewNativeIntegration(settings.StateDir, home, "gateway")
+	native, err := NewNativeIntegration(settings.StateDir, home, settings.integrationMode())
 	if err != nil {
 		return result
 	}
@@ -205,6 +223,9 @@ func accountPageHasModels(ctx context.Context, surface accountSurface, want []ac
 
 // Only the target account's exact profile can establish that an import is reusable.
 func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope string) ([]accountCatalogEntry, string, bool) {
+	if settings.integrationMode() == IntegrationModeDirect {
+		return n.directCatalog(settings, scope)
+	}
 	store, storeErr := readJSONFile(filepath.Join(n.kimiDir, NativeWorkStore), maxStoreBytes)
 	if storeErr != "" {
 		return nil, "profile_store_" + storeErr, storeErr == "absent"

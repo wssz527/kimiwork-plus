@@ -1,6 +1,6 @@
 import { configInfo, configReady } from './app-connections.js';
 import { API, POLICY_MODE_WORD, POLICY_TRANSPORT_WORD, RUNTIME_STATE, displayModelId, dom, fmtCount, fmtTime, iconUse, modelLabel, renderErrorList, request, setDot, setHidden, setText, showToast, state, syncSelectOptions } from './app-core.js';
-import { declaredEfforts, findModel, isCapable, modelIdFromAlias, modelSignature } from './app-models.js';
+import { declaredEfforts, findModel, isCapable, modelIdFromAlias, modelSignature, resolveAlias } from './app-models.js';
 import { isInFlight } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
 
@@ -27,7 +27,7 @@ function savedTarget(data) {
       ? typeof configured.model === 'string' && configured.model
         ? configured.model
         : typeof configured.modelAlias === 'string' && configured.modelAlias
-          ? modelIdFromAlias(configured.modelAlias) || configured.modelAlias
+          ? modelIdFromAlias(configured.modelAlias) || resolveAlias(configured.modelAlias)
           : null
       : null,
     effort: mode === 'force' && typeof configured.effort === 'string' ? configured.effort : null,

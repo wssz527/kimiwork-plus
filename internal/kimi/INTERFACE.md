@@ -115,7 +115,7 @@ rewritten.
 lock, err := platform.AcquireLock(stateDir)   // platform.ErrLocked for a second owner
 defer lock.Release()
 
-store, err := platform.OpenCredentials("dev.kimi-work-plus.preview")
+store, err := platform.OpenCredentials("dev.kimi-work-plus")
 value, err := store.Get(key)                  // platform.ErrCredentialMissing
 err = store.Set(key, value)
 err = store.Delete(key)
@@ -263,6 +263,25 @@ calling `ImportModelsAuthorized`:
    inserts only the marked hosts pair, preserving original bytes and line endings.
 3. Preserve other valid flag fields while setting `revealed=true`, invalidate the
    probe cache, and require a fresh private-address result before importing.
+
+Direct Mode changes step 1 and 2 on macOS. The preparation is built with
+`byokdns.Setup{RequireStaticHosts: true}`, so the name has to resolve from the
+marked `/etc/hosts` entry and the gateway's UDP listener is not needed: a bind
+failure is irrelevant, and the listener is closed after a successful prepare.
+The elevated step writes that entry and removes `/etc/resolver/dev.msh.team` in
+the same prompt, because a leftover resolver would send the lookup to a port
+nothing listens on. A machine that already holds a passing managed hosts entry and
+no legacy resolver costs no prompt; a legacy resolver alone is not reused in this
+mode. Windows already resolves through the hosts file, so its preparation is
+unchanged.
+`IntegrationMode` is read from the private configuration and any missing or
+unknown value is `gateway`; the two import directions refuse each other
+(`native_import_direct_mode`, `native_import_gateway_mode`). Switching either way
+applies and verifies the new source before disconnecting the previous managed
+source. A cleanup failure is reported as `route_cleanup_pending` and is retried
+by the next explicit sync; it never turns a failed new import into a disconnected
+old route. Runtime reads follow mode and source-id updates on the existing CDP
+actions, protected by their mutex.
 
 `POST /api/actions` also accepts `{"action":"remove-dns"}`. It removes only the
 exact owned resolver or marked hosts pair and stops the Mac DNS listener. The
@@ -868,7 +887,7 @@ product adds a login item without asking.
 | Platform | Definition | Login start is |
 |---|---|---|
 | macOS | LaunchAgent in `~/Library/LaunchAgents`, `gui/<uid>` domain, no elevation | `<key>RunAtLoad</key>` |
-| Windows | JSON record under `%APPDATA%\kimi-work-plus-preview\service`, plus a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | the `Run` value |
+| Windows | JSON record under `%APPDATA%\kimi-work-plus\service`, plus a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | the `Run` value |
 
 `KeepAlive` is false on both: a crashed daemon is reported, not restarted in a
 loop that hides the failure.
@@ -885,7 +904,7 @@ without interrupting the running daemon.
 
 The value holds a command line, so it is quoted by the `CommandLineToArgvW` rules
 (a run of backslashes before a quote is doubled, the quote is escaped, a trailing
-run is doubled) rather than by wrapping the path in quotes. The preview's own path
+run is doubled) rather than by wrapping the path in quotes. The product's own path
 contains a space and a `+`, which an unquoted or naively quoted value breaks.
 
 A definition written by a different build is `Stale` with

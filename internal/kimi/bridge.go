@@ -36,8 +36,9 @@ import (
 
 // BridgeContractGeneration is the capability number the host advertises. A
 // caller compares it instead of probing routes by failure: a host built before a
-// route existed answers 404 for a route it simply does not have.
-const BridgeContractGeneration = 5
+// route existed answers 404 for a route it simply does not have. Generation 6
+// added the Direct Mode import route.
+const BridgeContractGeneration = 6
 
 // BridgeDescriptorName is the descriptor file inside the Kimi home.
 const BridgeDescriptorName = ".kimi-work-desktop-bridge.json"
@@ -47,6 +48,7 @@ const BridgeDescriptorName = ".kimi-work-desktop-bridge.json"
 const (
 	OperationStatus            = "status"
 	OperationImportModels      = "import-models"
+	OperationImportDirect      = "import-direct"
 	OperationCloseWorkSettings = "close-work-settings"
 	OperationWorkSurface       = "work-surface"
 	OperationActivateWork      = "activate-work"
@@ -54,8 +56,9 @@ const (
 )
 
 var bridgeOperations = map[string]bool{
-	OperationStatus: true, OperationImportModels: true, OperationCloseWorkSettings: true,
-	OperationWorkSurface: true, OperationActivateWork: true, OperationOpenWorkSettings: true,
+	OperationStatus: true, OperationImportModels: true, OperationImportDirect: true,
+	OperationCloseWorkSettings: true, OperationWorkSurface: true, OperationActivateWork: true,
+	OperationOpenWorkSettings: true,
 }
 
 var (
@@ -101,6 +104,9 @@ type ImportRequest struct {
 	Token              string `json:"token"`
 	ExpectedAccountKey string `json:"expectedAccountKey,omitempty"`
 	OpenSettings       bool   `json:"openSettings,omitempty"`
+	// DisconnectDirectSourceID names the Direct Mode custom source a gateway
+	// import disconnects only after the replacement has been applied.
+	DisconnectDirectSourceID string `json:"disconnectDirectSourceId,omitempty"`
 }
 
 // ImportResult is the host's answer. A confirmed import that still owes a
@@ -127,6 +133,13 @@ type ImportResult struct {
 	// Adopted is true only when the running application is known to have loaded
 	// it. It is never inferred from the request.
 	Adopted bool `json:"adopted,omitempty"`
+	// RouteCleanupPending means the replacement is usable but the previous managed
+	// source could not be disconnected yet. The old route was not touched first.
+	RouteCleanupPending bool `json:"routeCleanupPending,omitempty"`
+	// SourceID is the source a page created or updated. It is set for a Direct
+	// Mode import: the intent records it so a later sync updates that source
+	// instead of creating a second one.
+	SourceID string `json:"sourceId,omitempty"`
 	// Readback is the evidence `Applied` was decided from.
 	Readback *ImportReadback `json:"readback,omitempty"`
 }
@@ -230,6 +243,13 @@ func (c *BridgeClient) ImportModels(ctx context.Context, request ImportRequest) 
 	return result, err
 }
 
+// ImportDirect asks the host to run a Direct Mode import.
+func (c *BridgeClient) ImportDirect(ctx context.Context, request DirectImportRequest) (ImportResult, error) {
+	var result ImportResult
+	err := c.call(ctx, OperationImportDirect, request, &result)
+	return result, err
+}
+
 // CloseWorkSettings posts the official overlay close.
 func (c *BridgeClient) CloseWorkSettings(ctx context.Context) (ActionResult, error) {
 	var result ActionResult
@@ -317,6 +337,9 @@ type PageActions interface {
 	// ImportModels performs the official import and reports whether a restart
 	// is still owed.
 	ImportModels(ctx context.Context, request ImportRequest) (ImportResult, error)
+	// ImportDirect performs a Direct Mode import: the user's own providers are
+	// written into Kimi's custom source through the official byokSources API.
+	ImportDirect(ctx context.Context, request DirectImportRequest) (ImportResult, error)
 	// WorkSurface reports what is on screen.
 	WorkSurface(ctx context.Context) (WorkSurface, error)
 	// CloseWorkSettings posts the official overlay close.
@@ -438,7 +461,7 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 			reply(http.StatusUnsupportedMediaType, map[string]any{"ok": false, "reason": "native_bridge_json_required"})
 			return
 		}
-		body := http.MaxBytesReader(writer, request.Body, 16384)
+		body := http.MaxBytesReader(writer, request.Body, bridgeBodyLimit(operation))
 		var input json.RawMessage
 		if json.NewDecoder(body).Decode(&input) != nil {
 			reply(http.StatusBadRequest, map[string]any{"ok": false, "reason": "native_bridge_invalid_request"})
@@ -452,6 +475,18 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 			result, err := h.actions.ImportModels(ctx, importRequest)
+			if err != nil {
+				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				return
+			}
+			reply(http.StatusOK, result)
+		case OperationImportDirect:
+			var importRequest DirectImportRequest
+			if json.Unmarshal(input, &importRequest) != nil {
+				reply(http.StatusBadRequest, map[string]any{"ok": false, "reason": "native_bridge_invalid_request"})
+				return
+			}
+			result, err := h.actions.ImportDirect(ctx, importRequest)
 			if err != nil {
 				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
 				return
@@ -497,6 +532,16 @@ func (h *BridgeHost) Close() error {
 		_ = os.Remove(file)
 	}
 	return nil
+}
+
+// bridgeBodyLimit bounds one request body. A gateway import is a token and a
+// URL; a Direct Mode import carries provider keys and a model catalog, so it
+// gets the same ceiling the pipe itself enforces.
+func bridgeBodyLimit(operation string) int64 {
+	if operation == OperationImportDirect {
+		return 4 << 20
+	}
+	return 16384
 }
 
 func safeReason(err error) string {

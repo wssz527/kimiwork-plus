@@ -113,7 +113,7 @@ func (s *Service) Close(ctx context.Context) error {
 	}
 	return s.http.Shutdown(ctx)
 }
-func (s *Service) SetGateway(h http.Handler)       { s.mu.Lock(); s.Gateway = h; s.mu.Unlock() }
+func (s *Service) SetGateway(h http.Handler) { s.mu.Lock(); s.Gateway = h; s.mu.Unlock() }
 func reply(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -126,8 +126,16 @@ func fail(w http.ResponseWriter, e error) {
 		status = 400
 	}
 	switch code {
-	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable":
+	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
 		status = 409
+	case "direct_preview_refused":
+		status = 503
+	case "direct_catalog_too_large":
+		status = 413
+	case "direct_import_failed":
+		status = 502
+	case "direct_no_eligible_models", "direct_missing_api_key":
+		status = 400
 	case "unauthorized":
 		status = 401
 	case "origin_refused":
@@ -182,19 +190,19 @@ func message(code string) string {
 	case "credential_keychain_locked":
 		return "登录钥匙串已锁定，请在 macOS 中解锁后从本窗口重新保存；密钥未写入。"
 	case "credential_keychain_unavailable":
-		return "当前登录会话无法使用系统钥匙串，请检查预览签名和会话权限；密钥未写入。"
+		return "当前登录会话无法使用系统钥匙串，请检查应用签名和会话权限；密钥未写入。"
 	case "credential_session_unavailable":
-		return "当前后台会话不能显示授权窗口，请从预览窗口重新保存。"
+		return "当前后台会话不能显示授权窗口，请从应用窗口重新保存。"
 	case "credential_authorization_required":
-		return "此条目需要系统授权，请从预览窗口重新保存并响应系统提示。"
+		return "此条目需要系统授权，请从应用窗口重新保存并响应系统提示。"
 	case "credential_authorization_cancelled":
 		return "系统授权已取消，密钥未保存；原配置仍保留。"
 	case "credential_authorization_failed":
 		return "系统未接受授权，密钥未保存；原配置仍保留。"
 	case "credential_store_corrupt":
-		return "凭据条目内容无法识别，请从预览窗口重新输入并保存。"
+		return "凭据条目内容无法识别，请从应用窗口重新输入并保存。"
 	case "credential_interaction_not_restored":
-		return "系统凭据交互状态未能恢复，请重启预览服务后重试。"
+		return "系统凭据交互状态未能恢复，请重启后台服务后重试。"
 	case "credential_store_failed":
 		return "系统凭据操作未完成，请查看诊断状态；密钥未保存。"
 	case "updates_unavailable":
@@ -205,6 +213,28 @@ func message(code string) string {
 		return "当前没有可回退的上一版本备份。"
 	case "invalid_update_settings":
 		return "更新设置参数无效，请确认渠道为稳定版或预览版。"
+	case "invalid_integration_mode":
+		return "接入模式无效，请选择网关或直连。"
+	case "direct_no_eligible_models":
+		return "当前没有可直连导入的模型，请确认连接地址、上下文长度和工具调用支持。"
+	case "direct_duplicate_endpoint":
+		return "多个连接使用同一地址和协议，直连无法区分，请修改其中一个连接的地址。"
+	case "direct_missing_api_key":
+		return "缺少导入所需的服务商密钥，请在连接页重新保存密钥后重试。"
+	case "direct_mode_unsupported":
+		return "当前 Kimi Work 版本不支持直连导入，请升级官方 Work 或改用网关模式。"
+	case "direct_preview_refused":
+		return "Kimi 未接受本次直连导入，现有配置未被预先断开；请检查连接与模型设置后重试。"
+	case "direct_catalog_too_large":
+		return "单次直连目录过大，请减少一次同步的模型数量或拆分连接后重试。"
+	case "direct_import_failed":
+		return "Kimi 没有完成这次直连写入；请重新同步，仍失败时查看诊断信息。"
+	case "direct_foreign_source":
+		return "官方 Kimi 中已有不是本产品写入的模型源，未覆盖；请先核对现有来源。"
+	case "native_import_direct_mode":
+		return "当前是直连模式，网关模型同步不会执行；请先切换到网关模式。"
+	case "native_import_gateway_mode":
+		return "当前是网关模式，直连导入不会执行；请先切换到直连模式。"
 	}
 	return "操作未完成，请检查输入或诊断信息。"
 }
@@ -362,7 +392,7 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return nil, err
 			}
 			return core.Document{"ok": true, "updates": st}, nil
-		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save":
+		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode":
 			return s.configure(path, in)
 		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie":
 			if s.Extra != nil {
@@ -492,6 +522,11 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				return err
 			}
 			d["subagents"] = map[string]any(policy)
+		case "/api/integration-mode":
+			if core.String(in["revision"]) == "" {
+				return core.ErrConflict
+			}
+			return core.SetIntegrationMode(d, core.String(in["mode"]))
 		}
 		return nil
 	})
@@ -536,6 +571,7 @@ func (s *Service) State() (core.Document, error) {
 		"kimiProcess": core.Document{"running": nil, "state": "unknown"}, "context": core.Document{"policy": core.Document{"mode": "inherit"}, "status": "unavailable"},
 		"tools": core.Document{"available": false, "reason": "native_preview_unavailable", "servers": []any{}}, "search": core.Document{"status": "unavailable"},
 		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
+		"integrationMode": core.IntegrationMode(d), "directMode": directModeBase(d),
 	}
 	s.mu.RLock()
 	g := s.Gateway

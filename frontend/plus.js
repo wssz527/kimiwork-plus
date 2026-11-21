@@ -741,12 +741,15 @@
 
   function activationLine(activation) {
     const state = textOf(activation.state);
+    const rolledBack = activation.rolledBack === true || state === 'restored';
     const words = { hot: '已应用', restarted: '已应用', 'needs-login': '需要重新登录', restored: '已恢复原账号', failed: '应用失败' };
     const bits = [words[state] || state];
     if (activation.restarted === true) bits.push('已重启 Work');
     if (activation.verified === true) bits.push('读回一致');
     if (activation.hot === true) bits.push('未重启，热切换');
-    if (activation.requiresLogin === true) bits.push('需要在该窗口登录');
+    /* 已回滚时凭据失效的是「刚才想切过去的那个账号」，原账号已经恢复；
+       这时再说「需要在该窗口登录」会把用户指向错误的窗口和错误的账号。 */
+    if (activation.requiresLogin === true) bits.push(rolledBack ? '所选账号需重新登录' : '需要在该窗口登录');
     if (activation.modelsState === 'ready') bits.push('第三方模型已就绪');
     if (activation.modelsState === 'pending' || activation.modelsState === 'failed') {
       bits.push('账号已切换，第三方模型尚未就绪，请在模型页同步');

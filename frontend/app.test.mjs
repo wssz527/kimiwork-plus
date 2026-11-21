@@ -20,6 +20,30 @@ function sourceFunction(name) {
   return extractFunction(source, name);
 }
 
+/* syncState / nativeConnectionText 现在第一步就问接入模式。直连辅助函数用真实实现，
+   这样「没有 integrationMode」的旧数据必须原样走网关分支，也一并被这些用例守住。
+   失败码归一化也在这里用真实代码，避免测试自己复制一张会漂移的映射表。 */
+const DIRECT_REASON_SOURCE = (() => {
+  const start = source.indexOf('const DIRECT_REASON = {');
+  assert.notEqual(start, -1, 'missing DIRECT_REASON table');
+  const end = source.indexOf('\n};', start);
+  assert.notEqual(end, -1, 'unterminated DIRECT_REASON table');
+  return source.slice(start, end + 3);
+})();
+const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
+  'directImportComplete', 'directRouteCleanupPending', 'directStaticHostsReady', 'directModeState',
+  'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
+
+function makeSyncState() {
+  return new Function('fmtCount', 'String',
+    [...INTEGRATION_HELPERS, sourceFunction('syncState'), 'return syncState;'].join('\n'))(
+    (value) => String(value), String);
+}
+
+function makeNativeConnectionText() {
+  return new Function([...INTEGRATION_HELPERS, sourceFunction('nativeConnectionText'), 'return nativeConnectionText;'].join('\n'))();
+}
+
 function growthFunction(name, indent = '') {
   return extractFunction(growthSource, name, indent);
 }
@@ -51,7 +75,7 @@ test('unreadable connection credentials expose explicit system authorization eve
 });
 
 test('a verified account change requests model synchronization instead of another login', () => {
-  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
+  const syncState = makeSyncState();
   for (const reason of ['account_changed', 'native_import_account_changed']) {
     const data = { integration: { state: 'needs-native-import', reason, readback: { accountVerified: true } } };
     const verdict = syncState(data);
@@ -65,7 +89,7 @@ test('a verified account change requests model synchronization instead of anothe
 });
 
 test('missing official Kimi has an explicit installation next step', () => {
-  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
+  const syncState = makeSyncState();
   const verdict = syncState({ integration: { state: 'stopped', reason: 'not_installed', desktop: { state: 'stopped', reason: 'not_installed' } }, models: [] });
   assert.equal(verdict.code, 'not-installed');
   assert.match(verdict.note, /安装官方 Kimi/);
@@ -405,7 +429,7 @@ test('switching the private panel session clears the visible catalogue query and
   const state = { key: 'old-session', onboard: { advanced: false, query: 'vision' } };
   const dom = { onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const code = [
-    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {};',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -425,7 +449,7 @@ function rotatedKeyHarness(loadState, calls) {
   const dom = { conn: {}, onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const usagePanel = { reset() { calls.push('reset'); }, show() { calls.push('show'); }, reload: async () => {} };
   const code = [
-    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {};',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -619,6 +643,7 @@ test('computeOverviewIssue prioritizes gateway, connection apply, budget, integr
     const budgetNotice = b => b?.msg || '';
     const syncState = data => data._sync || { code: 'synced', tone: 'ok', word: '已同步', note: '' };
     const requestErrorText = row => row.msg || row.error || '';
+    ${INTEGRATION_HELPERS.join('\n')}
     ${sourceFunction('computeOverviewIssue')}
     return computeOverviewIssue;
   `)();
@@ -1259,8 +1284,8 @@ test('boot reads the session key before any view mounts', () => {
 /* 系统直接启动的 Kimi（managed=false）不能被说成受管进程已加载配置，
    也不能被当成首次使用让用户重复点启动。 */
 test('an unmanaged Kimi started from the Dock is not reported as a managed load', () => {
-  const syncState = new Function(sourceFunction('syncState') + '\nreturn syncState;')();
-  const nativeConnectionText = new Function(sourceFunction('nativeConnectionText') + '\nreturn nativeConnectionText;')();
+  const syncState = makeSyncState();
+  const nativeConnectionText = makeNativeConnectionText();
   const base = {
     kimiProcess: { running: true },
     integration: {
@@ -1411,4 +1436,655 @@ test('renderCompatibility distinguishes verified, new version pass, and degraded
   assert.equal(nodes['compat-summary'].textContent, '模型同步不可用');
   assert.match(nodes['compat-note'].textContent, /已停止受影响功能的写入/);
   assert.match(nodes['diag-compat-guards'].textContent, /已停止模型同步写入/);
+});
+
+/* ---------- Wave 2B：零网关直连模式 ---------- */
+
+test('direct mode reports the unsynced, ready, and zero-gateway states without a restart warning', () => {
+  const syncState = makeSyncState();
+  const models = [{ id: 'conn/resp/model-a' }, { id: 'conn/chat/model-b' }];
+  const eligibleModelIds = ['conn/resp/model-a', 'conn/chat/model-b'];
+  const imported = {
+    mode: 'direct', state: 'ready', applied: true, adopted: true,
+    aliases: { 'conn/resp/model-a': 'byok-uuid/model-a', 'conn/chat/model-b': 'byok-uuid/model-b' },
+  };
+
+  /* 已选直连但官方 Kimi 还没写入：无论 Kimi 是否运行，下一步都是同步。 */
+  const pending = syncState({
+    integrationMode: 'direct',
+    models,
+    integration: { mode: 'gateway', reason: 'direct_import_required' },
+  });
+  assert.equal(pending.code, 'pending');
+  assert.equal(pending.tone, 'warn');
+  assert.equal(pending.word, '待写入直连配置');
+  assert.match(pending.note, /同步到 Work/);
+  assert.doesNotMatch(pending.note, /重启/);
+
+  /* 只要 integration.mode 还不是 direct，就必须说「待写入」。 */
+  assert.equal(syncState({ integrationMode: 'direct', models, integration: {} }).word, '待写入直连配置');
+
+  /* 已同步且静态 hosts 就绪：直连已就绪，不需要后台服务。 */
+  const ready = syncState({
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds, eligibleModels: 2, totalModels: 2, readyForZeroGateway: false },
+    integration: imported,
+  });
+  assert.equal(ready.code, 'ready');
+  assert.equal(ready.tone, 'ok');
+  assert.equal(ready.word, '直连已就绪');
+  assert.match(ready.note, /退出本软件及后台服务/);
+
+  /* 用户直接双击官方 Kimi（managed=false）时，直连本来就不依赖受管进程。 */
+  const unmanaged = syncState({
+    integrationMode: 'direct',
+    models,
+    kimiProcess: { running: true },
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds, eligibleModels: 2, totalModels: 2, readyForZeroGateway: true },
+    integration: { ...imported, desktop: { managed: false } },
+  });
+  assert.equal(unmanaged.code, 'ready');
+  assert.equal(unmanaged.tone, 'ok');
+  assert.equal(unmanaged.word, '直连运行中（免开本软件）');
+  assert.match(unmanaged.note, /无需保持 KimiWork \+ 运行/);
+  assert.doesNotMatch(unmanaged.note, /正常退出并重启/);
+  assert.doesNotMatch(unmanaged.note, /需要重启/);
+  assert.doesNotMatch(unmanaged.note, /未受本产品托管/);
+});
+
+test('skipped direct models still count as synced once the eligible set is imported', () => {
+  const syncState = makeSyncState();
+  const integration = {
+    mode: 'direct', state: 'ready', applied: true, adopted: true,
+    aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' },
+  };
+  const base = {
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/model-a' }, { id: 'conn/resp/no-tools' }],
+    integration,
+  };
+  /* eligibleModelIds 少于模型总数：被跳过的模型不能让界面永远停在「待写入」。 */
+  const verdict = syncState({
+    ...base,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds: ['conn/resp/model-a'],
+      eligibleModels: 1, totalModels: 2, skippedModels: [{ id: 'conn/resp/no-tools', reason: 'tools_required' }],
+      readyForZeroGateway: true },
+  });
+  assert.equal(verdict.code, 'ready');
+  assert.doesNotMatch(verdict.word, /待写入/);
+
+  /* 同一个模型数但上游不同：别名数达标不代表要导入的 ID 都在。 */
+  const swapped = syncState({
+    ...base,
+    integration: { ...integration, aliases: { 'conn/resp/other-model': 'byok-uuid/other-model' } },
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds: ['conn/resp/model-a'],
+      eligibleModels: 1, totalModels: 2 },
+  });
+  assert.equal(swapped.code, 'pending');
+  assert.equal(swapped.word, '待写入直连配置');
+});
+
+test('a ready direct alias set without applied evidence is still pending', () => {
+  const syncState = makeSyncState();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const directMode = { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds: ['conn/resp/model-a'],
+    eligibleModels: 1, totalModels: 1 };
+  /* applied 代表官方 store 与生成的 config 都读到了；只有 ready+adopted 不够。 */
+  const adoptedOnly = syncState({
+    integrationMode: 'direct', models, directMode,
+    integration: { mode: 'direct', state: 'ready', adopted: true, applied: false,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  });
+  assert.equal(adoptedOnly.code, 'pending');
+  assert.equal(adoptedOnly.word, '待写入直连配置');
+
+  /* 旧后端没有 eligibleModelIds：readback.modelAliases 覆盖了这次 spec 也算完成。 */
+  const legacy = syncState({
+    integrationMode: 'direct', models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' },
+      readback: { modelAliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } } },
+  });
+  assert.equal(legacy.code, 'ready');
+
+  /* 旧后端的 readback 指向别的模型：不能凭别名数量放行。 */
+  const legacySwapped = syncState({
+    integrationMode: 'direct', models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/other-model': 'byok-uuid/other-model' },
+      readback: { modelAliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } } },
+  });
+  assert.equal(legacySwapped.code, 'pending');
+});
+
+test('a synced direct import without static hosts asks for one more sync', () => {
+  const syncState = makeSyncState();
+  const data = {
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/model-a' }],
+    directMode: { mode: 'direct', supported: true, staticHostsReady: false, eligibleModelIds: ['conn/resp/model-a'],
+      eligibleModels: 1, totalModels: 1, readyForZeroGateway: false },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  };
+  const verdict = syncState(data);
+  /* 模型写进去了但 hosts 还没补齐：不能报「已就绪」，否则用户会直接关掉后台。 */
+  assert.equal(verdict.code, 'pending');
+  assert.equal(verdict.tone, 'warn');
+  assert.equal(verdict.word, '待补齐静态 hosts');
+  assert.match(verdict.note, /再点一次「同步到 Work」/);
+  assert.doesNotMatch(verdict.note, /退出本软件/);
+
+  /* directMode 存在时 setup.dns.state === 'hosts' 不是证据：
+     Windows 非 macOS 的 setup 默认就是 hosts，拿它回退等于跳过真实检查。 */
+  const viaSetup = syncState({ ...data, setup: { dns: { state: 'hosts' } } });
+  assert.equal(viaSetup.code, 'pending');
+  assert.equal(viaSetup.word, '待补齐静态 hosts');
+});
+
+test('without a directMode row the legacy setup.dns answer still counts', () => {
+  const syncState = makeSyncState();
+  const verdict = syncState({
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/model-a' }],
+    setup: { dns: { state: 'hosts' } },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  });
+  assert.equal(verdict.code, 'ready');
+  assert.equal(verdict.word, '直连已就绪');
+});
+
+test('direct mode with no eligible models names the real blocker', () => {
+  const syncState = makeSyncState();
+  const verdict = syncState({
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/no-tools' }],
+    directMode: { mode: 'direct', supported: true, staticHostsReady: false, eligibleModels: 0, totalModels: 1,
+      skippedModels: [{ id: 'conn/resp/no-tools', reason: 'tools_required' }] },
+    integration: { mode: 'direct', state: 'ready', adopted: true },
+  });
+  assert.equal(verdict.code, 'pending');
+  assert.equal(verdict.word, '没有可直连的模型');
+  assert.match(verdict.note, /工具调用/);
+});
+
+test('gateway mode wording is untouched by the direct-mode switch', () => {
+  const syncState = makeSyncState();
+  /* 老数据没有 integrationMode / directMode：必须逐字保留原结论。 */
+  assert.equal(syncState({ models: [] }).word, '等待模型');
+  assert.equal(syncState({ models: [{ id: 'a' }], integration: { state: 'synchronized', applied: true, adopted: true } }).word, '已核对目录');
+  assert.equal(syncState({ models: [{ id: 'a' }], integration: { applied: true, adopted: true, aliases: { a: 'a' } } }).word, '已保存，待接入');
+  assert.equal(syncState({ integrationMode: 'gateway', models: [] }).code, 'empty');
+});
+
+test('a successful direct sync is a ready state, not an overview problem', () => {
+  const compute = new Function(`
+    const displayModelId = id => id;
+    const applyState = data => data._apply || { tone: 'ok', word: '已应用', note: '' };
+    const budgetNotice = b => b?.msg || '';
+    const requestErrorText = row => row.msg || row.error || '';
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('syncState')}
+    ${sourceFunction('computeOverviewIssue')}
+    return computeOverviewIssue;
+  `)();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const readyData = {
+    integrationMode: 'direct',
+    models,
+    gateway: { state: 'stopped' },
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  };
+  const issue = compute(readyData);
+  /* 直连正常时网关停着不是故障，也不能落进「接入与恢复」。 */
+  assert.equal(issue.tone, 'ok');
+  assert.equal(issue.title, '状态正常');
+  assert.equal(issue.action, null);
+
+  /* 网关模式原有判定不变：网关停了照旧报错。 */
+  assert.equal(compute({ gateway: { state: 'stopped' } }).title, '本机网关未运行');
+  /* 直连未写入时仍然要说出下一步，不能被当成正常。 */
+  const pending = compute({ ...readyData, gateway: { state: 'running' }, integration: { mode: 'gateway' } });
+  assert.equal(pending.title, '待写入直连配置');
+
+  const cleanup = compute({ ...readyData, directMode: { ...readyData.directMode, routeCleanupPending: true } });
+  assert.equal(cleanup.title, '切换收尾未完成');
+  assert.match(cleanup.note, /不要退出后台服务/);
+  assert.doesNotMatch(cleanup.note, /模型请求当前无法发出/);
+
+  /* 版本不支持时，重起网关解决不了：概览要说版本前提而不是网关报错。 */
+  const unsupported = compute({
+    ...readyData,
+    integration: { mode: 'gateway' },
+    directMode: { ...readyData.directMode, supported: false },
+  });
+  assert.equal(unsupported.title, '当前官方 Kimi 不支持直连');
+  assert.match(unsupported.note, /3\.2\.28\+/);
+});
+
+test('route cleanup pending never reads as a finished switch', () => {
+  const syncState = makeSyncState();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const directMode = { mode: 'direct', supported: true, staticHostsReady: true,
+    eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 };
+  const integration = { mode: 'direct', state: 'ready', applied: true, adopted: true,
+    aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } };
+
+  /* 三条证据分别都能判定收尾未完成。 */
+  const variants = [
+    { ...directMode, routeCleanupPending: true },
+    directMode,
+    directMode,
+  ];
+  const integrations = [
+    integration,
+    { ...integration, nativeImport: { routeCleanupPending: true } },
+    { ...integration, nativeImport: { reason: 'route_cleanup_pending' } },
+  ];
+  for (let i = 0; i < variants.length; i += 1) {
+    const verdict = syncState({ integrationMode: 'direct', models, directMode: variants[i], integration: integrations[i] });
+    assert.equal(verdict.code, 'pending', 'variant ' + i + ' must not report ready');
+    assert.equal(verdict.word, '切换收尾未完成');
+    assert.match(verdict.note, /旧的服务商来源仍保留/);
+    assert.match(verdict.note, /再点一次「同步到 Work」/);
+    assert.match(verdict.note, /不要退出后台服务/);
+    assert.match(verdict.note, /旧路由已清理/);
+    assert.doesNotMatch(verdict.note, /直连已就绪|切换全部完成/);
+  }
+
+  /* 收尾未完成不是整个导入失败：文案不能说成失败。 */
+  const verdict = syncState({ integrationMode: 'direct', models, directMode: { ...directMode, routeCleanupPending: true }, integration });
+  assert.doesNotMatch(verdict.note, /失败/);
+
+  /* 回执还停在网关走法、但收尾标记已在：这时也不能退回「待写入」，
+     因为配置确实已经写入，只差清理。 */
+  const gatewayMode = syncState({
+    integrationMode: 'direct',
+    models,
+    directMode: { ...directMode, routeCleanupPending: true },
+    integration: { mode: 'gateway' },
+  });
+  assert.equal(gatewayMode.word, '切换收尾未完成');
+
+  /* 没有收尾标记时仍是正常 ready，不能被这条判断顺手拖成 pending。 */
+  assert.equal(syncState({ integrationMode: 'direct', models, directMode, integration }).code, 'ready');
+});
+
+test('an unsupported official version is named instead of asking for another sync', () => {
+  const syncState = makeSyncState();
+  const verdict = syncState({
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/model-a' }],
+    directMode: { mode: 'direct', supported: false, staticHostsReady: false, eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'gateway' },
+  });
+  assert.equal(verdict.code, 'unsupported');
+  assert.equal(verdict.tone, 'bad');
+  assert.match(verdict.word, /不支持直连/);
+  assert.match(verdict.note, /3\.2\.28\+/);
+  assert.match(verdict.note, /本机网关/);
+  assert.doesNotMatch(verdict.note, /同步到 Work/);
+});
+
+test('catalog-size and removed-model failures name the next step without claiming success', () => {
+  const fn = new Function(
+    [DIRECT_REASON_SOURCE, sourceFunction('normalizeReasonCode'), sourceFunction('directReasonText'),
+      'return directReasonText;'].join('\n'),
+  )();
+
+  const tooLarge = fn('direct_catalog_too_large');
+  assert.match(tooLarge, /减少单次导入的模型/);
+  assert.match(tooLarge, /拆分连接/);
+  assert.match(tooLarge, /本次未写入/);
+  assert.doesNotMatch(tooLarge, /direct_catalog_too_large/);
+
+  const removed = fn('models_removed');
+  assert.match(removed, /重新同步到 Work/);
+  assert.match(removed, /已经没有/);
+  assert.doesNotMatch(removed, /models_removed/);
+
+  const cleanup = fn('route_cleanup_pending');
+  assert.match(cleanup, /已写入并读回/);
+  assert.match(cleanup, /重试清理/);
+  /* 收尾待清理不是导入失败。 */
+  assert.doesNotMatch(cleanup, /导入失败|写入失败/);
+
+  /* 旧前缀与连字符形式继续兼容。 */
+  assert.equal(fn('native_import_route-cleanup-pending'), cleanup);
+  assert.equal(fn('native_direct_mode_unsupported'), fn('direct_mode_unsupported'));
+});
+
+function makeWorkspaceSyncEnv() {
+  const nodes = {};
+  for (const id of ['workspace-sync-state', 'workspace-sync-note', 'workspace-restart']) {
+    nodes[id] = { id, textContent: '', hidden: false };
+  }
+  const code = [
+    ...INTEGRATION_HELPERS,
+    'const $ = id => nodes[id] || null;',
+    'const setText = (element, text) => { if (element) element.textContent = text; };',
+    'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
+    sourceFunction('renderWorkspaceSync'),
+    'return renderWorkspaceSync;',
+  ].join('\n');
+  const render = new Function('nodes', code)(nodes);
+  return { render, nodes };
+}
+
+test('the connection line names the unfinished cleanup and the catalog failures', () => {
+  const directText = makeNativeConnectionText();
+  const directBase = {
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/model-a' }],
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  };
+  const cleanupText = directText({
+    ...directBase,
+    integration: { ...directBase.integration, nativeImport: { reason: 'route_cleanup_pending', routeCleanupPending: true } },
+  });
+  assert.match(cleanupText, /切换收尾未完成/);
+  assert.match(cleanupText, /旧的服务商来源还保留/);
+  assert.match(cleanupText, /不要退出后台服务/);
+  assert.doesNotMatch(cleanupText, /已写入官方 Kimi 且静态 hosts 就绪/);
+
+  const readyText = directText(directBase);
+  assert.match(readyText, /静态 hosts 就绪/);
+  assert.doesNotMatch(readyText, /切换收尾未完成/);
+
+  /* 目录过大与模型残留各自给出下一步，且不把码原样抛给用户。 */
+  const tooLarge = directText({ ...directBase, integration: { ...directBase.integration, reason: 'direct_catalog_too_large' } });
+  assert.match(tooLarge, /拆分连接/);
+  assert.doesNotMatch(tooLarge, /direct_catalog_too_large/);
+  const removed = directText({ ...directBase, integration: { ...directBase.integration, reason: 'models_removed' } });
+  assert.match(removed, /重新同步/);
+  assert.doesNotMatch(removed, /models_removed/);
+});
+
+test('the workspace bar and the gateway fact both show an unfinished route cleanup', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const base = {
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  };
+  for (const data of [
+    { ...base, directMode: { ...base.directMode, routeCleanupPending: true } },
+    { ...base, integration: { ...base.integration, nativeImport: { routeCleanupPending: true } } },
+    { ...base, integration: { ...base.integration, nativeImport: { reason: 'route_cleanup_pending' } } },
+  ]) {
+    render(data);
+    assert.equal(nodes['workspace-sync-state'].textContent, '切换收尾未完成');
+    assert.match(nodes['workspace-sync-note'].textContent, /旧的服务商来源还保留/);
+    assert.match(nodes['workspace-sync-note'].textContent, /不要退出后台服务/);
+    assert.match(nodes['workspace-sync-note'].textContent, /旧路由已清理/);
+    /* 收尾未完成时不能提示「需要重启 Kimi」把人带去别的动作。 */
+    assert.equal(nodes['workspace-restart'].hidden, true);
+  }
+
+  /* 没有收尾标记时依旧是原来的已同步文案。 */
+  render(base);
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+
+  const fact = new Function(
+    [...INTEGRATION_HELPERS,
+      'const el = { textContent: "", hidden: true };',
+      'const dom = { factGatewayMode: el };',
+      'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
+      'const setText = (element, text) => { if (element) element.textContent = text; };',
+      sourceFunction('renderGatewayModeFact'),
+      'return { renderGatewayModeFact, el };'].join('\n'),
+  )();
+  fact.renderGatewayModeFact({ ...base, directMode: { ...base.directMode, routeCleanupPending: true } });
+  assert.match(fact.el.textContent, /切换收尾未完成/);
+  assert.match(fact.el.textContent, /暂不要退出后台/);
+  fact.renderGatewayModeFact(base);
+  assert.match(fact.el.textContent, /退出后台后第三方模型仍可用/);
+});
+
+test('the models sync bar names the pending direct write and the gateway fallback', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }, { id: 'conn/chat/model-b' }];
+
+  /* 直连已选、官方 Kimi 还是网关：说明下一步是写入直连配置。 */
+  render({ integrationMode: 'direct', models, integration: { mode: 'gateway' } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '待写入直连配置');
+  assert.match(nodes['workspace-sync-note'].textContent, /服务商地址与静态 hosts 写入官方 Kimi/);
+  assert.match(nodes['workspace-sync-note'].textContent, /之后可退出本软件/);
+
+  /* 切回网关、官方 Kimi 仍是直连：说明下一步是恢复网关路由。 */
+  render({ integrationMode: 'gateway', models, integration: { mode: 'direct' } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '待切回网关并同步');
+  assert.match(nodes['workspace-sync-note'].textContent, /恢复为本机网关路由/);
+
+  /* 直连已同步并跳过了一个模型：仍然显示已同步，并强调可以退出后台。 */
+  render({
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds: ['conn/resp/model-a'],
+      eligibleModels: 1, totalModels: 2,
+      skippedModels: [{ id: 'conn/chat/model-b', reason: 'missing_api_key' }] },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.match(nodes['workspace-sync-note'].textContent, /静态 hosts 就绪/);
+  assert.match(nodes['workspace-sync-note'].textContent, /仍可直接使用这些模型/);
+
+  /* 直连模型已写入但静态 hosts 还没就绪：明说还差一步。 */
+  render({
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: false,
+      eligibleModelIds: ['conn/resp/model-a', 'conn/chat/model-b'], eligibleModels: 2, totalModels: 2 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a', 'conn/chat/model-b': 'byok-uuid/model-b' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.match(nodes['workspace-sync-note'].textContent, /补齐静态 hosts/);
+
+  /* 网关模式原有四种文案不得变化。 */
+  render({ models: [], integration: {} });
+  assert.equal(nodes['workspace-sync-state'].textContent, '尚未添加模型');
+  render({ models, integration: { adopted: true, aliases: { 'conn/resp/model-a': 'a', 'conn/chat/model-b': 'b' } } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已同步到 Work');
+  render({ models, integration: { applied: true, adopted: false, aliases: { 'conn/resp/model-a': 'a', 'conn/chat/model-b': 'b' } } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
+  assert.equal(nodes['workspace-restart'].hidden, false);
+});
+
+test('direct failure codes normalize across native_import_ prefixes and dashed page codes', () => {
+  const fn = new Function(
+    [DIRECT_REASON_SOURCE, sourceFunction('normalizeReasonCode'), sourceFunction('directReasonText'),
+      'return { normalizeReasonCode, directReasonText };'].join('\n'),
+  )();
+  assert.equal(fn.normalizeReasonCode('native_import_direct-preview-refused'), 'direct_preview_refused');
+  assert.equal(fn.normalizeReasonCode('native_direct_mode_unsupported'), 'direct_mode_unsupported');
+  assert.equal(fn.normalizeReasonCode('direct-preview-refused'), 'direct_preview_refused');
+  assert.equal(fn.normalizeReasonCode('direct_preview_refused'), 'direct_preview_refused');
+  assert.equal(fn.normalizeReasonCode(''), '');
+  assert.equal(fn.normalizeReasonCode(undefined), '');
+
+  /* 三种写法指向同一句中文，且都不直接把诊断码摆给用户。 */
+  const preview = fn.directReasonText('native_import_direct-preview-refused');
+  assert.equal(preview, fn.directReasonText('direct-preview-refused'));
+  assert.equal(preview, fn.directReasonText('direct_preview_refused'));
+  assert.match(preview, /拒绝/);
+  assert.match(preview, /重新同步/);
+  assert.doesNotMatch(preview, /direct_preview_refused/);
+
+  const unsupported = fn.directReasonText('native_direct_mode_unsupported');
+  assert.match(unsupported, /不支持原生直连/);
+  assert.match(unsupported, /本机网关/);
+
+  /* 主会话要收敛的失败码都要有明确下一步。 */
+  const cases = {
+    direct_gateway_disconnect_failed: /仍指向本机网关/,
+    direct_disconnect_failed: /原来的路由/,
+    direct_import_failed: /重新同步/,
+    direct_foreign_source: /核对现有来源/,
+    direct_mode_unsupported: /本机网关/,
+    direct_preview_refused: /重新同步/,
+  };
+  for (const [code, pattern] of Object.entries(cases)) {
+    const text = fn.directReasonText(code);
+    assert.match(text, pattern, code + ' must explain the next step');
+    assert.doesNotMatch(text, new RegExp(code), code + ' must not leak the raw code');
+    /* 旧后端可能再包一层前缀、把下划线换成连字符。 */
+    assert.equal(fn.directReasonText('native_import_' + code.replace(/_/g, '-')), text);
+  }
+
+  /* 断开失败不能说成「旧路由已断开」。 */
+  for (const code of ['direct_gateway_disconnect_failed', 'direct_disconnect_failed', 'gateway_disconnect_failed']) {
+    const text = fn.directReasonText(code);
+    assert.match(text, /可能仍/, code + ' must not claim the old route is gone');
+    assert.doesNotMatch(text, /已经断开|已断开|不会再走/, code + ' must not claim success');
+  }
+
+  /* 真正未知的码不能被伪装成已知错误。 */
+  assert.equal(fn.directReasonText('direct_some_new_failure'), '');
+  assert.equal(fn.directReasonText('native_import_import-failed'), fn.directReasonText('import_failed'));
+});
+
+test('stripModelAliasPrefix removes gateway and UUID source prefixes but not custom names', () => {
+  const fn = new Function(
+    'MODEL_ALIAS_PREFIXES', 'MODEL_ALIAS_UUID_PREFIX',
+    sourceFunction('stripModelAliasPrefix') + '\nreturn stripModelAliasPrefix;',
+  )(['byok-kth-kimi/', 'byok-kth-resp/'], /^byok-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\//i);
+
+  assert.equal(fn('byok-kth-kimi/conn/chat/model-a'), 'conn/chat/model-a');
+  assert.equal(fn('byok-kth-resp/conn/resp/model-a'), 'conn/resp/model-a');
+  assert.equal(fn('byok-3d8250d1-1234-5678-9abc-def012345678/conn/chat/model-a'), 'conn/chat/model-a');
+  /* 用户自己的 byok- 命名不是别名，必须原样保留。 */
+  assert.equal(fn('byok-custom/conn/chat/model-a'), 'byok-custom/conn/chat/model-a');
+  assert.equal(fn('conn/chat/model-a'), 'conn/chat/model-a');
+  assert.equal(fn(''), '');
+  assert.equal(fn(undefined), undefined);
+  /* 前缀后面为空时不能把整个名字吞掉。 */
+  assert.equal(fn('byok-kth-kimi/'), 'byok-kth-kimi/');
+});
+
+test('resolveAlias unwraps prefixed aliases and falls back to the bare route id', () => {
+  const state = { data: { models: [
+    { id: 'conn/chat/model-a' },
+    { id: 'conn/resp/model-b' },
+    { id: 'byok-custom/conn/chat/model-c' },
+  ] } };
+  const code = [
+    'const MODEL_ALIAS_PREFIXES = ["byok-kth-kimi/", "byok-kth-resp/"];',
+    'const MODEL_ALIAS_UUID_PREFIX = /^byok-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\//i;',
+    'const displayModelId = value => value;',
+    sourceFunction('stripModelAliasPrefix'),
+    sourceFunction('modelIndex'),
+    sourceFunction('modelIdFromAlias'),
+    sourceFunction('resolveAlias'),
+    'return { resolveAlias, modelIdFromAlias };',
+  ].join('\n');
+  const { resolveAlias, modelIdFromAlias } = new Function('state', code)(state);
+
+  assert.equal(resolveAlias('byok-kth-kimi/conn/chat/model-a'), 'conn/chat/model-a');
+  assert.equal(resolveAlias('byok-kth-resp/conn/resp/model-b'), 'conn/resp/model-b');
+  assert.equal(resolveAlias('byok-3d8250d1-1234-5678-9abc-def012345678/conn/chat/model-a'), 'conn/chat/model-a');
+  /* 目录里没有的别名也要去掉前缀再显示，而不是把 UUID 摆给用户。 */
+  assert.equal(resolveAlias('byok-3d8250d1-1234-5678-9abc-def012345678/conn/chat/gone'), 'conn/chat/gone');
+  /* byok-custom/ 是真实存在的模型 ID，不能被当成别名剥离。 */
+  assert.equal(resolveAlias('byok-custom/conn/chat/model-c'), 'byok-custom/conn/chat/model-c');
+  assert.equal(modelIdFromAlias('byok-3d8250d1-1234-5678-9abc-def012345678/conn/resp/model-b'), 'conn/resp/model-b');
+  assert.equal(modelIdFromAlias('byok-custom/conn/chat/nope'), null);
+  assert.equal(resolveAlias(''), '');
+});
+
+test('direct mode keeps budget reminders out of the overview issue card', () => {
+  const compute = new Function(`
+    const displayModelId = id => id;
+    const applyState = data => data._apply || { tone: 'ok', word: '已应用', note: '' };
+    const budgetNotice = b => b?.msg || '';
+    const syncState = data => data._sync || { code: 'synced', tone: 'ok', word: '已同步', note: '' };
+    const requestErrorText = row => row.msg || row.error || '';
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('computeOverviewIssue')}
+    return computeOverviewIssue;
+  `)();
+  const budget = { enabled: true, spend: { daily: { reached: true, action: 'block' } }, msg: '今日已达预算上限。' };
+  /* 直连下预算保护不生效：不能报「新请求会被拒绝」。 */
+  const direct = compute({ integrationMode: 'direct', gateway: { state: 'running' }, budget });
+  assert.doesNotMatch(direct.title, /预算/);
+  assert.doesNotMatch(direct.note, /预算/);
+  /* 网关模式下原行为不变。 */
+  assert.equal(compute({ gateway: { state: 'running' }, budget }).title, '已达到预算上限');
+});
+
+test('the settings notice and sync button both name the pending cleanup', () => {
+  const nodes = {};
+  for (const id of ['direct-mode-notice', 'direct-mode-support', 'direct-mode-hosts', 'native-sync-label']) {
+    nodes[id] = { id, textContent: '', hidden: false, dataset: {}, classList: { add() {}, toggle() {} } };
+  }
+  const dom = {
+    modeGateway: { value: 'gateway', checked: false, disabled: false },
+    modeDirect: { value: 'direct', checked: false, disabled: false },
+    integrationModeGroup: null,
+    integrationModeState: null,
+    nativeSyncLabel: nodes['native-sync-label'],
+    nativeSync: null,
+    directModeNotice: nodes['direct-mode-notice'],
+    directModeSupport: nodes['direct-mode-support'],
+    directModeHosts: nodes['direct-mode-hosts'],
+    directModeBypassed: null,
+    directModeSkipped: null,
+  };
+  const code = [
+    ...INTEGRATION_HELPERS,
+    'let integrationModeSaving = false;',
+    'const integrationModeBusy = data => integrationModeSaving || data?.operation?.state === "running";',
+    'const setText = (element, text) => { if (element) element.textContent = text; };',
+    'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
+    'const displayModelId = id => id;',
+    'const DIRECT_BYPASS_WORD = {};',
+    'const DIRECT_SKIP_REASON = {};',
+    sourceFunction('renderIntegrationMode'),
+    'return renderIntegrationMode;',
+  ].join('\n');
+  const render = new Function('dom', code)(dom);
+
+  const models = [{ id: 'conn/resp/model-a' }];
+  const base = {
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1, routeCleanupPending: true },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
+  };
+  render(base);
+  assert.equal(nodes['direct-mode-notice'].hidden, false);
+  assert.equal(nodes['direct-mode-notice'].dataset.tone, 'warn');
+  assert.match(nodes['direct-mode-support'].textContent, /切换收尾未完成/);
+  assert.match(nodes['direct-mode-hosts'].textContent, /重试清理旧来源/);
+  assert.match(nodes['direct-mode-hosts'].textContent, /不要退出后台服务/);
+  /* 按钮说的也是重试清理，不是「写入直连配置」。 */
+  assert.equal(nodes['native-sync-label'].textContent, '重试清理旧来源并同步');
+
+  /* 收尾完成后回到原来的说明与按钮文案。 */
+  render({ ...base, directMode: { ...base.directMode, routeCleanupPending: false } });
+  assert.equal(nodes['direct-mode-notice'].dataset.tone, 'neutral');
+  assert.match(nodes['direct-mode-support'].textContent, /直连模型已写入/);
+  assert.equal(nodes['native-sync-label'].textContent, '写入直连配置并同步');
+
+  /* 版本不支持时仍是原来的告警说明。 */
+  render({ ...base, directMode: { ...base.directMode, supported: false, routeCleanupPending: false } });
+  assert.equal(nodes['direct-mode-notice'].dataset.tone, 'warn');
+  assert.match(nodes['direct-mode-support'].textContent, /不支持原生直连/);
 });

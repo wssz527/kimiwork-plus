@@ -88,6 +88,11 @@ type IntegrationResult struct {
 	Adopted bool `json:"adopted"`
 	// Readback is what the profile and the generated config hold right now.
 	Readback *ImportReadback `json:"readback,omitempty"`
+	// Mode is the integration mode this result belongs to. Empty means the
+	// gateway, which is what every older caller means.
+	Mode string `json:"mode,omitempty"`
+	// DirectSourceID is the managed custom source a Direct Mode result verified.
+	DirectSourceID string `json:"directSourceId,omitempty"`
 }
 
 // NativeIntegration reconciles one Kimi home.
@@ -127,11 +132,22 @@ type ReconcileOptions struct {
 	// AllowAccountRebind follows a confirmed import or a switch whose target
 	// catalog and runtime were verified. Periodic callers leave it false.
 	AllowAccountRebind bool
+	// Mode selects the integration mode. Empty means the gateway.
+	Mode string
+	// DirectSpec is the non-secret declaration Direct Mode verifies. It replaces
+	// URL and Models, which describe the gateway import.
+	DirectSpec *DirectSpec
+	// DirectSourceID names the managed custom source to verify. Empty means the
+	// intent's own record, then the display name.
+	DirectSourceID string
 }
 
 // Reconcile compares the profile, the intent and the generated config, and
 // writes only what it can prove it owns.
 func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResult {
+	if options.Mode == IntegrationModeDirect {
+		return n.verifyDirectAccount(options)
+	}
 	target := normalizeNativeURL(options.URL)
 	catalog, ok := normalizeCatalog(options.Models)
 	if target == "" || !ok {
@@ -451,6 +467,12 @@ type nativeIntent struct {
 	Active           bool              `json:"active"`
 	Generation       int               `json:"generation"`
 	UpdatedAt        string            `json:"updatedAt"`
+	// Mode is empty for the gateway, so an intent written by an earlier version
+	// keeps meaning the gateway.
+	Mode string `json:"mode,omitempty"`
+	// DirectSourceID is the managed custom source a Direct Mode intent verified.
+	// No provider key is ever recorded here.
+	DirectSourceID string `json:"directSourceId,omitempty"`
 }
 
 var errUnsafeFile = errors.New("unsafe")
@@ -487,7 +509,13 @@ func configRawFor(kimiDir string) string {
 // that were parsed are still the bytes on disk: a generator or an editor racing
 // this call wins, and this call reports the conflict.
 func (n *NativeIntegration) commitConfig(raw string, document map[string]any) error {
-	current, err := os.ReadFile(filepath.Join(n.kimiDir, NativeWorkConfig))
+	return commitConfigFile(n.kimiDir, raw, document)
+}
+
+// commitConfigFile is the same guard for a caller that holds a Kimi home but no
+// integration instance, such as the legacy-entry cleanup.
+func commitConfigFile(kimiDir, raw string, document map[string]any) error {
+	current, err := os.ReadFile(filepath.Join(kimiDir, NativeWorkConfig))
 	if err != nil {
 		return errors.New("config_missing")
 	}
@@ -499,10 +527,10 @@ func (n *NativeIntegration) commitConfig(raw string, document map[string]any) er
 		return errors.New("invalid_config")
 	}
 	mode := os.FileMode(0o600)
-	if info, err := os.Stat(filepath.Join(n.kimiDir, NativeWorkConfig)); err == nil {
+	if info, err := os.Stat(filepath.Join(kimiDir, NativeWorkConfig)); err == nil {
 		mode = info.Mode().Perm()
 	}
-	return replaceFile(filepath.Join(n.kimiDir, NativeWorkConfig), append(encoded, '\n'), mode)
+	return replaceFile(filepath.Join(kimiDir, NativeWorkConfig), append(encoded, '\n'), mode)
 }
 
 func replaceFile(file string, content []byte, mode os.FileMode) error {
@@ -1140,7 +1168,7 @@ func intentSignature(intent *nativeIntent) string {
 		"sourceID": intent.SourceID, "kimiHome": intent.KimiHome, "url": intent.URL,
 		"accountDigest": intent.AccountDigest, "profileKeyDigest": intent.ProfileKeyDigest,
 		"credentialRef": intent.CredentialRef, "aliases": intent.Aliases,
-		"active": intent.Active,
+		"active": intent.Active, "mode": intent.Mode, "directSourceId": intent.DirectSourceID,
 	})
 }
 

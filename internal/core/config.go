@@ -25,8 +25,35 @@ func init() {
 	}
 }
 
+// Integration modes. The gateway is what every release before Direct Mode ran,
+// so a document that does not mention a mode keeps that behaviour.
+const (
+	IntegrationModeGateway = "gateway"
+	IntegrationModeDirect  = "direct"
+)
+
 func String(v any) string { s, _ := v.(string); return s }
-func Rows(v any) []any    { r, _ := v.([]any); return r }
+
+// IntegrationMode reads the configured mode. A missing, empty or unrecognised
+// value is the gateway: an older document or a hand-edited file must not be
+// able to opt into a different data path by accident.
+func IntegrationMode(d Document) string {
+	if String(d["integrationMode"]) == IntegrationModeDirect {
+		return IntegrationModeDirect
+	}
+	return IntegrationModeGateway
+}
+
+// SetIntegrationMode writes the mode. Only the two known values are accepted;
+// anything else is a caller mistake rather than a value to normalise away.
+func SetIntegrationMode(d Document, mode string) error {
+	if mode != IntegrationModeGateway && mode != IntegrationModeDirect {
+		return errors.New("invalid_integration_mode")
+	}
+	d["integrationMode"] = mode
+	return nil
+}
+func Rows(v any) []any { r, _ := v.([]any); return r }
 func Object(v any) map[string]any {
 	switch m := v.(type) {
 	case map[string]any:
@@ -53,6 +80,11 @@ func BaseURL(raw string) (string, error) {
 func Validate(d Document) error {
 	connections := map[string]map[string]any{}
 	envs := map[string]bool{}
+	if raw, exists := d["integrationMode"]; exists && raw != nil {
+		if mode := String(raw); mode != IntegrationModeGateway && mode != IntegrationModeDirect {
+			return errors.New("invalid_integration_mode")
+		}
+	}
 	if _, ok := d["connections"].([]any); !ok {
 		return errors.New("invalid_connections")
 	}

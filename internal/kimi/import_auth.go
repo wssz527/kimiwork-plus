@@ -110,7 +110,16 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 
 // RepairIntegration restores a verified existing import after its loopback port
 // changes. It never repairs a foreign URL, an inactive intent or another account.
+//
+// It is a no-op in Direct Mode: that mode has no loopback gateway to repair, and
+// rewriting its config back to a gateway would undo the user's explicit choice.
 func (c *Controller) RepairIntegration(ctx context.Context, observed IntegrationResult) {
+	c.mu.Lock()
+	settings := c.settings
+	c.mu.Unlock()
+	if settings.integrationMode() == IntegrationModeDirect {
+		return
+	}
 	readback := observed.Readback
 	if observed.State != IntegrationNeedsImport || observed.Reason != "base_url_changed" ||
 		readback == nil || !readback.Active || !readback.AccountVerified || readback.AccountDigest == "" ||
@@ -121,9 +130,6 @@ func (c *Controller) RepairIntegration(ctx context.Context, observed Integration
 	if !verified || account != readback.AccountDigest {
 		return
 	}
-	c.mu.Lock()
-	settings := c.settings
-	c.mu.Unlock()
 	native, err := NewNativeIntegration(settings.StateDir, c.kimiHome(), "gateway")
 	if err != nil {
 		return
@@ -139,6 +145,65 @@ func (c *Controller) RepairIntegration(ctx context.Context, observed Integration
 	}
 	signature := account + "\x00" + previous + "\x00" + target
 	_, _ = c.importModelsAuthorized(ctx, account, signature)
+}
+
+// ImportDirectAuthorized runs one Direct Mode import as an explicit, one-shot
+// user action: this call, and only this call, may open Kimi's settings page and
+// owns the overlay it opened.
+//
+// The keys in `request` exist only for the duration of this call. The intent
+// that a later reconcile reads records the source id and aliases, never a key.
+func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectImportRequest) (ImportResult, error) {
+	c.reapChild()
+	c.mu.Lock()
+	if c.importGranted {
+		c.mu.Unlock()
+		return ImportResult{State: ImportStateFailed, Reason: ErrImportBusy.Error()}, ErrImportBusy
+	}
+	bridge := c.bridge
+	settings := c.settings
+	c.importGranted = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.importGranted = false
+		c.mu.Unlock()
+	}()
+	if bridge == nil {
+		return ImportResult{State: ImportStateWaitingWork, Reason: "native_bridge_unavailable"},
+			errors.New("native_bridge_unavailable")
+	}
+	if settings.integrationMode() != IntegrationModeDirect {
+		return ImportResult{State: ImportStateFailed, Reason: "native_import_gateway_mode"},
+			errors.New("native_import_gateway_mode")
+	}
+	if request.DisplayName == "" {
+		request.DisplayName = DirectDisplayName
+	}
+	account, verified := c.profileAccount()
+	if !verified {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
+	}
+	if request.ExpectedAccountKey == "" {
+		request.ExpectedAccountKey = settings.AccountScope
+	}
+	if request.ExpectedAccountKey != "" && request.ExpectedAccountKey != account {
+		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
+	}
+	request.ExpectedAccountKey = account
+	// Updating the source this tool already manages keeps Kimi's provider ids and
+	// aliases; creating a second source would split the catalog.
+	if request.ExistingSourceID == "" {
+		request.ExistingSourceID = c.directSourceID(settings)
+	}
+	if request.DisconnectGateway && request.DisconnectGatewayURL == "" {
+		request.DisconnectGatewayURL = settings.GatewayURL
+	}
+	result, err := bridge.Client().ImportDirect(ctx, request)
+	if err != nil {
+		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
+	}
+	return c.gradeDirectImport(result, account, settings), nil
 }
 
 // ImportModels runs the import without opening anything. It keeps the released
@@ -167,6 +232,13 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 		return ImportResult{State: ImportStateWaitingWork, Reason: "native_bridge_unavailable"},
 			errors.New("native_bridge_unavailable")
 	}
+	if settings.integrationMode() == IntegrationModeDirect {
+		// A gateway import would overwrite the direct configuration the user
+		// chose. Switching modes is a settings change followed by an explicit
+		// import, never a periodic side effect.
+		return ImportResult{State: ImportStateFailed, Reason: "native_import_direct_mode"},
+			errors.New("native_import_direct_mode")
+	}
 	// The account is read from the selected profile's own files. A profile that
 	// has not signed in has no identity, and an import into "whatever account
 	// happens to be there" is exactly what this product must not do.
@@ -181,9 +253,17 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 
+	// A Direct Mode intent that is still active names the custom source this
+	// gateway import replaces. It is disconnected only after the new gateway
+	// source has been applied; only a source recorded by this tool is ever named.
+	disconnectDirect := ""
+	if settings.integrationMode() == IntegrationModeGateway {
+		disconnectDirect = c.previousDirectSourceID(settings)
+	}
 	result, err := bridge.Client().ImportModels(ctx, ImportRequest{
 		URL: settings.GatewayURL, Token: settings.GatewayToken,
 		ExpectedAccountKey: account, OpenSettings: authorized,
+		DisconnectDirectSourceID: disconnectDirect,
 	})
 	if err != nil {
 		// A bridge that cannot be reached is not a page state: it is a failure the
@@ -220,6 +300,12 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string) Im
 		// read yet.
 		result.State = ImportStateRequiresRestart
 		result.Reason = firstNonEmpty(result.Reason, NativeRequiresRestart)
+		result.Applied = integration.Applied
+		return result
+	}
+	if result.RouteCleanupPending && !result.RequiresRestart {
+		result.State = ImportStateAccepted
+		result.Reason = "route_cleanup_pending"
 		result.Applied = integration.Applied
 		return result
 	}
@@ -280,16 +366,17 @@ func (c *Controller) profileAccount() (string, bool) {
 // the evidence half of an import; the caller's answer is the request half.
 func (c *Controller) readback(account string) *ImportReadback {
 	c.mu.Lock()
-	stateDir := c.settings.StateDir
+	settings := c.settings
 	c.mu.Unlock()
+	mode := settings.integrationMode()
 	home := c.kimiHome()
 	if home == "" {
-		return &ImportReadback{AccountDigest: account, AccountVerified: account != ""}
+		return &ImportReadback{AccountDigest: account, AccountVerified: account != "", Mode: mode}
 	}
-	integration, err := NewNativeIntegration(stateDir, home, "gateway")
+	integration, err := NewNativeIntegration(settings.StateDir, home, mode)
 	if err != nil {
-		return &ImportReadback{AccountDigest: account, AccountVerified: account != ""}
+		return &ImportReadback{AccountDigest: account, AccountVerified: account != "", Mode: mode}
 	}
-	result := integration.Readback(account)
+	result := integration.ReadbackMode(account, mode, "")
 	return &result
 }

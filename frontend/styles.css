@@ -284,6 +284,11 @@ option { background: var(--surface-strong); color: var(--ink); }
 .check--channel .field__hint { flex-basis: 100%; padding-left: 26px; font-weight: 400; }
 .choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0; border: 0; }
 .choices--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* 接入模式的两条说明比普通选项长，两列在中等宽度就已挤成竖条：
+   这里只在足够宽时并列，窄屏自动落成一列。 */
+.choices--mode { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.choices--mode > legend { margin-bottom: 9px; }
+.choices--mode .choice__note { padding-left: 24px; line-height: 1.55; }
 .choice { position: relative; display: flex; cursor: pointer; }
 .choice input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .choice__body { display: grid; gap: 5px; width: 100%; padding: 15px 16px; border: 1px solid var(--rule); border-radius: var(--r-group); background: var(--surface); transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease); }
@@ -295,6 +300,14 @@ option { background: var(--surface-strong); color: var(--ink); }
 .choice input:checked + .choice__body .choice__title::before { border-color: var(--accent); background: var(--accent-fill); }
 .choice input:focus-visible + .choice__body { outline: 2px solid var(--focus); outline-offset: 3px; }
 .choice input:disabled + .choice__body { opacity: .58; cursor: not-allowed; }
+
+/* 直连模式说明：信息块而非告警块，只有「不支持」才升级成告警配色。 */
+.direct-notice { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--rule); border-radius: var(--r-group); background: var(--surface); }
+.direct-notice__head { color: var(--ink); font-size: 13px; font-weight: 650; }
+.direct-notice__line { color: var(--ink-2); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.direct-notice[data-tone="warn"] { border-color: var(--warn); background: var(--warn-soft); }
+.direct-notice[data-tone="warn"] .direct-notice__line { color: var(--warn); }
+.direct-notice__line--list { color: var(--ink-3); font-size: 12px; }
 
 .banner { display: flex; align-items: center; gap: 11px; margin: 20px 0 0; padding: 12px 14px; border-radius: var(--r-group); font-size: 13px; }
 .banner p { flex: 1 1 auto; min-width: 0; }

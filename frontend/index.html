@@ -101,6 +101,7 @@
             <span class="overview-card__label">本机网关</span>
             <strong class="overview-card__value"><span class="dot" id="fact-gateway-dot" data-tone="neutral"></span><span id="fact-gateway">…</span></strong>
             <p class="overview-card__meta mono" id="fact-gateway-url">…</p>
+            <p class="overview-card__meta" id="fact-gateway-mode" hidden></p>
           </article>
 
           <article class="overview-card">
@@ -295,7 +296,40 @@
     </section>
 
     <section class="view" id="view-maintenance" aria-label="设置" hidden>
-<section class="band" id="native-panel"><div class="band__head"><div><h2>Kimi 接入</h2><p>只接入本机官方桌面 Work。</p></div></div><p class="note" id="native-state" role="status">正在检查接入…</p><p class="verdict" id="native-remote" role="status" hidden><span class="dot" id="native-remote-dot" data-tone="neutral"></span><span>接入范围</span><strong id="native-remote-word">仅桌面</strong><span class="verdict__note" id="native-remote-note">只接入本机官方 Kimi 桌面 Work，不同步到 Kimi 手机端。</span></p><div class="action-line action-line--start"><button class="btn btn--primary" id="native-launch" data-action="launch-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>打开 / 启动 Kimi</button><button class="btn btn--outline" data-action="launch-kimi" data-profile-mode="existing-authorized" type="button" hidden>诊断：沿用登录，隔离 Work</button><button class="btn btn--outline" data-action="connect-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>重新准备接入</button></div><p class="hint">默认沿用官方登录、对话、技能和已导入模型。诊断隔离模式才把模型、工具与任务临时放入独立目录，并在退出后恢复原数据位置。</p></section>
+<section class="band" id="native-panel">
+  <div class="band__head"><div><h2>Kimi 接入</h2><p>只接入本机官方桌面 Work；先选择接入模式，再把模型同步到 Kimi。</p></div></div>
+  <fieldset class="choices choices--mode" id="integration-mode-group">
+    <legend class="field__label">接入模式</legend>
+    <label class="choice" for="mode-gateway">
+      <input type="radio" name="integration-mode" id="mode-gateway" value="gateway">
+      <span class="choice__body">
+        <span class="choice__title">本机网关模式（默认）</span>
+        <span class="choice__note">通过本机网关转发请求；完整支持用量账本、预算限制、故障转移、共享指令与联网搜索。开启「允许登录时启动」后平时也无需打开主窗口。</span>
+      </span>
+    </label>
+    <label class="choice" for="mode-direct">
+      <input type="radio" name="integration-mode" id="mode-direct" value="direct">
+      <span class="choice__body">
+        <span class="choice__title">零网关直连模式</span>
+        <span class="choice__note">将服务商地址与密钥直接写入官方 Kimi 3.2.28，并写入静态 hosts；同步完成后可彻底退出 KimiWork + 与后台服务，直接打开官方 Kimi 使用第三方模型。官方更新或更改模型后再打开本软件同步一次。</span>
+      </span>
+    </label>
+  </fieldset>
+  <p class="note" id="integration-mode-state" role="status" hidden></p>
+  <div class="direct-notice" id="direct-mode-notice" hidden>
+    <p class="direct-notice__head">直连模式说明</p>
+    <p class="direct-notice__line" id="direct-mode-support"></p>
+    <p class="direct-notice__line" id="direct-mode-hosts"></p>
+    <p class="direct-notice__line" id="direct-mode-tradeoff">直连模式下 API Key 交由官方 Kimi 本机安全存储托管，请求不经过本机网关；用量统计、预算限制、故障转移、共享指令与网关侧联网搜索不会生效，思考翻译与多账号切换仍需打开本软件。</p>
+    <p class="direct-notice__line" id="direct-mode-bypassed" hidden></p>
+    <p class="direct-notice__line" id="direct-mode-skipped" hidden></p>
+    <p class="hint" id="direct-mode-hint">官方更新或更改模型后，再打开本软件同步一次即可。</p>
+  </div>
+  <p class="note" id="native-state" role="status">正在检查接入…</p>
+  <p class="verdict" id="native-remote" role="status" hidden><span class="dot" id="native-remote-dot" data-tone="neutral"></span><span>接入范围</span><strong id="native-remote-word">仅桌面</strong><span class="verdict__note" id="native-remote-note">只接入本机官方 Kimi 桌面 Work，不同步到 Kimi 手机端。</span></p>
+  <div class="action-line action-line--start"><button class="btn btn--primary" id="native-launch" data-action="launch-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>打开 / 启动 Kimi</button><button class="btn btn--outline" data-action="launch-kimi" data-profile-mode="existing-authorized" type="button" hidden>诊断：沿用登录，隔离 Work</button><button class="btn btn--outline" id="native-sync" data-action="connect-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span id="native-sync-label">重新准备接入</span></button></div>
+  <p class="hint">默认沿用官方登录、对话、技能和已导入模型。诊断隔离模式才把模型、工具与任务临时放入独立目录，并在退出后恢复原数据位置。</p>
+</section>
         <div class="takeover__foot"><button class="btn btn--quiet" id="ob-advanced-toggle" type="button" aria-expanded="false" aria-controls="ob-advanced">高级恢复选项</button></div>
         <div id="ob-advanced" class="advanced-body" hidden><div class="actions-grid"><button class="btn btn--outline" data-action="connect-kimi" type="button">重新准备本地接入</button><button class="btn btn--outline" data-action="prepare-native" type="button">准备原生入口</button><button class="btn btn--quiet" data-action="remove-dns" type="button">移除单域名 DNS</button></div></div>
 <section class="band" id="update-panel">

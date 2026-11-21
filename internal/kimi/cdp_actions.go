@@ -91,6 +91,11 @@ type cdpActions struct {
 	pipe     *Pipe
 	kimiDir  string
 	kimiHome string
+	// mode is the integration mode this controller runs in, and directSourceID
+	// is the managed custom source it verifies. They only change which source a
+	// runtime model check reads; the page allowlist is the same either way.
+	mode           string
+	directSourceID string
 
 	mu       sync.Mutex
 	sessions map[string]string // target id -> CDP session id
@@ -98,8 +103,32 @@ type cdpActions struct {
 
 // NewCDPActions builds the production PageActions for a managed child.
 func NewCDPActions(pipe *Pipe, kimiDir, kimiHome string) PageActions {
+	return NewCDPActionsForMode(pipe, kimiDir, kimiHome, IntegrationModeGateway, "")
+}
+
+// NewCDPActionsForMode builds the same actions for a controller that may be in
+// Direct Mode.
+func NewCDPActionsForMode(pipe *Pipe, kimiDir, kimiHome, mode, directSourceID string) PageActions {
+	if mode != IntegrationModeDirect {
+		directSourceID = ""
+	}
 	return &cdpActions{pipe: pipe, kimiDir: kimiDir, kimiHome: kimiHome,
-		sessions: map[string]string{}}
+		mode: mode, directSourceID: directSourceID, sessions: map[string]string{}}
+}
+
+func (a *cdpActions) setIntegrationMode(mode, sourceID string) {
+	if mode != IntegrationModeDirect {
+		sourceID = ""
+	}
+	a.mu.Lock()
+	a.mode, a.directSourceID = mode, sourceID
+	a.mu.Unlock()
+}
+
+func (a *cdpActions) integrationRoute() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mode, a.directSourceID
 }
 
 const (
@@ -107,6 +136,10 @@ const (
 	settingsOpenReads   = 6
 	settingsOpenStep    = 250 * time.Millisecond
 	maxActionExpression = 32 * 1024
+	// maxDirectExpression is bounded by the pipe's own frame limit: a direct
+	// import carries a whole catalog and its keys.
+	maxDirectExpression = 2 << 20
+	maxDirectCatalog    = 256 << 10
 )
 
 func (a *cdpActions) Connected() bool {
@@ -115,12 +148,19 @@ func (a *cdpActions) Connected() bool {
 }
 
 func (a *cdpActions) evaluate(ctx context.Context, sessionID, expression string) (any, error) {
-	if len(expression) > maxActionExpression {
+	return a.evaluateBounded(ctx, sessionID, expression, maxActionExpression)
+}
+
+func (a *cdpActions) evaluateBounded(ctx context.Context, sessionID, expression string, limit int) (any, error) {
+	if len(expression) > limit {
 		return nil, errors.New("native_bridge_expression_too_large")
 	}
-	result, err := a.pipe.Send(ctx, "Runtime.evaluate",
-		map[string]any{"expression": expression, "returnByValue": true, "awaitPromise": true},
-		sessionID, actionCallTimeout)
+	params := map[string]any{"expression": expression, "returnByValue": true, "awaitPromise": true}
+	encoded, _ := json.Marshal(params)
+	if len(encoded)+1 > MaxFrameBytes {
+		return nil, errors.New("native_bridge_expression_too_large")
+	}
+	result, err := a.pipe.Send(ctx, "Runtime.evaluate", params, sessionID, actionCallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -307,55 +347,19 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 
-	targets, err := a.targets(ctx)
+	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings)
 	if err != nil {
 		return ImportResult{}, err
 	}
-	settings, found := a.findImportTarget(ctx, targets)
-	opened := false
-	if !found {
-		if !request.OpenSettings {
-			return ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings}, nil
-		}
-		work, ok := findPath(targets, "/kimi-agent.html")
-		if !ok {
-			return ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
-		}
-		asked, err := a.evaluate(ctx, work.sessionID, openSettingsExpression)
-		if err != nil || asked != true {
-			return ImportResult{State: ImportStateWaitingSettings, Reason: "native_bridge_settings_open_refused"}, nil
-		}
-		opened = true
-		for attempt := 0; attempt < settingsOpenReads && !found; attempt++ {
-			if attempt > 0 {
-				select {
-				case <-time.After(settingsOpenStep):
-				case <-ctx.Done():
-					a.closeIfOpened(ctx, opened)
-					return ImportResult{}, ctx.Err()
-				}
-			}
-			if fresh, err := a.targets(ctx); err == nil {
-				targets = fresh
-			}
-			if candidate, ok := a.findImportTarget(ctx, targets); ok {
-				settings, found = candidate, true
-			}
-		}
-	}
-	if !found {
-		// The overlay this call opened is closed again: leaving it up would strand
-		// a window the user did not ask for.
-		result := ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings, Opened: opened}
-		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, nil
+	if failure != nil {
+		return *failure, nil
 	}
 
 	// The import itself. The answer reports only what the caller may act on:
 	// whether it applied, whether a restart is still owed, and how many models
 	// the profile now holds. The profile rows, the token and every other native
 	// field stay in the page.
-	expression := importExpression(request.Token, request.URL)
+	expression := importExpression(request.Token, request.URL, request.DisconnectDirectSourceID)
 	value, err := a.evaluate(ctx, settings.sessionID, expression)
 	if err != nil {
 		result := ImportResult{State: ImportStateContractChanged, Reason: NativeContractChanged, Opened: opened}
@@ -375,6 +379,9 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		if deferred, ok := answer["restartDeferred"].(bool); ok {
 			result.RestartDeferred = deferred
 		}
+		if pending, ok := answer["routeCleanupPending"].(bool); ok {
+			result.RouteCleanupPending = pending
+		}
 		// The page's own word: accepted. The controller grades this against a
 		// readback before anything is called applied.
 		result.State = ImportStateAccepted
@@ -390,6 +397,141 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	// either way: a close that failed means the window may still be up.
 	a.closeIfOpenedInto(ctx, opened, &result)
 	return result, nil
+}
+
+// ImportDirect writes the caller's providers and models into a managed custom
+// source through the official byokSources API.
+//
+// Everything the page schema would reject is refused here first: a non-loopback
+// http endpoint, a key with a line break, a model without tool use. The account,
+// target and overlay rules are the same ones ImportModels follows, because both
+// import into the same signed-in page.
+func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportRequest) (ImportResult, error) {
+	if reason := validateDirectImportRequest(request); reason != "" {
+		return ImportResult{State: ImportStateFailed, Reason: reason}, nil
+	}
+	if a.kimiHome == "" || !filepath.IsAbs(a.kimiHome) {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
+	}
+	current := AccountScope(a.kimiHome)
+	if current == "" {
+		return ImportResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
+	}
+	if request.ExpectedAccountKey != "" && request.ExpectedAccountKey != current {
+		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
+	}
+	if request.DisplayName == "" {
+		request.DisplayName = DirectDisplayName
+	}
+
+	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if failure != nil {
+		return *failure, nil
+	}
+	expression, err := directImportExpression(request)
+	if err != nil {
+		result := ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request", Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, nil
+	}
+	value, err := a.evaluateBounded(ctx, settings.sessionID, expression, maxDirectExpression)
+	if err != nil {
+		result := ImportResult{State: ImportStateContractChanged, Reason: NativeContractChanged, Opened: opened}
+		if err.Error() == "native_bridge_expression_too_large" || errors.Is(err, ErrMessageTooLarge) {
+			result.State, result.Reason = ImportStateFailed, "direct_catalog_too_large"
+		}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, nil
+	}
+	answer, _ := value.(map[string]any)
+	result := ImportResult{Opened: opened}
+	if ok, _ := answer["ok"].(bool); ok {
+		result.SourceID, _ = answer["sourceId"].(string)
+		if result.SourceID == "" {
+			// A save without a source id cannot be reconciled later, so it is not
+			// reported as accepted.
+			result.State, result.Reason = ImportStateContractChanged, NativeContractChanged
+		} else {
+			result.OK = true
+			if count, ok := answer["models"].(float64); ok {
+				result.Models = int(count)
+			}
+			if restart, ok := answer["requiresRestart"].(bool); ok {
+				result.RequiresRestart = restart
+			}
+			if deferred, ok := answer["restartDeferred"].(bool); ok {
+				result.RestartDeferred = deferred
+			}
+			if pending, ok := answer["routeCleanupPending"].(bool); ok {
+				result.RouteCleanupPending = pending
+			}
+			result.State = ImportStateAccepted
+		}
+	} else {
+		code, _ := answer["code"].(string)
+		result.State = ImportStateFailed
+		result.Reason = directImportFailureReason(code)
+		if result.Reason == NativeContractChanged || result.Reason == "direct_mode_unsupported" {
+			result.State = ImportStateContractChanged
+		}
+	}
+	a.closeIfOpenedInto(ctx, opened, &result)
+	return result, nil
+}
+
+// resolveImportTarget finds the page that carries the import API, opening the
+// overlay only when the caller allowed it. A failure result is returned rather
+// than an error when the page simply is not there; a transport error is
+// returned as an error. `opened` says whether this call opened the overlay, so
+// every early return can close it.
+func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool) (actionTarget, bool, *ImportResult, error) {
+	targets, err := a.targets(ctx)
+	if err != nil {
+		return actionTarget{}, false, nil, err
+	}
+	settings, found := a.findImportTarget(ctx, targets)
+	opened := false
+	if !found {
+		if !openSettings {
+			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings}, nil
+		}
+		work, ok := findPath(targets, "/kimi-agent.html")
+		if !ok {
+			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
+		}
+		asked, err := a.evaluate(ctx, work.sessionID, openSettingsExpression)
+		if err != nil || asked != true {
+			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: "native_bridge_settings_open_refused"}, nil
+		}
+		opened = true
+		for attempt := 0; attempt < settingsOpenReads && !found; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-time.After(settingsOpenStep):
+				case <-ctx.Done():
+					a.closeIfOpened(ctx, opened)
+					return actionTarget{}, opened, nil, ctx.Err()
+				}
+			}
+			if fresh, err := a.targets(ctx); err == nil {
+				targets = fresh
+			}
+			if candidate, ok := a.findImportTarget(ctx, targets); ok {
+				settings, found = candidate, true
+			}
+		}
+	}
+	if !found {
+		// The overlay this call opened is closed again: leaving it up would strand
+		// a window the user did not ask for.
+		result := ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings, Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return actionTarget{}, opened, &result, nil
+	}
+	return settings, opened, nil, nil
 }
 
 // closeIfOpened closes the overlay this call opened and records the outcome.
@@ -591,25 +733,43 @@ catch (error) { return { asked: false, failed: true }; }
 })()`
 )
 
-// importExpression renders the official import call.
-func importExpression(token, baseURL string) string {
-	return `(async(token, baseURL)=>{
+// importExpression renders the official import call. `disconnectDirectSourceID`
+// is set when the controller switches from Direct Mode to the gateway: the old
+// custom source is disconnected only after the replacement has been applied.
+func importExpression(token, baseURL, disconnectDirectSourceID string) string {
+	return `(async(token, baseURL, directSourceID)=>{
 const api=globalThis.clawBridgeAPI;
 if(typeof api?.revealByok==="function"){
   const state=await api.revealByok();
   if(state?.available===false)return {ok:false,code:"feature-disabled"};
 }
+const sources=api?.byokSources;
+const unwrap=result=>result?.ok===true?result.value:null;
+const disconnectDirect=async()=>{
+  if(!directSourceID)return true;
+  if(typeof sources?.list!=="function"||typeof sources.disconnect!=="function")return false;
+  const current=unwrap(await sources.list());
+  if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string")return false;
+  let direct=current.sources.find(source=>source.id===directSourceID);
+  if(!direct)direct=current.sources.find(source=>source.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
+  if(!direct)return true;
+  if(direct.kind!=="custom")return false;
+  const reply=await sources.disconnect({sourceId:direct.id,accountRevision:current.accountRevision,
+    sourceRevision:direct.revision??null});
+  return reply?.ok===true;
+};
 if(typeof api?.importByokModels==="function"){
   const result=await api.importByokModels(token,baseURL);
-  return {ok:result?.ok===true,code:result?.code,
-    requiresRestart:result?.requiresRestart===true,restartDeferred:result?.restartDeferred===true,
+  const imported=result?.ok===true;
+  const requiresRestart=result?.requiresRestart===true;
+  return {ok:imported,code:result?.code,routeCleanupPending:imported&&!!directSourceID&&
+    (requiresRestart||!(await disconnectDirect())),
+    requiresRestart:requiresRestart,restartDeferred:result?.restartDeferred===true,
     models:Array.isArray(result?.profile?.models)?result.profile.models.length:0};
 }
-const sources=api?.byokSources;
-if(typeof sources?.list!=="function"||typeof sources.preview!=="function"||typeof sources.save!=="function"){
+if(!sources||typeof sources?.list!=="function"||typeof sources.preview!=="function"||typeof sources.save!=="function"){
   return {ok:false,code:"contract-changed"};
 }
-const unwrap=result=>result?.ok===true?result.value:null;
 baseURL=baseURL.replace(/\/$/,"");
 const catalogURL=baseURL+"/models/api.json";
 const snapshot=unwrap(await sources.list());
@@ -678,8 +838,9 @@ if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function
   status=applied.value?.status;
 }
 if(!["applied","pending","deferred"].includes(status))return {ok:false,code:"import-failed"};
-return {ok:true,requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount};
-})(` + quoteJS(token) + `,` + quoteJS(baseURL) + `)`
+return {ok:true,routeCleanupPending:!!directSourceID&&(status!=="applied"||!(await disconnectDirect())),
+  requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount};
+})(` + quoteJS(token) + `,` + quoteJS(baseURL) + `,` + quoteJS(disconnectDirectSourceID) + `)`
 }
 
 // isLoopbackGateway accepts only a loopback http endpoint with a /v1 path, which
@@ -696,6 +857,27 @@ func isLoopbackGateway(value string) bool {
 		return false
 	}
 	return parsed.Path == "/v1" || parsed.Path == "/v1/"
+}
+
+func directImportFailureReason(code string) string {
+	code = strings.ReplaceAll(safeActionCode(code), "-", "_")
+	code = strings.TrimPrefix(code, "native_import_")
+	switch code {
+	case "", "contract_changed":
+		return NativeContractChanged
+	case "direct_mode_unsupported", "native_direct_mode_unsupported":
+		return "direct_mode_unsupported"
+	case "direct_preview_refused", "direct_import_failed", "direct_foreign_source",
+		"direct_disconnect_failed", "direct_disconnect_unavailable", "direct_catalog_too_large":
+		return code
+	case "foreign_source":
+		return "direct_foreign_source"
+	case "gateway_disconnect_failed":
+		return "direct_gateway_disconnect_failed"
+	case "import_failed":
+		return "direct_import_failed"
+	}
+	return "native_import_" + code
 }
 
 // safeActionCode keeps an error code from the page inside the vocabulary the
