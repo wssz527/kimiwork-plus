@@ -269,16 +269,18 @@ function directModeState(data) {
     return { code: 'pending', tone: 'warn', word: '没有可直连的模型',
       note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在模型页补齐，再同步到 Work。' };
   }
+  /* 官方延迟应用时先重启，重启后旧回执不再阻塞清理。此时若先提示清理，
+     用户会在尚未采用新配置时反复同步，并看不到真正的下一步。 */
+  if (directRestartRequired(data)) {
+    return { code: 'restart', tone: 'warn', word: '需要重启 Kimi',
+      note: '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。' };
+  }
   /* 切换收尾未完成：新配置已写入，但旧来源还在。必须排在「待写入」之前：
      这时说「待写入直连配置」同样会让人以为还没写，而实际上只差清理。
      说「已就绪」则更糟，会让人直接退出后台并以为旧路由已经清理。 */
   if (directRouteCleanupPending(data)) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
       note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
-  }
-  if (directRestartRequired(data)) {
-    return { code: 'restart', tone: 'warn', word: '需要重启 Kimi',
-      note: '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。' };
   }
   /* 还没同步到官方 Kimi：无论 Kimi 是否在跑，下一步都是写入直连配置。 */
   if (!synced) {
@@ -312,13 +314,13 @@ function nativeConnectionText(data) {
       return '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。';
     }
     const reason = info.reason || info.nativeImport?.reason || '';
+    if (directRestartRequired(data)) {
+      return '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。';
+    }
     /* 收尾未完成不等同导入失败：新配置已写入，只是旧来源还留着。
        这句话必须排在失败码之前，否则 reason 会把它说成一次失败。 */
     if (directRouteCleanupPending(data)) {
       return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
-    }
-    if (directRestartRequired(data)) {
-      return '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。';
     }
     /* 失败码由 app-core 统一归一化（native_import_ 前缀、连字符形式），
        这里不再维护第二张码表，避免两处文案各说一套。 */
@@ -416,11 +418,13 @@ function renderGatewayModeFact(data) {
   }
   setHidden(el, false);
   const ready = directImportComplete(data) && directStaticHostsReady(data);
-  setText(el, directRouteCleanupPending(data)
-    ? '直连模式 · 切换收尾未完成，暂不要退出后台'
-    : ready
-      ? '直连模式 · 退出后台后第三方模型仍可用'
-      : '直连模式 · 尚未写入直连配置');
+  setText(el, directRestartRequired(data)
+    ? '直连模式 · 需要重启 Kimi'
+    : directRouteCleanupPending(data)
+      ? '直连模式 · 切换收尾未完成，暂不要退出后台'
+      : ready
+        ? '直连模式 · 退出后台后第三方模型仍可用'
+        : '直连模式 · 尚未写入直连配置');
 }
 
 
@@ -959,7 +963,8 @@ function renderActions(data) {
     const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
     const compatBlocked = modelSyncBlocked && (action === 'connect-kimi' || action === 'prepare-native');
     const pending = state.pendingAction === action;
-    button.disabled = busy || compatBlocked || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
+    const directRestartBlocked = action === 'connect-kimi' && savedIntegrationMode(data) === 'direct' && directRestartRequired(data);
+    button.disabled = busy || compatBlocked || directRestartBlocked || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
     if (button.id === 'native-launch') setText(button, ACTION_LABEL[action]);
     if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
     button.classList.toggle('is-busy', pending);
@@ -990,17 +995,17 @@ function renderWorkspaceSync(data) {
     const restart = directRestartRequired(data) || (synced && integration.applied && !integration.adopted);
     const hosts = directStaticHostsReady(data);
     const cleanup = directRouteCleanupPending(data);
-    setText($('workspace-sync-state'), cleanup ? '切换收尾未完成' : restart ? '需要重启 Kimi' : synced ? '已直连同步到 Work' : '待写入直连配置');
-    setText($('workspace-sync-note'), cleanup
-      ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
-      : restart
-        ? '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。'
+    setText($('workspace-sync-state'), restart ? '需要重启 Kimi' : cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Work' : '待写入直连配置');
+    setText($('workspace-sync-note'), restart
+      ? '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。'
+      : cleanup
+        ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
         : synced
           ? (hosts
             ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出 KimiWork + 与后台服务后仍可直接使用这些模型。'
             : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
           : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
-    setHidden($('workspace-restart'), cleanup || !restart);
+    setHidden($('workspace-restart'), !restart);
     return;
   }
   if (modeChanged) {
@@ -1042,6 +1047,7 @@ function renderIntegrationMode(data) {
 
   const direct = directModeOf(data);
   const directSaved = saved === 'direct';
+  const restartRequired = directSaved && directRestartRequired(data);
   /* 未同步时把话说在按钮上：用户点的是同一次同步动作，但结果不同。 */
   const pendingSync = directSaved !== (effective === 'direct') || (directSaved && !directImportComplete(data));
   if (dom.integrationModeState) {
@@ -1051,18 +1057,18 @@ function renderIntegrationMode(data) {
     setText(dom.integrationModeState, !showState ? ''
       : direct?.supported === false && directSaved
         ? '模式已更改，尚未同步到 Kimi Work：当前官方 Kimi 版本不支持原生直连，请改用本机网关模式。'
-        : directSaved && directRestartRequired(data)
+        : restartRequired
           ? '直连配置已写入，需要正常重启 Kimi 后完成应用。'
           : '模式已更改，尚未同步到 Kimi Work。');
   }
   if (dom.nativeSyncLabel) {
     setText(dom.nativeSyncLabel, directSaved
-      ? (directRouteCleanupPending(data) ? '重试清理旧来源并同步' : '写入直连配置并同步')
+      ? (restartRequired ? '等待重启 Kimi' : directRouteCleanupPending(data) ? '重试清理旧来源并同步' : '写入直连配置并同步')
       : pendingSync ? '切回网关并同步' : '重新准备接入');
   }
   if (dom.nativeSync) {
     const blocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
-    dom.nativeSync.disabled = busy || blocked;
+    dom.nativeSync.disabled = busy || blocked || restartRequired;
     dom.nativeSync.classList.toggle('is-busy', integrationModeSaving);
     dom.nativeSync.setAttribute('aria-busy', integrationModeSaving ? 'true' : 'false');
   }
@@ -1071,21 +1077,23 @@ function renderIntegrationMode(data) {
   if (!notice) return;
   setHidden(notice, !directSaved);
   if (!directSaved) return;
-  notice.dataset.tone = direct?.supported === false || directRouteCleanupPending(data) ? 'warn' : 'neutral';
+  notice.dataset.tone = direct?.supported === false || restartRequired || directRouteCleanupPending(data) ? 'warn' : 'neutral';
   setText(dom.directModeSupport, direct?.supported === false
     ? '当前官方 Kimi 版本不支持原生直连：需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。'
-    : directRouteCleanupPending(data)
-      ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
-      : directRestartRequired(data)
-        ? '直连配置已写入，正常重启 Kimi 后完成应用。'
+    : restartRequired
+      ? '直连配置已写入，正常重启 Kimi 后完成应用。'
+      : directRouteCleanupPending(data)
+        ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
         : directImportComplete(data)
           ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
           : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
-  setText(dom.directModeHosts, directRouteCleanupPending(data)
-    ? '重新点「同步到 Work」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
-    : directStaticHostsReady(data)
-      ? '静态 hosts 已就绪，直连同步完成后可彻底停止后台服务与退出 KimiWork +。'
-      : '首次同步直连模式时将写入一次静态 hosts（并清理旧单域名 DNS 配置），之后不再依赖后台 DNS。');
+  setText(dom.directModeHosts, restartRequired
+    ? '请先正常退出并重启 Kimi；重启完成前无需重复同步，也请保留后台服务。'
+    : directRouteCleanupPending(data)
+      ? '重新点「同步到 Work」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
+      : directStaticHostsReady(data)
+        ? '静态 hosts 已就绪，直连同步完成后可彻底停止后台服务与退出 KimiWork +。'
+        : '首次同步直连模式时将写入一次静态 hosts（并清理旧单域名 DNS 配置），之后不再依赖后台 DNS。');
 
   const bypassed = Array.isArray(direct?.activeFeaturesBypassed) ? direct.activeFeaturesBypassed : [];
   const bypassNames = bypassed.map((key) => DIRECT_BYPASS_WORD[key]).filter(Boolean);
