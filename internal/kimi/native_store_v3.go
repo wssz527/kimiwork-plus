@@ -30,11 +30,12 @@ type nativeProviderV3 struct {
 }
 
 type nativeAccountV3 struct {
-	providers   map[string]nativeProviderV3
-	refs        []string
-	baseURLs    []string
-	pending     bool
-	quarantined bool
+	providers     map[string]nativeProviderV3
+	refs          []string
+	baseURLs      []string
+	pending       bool
+	quarantined   bool
+	directCleanup bool
 }
 
 // accountProfiles reads every account the v3 store holds. Only accounts that
@@ -134,7 +135,8 @@ func accountProfile(key string, account, source map[string]any) (profileCandidat
 		}
 	}
 	account3 := &nativeAccountV3{providers: usedFacts, pending: blocking,
-		quarantined: source["quarantined"] == true}
+		quarantined:   source["quarantined"] == true,
+		directCleanup: directSourceRemainsInAccount(account, "") != ""}
 	seen := map[string]bool{}
 	for _, fact := range usedFacts {
 		if fact.credential != "" && !seen[fact.credential] {

@@ -842,6 +842,20 @@ func TestDirectModeBaseDoesNotAssumeDesktopHosts(t *testing.T) {
 	}
 }
 
+func TestNativeGatewayModePublishesRemainingDirectCleanup(t *testing.T) {
+	n := newDirectTestNative(t, false)
+	document := directDocument(nil, nil)
+	integration := core.Document{"mode": kimi.IntegrationModeGateway, "state": kimi.IntegrationReady,
+		"applied": true, "routeCleanupPending": true}
+	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != true {
+		t.Fatalf("reconcile cleanup evidence was not published: %+v", row)
+	}
+	delete(integration, "routeCleanupPending")
+	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != false {
+		t.Fatalf("cleared cleanup evidence was still published: %+v", row)
+	}
+}
+
 func TestNativeDirectModeCleanupRequiresAnAppliedReplacement(t *testing.T) {
 	n := newDirectTestNative(t, true)
 	settings := n.controller.Settings()

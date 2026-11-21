@@ -274,6 +274,36 @@ func nativeDesktopState(status kimi.ControllerStatus) core.Document {
 	return desktop
 }
 
+func settledNativeImportReceipt(current *kimi.IntegrationResult, receipt kimi.ImportResult) kimi.ImportResult {
+	if current == nil {
+		return receipt
+	}
+	if current.Applied && !current.RouteCleanupPending {
+		receipt.RouteCleanupPending = false
+		if receipt.Reason == "route_cleanup_pending" {
+			receipt.Reason = ""
+		}
+	}
+	if !current.Adopted {
+		return receipt
+	}
+	receipt.RequiresRestart = false
+	receipt.RestartDeferred = false
+	receipt.Applied = current.Applied
+	receipt.Adopted = true
+	if receipt.State == kimi.ImportStateRequiresRestart {
+		receipt.State = kimi.ImportStateApplied
+		if receipt.Reason == kimi.NativeRequiresRestart {
+			receipt.Reason = ""
+		}
+	}
+	if receipt.RouteCleanupPending {
+		receipt.State = kimi.ImportStateAccepted
+		receipt.Reason = "route_cleanup_pending"
+	}
+	return receipt
+}
+
 func (n *Native) State() core.Document {
 	n.mu.Lock()
 	status := n.controller.Status(context.Background())
@@ -307,7 +337,7 @@ func (n *Native) State() core.Document {
 			}
 		}
 		if receipt.State != "" || receipt.Reason != "" || receipt.OK {
-			raw, _ := json.Marshal(receipt)
+			raw, _ := json.Marshal(settledNativeImportReceipt(status.Integration, receipt))
 			var published core.Document
 			if json.Unmarshal(raw, &published) == nil {
 				integration["nativeImport"] = published

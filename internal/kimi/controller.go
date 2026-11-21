@@ -691,19 +691,22 @@ func (c *Controller) syncActionsIntegrationRoute(settings ControllerSettings, so
 	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
 }
 
-// previousDirectSourceID answers the source a still-active Direct Mode intent
-// records. Switching back to the gateway uses it to disconnect that source; a
-// non-direct or inactive intent answers nothing.
+// previousDirectSourceID answers the active Direct Mode intent first. Once a
+// gateway reconcile has replaced that intent, the official store still names a
+// connected managed source whose disconnect failed or was deferred.
 func (c *Controller) previousDirectSourceID(settings ControllerSettings) string {
-	native, err := NewNativeIntegration(settings.StateDir, c.kimiHome(), IntegrationModeGateway)
-	if err != nil {
+	home := c.kimiHome()
+	native, err := NewNativeIntegration(settings.StateDir, home, IntegrationModeGateway)
+	if err == nil {
+		intent, intentErr := native.readIntent()
+		if intentErr == nil && intent != nil && intent.Active && intent.Mode == IntegrationModeDirect && intent.DirectSourceID != "" {
+			return intent.DirectSourceID
+		}
+	}
+	if settings.integrationMode() != IntegrationModeGateway {
 		return ""
 	}
-	intent, err := native.readIntent()
-	if err != nil || intent == nil || !intent.Active || intent.Mode != IntegrationModeDirect {
-		return ""
-	}
-	return intent.DirectSourceID
+	return DirectSourceRemains(home, AccountScope(home), "")
 }
 
 // Stop ends the managed child. It never touches any other process.

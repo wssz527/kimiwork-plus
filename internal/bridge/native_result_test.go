@@ -31,6 +31,34 @@ func TestNativeDesktopStateExposesInstallationReason(t *testing.T) {
 	}
 }
 
+func TestSettledNativeImportReceiptUsesCurrentReadback(t *testing.T) {
+	deferred := kimi.ImportResult{OK: true, State: kimi.ImportStateRequiresRestart,
+		Reason: kimi.NativeRequiresRestart, Applied: true, RequiresRestart: true, RestartDeferred: true,
+		RouteCleanupPending: true}
+
+	pending := settledNativeImportReceipt(&kimi.IntegrationResult{Applied: true, RouteCleanupPending: true}, deferred)
+	if !pending.RequiresRestart || !pending.RestartDeferred || !pending.RouteCleanupPending {
+		t.Fatalf("an unadopted import lost its pending evidence: %+v", pending)
+	}
+
+	cleanupDone := settledNativeImportReceipt(&kimi.IntegrationResult{Applied: true}, deferred)
+	if !cleanupDone.RequiresRestart || cleanupDone.RouteCleanupPending {
+		t.Fatalf("cleanup readback did not settle only the cleanup: %+v", cleanupDone)
+	}
+
+	adopted := settledNativeImportReceipt(&kimi.IntegrationResult{Applied: true, Adopted: true}, deferred)
+	if adopted.RequiresRestart || adopted.RestartDeferred || adopted.RouteCleanupPending ||
+		!adopted.Applied || !adopted.Adopted || adopted.State != kimi.ImportStateApplied || adopted.Reason != "" {
+		t.Fatalf("adopted import kept stale pending evidence: %+v", adopted)
+	}
+
+	stillCleaning := settledNativeImportReceipt(&kimi.IntegrationResult{Applied: true, Adopted: true, RouteCleanupPending: true}, deferred)
+	if stillCleaning.RequiresRestart || stillCleaning.RestartDeferred || !stillCleaning.RouteCleanupPending ||
+		stillCleaning.State != kimi.ImportStateAccepted || stillCleaning.Reason != "route_cleanup_pending" {
+		t.Fatalf("adopted import hid the remaining cleanup: %+v", stillCleaning)
+	}
+}
+
 func TestRejectedImportIsNotPrepared(t *testing.T) {
 	for _, reason := range []string{"native_bridge_waiting_work", "native_import_account_unverified", ""} {
 		if err := importResultError(kimi.ImportResult{Reason: reason}); err == nil {

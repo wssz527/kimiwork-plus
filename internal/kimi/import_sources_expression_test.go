@@ -18,7 +18,10 @@ func TestSourceImportUsesPreviewRevisionAndAppliesOnce(t *testing.T) {
 		{"account changes before apply", `updated.scopeToken="another"`, "list,preview,save,list", false},
 		{"own previous loopback registry", `initial.sources[0].registryUrl="http://127.0.0.1:8100/v1/models/api.json"`, "list,preview,save,list,apply", true},
 		{"foreign registry", `initial.sources[0].registryUrl="https://other.example/v1/models/api.json"`, "list", false},
-		{"pending changes from another source", `initial.applyState="prepared";initial.sources.push({id:"other",kind:"registry"})`, "list,preview,save", true},
+		{"pending changes from another source without model evidence", `initial.applyState="prepared";initial.sources.push({id:"other",kind:"registry"})`, "list,preview,save", true},
+		{"idle state with another settled source", `initial.applyState="idle";initial.sources.push({id:"other",kind:"registry",models:[{status:"available"}]})`, "list,preview,save,list,apply", true},
+		{"prepared state with another settled source", `initial.applyState="prepared";initial.sources.push({id:"other",kind:"registry",models:[{status:"available"}]})`, "list,preview,save,list,apply", true},
+		{"pending model from another source", `initial.applyState="prepared";initial.sources.push({id:"other",kind:"registry",models:[{status:"pending"}]})`, "list,preview,save", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm := goja.New()
@@ -227,6 +230,7 @@ func TestGatewayImportDisconnectsDirectOnlyAfterReplacement(t *testing.T) {
 		name           string
 		failPreview    bool
 		failDisconnect bool
+		deferred       bool
 		wantCalls      string
 		wantOK         bool
 		wantPending    bool
@@ -235,9 +239,15 @@ func TestGatewayImportDisconnectsDirectOnlyAfterReplacement(t *testing.T) {
 		{name: "preview failure preserves direct", failPreview: true, wantCalls: "list,preview"},
 		{name: "cleanup failure is retryable", failDisconnect: true,
 			wantCalls: "list,preview,save,list,apply,list,disconnect", wantOK: true, wantPending: true},
+		{name: "deferred replacement preserves direct until restart", deferred: true,
+			wantCalls: "list,preview,save,list,apply", wantOK: true, wantPending: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm := goja.New()
+			applyStatus := `"applied"`
+			if tc.deferred {
+				applyStatus = `"deferred"`
+			}
 			if _, err := vm.RunString(`
 const calls=[];
 let directConnected=true;
@@ -250,7 +260,7 @@ globalThis.clawBridgeAPI={byokSources:{
   preview(){calls.push("preview");if(` + boolString(tc.failPreview) + `)return {ok:false,reasonCode:"preview-refused"};
     return ok({scopeToken:"scope",accountRevision:"r1",sourceRevision:"k1",sourceId:"byok-kth",previewId:"p1",canSave:true,candidates:[{id:"m1"}]});},
   save(){calls.push("save");imported=true;return ok({sourceId:"byok-kth",accountRevision:"r2",status:"pending"});},
-  applyPending(){calls.push("apply");return ok({status:"applied"});},
+  applyPending(){calls.push("apply");return ok({status:` + applyStatus + `});},
   disconnect(request){calls.push("disconnect");if(` + boolString(tc.failDisconnect) + `)return {ok:false,reasonCode:"disconnect-refused"};
     if(request.sourceId!=="direct-source")throw new Error("wrong source");directConnected=false;return ok({});},
 }};

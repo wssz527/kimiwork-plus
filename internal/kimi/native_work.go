@@ -93,6 +93,9 @@ type IntegrationResult struct {
 	Mode string `json:"mode,omitempty"`
 	// DirectSourceID is the managed custom source a Direct Mode result verified.
 	DirectSourceID string `json:"directSourceId,omitempty"`
+	// RouteCleanupPending means a verified gateway replacement still shares the
+	// account with a connected managed Direct Mode source.
+	RouteCleanupPending bool `json:"routeCleanupPending,omitempty"`
 }
 
 // NativeIntegration reconciles one Kimi home.
@@ -229,7 +232,11 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 	// by the official application, so it is verified on its own terms: this
 	// package never writes a v3 store's `config.json`.
 	if selected.v3 != nil {
-		return n.verifyAccount(selected, target, catalog, intent, scopeDigest)
+		result := n.verifyAccount(selected, target, catalog, intent, scopeDigest)
+		if result.State == IntegrationReady || result.State == IntegrationRepaired {
+			result.RouteCleanupPending = selected.v3.directCleanup
+		}
+		return result
 	}
 	profileURL := normalizeNativeURL(stringField(profile, "baseUrl"))
 	if profileURL == "" {

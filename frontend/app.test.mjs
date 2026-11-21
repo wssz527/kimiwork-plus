@@ -31,8 +31,8 @@ const DIRECT_REASON_SOURCE = (() => {
   return source.slice(start, end + 3);
 })();
 const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
-  'directImportComplete', 'directRouteCleanupPending', 'directStaticHostsReady', 'directModeState', 'directRestartRequired',
-  'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
+  'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
+  'directRestartRequired', 'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
 
 function makeSyncState() {
   return new Function('fmtCount', 'String',
@@ -42,6 +42,10 @@ function makeSyncState() {
 
 function makeNativeConnectionText() {
   return new Function([...INTEGRATION_HELPERS, sourceFunction('nativeConnectionText'), 'return nativeConnectionText;'].join('\n'))();
+}
+
+function makeDirectRestartRequired() {
+  return new Function([...INTEGRATION_HELPERS, 'return directRestartRequired;'].join('\n'))();
 }
 
 function growthFunction(name, indent = '') {
@@ -1290,6 +1294,7 @@ test('an unmanaged Kimi started from the Dock is not reported as a managed load'
     kimiProcess: { running: true },
     integration: {
       applied: true,
+      adopted: false,
       readback: { accountVerified: true },
       desktop: { state: 'stopped', managed: false, reason: 'managed_child_exited_application-exit' },
       imported: true,
@@ -1310,6 +1315,48 @@ test('an unmanaged Kimi started from the Dock is not reported as a managed load'
   /* 受管进程仍在时，原来说明必须保持不变。 */
   const managed = { ...base, integration: { ...base.integration, adopted: true, desktop: { state: 'ready', managed: true } } };
   assert.match(syncState(managed).note, /受管进程已加载对应配置代次/);
+});
+
+test('a complete direct import only requires a restart when a managed process has not adopted it', () => {
+  const directRestartRequired = makeDirectRestartRequired();
+  const syncState = makeSyncState();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const directMode = { mode: 'direct', supported: true, staticHostsReady: true,
+    eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 };
+  const integration = { mode: 'direct', state: 'ready', applied: true, adopted: false,
+    aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } };
+
+  /* Kimi 未运行：adopted=false 是常态，下次启动自然会采用，不是重启。 */
+  const stopped = {
+    integrationMode: 'direct', models, kimiProcess: { running: false }, directMode,
+    integration: { ...integration, desktop: { state: 'stopped', managed: false } },
+  };
+  assert.equal(directRestartRequired(stopped), false);
+  const stoppedVerdict = syncState(stopped);
+  assert.equal(stoppedVerdict.code, 'ready');
+  assert.equal(stoppedVerdict.word, '直连已就绪');
+  assert.doesNotMatch(stoppedVerdict.note, /重启/);
+
+  /* 非托管运行：系统直接启动的 Kimi 没有可重启的受管子进程。 */
+  const unmanaged = {
+    ...stopped, kimiProcess: { running: true },
+    integration: { ...integration, desktop: { state: 'ready', managed: false } },
+  };
+  assert.equal(directRestartRequired(unmanaged), false);
+  const unmanagedVerdict = syncState(unmanaged);
+  assert.equal(unmanagedVerdict.code, 'ready');
+  assert.equal(unmanagedVerdict.word, '直连运行中（免开本软件）');
+  assert.doesNotMatch(unmanagedVerdict.note, /需要重启|正常退出并重启/);
+
+  /* 受管进程在跑却还没采用配置：这时才要求重启。 */
+  const managed = {
+    ...unmanaged,
+    integration: { ...integration, desktop: { state: 'ready', managed: true } },
+  };
+  assert.equal(directRestartRequired(managed), true);
+  const managedVerdict = syncState(managed);
+  assert.equal(managedVerdict.code, 'restart');
+  assert.match(managedVerdict.word, /需要重启 Kimi/);
 });
 
 test('displayModelId decodes percent-encoded route IDs while falling back safely on malformed escapes', () => {
@@ -1482,7 +1529,7 @@ test('direct mode reports the unsynced, ready, and zero-gateway states without a
     models,
     kimiProcess: { running: true },
     directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModelIds, eligibleModels: 2, totalModels: 2, readyForZeroGateway: true },
-    integration: { ...imported, desktop: { managed: false } },
+    integration: { ...imported, adopted: false, desktop: { managed: false } },
   });
   assert.equal(unmanaged.code, 'ready');
   assert.equal(unmanaged.tone, 'ok');
@@ -1951,13 +1998,28 @@ test('a direct write that needs restart exposes the restart action instead of an
 
   const awaitingAdoption = {
     ...ready,
-    integration: { ...ready.integration, adopted: false },
+    /* 受管进程已启动但还没采用配置：这才是「需要重启」的真实证据。 */
+    integration: { ...ready.integration, adopted: false, desktop: { managed: true } },
   };
   render(awaitingAdoption);
   assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
   assert.equal(nodes['workspace-restart'].hidden, false);
   assert.equal(syncState(awaitingAdoption).code, 'restart');
   assert.match(makeNativeConnectionText()(awaitingAdoption), /正常重启 Kimi 后完成应用/);
+
+  /* 手动重启完成后 adopted=true：重启提示让位给切换收尾清理，同步入口恢复。 */
+  const cleanupAfterRestart = {
+    ...ready,
+    directMode: { ...ready.directMode, routeCleanupPending: true },
+    integration: { ...ready.integration, adopted: true, desktop: { managed: true },
+      nativeImport: { ...ready.integration.nativeImport, routeCleanupPending: true } },
+  };
+  render(cleanupAfterRestart);
+  assert.equal(nodes['workspace-sync-state'].textContent, '切换收尾未完成');
+  assert.match(nodes['workspace-sync-note'].textContent, /重试清理/);
+  assert.equal(nodes['workspace-restart'].hidden, true);
+  assert.equal(syncState(cleanupAfterRestart).code, 'pending');
+  assert.match(makeNativeConnectionText()(cleanupAfterRestart), /重试清理/);
 });
 
 test('direct failure codes normalize across native_import_ prefixes and dashed page codes', () => {
@@ -2081,20 +2143,23 @@ test('direct mode keeps budget reminders out of the overview issue card', () => 
   assert.equal(compute({ gateway: { state: 'running' }, budget }).title, '已达到预算上限');
 });
 
-test('the settings notice and sync button both name the pending cleanup', () => {
+function makeIntegrationModeEnv() {
   const nodes = {};
-  for (const id of ['direct-mode-notice', 'direct-mode-support', 'direct-mode-hosts', 'native-sync-label', 'native-sync']) {
+  for (const id of ['integration-mode-state', 'direct-mode-notice', 'direct-mode-support', 'direct-mode-hosts',
+    'native-sync-label', 'native-sync', 'native-recover']) {
     nodes[id] = { id, textContent: '', hidden: false, disabled: false, dataset: {}, setAttribute() {},
       classList: { add() {}, toggle() {} } };
   }
   nodes['native-sync'].dataset.action = 'connect-kimi';
+  nodes['native-recover'].dataset.action = 'prepare-native';
   const dom = {
     modeGateway: { value: 'gateway', checked: false, disabled: false },
     modeDirect: { value: 'direct', checked: false, disabled: false },
     integrationModeGroup: null,
-    integrationModeState: null,
+    integrationModeState: nodes['integration-mode-state'],
     nativeSyncLabel: nodes['native-sync-label'],
     nativeSync: nodes['native-sync'],
+    nativeRecover: nodes['native-recover'],
     directModeNotice: nodes['direct-mode-notice'],
     directModeSupport: nodes['direct-mode-support'],
     directModeHosts: nodes['direct-mode-hosts'],
@@ -2105,7 +2170,7 @@ test('the settings notice and sync button both name the pending cleanup', () => 
     ...INTEGRATION_HELPERS,
     'let integrationModeSaving = false;',
     'const integrationModeBusy = data => integrationModeSaving || data?.operation?.state === "running";',
-    'const state = { actionButtons: [dom.nativeSync], pendingAction: null, modelsSaving: false, connsSaving: false };',
+    'const state = { actionButtons: [dom.nativeSync, dom.nativeRecover], pendingAction: null, modelsSaving: false, connsSaving: false };',
     'const onboardBusy = () => false;',
     'const renderOnboard = () => {};',
     'const configReady = () => true;',
@@ -2125,6 +2190,11 @@ test('the settings notice and sync button both name the pending cleanup', () => 
     renderers.renderIntegrationMode(data);
     renderers.renderActions(data);
   };
+  return { nodes, dom, renderers, render };
+}
+
+test('the settings notice and sync button both name the pending cleanup', () => {
+  const { nodes, render } = makeIntegrationModeEnv();
 
   const models = [{ id: 'conn/resp/model-a' }];
   const base = {
@@ -2162,7 +2232,8 @@ test('the settings notice and sync button both name the pending cleanup', () => 
   };
   const awaitingAdoption = {
     ...base,
-    integration: { ...base.integration, adopted: false },
+    /* 只有受管进程尚未采用配置才应进入重启态；未托管/未运行不在此列。 */
+    integration: { ...base.integration, adopted: false, desktop: { managed: true } },
   };
   for (const restarting of [deferredRestart, awaitingAdoption]) {
     render(restarting);
@@ -2172,11 +2243,125 @@ test('the settings notice and sync button both name the pending cleanup', () => 
     assert.doesNotMatch(nodes['direct-mode-hosts'].textContent, /重试清理/);
     assert.equal(nodes['native-sync-label'].textContent, '等待重启 Kimi');
     assert.equal(nodes['native-sync'].disabled, true, 'renderActions must not re-enable sync');
+    assert.equal(nodes['native-recover'].disabled, true, 'prepare-native must not trigger another import either');
   }
 
   render(base);
   assert.equal(nodes['native-sync-label'].textContent, '重试清理旧来源并同步');
   assert.equal(nodes['native-sync'].disabled, false);
+  assert.equal(nodes['native-recover'].disabled, false, 'cleanup after a manual restart must keep the recovery entry');
   assert.match(nodes['direct-mode-support'].textContent, /切换收尾未完成/);
   assert.match(nodes['direct-mode-hosts'].textContent, /重试清理旧来源/);
+});
+
+test('a saved gateway mode reports the unfinished direct cleanup and obeys a deferred restart receipt', () => {
+  const syncState = makeSyncState();
+  const connectionText = makeNativeConnectionText();
+  const { render: renderWorkspace, nodes: workspace } = makeWorkspaceSyncEnv();
+  const { nodes, render } = makeIntegrationModeEnv();
+
+  const models = [{ id: 'conn/resp/model-a' }];
+  const directMode = { mode: 'gateway', supported: true, staticHostsReady: false,
+    eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1, routeCleanupPending: true };
+  const integration = {
+    mode: 'gateway', state: 'ready', applied: true, adopted: true,
+    aliases: { 'conn/resp/model-a': 'byok-gateway/model-a' },
+    readback: { modelAliases: { 'conn/resp/model-a': 'byok-gateway/model-a' } },
+    nativeImport: { routeCleanupPending: true },
+  };
+  const cleanup = { integrationMode: 'gateway', models, directMode, integration };
+
+  /* Direct → Gateway 切换收尾：不能因为 readback/applied 就绿色显示已同步。 */
+  const verdict = syncState(cleanup);
+  assert.equal(verdict.code, 'pending');
+  assert.equal(verdict.word, '切换收尾未完成');
+  assert.match(verdict.note, /旧的服务商来源/);
+  assert.match(verdict.note, /重试清理旧来源并同步/);
+  assert.match(verdict.note, /不要退出后台服务/);
+  assert.doesNotMatch(verdict.word, /已同步|已核对目录/);
+
+  /* directMode 行与回执里的任一条证据都必须生效。 */
+  for (const variant of [
+    { ...cleanup, directMode: { ...directMode, routeCleanupPending: true }, integration: { ...integration, nativeImport: {} } },
+    { ...cleanup, directMode: { ...directMode, routeCleanupPending: false }, integration: { ...integration, nativeImport: { routeCleanupPending: true } } },
+    { ...cleanup, directMode: { ...directMode, routeCleanupPending: false }, integration: { ...integration, nativeImport: { reason: 'route_cleanup_pending' } } },
+  ]) {
+    assert.equal(syncState(variant).word, '切换收尾未完成');
+  }
+
+  /* 读回成功或 synchronized 都不能盖过收尾标记：绿色结论必须让位。 */
+  assert.equal(syncState(cleanup).code, 'pending');
+  const synchronized = { ...cleanup, integration: { ...integration, state: 'synchronized' } };
+  assert.equal(syncState(synchronized).code, 'pending');
+  assert.equal(syncState(synchronized).word, '切换收尾未完成');
+
+  renderWorkspace(cleanup);
+  assert.equal(workspace['workspace-sync-state'].textContent, '切换收尾未完成');
+  assert.match(workspace['workspace-sync-note'].textContent, /重试清理旧来源并同步/);
+  assert.equal(workspace['workspace-restart'].hidden, true);
+
+  assert.match(connectionText(cleanup), /切换收尾未完成/);
+  assert.match(connectionText(cleanup), /重试清理旧来源并同步/);
+
+  /* 设置页：状态行与按钮都提示清理，且同步与恢复入口保持可用。 */
+  render(cleanup);
+  assert.equal(nodes['direct-mode-notice'].hidden, true);
+  assert.equal(nodes['integration-mode-state'].hidden, false);
+  assert.match(nodes['integration-mode-state'].textContent, /切换收尾未完成/);
+  assert.match(nodes['integration-mode-state'].textContent, /重试清理旧来源并同步/);
+  assert.equal(nodes['native-sync-label'].textContent, '重试清理旧来源并同步');
+  assert.equal(nodes['native-sync'].disabled, false);
+  assert.equal(nodes['native-recover'].disabled, false);
+
+  /* 清理完成：网关原文案恢复为绿色已同步。 */
+  const clean = {
+    ...cleanup,
+    directMode: { ...directMode, routeCleanupPending: false },
+    integration: { ...integration, nativeImport: {} },
+  };
+  assert.equal(syncState(clean).code, 'synced');
+  renderWorkspace(clean);
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  render(clean);
+  assert.equal(nodes['integration-mode-state'].hidden, true);
+  assert.equal(nodes['native-sync-label'].textContent, '重新准备接入');
+  assert.equal(nodes['native-sync'].disabled, false);
+
+  /* deferred 回执优先于清理提示；state=requires-restart 单独也成立。
+     回执要求重启时 adopted 必为 false（重启尚未发生）。 */
+  for (const receipt of [
+    { state: 'requires-restart', requiresRestart: true, restartDeferred: true, routeCleanupPending: true },
+    { state: 'requires-restart', routeCleanupPending: true },
+  ]) {
+    const deferred = { ...cleanup, integration: { ...integration, adopted: false, nativeImport: receipt } };
+    const deferredVerdict = syncState(deferred);
+    assert.equal(deferredVerdict.code, 'restart');
+    assert.equal(deferredVerdict.word, '等待 Kimi 重启');
+    assert.doesNotMatch(deferredVerdict.note, /重试清理|切换收尾/);
+
+    renderWorkspace(deferred);
+    assert.equal(workspace['workspace-sync-state'].textContent, '需要重启 Kimi');
+    assert.match(workspace['workspace-sync-note'].textContent, /正常重启 Kimi/);
+    assert.doesNotMatch(workspace['workspace-sync-note'].textContent, /重试清理|切换收尾/);
+    assert.equal(workspace['workspace-restart'].hidden, false);
+
+    assert.match(connectionText(deferred), /重启 Kimi Work/);
+    assert.doesNotMatch(connectionText(deferred), /重试清理/);
+
+    render(deferred);
+    assert.match(nodes['integration-mode-state'].textContent, /正常重启 Kimi/);
+    assert.equal(nodes['native-sync-label'].textContent, '等待重启 Kimi');
+    /* 网关模式没有可锁定的直连导入：按钮保持可用，避免旧回执永久挡住重试。 */
+    assert.equal(nodes['native-sync'].disabled, false);
+    assert.equal(nodes['native-recover'].disabled, false);
+  }
+
+  /* 重启回执优先于「已读回」这条绿色结论。 */
+  const restartOverReadback = {
+    ...cleanup,
+    directMode: { ...directMode, routeCleanupPending: false },
+    integration: { ...integration, state: 'ready', adopted: false, nativeImport: { requiresRestart: true } },
+  };
+  assert.equal(syncState(restartOverReadback).code, 'restart');
+  assert.equal(syncState(restartOverReadback).word, '等待 Kimi 重启');
 });

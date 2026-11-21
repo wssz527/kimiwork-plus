@@ -282,10 +282,16 @@ source. If Kimi's background catalog discovery races the first direct cleanup,
 the same action re-saves the exact manual draft once, but only when no other
 source has a pending confirmation. Unrequested catalog discoveries do not block
 readback; a pending manual model still does. Any remaining cleanup failure is
-reported as `route_cleanup_pending` and is retried by the next explicit sync; it
-never turns a failed new import into a disconnected old route. Runtime reads
+reported as `route_cleanup_pending` and is retried by the next explicit sync. If
+the gateway reconcile has already replaced the direct intent, the retry recovers
+the still-connected managed custom source from the current account's v3 store;
+disconnected or quarantined rows do not require cleanup. A failed new import
+never turns into a disconnected old route. Runtime reads
 follow mode and source-id updates on the existing CDP
-actions, protected by their mutex.
+actions, protected by their mutex. The published native receipt yields to newer
+readback evidence: adoption clears restart-only flags, and a clean applied
+snapshot clears cleanup flags. A remaining cleanup survives adoption until the
+old source is actually disconnected.
 
 `POST /api/actions` also accepts `{"action":"remove-dns"}`. It removes only the
 exact owned resolver or marked hosts pair and stops the Mac DNS listener. The

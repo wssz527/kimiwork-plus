@@ -282,7 +282,7 @@ let snapshot=await readSnapshot();
 if(!snapshot)return {ok:false,code:"contract-changed"};
 let gatewayDisconnected=false;
 const ownGateway=source=>{
-  if(!source||expectedGateway==="")return false;
+  if(!source||expectedGateway===""||source.quarantined===true||source.status==="disconnected")return false;
   const providers=Array.isArray(source.providers)?source.providers:[];
   const addresses=[];
   for(const provider of providers){if(typeof provider?.baseUrl==="string"&&provider.baseUrl)addresses.push(provider.baseUrl);}
@@ -331,7 +331,11 @@ const draftModels=wantedModels.map(model=>{
   return entry;
 });
 const draft={kind:"custom",displayName:request.displayName||"` + DirectDisplayName + `",providers:draftProviders,models:draftModels};
-const otherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&snapshot.sources.some(source=>source.id!==existing?.id);
+const otherPending=snapshot.sources.some(source=>{
+  if(source.id===existing?.id)return false;
+  if(Array.isArray(source.models))return source.models.some(model=>model.status==="pending");
+  return snapshot.applyState!==undefined&&!["applied","idle","ready"].includes(snapshot.applyState);
+});
 const importDraft=async(current,existing,allowApply)=>{
   const previewRequest={accountRevision:current.accountRevision,sourceRevision:existing?.revision??null,draft:draft};
   if(existing)previewRequest.sourceId=existing.id;
@@ -548,6 +552,42 @@ func directSourceOf(sources []map[string]any, sourceID string) (map[string]any, 
 		}
 	}
 	return nil, false
+}
+
+// DirectSourceRemains finds this tool's connected custom source in the current
+// account. The id recorded by an earlier intent is preferred; the managed display
+// name recovers cleanup after a gateway reconcile has replaced that intent.
+func DirectSourceRemains(kimiDir, accountScope, preferredSourceID string) string {
+	store, kind := readJSONFile(filepath.Join(kimiDir, NativeWorkStore), maxStoreBytes)
+	if kind != "" {
+		return ""
+	}
+	scopeDigest := ""
+	if accountScope != "" {
+		scopeDigest = sha256Hex(accountScope)
+	}
+	account, ambiguous := selectDirectAccount(directAccountCandidates(store), scopeDigest, nil)
+	if ambiguous || account.account == nil {
+		return ""
+	}
+	return directSourceRemainsInAccount(account.account, preferredSourceID)
+}
+
+func directSourceRemainsInAccount(account map[string]any, preferredSourceID string) string {
+	rows, _ := account["sources"].([]any)
+	sources := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		source, ok := row.(map[string]any)
+		if !ok || source["quarantined"] == true || stringField(source, "status") == "disconnected" {
+			continue
+		}
+		sources = append(sources, source)
+	}
+	source, found := directSourceOf(sources, preferredSourceID)
+	if !found {
+		return ""
+	}
+	return stringField(source, "id")
 }
 
 func intentDirectSource(intent *nativeIntent) string {

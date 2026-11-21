@@ -79,7 +79,10 @@ function syncState(data) {
     return { code: 'not-installed', tone: 'warn', word: '尚未安装官方 Kimi',
       note: '请先安装官方 Kimi 并正常打开一次，再回到本面板继续；已有登录和 Work 数据会保留。' };
   }
-  if (info.readback && info.applied === true) {
+  /* 回执要求重启、或切换收尾未完成时，读回成功也不能报成绿色已同步：
+     前者要先重启，后者还差一次清理。 */
+  const nativePending = nativeRestartReceipt(data) || directRouteCleanupPending(data);
+  if (info.readback && info.applied === true && !nativePending) {
     return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
       note: unmanagedRunning
         ? '已同步的模型配置仍保留在磁盘；当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」可恢复完整受管能力。'
@@ -125,9 +128,18 @@ function syncState(data) {
     return { code: 'daimon', tone: 'warn', word: '后台正在对齐模型',
       note: '模型目录已交给 Kimi，后台还没有对齐完成、暂时不能选择；后台会自动继续，不必重复点击或重启桌面。' };
   }
-  if (receipt.requiresRestart === true || receipt.restartDeferred === true) {
+  /* 回执明确要求重启（含旧后端的 state=requires-restart）时先处理重启：
+     此时说「已同步」或先清理旧来源都会让人错过真正要做的下一步。 */
+  if (nativeRestartReceipt(data)) {
     return { code: 'restart', tone: 'warn', word: '等待 Kimi 重启',
       note: '模型已写入原生目录，但 Kimi Work 需要重启后才会显示；空闲后会自动完成。' };
+  }
+  /* 从直连切回网关后，旧的服务商来源也可能还没清理：这时不能绿色显示
+     「已同步」，同步入口要留着让用户重试清理。这句话不假设官方 Kimi 已
+     切到哪一侧，只说明收尾欠清理。 */
+  if (directRouteCleanupPending(data)) {
+    return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
+      note: '新配置已写入并读回，但旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。' };
   }
   /* 只有 synchronized 声明原生 profile 已核对。已保存、已导入和已核对是三件
      不同的事：目录证据也不能被夸大成已经真实选模或已经收到回复。 */
@@ -200,11 +212,20 @@ function directModeOf(data) {
 
 /* 切换收尾：新配置已写入并读回，但旧的受管来源还没清理掉。
    directMode 的布尔值来自最近一次导入回执，回执本身也要看（旧后端只给后者）。
-   这时说「直连已就绪」「切换全部完成」都会让人以为可以退出后台。 */
+   这时说「直连已就绪」「切换全部完成」都会让人以为可以退出后台。
+   这个判断不限于直连模式：从直连切回网关后，旧来源同样可能欠清理，
+   所以网关分支必须共用同一个入口。 */
 function directRouteCleanupPending(data) {
   if (directModeOf(data)?.routeCleanupPending === true) return true;
   const receipt = data?.integration?.nativeImport;
   return receipt?.routeCleanupPending === true || receipt?.reason === 'route_cleanup_pending';
+}
+
+/* 原生导入回执里的重启证据。直连与网关两个分支共用同一张判定，
+   避免清理提示或「已同步」文案盖住真正需要先做的重启。 */
+function nativeRestartReceipt(data) {
+  const receipt = data?.integration?.nativeImport || {};
+  return receipt.requiresRestart === true || receipt.restartDeferred === true || receipt.state === 'requires-restart';
 }
 
 /* 直连写入是否已经落到官方 Kimi。skippedModels 里的模型本来就不会被写入，
@@ -235,11 +256,11 @@ function directImportComplete(data) {
 
 function directRestartRequired(data) {
   const info = data?.integration || {};
-  const receipt = info.nativeImport || {};
-  /* 两种重启证据共用同一入口：官方明确 deferred，或配置已读回但进程尚未采用。
-     各页面若自行补第二条判断，按钮状态就会再次和重启提示分叉。 */
-  if (directImportComplete(data)) return info.adopted !== true;
-  return receipt.requiresRestart === true || receipt.restartDeferred === true || receipt.state === 'requires-restart';
+  /* 两种重启证据共用同一入口：官方明确 deferred，或配置已读回但受管进程
+     尚未采用。只有受管进程才存在「已写入、未采用」：未托管或 Kimi 未运行时
+     后台的 adopted 恒为 false，不能据此要求重启。 */
+  if (directImportComplete(data)) return info.desktop?.managed === true && info.adopted !== true;
+  return nativeRestartReceipt(data);
 }
 
 /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
@@ -340,9 +361,13 @@ function nativeConnectionText(data) {
   if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
   if (preparation.state === 'cancelled') return '上次系统授权已取消。点「打开 / 启动 Kimi」或「重新准备接入」可继续。';
   if (preparation.state === 'failed' || preparation.state === 'interrupted') return '接入准备未完成，请检查系统授权后重试。';
-  const importReceipt = info.nativeImport || {};
-  if (importReceipt.requiresRestart === true || importReceipt.restartDeferred === true) {
+  if (nativeRestartReceipt(data)) {
     return '模型已接入 Kimi 原生选择器，但需要重启 Kimi Work 后才会生效。';
+  }
+  /* 从直连切回网关后旧来源仍可能欠清理；这句话必须排在「已读回」之前，
+     否则连接页会把未收尾的切换说成已完成。 */
+  if (directRouteCleanupPending(data)) {
+    return '新配置已写入并读回，但旧的服务商来源仍保留着，切换收尾未完成；点「同步到 Work」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。';
   }
   /* 系统直接启动的 Kimi 不是首次使用：模型配置可能已在磁盘上，只是没有受管进程。
      落到末尾兜底会把它说成「首次使用」，反而让用户重复点启动。 */
@@ -966,8 +991,11 @@ function renderActions(data) {
     const needsReady = action === 'launch-kimi' || action === 'restart-kimi';
     const compatBlocked = modelSyncBlocked && (action === 'connect-kimi' || action === 'prepare-native');
     const pending = state.pendingAction === action;
-    const directRestartBlocked = action === 'connect-kimi' && savedIntegrationMode(data) === 'direct' && directRestartRequired(data);
-    button.disabled = busy || compatBlocked || directRestartBlocked || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
+    /* 直连重启未完成时，同步与高级恢复都不能再触发一次导入。
+       只限直连：网关的回执可能来自更早的一次操作，锁住按钮会挡住重试。 */
+    const restartBlocked = savedIntegrationMode(data) === 'direct' && directRestartRequired(data)
+      && (action === 'connect-kimi' || action === 'prepare-native');
+    button.disabled = busy || compatBlocked || restartBlocked || (needsReady && (!ready || (reuseLogin && alreadyRunning)));
     if (button.id === 'native-launch') setText(button, ACTION_LABEL[action]);
     if (reuseLogin) setText(button, '诊断：沿用登录，隔离 Work');
     button.classList.toggle('is-busy', pending);
@@ -987,6 +1015,7 @@ function renderWorkspaceSync(data) {
   }
   const mode = savedIntegrationMode(data);
   const effective = effectiveIntegrationMode(data);
+  const cleanupPending = directRouteCleanupPending(data);
   /* 模式改了但官方 Kimi 还停在另一种走法：先说「需要再同步一次」，
      不能因为旧别名还在就显示成已同步。 */
   const modeChanged = models.length > 0 && mode !== effective;
@@ -1009,6 +1038,22 @@ function renderWorkspaceSync(data) {
             : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
           : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
     setHidden($('workspace-restart'), !restart);
+    return;
+  }
+  /* 回执要求重启时，重启提示必须先于模式/清理提示；否则用户会去重复同步。 */
+  if (nativeRestartReceipt(data)) {
+    setText($('workspace-sync-state'), '需要重启 Kimi');
+    setText($('workspace-sync-note'), '模型配置已写入。正常重启 Kimi 后，在选择器中确认。');
+    setHidden($('workspace-restart'), false);
+    return;
+  }
+  /* Direct → Gateway 也共用收尾判断：旧来源没清理就不能显示绿色已同步，
+     但同步入口要保留，让用户能用同一次同步重试清理。这条也要排在
+     「待切回网关」之前：官方还停在直连时，缺的正是这次清理。 */
+  if (cleanupPending) {
+    setText($('workspace-sync-state'), '切换收尾未完成');
+    setText($('workspace-sync-note'), '已切回本机网关模式，但旧的服务商来源还保留着；点「同步到 Work」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。');
+    setHidden($('workspace-restart'), true);
     return;
   }
   if (modeChanged) {
@@ -1050,28 +1095,44 @@ function renderIntegrationMode(data) {
 
   const direct = directModeOf(data);
   const directSaved = saved === 'direct';
-  const restartRequired = directSaved && directRestartRequired(data);
+  const cleanupPending = directRouteCleanupPending(data);
+  /* 回执要求重启时优先于清理提示；从直连切回网关后同样成立。 */
+  const restartRequired = directSaved ? directRestartRequired(data) : nativeRestartReceipt(data);
   /* 未同步时把话说在按钮上：用户点的是同一次同步动作，但结果不同。 */
-  const pendingSync = directSaved !== (effective === 'direct') || (directSaved && !directImportComplete(data));
+  const pendingSync = directSaved !== (effective === 'direct') || (directSaved && !directImportComplete(data))
+    || cleanupPending;
   if (dom.integrationModeState) {
-    const showState = pendingSync || (directSaved && direct?.supported === false);
+    /* 网关模式没有直连那张说明卡，重启回执与收尾标记要在这里明说。 */
+    const showState = pendingSync || (directSaved && direct?.supported === false) || (!directSaved && restartRequired);
     setHidden(dom.integrationModeState, !showState);
     dom.integrationModeState.classList.toggle('note--warn', showState);
     setText(dom.integrationModeState, !showState ? ''
       : direct?.supported === false && directSaved
         ? '模式已更改，尚未同步到 Kimi Work：当前官方 Kimi 版本不支持原生直连，请改用本机网关模式。'
         : restartRequired
-          ? '直连配置已写入，需要正常重启 Kimi 后完成应用。'
-          : '模式已更改，尚未同步到 Kimi Work。');
+          ? directSaved
+            ? '直连配置已写入，需要正常重启 Kimi 后完成应用。'
+            : '模型已写入原生目录，需要正常重启 Kimi 后完成应用。'
+          : cleanupPending
+            ? directSaved
+              ? '新的直连配置已写入并读回，但旧来源尚未清理，切换收尾未完成。'
+              : '已切回本机网关模式，但旧来源尚未清理，切换收尾未完成；请重试清理旧来源并同步。'
+            : '模式已更改，尚未同步到 Kimi Work。');
   }
   if (dom.nativeSyncLabel) {
-    setText(dom.nativeSyncLabel, directSaved
-      ? (restartRequired ? '等待重启 Kimi' : directRouteCleanupPending(data) ? '重试清理旧来源并同步' : '写入直连配置并同步')
-      : pendingSync ? '切回网关并同步' : '重新准备接入');
+    setText(dom.nativeSyncLabel, restartRequired
+      ? '等待重启 Kimi'
+      : cleanupPending
+        ? '重试清理旧来源并同步'
+        : directSaved
+          ? '写入直连配置并同步'
+          : pendingSync ? '切回网关并同步' : '重新准备接入');
   }
   if (dom.nativeSync) {
     const blocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
-    dom.nativeSync.disabled = busy || blocked || restartRequired;
+    /* 只有直连等待重启时才锁住同步：网关模式的回执可能来自更早的操作，
+       锁住会挡住重试清理的入口。 */
+    dom.nativeSync.disabled = busy || blocked || (directSaved && restartRequired);
     dom.nativeSync.classList.toggle('is-busy', integrationModeSaving);
     dom.nativeSync.setAttribute('aria-busy', integrationModeSaving ? 'true' : 'false');
   }

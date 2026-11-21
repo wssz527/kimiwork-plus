@@ -104,6 +104,9 @@ const gatewayBase=gatewayRegistry.replace(/\/models\/api\.json$/,"");
 const kth={id:"byok-kth",kind:"kth",revision:"k1",displayName:"KimiWork +",
   registryUrl:gatewayRegistry,
   providers:(globalThis.extraGatewayProviders||[]).concat([{id:"byok-kth-resp",protocol:"openai_responses",baseUrl:gatewayBase}])};
+if(Array.isArray(globalThis.gatewayModels))kth.models=globalThis.gatewayModels;
+if(globalThis.gatewayQuarantined)kth.quarantined=true;
+if(globalThis.gatewayStatus)kth.status=globalThis.gatewayStatus;
 const custom={id:"byok-src-1",kind:"custom",displayName:"KimiWork + 直连",revision:"s1",
   providers:[{id:"byok-prov-existing",protocol:"openai",baseUrl:"https://api.example.com/v1"}],
   models:[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}]};
@@ -116,7 +119,7 @@ globalThis.clawBridgeAPI={byokSources:{
   list(){calls.push("list");
     custom.models=[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}];
     if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId:"byok-prov-existing",model:"catalog-extra",alias:"byok-prov-existing/catalog-extra",status:"pending",provenance:"catalog"});
-    return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:"applied",
+    return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:globalThis.snapshotApplyState||"applied",
     sources:(gatewayConnected?[kth]:[]).concat([custom])});},
   preview(request){
     calls.push("preview");
@@ -310,6 +313,57 @@ func TestDirectImportExpressionDisconnectsOnlyOurLoopbackGateway(t *testing.T) {
 			t.Fatalf("a different local gateway was disconnected: %v", calls)
 		}
 	})
+}
+
+func TestDirectImportExpressionChecksOtherSourcesForPendingModels(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		applyState string
+		models     string
+		wantApply  bool
+	}{
+		{name: "idle state with settled models", applyState: "idle", models: `[{status:"available"}]`, wantApply: true},
+		{name: "prepared state with settled models", applyState: "prepared", models: `[{status:"available"}]`, wantApply: true},
+		{name: "missing model evidence uses the pending state", applyState: "prepared"},
+		{name: "another pending model blocks apply", applyState: "prepared", models: `[{status:"pending"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := `globalThis.snapshotApplyState="` + tc.applyState + `";`
+			if tc.models != "" {
+				setup += `globalThis.gatewayModels=` + tc.models + `;`
+			}
+			vm := runDirectExpression(t, validDirectImportRequest(), setup)
+			result := vm.Get("directResult").ToObject(vm)
+			if !result.Get("ok").ToBoolean() || result.Get("requiresRestart").ToBoolean() == tc.wantApply {
+				t.Fatalf("apply = %v, result = %v", tc.wantApply, result)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			want := "list,preview,save"
+			if tc.wantApply {
+				want += ",list,apply:r2"
+			}
+			if err != nil || calls.String() != want {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, want, err)
+			}
+		})
+	}
+}
+
+func TestDirectImportExpressionIgnoresDisconnectedOrQuarantinedGateway(t *testing.T) {
+	request := validDirectImportRequest()
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+	for _, setup := range []string{`globalThis.gatewayQuarantined=true;`, `globalThis.gatewayStatus="disconnected";`} {
+		vm := runDirectExpression(t, request, setup)
+		result := vm.Get("directResult").ToObject(vm)
+		if !result.Get("ok").ToBoolean() || result.Get("routeCleanupPending").ToBoolean() {
+			t.Fatalf("inactive gateway required cleanup: %v", result)
+		}
+		calls, err := vm.RunString(`calls.join(",")`)
+		if err != nil || strings.Contains(calls.String(), "disconnect") {
+			t.Fatalf("inactive gateway was disconnected again: %v, err=%v", calls, err)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +772,88 @@ func TestControllerGatewayImportDisconnectsTheDirectSource(t *testing.T) {
 	}
 }
 
+func TestControllerGatewayImportRecoversDirectSourceAfterIntentReplacement(t *testing.T) {
+	h := newAccountHarness(t)
+	key := sha256Hex("gateway-account")
+	fixture := &nativeFixture{dir: h.home, state: h.stateDir}
+	fixture.writeJSON(t, filepath.Join(h.home, NativeWorkStore), directStoreFixture(key))
+	fixture.writeJSON(t, filepath.Join(h.home, NativeWorkConfig), directConfigFixture())
+	writeIdentity(t, fixture, "gateway-account")
+	fixture.writeJSON(t, filepath.Join(h.stateDir, NativeWorkIntent), map[string]any{
+		"schemaVersion": NativeWorkSchema, "sourceID": "gateway", "ownerID": "owner",
+		"kimiHome": h.home, "url": "http://127.0.0.1:9999/v1",
+		"accountDigest": sha256Hex(key), "active": true, "generation": 4,
+	})
+	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"
+	h.controller.settings.GatewayToken = "gateway-token"
+	h.controller.settings.Models = testCatalog()
+
+	actions := &fakeActions{connected: true, imported: ImportResult{OK: false, Reason: "stop_after_import"}}
+	host, err := StartBridgeHost(h.home, 1, actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+	h.controller.mu.Lock()
+	h.controller.bridge = host
+	h.controller.mu.Unlock()
+
+	if got := h.controller.previousDirectSourceID(h.controller.settings); got != directSourceID {
+		t.Fatalf("remaining direct source = %q", got)
+	}
+	if _, err := h.controller.ImportModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	actions.mu.Lock()
+	defer actions.mu.Unlock()
+	if len(actions.imports) != 1 || actions.imports[0].DisconnectDirectSourceID != directSourceID {
+		t.Fatalf("retry did not name the remaining direct source: %+v", actions.imports)
+	}
+}
+
+func TestGatewayReconcileCarriesDirectCleanupFromAccountSnapshot(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const scope = "account"
+	const gateway = "http://127.0.0.1:9999/v1"
+	store := directStoreFixture(scope)
+	account := store["accounts"].(map[string]any)[scope].(map[string]any)
+	account["sources"] = append(account["sources"].([]any), map[string]any{
+		"id": "byok-kth", "kind": "kth", "registryUrl": gateway + "/models/api.json",
+	})
+	active := account["active"].(map[string]any)
+	active["providers"] = append(active["providers"].([]any), map[string]any{
+		"id": "byok-kth-resp", "sourceId": "byok-kth", "protocol": "openai_responses",
+		"baseUrl": gateway, "credentialRef": "cred-gw",
+	})
+	active["models"] = append(active["models"].([]any), map[string]any{
+		"alias": "byok-kth-resp/gpt-probe-model", "providerId": "byok-kth-resp",
+		"model": "gpt-probe-model", "family": "responses", "maxContextSize": 262144, "sourceId": "byok-kth",
+	})
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	config := directConfigFixture()
+	model := config["model"].(map[string]any)
+	model["providers"].(map[string]any)["byok-kth-resp"] = map[string]any{
+		"type": "openai_responses", "baseUrl": gateway, "credential": "cred-gw",
+	}
+	model["models"].(map[string]any)["byok-kth-resp/gpt-probe-model"] = map[string]any{
+		"provider": "byok-kth-resp", "model": "gpt-probe-model", "maxContextSize": 262144,
+	}
+	config["credentials"].(map[string]any)["cred-gw"] = map[string]any{"apiKey": "synthetic-not-a-real-key"}
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), config)
+	options := ReconcileOptions{Enabled: true, AccountScope: scope, URL: gateway,
+		Models: []Model{{ID: "gpt-probe-model", Protocol: "responses", ContextWindow: 262144}}}
+	result := fixture.integration(t).Reconcile(options)
+	if result.State != IntegrationReady || !result.RouteCleanupPending {
+		t.Fatalf("remaining direct source was not carried by reconcile: %+v", result)
+	}
+	account["sources"].([]any)[0].(map[string]any)["status"] = "disconnected"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	result = fixture.integration(t).Reconcile(options)
+	if result.State != IntegrationReady || result.RouteCleanupPending {
+		t.Fatalf("disconnected direct source still required cleanup: %+v", result)
+	}
+}
+
 func TestControllerRepairIntegrationIsANoOpInDirectMode(t *testing.T) {
 	h := newAccountHarness(t)
 	h.controller.settings.IntegrationMode = IntegrationModeDirect
@@ -1018,6 +1154,34 @@ func TestDirectReconcileReportsARemovedModel(t *testing.T) {
 		Mode: IntegrationModeDirect, DirectSpec: directSpecFixture()})
 	if result.State != IntegrationNeedsImport || result.Reason != "models_removed" {
 		t.Fatalf("removed model was accepted: %s/%s", result.State, result.Reason)
+	}
+}
+
+func TestDirectSourceRemainsReturnsOnlyConnectedManagedSources(t *testing.T) {
+	fixture := newNativeFixture(t)
+	store := directStoreFixture("account")
+	account := store["accounts"].(map[string]any)["account"].(map[string]any)
+	source := account["sources"].([]any)[0].(map[string]any)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if got := DirectSourceRemains(fixture.dir, "account", ""); got != directSourceID {
+		t.Fatalf("managed direct source = %q", got)
+	}
+	source["status"] = "disconnected"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if got := DirectSourceRemains(fixture.dir, "account", ""); got != "" {
+		t.Fatalf("disconnected source = %q", got)
+	}
+	delete(source, "status")
+	source["quarantined"] = true
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if got := DirectSourceRemains(fixture.dir, "account", ""); got != "" {
+		t.Fatalf("quarantined source = %q", got)
+	}
+	delete(source, "quarantined")
+	source["displayName"] = "Another custom source"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if got := DirectSourceRemains(fixture.dir, "account", ""); got != "" {
+		t.Fatalf("foreign custom source = %q", got)
 	}
 }
 

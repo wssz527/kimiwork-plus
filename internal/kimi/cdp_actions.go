@@ -754,6 +754,7 @@ const disconnectDirect=async()=>{
   if(!direct)direct=current.sources.find(source=>source.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
   if(!direct)return true;
   if(direct.kind!=="custom")return false;
+  if(direct.quarantined===true||direct.status==="disconnected")return true;
   const reply=await sources.disconnect({sourceId:direct.id,accountRevision:current.accountRevision,
     sourceRevision:direct.revision??null});
   return reply?.ok===true;
@@ -782,8 +783,11 @@ const ownPreviousLoopback=existing&&existing.kind==="kth"&&
 if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL&&!ownPreviousLoopback))){
   return {ok:false,code:"foreign-url"};
 }
-const hadOtherPending=snapshot.applyState!==undefined&&snapshot.applyState!=="applied"&&
-  snapshot.sources.some(source=>source.id!==existing?.id);
+const hadOtherPending=snapshot.sources.some(source=>{
+  if(source.id===existing?.id)return false;
+  if(Array.isArray(source.models))return source.models.some(model=>model.status==="pending");
+  return snapshot.applyState!==undefined&&!["applied","idle","ready"].includes(snapshot.applyState);
+});
 const displayName=existing?.displayName;
 const draft={kind:"kth",displayName:(!displayName||displayName==="KTH"||displayName==="Kimi Work+")?"KimiWork +":displayName,registryUrl:catalogURL,
   registryKey:{mode:"set",value:token},reuseRegistryCredential:true};
