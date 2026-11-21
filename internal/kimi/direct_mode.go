@@ -1001,11 +1001,7 @@ func (c *Controller) gradeDirectImport(result ImportResult, expectedAccount stri
 	if !result.OK {
 		return result
 	}
-	if result.RequiresRestart {
-		// Same withdrawal as the gateway path: a message the page deferred leaves
-		// the running kernel on the catalog it started with.
-		c.invalidateLoadedRuntime(child)
-	}
+	c.recordImportReload(child, result.RequiresRestart)
 	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted

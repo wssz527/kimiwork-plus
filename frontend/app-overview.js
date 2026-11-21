@@ -132,7 +132,7 @@ function syncState(data) {
      此时说「已同步」或先清理旧来源都会让人错过真正要做的下一步。 */
   if (nativeRestartReceipt(data)) {
     return { code: 'restart', tone: 'warn', word: '等待 Kimi 重启',
-      note: '模型已写入原生目录，但 Kimi Work 需要重启后才会显示；空闲后会自动完成。' };
+      note: '模型配置已写入。请等当前任务结束，再正常重启 Kimi 并确认模型。' };
   }
   /* 从直连切回网关后，旧的服务商来源也可能还没清理：这时不能绿色显示
      「已同步」，同步入口要留着让用户重试清理。这句话不假设官方 Kimi 已
@@ -1070,9 +1070,14 @@ function renderWorkspaceSync(data) {
   const unmanaged = integration.desktop?.managed === false;
   const restart = matches && integration.applied && !integration.adopted && !unmanaged;
   const synced = matches && (integration.adopted || (integration.applied && unmanaged));
+  let syncedNote = '已读回当前模型配置，可在 Work 的模型选择器中使用。';
+  if (unmanaged) {
+    syncedNote = data.kimiProcess?.running === true
+      ? '已读回当前模型配置。当前 Kimi 非托管运行，请在官方窗口确认模型。'
+      : '已读回当前模型配置。打开 Kimi 后可在模型选择器中确认。';
+  }
   setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Work' : restart ? '需要重启 Kimi' : '待同步到 Work');
-  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced
-    ? unmanaged ? '已读回当前模型配置；当前 Kimi 非托管运行，菜单采用情况请在官方窗口确认。' : '已读回当前模型配置，可在 Work 的模型选择器中使用。'
+  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced ? syncedNote
     : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '本机网关已保存模型。点击「同步到 Work」更新官方模型选择器。');
   setHidden($('workspace-restart'), !restart);
 }

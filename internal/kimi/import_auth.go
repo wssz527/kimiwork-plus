@@ -294,13 +294,7 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string, ch
 	if !result.OK {
 		return result
 	}
-	if result.RequiresRestart {
-		// The official importer accepted the request but deferred its own kernel
-		// reload, so the running child still holds the catalog it started with.
-		// Withdrawing its baseline before the readback keeps this reconcile from
-		// claiming an adoption that a same-catalog sync never changed.
-		c.invalidateLoadedRuntime(child)
-	}
+	c.recordImportReload(child, result.RequiresRestart)
 	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted

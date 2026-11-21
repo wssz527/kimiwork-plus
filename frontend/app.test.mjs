@@ -2338,6 +2338,11 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   renderWorkspace(unmanagedRestart);
   assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
   assert.equal(workspace['workspace-restart'].hidden, true);
+  assert.match(workspace['workspace-sync-note'].textContent, /非托管运行/);
+  renderWorkspace({ ...unmanagedRestart, kimiProcess: { running: false } });
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.match(workspace['workspace-sync-note'].textContent, /打开 Kimi 后/);
+  assert.equal(workspace['workspace-restart'].hidden, true);
   assert.doesNotMatch(connectionText(unmanagedRestart), /需要重启|等待.*重启/);
   assert.match(connectionText(unmanagedRestart), /未受本产品托管/);
   render(unmanagedRestart);

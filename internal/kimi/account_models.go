@@ -121,6 +121,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			return "failed", NativeAccountChanged
 		}
 		c.mu.Lock()
+		c.deferredChild = nil
 		c.loadedKnown, c.loadedGeneration = true, integration.Readback.Generation
 		integration.Adopted = true
 		c.integration = &integration
@@ -133,8 +134,9 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 func (c *Controller) confirmRunningCatalog(ctx context.Context, result IntegrationResult) IntegrationResult {
 	c.mu.Lock()
 	child, bridge, settings := c.child, c.bridge, c.settings
+	deferred := c.deferredChild == child
 	c.mu.Unlock()
-	if child == nil || bridge == nil || result.Readback.Generation <= 0 {
+	if child == nil || bridge == nil || deferred || result.Readback.Generation <= 0 {
 		return result
 	}
 	surface, err := c.accountSurface()
@@ -169,7 +171,7 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.child != child || c.bridge != bridge || c.integration == nil || c.integration.Readback != result.Readback {
+	if c.child != child || c.bridge != bridge || c.deferredChild == child || c.integration == nil || c.integration.Readback != result.Readback {
 		return result
 	}
 	select {

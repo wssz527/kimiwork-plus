@@ -170,11 +170,9 @@ type Controller struct {
 	// against. A child started before an import cannot have loaded it, so
 	// adoption is decided by this number rather than by "a child is running".
 	loadedGeneration int
-	// loadedKnown is false until a child has actually been launched here, and
-	// stays false when the official importer defers its own kernel reload: the
-	// running child then still holds the catalog it started with, even when a
-	// same-catalog sync left the intent generation unchanged.
-	loadedKnown bool
+	loadedKnown      bool
+	// A matching catalog cannot prove a deferred credential change took effect.
+	deferredChild *Child
 }
 
 // ErrUnmanagedKimiRunning is returned by Start when an official Kimi this
@@ -426,6 +424,7 @@ func (c *Controller) start(ctx context.Context) error {
 	generation := c.currentGeneration()
 	c.mu.Lock()
 	c.child = child
+	c.deferredChild = nil
 	c.loadedGeneration = generation
 	c.loadedKnown = true
 	c.mu.Unlock()
@@ -532,6 +531,7 @@ func (c *Controller) reapChildLocked() bool {
 	host := c.host
 	bridge := c.bridge
 	c.child = nil
+	c.deferredChild = nil
 	c.host = nil
 	c.bridge = nil
 	c.actions = nil
@@ -908,65 +908,46 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 			result.Applied = readback.Holds(settings.GatewayURL)
 		}
 		result.Applied = result.Applied && (result.State == IntegrationReady || result.State == IntegrationRepaired)
-		result.Adopted = result.Applied && c.runtimeLoaded(readback.Generation)
 	}
 	c.mu.Lock()
+	if withReadback && result.Applied {
+		result.Adopted = c.runtimeLoadedLocked(result.Readback.Generation)
+	}
 	c.integration = &result
 	c.mu.Unlock()
 	return result
 }
 
-// invalidateLoadedRuntime withdraws the adoption baseline of the child that
-// answered a deferred import.
-//
-// The official importer can answer `deferred` for a sync that only changes a
-// credential: the files then hold the new value while the intent generation
-// stays the same. Comparing generations alone would keep claiming adoption, so
-// the answering child's baseline is withdrawn until a new child is launched or
-// the ready daemon's catalog is read back and verified. Both of those paths
-// write a fresh baseline, so the withdrawal only lasts for the reload that was
-// deferred. A child started after the answer read the profile itself and keeps
-// its own baseline, which is why this compares the exact child.
-func (c *Controller) invalidateLoadedRuntime(child *Child) {
-	if child == nil {
+func (c *Controller) recordImportReload(child *Child, deferred bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if child == nil || c.child != child {
 		return
 	}
-	c.mu.Lock()
-	if c.child == child {
+	if deferred {
+		c.deferredChild = child
 		c.loadedKnown = false
+		if c.integration != nil && c.integration.Adopted {
+			current := *c.integration
+			current.Adopted = false
+			c.integration = &current
+		}
+	} else if c.deferredChild == child {
+		c.deferredChild = nil
 	}
-	c.mu.Unlock()
 }
 
-// runtimeLoaded reports whether the running application can have loaded the
-// import this reconcile just read back.
-//
-// "A child is running" is not enough: a child that was already up before the
-// import may not have read the new profile. The loaded generation is recorded
-// at launch or after a verified account transition and a matching catalog read
-// through the ready daemon. Adoption requires that generation to be current
-// and the baseline not to have been withdrawn by a deferred import.
-func (c *Controller) runtimeLoaded(generation int) bool {
-	c.mu.Lock()
-	bridge := c.bridge
+func (c *Controller) runtimeLoadedLocked(generation int) bool {
 	child := c.child
-	known := c.loadedKnown
-	loaded := c.loadedGeneration
-	c.mu.Unlock()
-	if bridge == nil || child == nil || !known {
+	if c.bridge == nil || child == nil || c.deferredChild == child || !c.loadedKnown || generation <= 0 {
 		return false
 	}
 	select {
 	case <-child.Exit():
 		return false
 	default:
+		return c.loadedGeneration >= generation
 	}
-	// A generation of 0 means the readback found no intent at all, so there is
-	// nothing to compare and nothing to claim.
-	if generation <= 0 {
-		return false
-	}
-	return loaded >= generation
 }
 
 // WorkSurface reports what is on screen, through the managed child's bridge.

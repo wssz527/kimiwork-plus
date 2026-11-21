@@ -175,6 +175,33 @@ func TestReconcileConfirmsRunningCatalogAfterGenerationChanges(t *testing.T) {
 	}
 }
 
+func TestReconcileKeepsDeferredRestartWithMatchingRunningCatalog(t *testing.T) {
+	h, a, _ := accountModelsHarness(t, true)
+	child, _ := startFakeChild(t)
+	h.controller.child = child
+	t.Cleanup(func() { _ = child.Stop(time.Second) })
+	before := h.controller.ReconcileWithReadback(context.Background())
+	if !before.Applied || !before.Adopted {
+		t.Fatalf("fixture could not confirm running catalog: %+v", before)
+	}
+	a.onImport = nil
+	a.imported = ImportResult{OK: true, Models: 2, RequiresRestart: true, RestartDeferred: true}
+	result, err := h.controller.ImportModelsAuthorized(context.Background())
+	if err != nil || !result.Applied || result.Adopted || !result.RequiresRestart || result.Readback.Generation != before.Readback.Generation {
+		t.Fatalf("same-generation deferred import: %+v, %v", result, err)
+	}
+	if polled := h.controller.ReconcileWithReadback(context.Background()); !polled.Applied || polled.Adopted {
+		t.Fatalf("an unchanged catalog and ready runtime cleared deferred restart: %+v", polled)
+	}
+	a.imported = ImportResult{OK: true, Models: 2}
+	if result, err = h.controller.ImportModelsAuthorized(context.Background()); err != nil || !result.Applied || result.RequiresRestart {
+		t.Fatalf("successful reimport: %+v, %v", result, err)
+	}
+	if polled := h.controller.ReconcileWithReadback(context.Background()); !polled.Adopted {
+		t.Fatalf("running catalog could not recover after successful reimport: %+v", polled)
+	}
+}
+
 func TestAccountModelsRejectPartialRuntimeCatalog(t *testing.T) {
 	h, a, _ := accountModelsHarness(t, true)
 	delete(section(a.config, "models"), "byok-kth-resp/gpt-probe-model")
