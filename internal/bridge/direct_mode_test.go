@@ -841,3 +841,34 @@ func TestDirectModeBaseDoesNotAssumeDesktopHosts(t *testing.T) {
 		t.Fatalf("unchecked desktop hosts reported ready: %+v", row)
 	}
 }
+
+func TestNativeDirectModeCleanupRequiresAnAppliedReplacement(t *testing.T) {
+	n := newDirectTestNative(t, true)
+	settings := n.controller.Settings()
+	settings.GatewayURL = "http://127.0.0.1:9100/v1"
+	if err := n.controller.Configure(settings); err != nil {
+		t.Fatal(err)
+	}
+	home, err := n.controller.WorkHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := []byte(`{"v":3,"accounts":{"account":{"revision":"a1","sources":[{"id":"byok-kth","kind":"kth","registryUrl":"http://127.0.0.1:9100/v1/models/api.json","desired":{"providers":[],"models":[]}}],"active":{"providers":[],"models":[]},"blockedAliases":{}}},"ownedResources":{}}`)
+	if err := os.WriteFile(filepath.Join(home, "byok-providers.json"), store, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document := directDocument(nil, nil)
+	document["integrationMode"] = core.IntegrationModeDirect
+	integration := core.Document{"mode": kimi.IntegrationModeDirect, "state": kimi.IntegrationNeedsImport, "applied": false}
+	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != false {
+		t.Fatalf("an unwritten replacement claimed cleanup work: %+v", row)
+	}
+	integration["state"] = kimi.IntegrationReady
+	integration["applied"] = true
+	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != true {
+		t.Fatalf("the remaining old gateway was not reported after apply: %+v", row)
+	}
+}

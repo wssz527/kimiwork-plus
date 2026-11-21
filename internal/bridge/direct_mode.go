@@ -578,7 +578,7 @@ func (n *Native) directModeState(d, integration, search core.Document) core.Docu
 	plan := buildDirectPlan(d)
 	if n.isDirectMode() {
 		plan = buildDirectPlan(d, n.credentialAvailability(d))
-		if home, err := n.controller.WorkHome(); err == nil &&
+		if home, err := n.controller.WorkHome(); err == nil && integration["applied"] == true &&
 			kimi.DirectGatewayRemains(home, kimi.AccountScope(home), n.controller.Settings().GatewayURL) {
 			withCleanup := core.Document{}
 			for key, value := range integration {
