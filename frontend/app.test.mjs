@@ -63,6 +63,7 @@ test('unreadable connection credentials expose explicit system authorization eve
     const setText = (element, text) => { element.textContent = text; };
     const setHidden = (element, hidden) => { element.hidden = hidden; };
     const setDot = () => {};
+    ${sourceFunction('credentialApplyReason')}
     ${sourceFunction('applyAvailability')}
     ${sourceFunction('applyState')}
     ${sourceFunction('renderApply')}
@@ -72,7 +73,12 @@ test('unreadable connection credentials expose explicit system authorization eve
   render(data);
   assert.equal(dom.applyButton.hidden, false);
   assert.equal(dom.applyButton.textContent, '重新授权并应用连接');
-  assert.equal(dom.applyVerdictWord.textContent, '连接需要系统授权');
+  /* 待授权不是 Key 丢失：文案要说清条目还在、需要系统授权。 */
+  assert.equal(dom.applyVerdictWord.textContent, '连接凭据待授权');
+  assert.match(dom.applyVerdictNote.textContent, /仍在系统钥匙串里/);
+  assert.match(dom.applyVerdictNote.textContent, /始终允许/);
+  assert.doesNotMatch(dom.applyVerdictNote.textContent, /重新输入|密钥未保存/);
+  assert.equal(dom.restartHead.textContent, '由当前窗口向系统申请读取已保存的连接凭据，后台不会自动弹出授权。');
   render({ ...data, operation: { action: 'apply-connections', state: 'running' } });
   assert.equal(dom.applyVerdictWord.textContent, '正在应用');
   assert.equal(dom.applyButton.hidden, true);
@@ -2394,4 +2400,153 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   };
   assert.equal(syncState(restartOverReadback).code, 'restart');
   assert.equal(syncState(restartOverReadback).word, '等待 Kimi 重启');
+});
+
+/* ---------- 升级后的连接凭据待授权 ---------- */
+
+function makeCredentialEnv() {
+  const copy = source.slice(source.indexOf('const APPLY_COPY ='), source.indexOf('\nconst APPLY_REFUSAL ='));
+  const blockedCodes = source.slice(source.indexOf('const CREDENTIAL_VAULT_BLOCKED ='), source.indexOf('\nfunction credentialAuthPending'));
+  const state = { pendingAction: null, applyUnsupported: false };
+  const dom = { restartHead: {}, applyVerdict: {}, applyVerdictDot: {}, applyVerdictWord: {}, applyVerdictNote: {}, applyButton: {} };
+  const code = `
+    ${copy}
+    ${blockedCodes}
+    const connectionsChanged = () => false;
+    const isInFlight = op => op?.state === 'running';
+    const setText = (element, text) => { element.textContent = text; };
+    const setHidden = (element, hidden) => { element.hidden = hidden; };
+    const setDot = () => {};
+    ${sourceFunction('credentialApplyReason')}
+    ${sourceFunction('credentialAuthPending')}
+    ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('connectionKeyText')}
+    ${sourceFunction('applyAvailability')}
+    ${sourceFunction('applyState')}
+    ${sourceFunction('renderApply')}
+    return { applyState, credentialAuthPending, connectionKeyText, renderApply };
+  `;
+  const fn = new Function('state', 'dom', code)(state, dom);
+  return { ...fn, dom };
+}
+
+test('a cancelled or denied system authorization is reported as what actually happened', () => {
+  const { applyState, renderApply, dom } = makeCredentialEnv();
+  const failed = (reason) => ({
+    connections: { restartRequired: false, apply: { state: 'failed', reason: 'credentials_unavailable' } },
+    operation: { action: 'apply-connections', state: 'failed', reason },
+  });
+
+  /* 取消：不是失败，也不是 Key 丢失；保留重试入口。 */
+  const cancelled = applyState(failed('credential_authorization_cancelled'));
+  assert.equal(cancelled.word, '已取消系统授权');
+  assert.equal(cancelled.credential, true);
+  assert.match(cancelled.note, /没有改动/);
+  assert.match(cancelled.note, /始终允许/);
+  assert.doesNotMatch(cancelled.note, /密钥未保存/);
+  renderApply(failed('credential_authorization_cancelled'));
+  assert.equal(dom.applyButton.hidden, false);
+  assert.equal(dom.applyButton.textContent, '重新授权并应用连接');
+
+  /* 拒绝：说明未获授权，仍可重来。 */
+  assert.equal(applyState(failed('credential_authorization_failed')).word, '系统未允许读取凭据');
+
+  /* 钥匙串锁定：给出解锁后再重试的下一步。 */
+  const locked = applyState(failed('credential_keychain_locked'));
+  assert.equal(locked.word, '登录钥匙串已锁定');
+  assert.match(locked.note, /解锁/);
+
+  /* 无 GUI 会话：指向应用窗口，而不是让人重输 Key。 */
+  const session = applyState(failed('credential_session_unavailable'));
+  assert.equal(session.word, '当前会话无法授权');
+  assert.match(session.note, /应用窗口/);
+  assert.equal(applyState(failed('credential_keychain_unavailable')).word, '登录钥匙串不可用');
+  assert.equal(applyState(failed('credential_authorization_required')).word, '连接凭据待授权');
+
+  /* 轮询里只有全局 reason 时，仍回落到待授权。 */
+  assert.equal(applyState({
+    connections: { restartRequired: false, apply: { state: 'failed', reason: 'credentials_unavailable' } },
+  }).word, '连接凭据待授权');
+
+  /* 没失败时不受影响。 */
+  assert.equal(applyState({ connections: { restartRequired: false, apply: { state: 'applied' } } }).word, '已应用');
+});
+
+test('a connection row says the saved key needs authorization instead of asking for a new key', () => {
+  const { connectionKeyText } = makeCredentialEnv();
+  for (const code of ['credential_authorization_required', 'credential_keychain_locked',
+    'credential_keychain_unavailable', 'credential_session_unavailable']) {
+    const text = connectionKeyText({ credentialError: code });
+    assert.match(text, /重新授权并应用连接/, code + ' must point at the authorization entry');
+    assert.doesNotMatch(text, /重新输入/, code + ' must not ask for a new key');
+  }
+  assert.match(connectionKeyText({ credentialError: 'credential_store_corrupt' }), /重新输入 Key/);
+  assert.equal(connectionKeyText({ credentialError: 'credential_missing' }), '凭据不可读，请编辑并重新输入 Key 后保存');
+  assert.equal(connectionKeyText({ apiKeySet: true, credentialError: 'credential_authorization_required' }), 'Key 已在运行环境中');
+});
+
+test('an update that leaves credentials unreadable is not reported as fully ready', () => {
+  const blockedCodes = source.slice(source.indexOf('const CREDENTIAL_VAULT_BLOCKED ='), source.indexOf('\nfunction credentialAuthPending'));
+  const verdict = new Function(
+    `${blockedCodes}\n${sourceFunction('connectionRowsOf')}\n${sourceFunction('credentialAuthPending')}\n${sourceFunction('updateCompletionVerdict')}\nreturn updateCompletionVerdict;`,
+  )();
+  const blocked = { connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } };
+  const ready = { connections: { saved: [{ id: 'c1', apiKeySet: true }] } };
+
+  const pending = verdict({ ...blocked, updates: { currentVersion: '1.1.0' } }, '版本替换');
+  assert.equal(pending.complete, false);
+  assert.equal(pending.tone, 'warn');
+  assert.match(pending.text, /1\.1\.0/);
+  assert.match(pending.text, /重新授权并应用连接/);
+  assert.match(pending.text, /始终允许/);
+  assert.doesNotMatch(pending.text, /^版本替换已完成，当前版本 1\.1\.0。$/);
+
+  /* 凭据可读时保留原来的正常完成提示，绿色不降级。 */
+  const done = verdict({ ...ready, updates: { currentVersion: '1.1.0' } }, '版本替换');
+  assert.equal(done.complete, true);
+  assert.equal(done.tone, 'ok');
+  assert.equal(done.text, '版本替换已完成，当前版本 1.1.0。');
+});
+
+test('the shell banner keeps the credential prompt alive across pages', () => {
+  const blockedCodes = source.slice(source.indexOf('const CREDENTIAL_VAULT_BLOCKED ='), source.indexOf('\nfunction credentialAuthPending'));
+  const nodes = {
+    'restart-banner': { textContent: '', hidden: true },
+    'restart-banner-text': { textContent: '', hidden: true },
+  };
+  const dom = {
+    railGatewayDot: {}, railGatewayText: {}, railGatewayUrl: {}, sync: {},
+    restartBanner: nodes['restart-banner'], restartBannerText: nodes['restart-banner-text'],
+    navModelCount: {}, budgetBanner: {}, budgetBannerText: {},
+  };
+  const renderShell = new Function('dom', `${blockedCodes}
+    const state = { lastSync: 0 };
+    const setText = (element, text) => { if (element) element.textContent = text; };
+    const setHidden = (element, hidden) => { if (element) element.hidden = hidden; };
+    const setDot = () => {};
+    const fmtTime = () => '12:00:00';
+    const fmtCount = v => String(v);
+    const savedIntegrationMode = data => data?.integrationMode === 'direct' ? 'direct' : 'gateway';
+    const budgetNotice = () => '';
+    ${sourceFunction('credentialAuthPending')}
+    ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('renderShell')}
+    return renderShell;`)(dom);
+
+  /* 配置未变更、但有连接待授权：横幅仍然出现，并指向重授权。 */
+  renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
+    connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
+  assert.equal(nodes['restart-banner'].hidden, false);
+  assert.match(nodes['restart-banner-text'].textContent, /无法读取系统钥匙串/);
+  assert.match(nodes['restart-banner-text'].textContent, /「模型」页查看原因并重新授权/);
+
+  /* 配置变更提示优先，保持原措辞不被覆盖。 */
+  renderShell({ gateway: { state: 'running' }, configuration: { state: 'changed' },
+    connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
+  assert.match(nodes['restart-banner-text'].textContent, /连接配置已修改/);
+
+  /* 都正常时横幅隐藏，原行为不变。 */
+  renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
+    connections: { saved: [{ id: 'c1', apiKeySet: true }] } });
+  assert.equal(nodes['restart-banner'].hidden, true);
 });

@@ -343,7 +343,7 @@ const importDraft=async(current,existing,allowApply)=>{
   const preview=unwrap(previewReply);
   if(!preview||preview.canSave!==true||typeof preview.previewId!=="string"||preview.scopeToken!==current.scopeToken||preview.accountRevision!==current.accountRevision){
     if(typeof preview?.previewId==="string"&&typeof sources.discard==="function")await sources.discard(preview.previewId);
-    return {error:previewReply?.reasonCode||"direct-preview-refused"};
+    return {error:previewReply?.reasonCode||"direct-preview-refused",previewFailed:true};
   }
   const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
   if(!saved?.ok||typeof saved.value?.sourceId!=="string"||!saved.value.sourceId)return {error:saved?.reasonCode||"import-failed"};
@@ -358,6 +358,23 @@ const importDraft=async(current,existing,allowApply)=>{
   return {saved:saved.value,status:status};
 };
 let imported=await importDraft(snapshot,existing,!otherPending);
+if(imported.previewFailed&&imported.error==="byok-invalid-source"&&existing){
+  // Kimi 3.2.28 can retain an old defaultEffort when a draft omits it.
+  // A fresh provider identity avoids that merge within the same source save.
+  const replacements=new Map();
+  for(const provider of wantedProviders){
+    const previousID=providerIDs[provider.id];
+    if(usedExisting.has(previousID)&&!existingProviders.some(candidate=>candidate.id===provider.id)&&
+       wantedModels.some(model=>model.providerId===provider.id&&!model.defaultEffort)){
+      replacements.set(previousID,provider.id);
+    }
+  }
+  if(replacements.size){
+    for(const provider of draft.providers)provider.id=replacements.get(provider.id)||provider.id;
+    for(const model of draft.models)model.providerId=replacements.get(model.providerId)||model.providerId;
+    imported=await importDraft(snapshot,existing,!otherPending);
+  }
+}
 if(imported.error)return {ok:false,code:imported.error};
 let saved=imported.saved,status=imported.status;
 if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};

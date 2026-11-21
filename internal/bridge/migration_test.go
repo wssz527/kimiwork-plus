@@ -76,6 +76,22 @@ func (m *migrationMemoryKeys) Delete(name string) error {
 	return nil
 }
 
+func TestInPlaceCredentialMigrationRequiresMissingCredential(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gateway.json"), []byte(`{"connections":[{"apiKeyRef":"connection-fixture"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys := newMigrationMemoryKeys()
+	if !ShouldAttemptInPlaceCredentialMigration(dir, keys) {
+		t.Fatal("a missing current credential should still allow migration")
+	}
+	keys.values["connection-fixture"] = "fixture"
+	keys.requireAuth["connection-fixture"] = true
+	if ShouldAttemptInPlaceCredentialMigration(dir, keys) {
+		t.Fatal("a stored credential requiring authorization must not trigger preview migration")
+	}
+}
+
 func TestMigrateStateDirCopiesPersistentAndPreservesLegacy(t *testing.T) {
 	root := t.TempDir()
 	legacy := filepath.Join(root, "kimi-work-plus-preview")

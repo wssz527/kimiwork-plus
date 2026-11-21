@@ -301,7 +301,7 @@ const ERROR_HINT = {
   credential_keychain_locked: '登录钥匙串已锁定，请在 macOS 中解锁后从本窗口重新保存；密钥未写入。',
   credential_keychain_unavailable: '当前登录会话无法使用系统钥匙串，请检查应用签名和会话权限；密钥未写入。',
   credential_session_unavailable: '当前后台会话不能显示授权窗口，请从应用窗口重新保存。',
-  credential_authorization_required: '此条目需要系统授权，请从应用窗口重新保存并响应系统提示。',
+  credential_authorization_required: '此条目需要系统授权；请从应用窗口响应系统提示。若在读取已保存 Key，可到模型页点「重新授权并应用连接」。',
   credential_authorization_cancelled: '系统授权已取消，密钥未保存；原配置仍保留。',
   credential_authorization_failed: '系统未接受授权，密钥未保存；原配置仍保留。',
   credential_store_corrupt: '凭据条目内容无法识别，请从应用窗口重新输入并保存。',
@@ -1098,7 +1098,7 @@ function showToast(message, tone) {
     state.toastTimer = null;
   }
   dom.toast.replaceChildren();
-  const icon = iconUse(tone === 'error' ? 'i-alert' : 'i-check');
+  const icon = iconUse(tone === 'error' || tone === 'warn' ? 'i-alert' : 'i-check');
   const text = document.createElement('span');
   text.textContent = message;
   dom.toast.dataset.tone = tone || 'ok';

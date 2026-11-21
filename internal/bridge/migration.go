@@ -315,7 +315,7 @@ func ShouldAttemptInPlaceCredentialMigration(targetDir string, newStore KeyStore
 			continue
 		}
 		val, err := newStore.Get(ref)
-		if err != nil || val == "" {
+		if errors.Is(err, platform.ErrCredentialMissing) || (err == nil && val == "") {
 			return true
 		}
 	}

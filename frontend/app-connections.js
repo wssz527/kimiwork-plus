@@ -1616,8 +1616,20 @@ const APPLY_COPY = {
   unsupported: { tone: 'bad', word: '自动应用不可用',
     note: '连接已保存，当前网关尚未应用；没有可自动应用的受管服务。' },
   failed: { tone: 'bad', word: '应用失败', note: '连接已保存，但应用未完成；可重试，不会结束正在运行的任务。' },
-  authorization: { tone: 'bad', word: '连接需要系统授权',
-    note: '当前应用无法读取已保存的 Key。点「重新授权并应用连接」并响应系统提示，不会显示或改写 Key。' },
+  /* 升级/换签名后凭据条目仍在钥匙串，只是当前版本还没被允许读取。
+     这里不能说成 Key 丢失，也不能要求重新输入 Key。 */
+  authorization: { tone: 'bad', word: '连接凭据待授权', credential: true,
+    note: '已保存的 Key 仍在系统钥匙串里，只是当前版本还没获得读取许可。点「重新授权并应用连接」后，在 macOS 弹出的「登录钥匙串」窗口选择「始终允许」，本版本之后重启也不必再授权；取消或拒绝不会改动已保存的连接，可随时重试。' },
+  authorizationCancelled: { tone: 'warn', word: '已取消系统授权', credential: true,
+    note: '你取消了系统授权窗口：已保存的 Key 与连接配置都没有改动，当前网关仍读不到它们。可再次点「重新授权并应用连接」，这次在窗口里选择「始终允许」。' },
+  authorizationDenied: { tone: 'bad', word: '系统未允许读取凭据', credential: true,
+    note: '系统拒绝了这次读取已保存 Key 的授权，连接配置未被改动。若在钥匙串窗口点过「拒绝」，可在「登录钥匙串」里重新允许本应用，或再次点「重新授权并应用连接」。' },
+  keychainLocked: { tone: 'warn', word: '登录钥匙串已锁定', credential: true,
+    note: '系统读不到登录钥匙串里的已保存 Key。请先在 macOS 中解锁登录钥匙串，再点「重新授权并应用连接」；这一步不会改写已保存的连接。' },
+  keychainUnavailable: { tone: 'bad', word: '登录钥匙串不可用', credential: true,
+    note: '请先在 macOS 的「钥匙串访问」中确认登录钥匙串可用，然后重新授权。' },
+  sessionUnavailable: { tone: 'bad', word: '当前会话无法授权', credential: true,
+    note: '当前进程不在可显示系统授权窗口的登录会话里，读不到已保存 Key。请从应用窗口操作；连接配置未被改动。' },
 };
 
 const APPLY_REFUSAL = {
@@ -1625,6 +1637,28 @@ const APPLY_REFUSAL = {
   service_foreign: '检测到的后台服务不属于当前配置，未使用它应用连接。',
   service_stopped: '后台服务当前没有运行，无法自动应用连接。',
 };
+
+/* 升级、换签名或重装后，已保存的 Key 还在钥匙串里，但 macOS securityd 会把
+   访问权绑到旧二进制的 cdhash（自签名没有固定 Team ID）。这时网关照常运行、
+   只是读不到 Key：必须说成“待授权”，不能说成 Key 丢失或需要重新输入。
+   条目存在却读不到，才是这条路径的特征；缺条目仍按缺失处理。 */
+const CREDENTIAL_VAULT_BLOCKED = ['credential_keychain_locked', 'credential_keychain_unavailable',
+  'credential_session_unavailable', 'credential_authorization_required', 'credential_authorization_failed'];
+
+function credentialAuthPending(data) {
+  const rows = connectionRowsOf(data) || [];
+  return rows.some((row) => CREDENTIAL_VAULT_BLOCKED.includes(row.credentialError));
+}
+
+/* 最近一次 apply-connections 的具体失败原因。轮询里 connections.apply 只会
+   说「凭据不可读」，取消/拒绝/锁定这些真正影响下一步的原因只在 operation 上，
+   所以两处都要看，并且 operation 的说法优先。 */
+function credentialApplyReason(data) {
+  const op = data?.operation;
+  if (op && op.action === 'apply-connections' && typeof op.reason === 'string' && op.reason) return op.reason;
+  const reason = data?.connections?.apply?.reason;
+  return typeof reason === 'string' ? reason : '';
+}
 
 /* 是否需要应用，不能只看连接对象是否相同：只换 Key、地址不变时，
    connections.restartRequired 仍是判断“尚未生效”的唯一权威；对象比较会漏掉
@@ -1648,7 +1682,18 @@ function applyAvailability(data) {
 /* 优先读 runner 写回的真实进展；没有时按本地可判断的事实降级。 */
 function applyState(data) {
   if (data?.operation?.action === 'apply-connections' && isInFlight(data.operation)) return APPLY_COPY.applying;
+  /* 同一批连接读不到时，runner 只记 credentials_unavailable；取消、拒绝、
+     钥匙串锁定这些决定下一步的原因只在 operation.reason 上。先看具体原因，
+     避免把用户主动取消说成「需要授权」或「密钥未保存」。 */
   if (data?.connections?.apply?.state === 'failed' && data.connections.apply.reason === 'credentials_unavailable') {
+    const reason = credentialApplyReason(data);
+    if (reason && reason !== 'credentials_unavailable') {
+      if (reason === 'credential_authorization_cancelled') return APPLY_COPY.authorizationCancelled;
+      if (reason === 'credential_authorization_failed') return APPLY_COPY.authorizationDenied;
+      if (reason === 'credential_keychain_locked') return APPLY_COPY.keychainLocked;
+      if (reason === 'credential_session_unavailable') return APPLY_COPY.sessionUnavailable;
+      if (reason === 'credential_keychain_unavailable') return APPLY_COPY.keychainUnavailable;
+    }
     return APPLY_COPY.authorization;
   }
   const code = applyAvailability(data);
@@ -1695,8 +1740,11 @@ function renderApply(data) {
   const service = data && data.service;
   const running = service && service.mode === 'service';
   const stateInfo = applyState(data);
+  /* 待授权、已取消、被拒绝、钥匙串锁定都要保留同一个重授权入口：
+     这些状态共用一条恢复路径，不能因为措辞不同就把按钮藏起来。 */
+  const credentialPrompt = stateInfo.credential === true;
   if (dom.restartHead) {
-    setText(dom.restartHead, stateInfo === APPLY_COPY.authorization
+    setText(dom.restartHead, credentialPrompt
       ? '由当前窗口向系统申请读取已保存的连接凭据，后台不会自动弹出授权。'
       : running ? '本面板由后台服务运行；保存连接后在这里应用，不需要终端命令。'
         : '本面板不是由受管后台服务运行；连接保存后需要由受管服务应用。');
@@ -1707,10 +1755,10 @@ function renderApply(data) {
     setText(dom.applyVerdictNote, stateInfo.note);
   }
   if (dom.applyButton) {
-    const pending = stateInfo === APPLY_COPY.pending || stateInfo === APPLY_COPY.failed || stateInfo === APPLY_COPY.authorization;
+    const pending = stateInfo === APPLY_COPY.pending || stateInfo === APPLY_COPY.failed || credentialPrompt;
     setHidden(dom.applyButton, !pending);
     dom.applyButton.disabled = !pending || Boolean(state.pendingAction);
-    setText(dom.applyButton, stateInfo === APPLY_COPY.authorization ? '重新授权并应用连接'
+    setText(dom.applyButton, credentialPrompt ? '重新授权并应用连接'
       : stateInfo === APPLY_COPY.failed ? '重试应用连接' : '应用已保存的连接');
   }
 }
@@ -1735,7 +1783,10 @@ async function applyConnections() {
       adoptState({ ...state.data, operation: op });
       renderApply(state.data);
     }
-    showToast('应用请求已提交；后台服务会在安全时应用连接。', 'ok');
+    /* 这一步会逐条弹出 macOS「登录钥匙串」授权框，提前说明才不会让人以为卡住。 */
+    showToast(credentialAuthPending(data)
+      ? '正在向系统申请读取已保存的 Key：请在 macOS「登录钥匙串」窗口选择「始终允许」；窗口会为每条连接各弹一次。'
+      : '应用请求已提交；若系统要求授权读取已保存的 Key，请在弹窗中选择「始终允许」。', 'ok');
     await loadState({ silent: true });
     return op;
   } catch (error) {
@@ -1860,6 +1911,22 @@ function renderConnections() {
   renderConnectionsDiff();
 }
 
+/* 连接行的 Key 状态必须和下方授权卡片说同一件事：条目还在、只是当前版本
+   读不到时，让用户去点重授权，而不是让用户重输一遍 Key。 */
+function connectionKeyText(row) {
+  if (row.apiKey) return '本次已输入新 Key（未保存）';
+  if (row.apiKeySet) return 'Key 已在运行环境中';
+  const code = row.credentialError;
+  if (!code) return 'Key 未在运行环境中';
+  if (CREDENTIAL_VAULT_BLOCKED.includes(code)) {
+    return '已保存 Key 待系统授权：请在下方点「重新授权并应用连接」';
+  }
+  if (code === 'credential_store_corrupt' || code === 'credential_store_failed') {
+    return '已保存 Key 无法读取，请编辑并重新输入 Key 后保存';
+  }
+  return '凭据不可读，请编辑并重新输入 Key 后保存';
+}
+
 function buildConnectionRow(row, index) {
   const li = document.createElement('li');
   li.className = 'conn-row';
@@ -1893,8 +1960,7 @@ function buildConnectionRow(row, index) {
   dot.className = 'dot';
   dot.dataset.tone = row.apiKeySet || row.apiKey ? 'ok' : 'warn';
   const keyText = document.createElement('span');
-  keyText.textContent = row.apiKey ? '本次已输入新 Key（未保存）'
-    : row.apiKeySet ? 'Key 已在运行环境中' : row.credentialError ? '凭据不可读，请编辑并重新输入 Key 后保存' : 'Key 未在运行环境中';
+  keyText.textContent = connectionKeyText(row);
   keyState.append(dot, keyText);
   const models = document.createElement('p');
   models.className = 'conn-row__line muted';
@@ -2192,6 +2258,7 @@ export {
   applyState,
   closeConnectionEditor,
   configInfo,
+  credentialAuthPending,
   configReady,
   connectionDraftFrom,
   connectionPayload,

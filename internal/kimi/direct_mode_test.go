@@ -126,6 +126,8 @@ globalThis.clawBridgeAPI={byokSources:{
     calls.push("preview");
     globalThis.seenDraft=request.draft;
     globalThis.seenPreviewRequest=request;
+    if(globalThis.rejectClearedEffort&&request.draft.providers[0].id==="byok-prov-existing"&&
+       !request.draft.models[0].defaultEffort)return {ok:false,reasonCode:"byok-invalid-source"};
     return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",sourceRevision:"s1",sourceId:"byok-src-1",
       previewId:"p1",canSave:true,candidates:[]});
   },
@@ -161,6 +163,24 @@ func validDirectImportRequest() DirectImportRequest {
 			BaseURL: "https://api.example.com/v1", APIKey: "sk-direct-test-key"}},
 		Models: []DirectModel{{ID: "kimi-a", ProviderID: "prov-1", Model: "model-a",
 			DisplayName: "Model A", MaxContextSize: 128000, Capabilities: []string{"tool_use"}}},
+	}
+}
+
+func TestDirectImportRetriesClearedEffortWithFreshProvider(t *testing.T) {
+	vm := runDirectExpression(t, validDirectImportRequest(), `globalThis.rejectClearedEffort=true;`)
+	result := vm.Get("directResult").ToObject(vm)
+	if !result.Get("ok").ToBoolean() || result.Get("sourceId").String() != directSourceID {
+		t.Fatalf("direct result: %v", result)
+	}
+	draft := vm.Get("seenDraft").ToObject(vm)
+	provider := draft.Get("providers").ToObject(vm).Get("0").ToObject(vm)
+	model := draft.Get("models").ToObject(vm).Get("0").ToObject(vm)
+	if provider.Get("id").String() != "prov-1" || model.Get("providerId").String() != "prov-1" {
+		t.Fatalf("retry draft: %v", draft)
+	}
+	calls, err := vm.RunString(`calls.join(",")`)
+	if err != nil || calls.String() != "list,preview,preview,save,list,apply:r2" {
+		t.Fatalf("want one save after validated retry, got %v (%v)", calls, err)
 	}
 }
 

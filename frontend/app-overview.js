@@ -1,4 +1,4 @@
-import { applyState, configInfo, configReady, onboardBusy, renderOnboard } from './app-connections.js';
+import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, INTEGRATION_MODES, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
 import { handleSaveFailure, loadState, runAction, setView } from './app.js';
@@ -14,9 +14,14 @@ function renderShell(data) {
   setText(dom.sync, state.lastSync ? '同步于 ' + fmtTime(state.lastSync) : '尚未同步');
 
   const config = (data && data.configuration) || {};
-  setHidden(dom.restartBanner, config.state !== 'changed');
+  /* 凭据待授权的提示必须活过轮询：升级后用户会停留在任意页面，
+     只在模型页说一次会让人以为已经恢复。配置变更提示优先，两者都指向模型页。 */
+  const credentialNotice = credentialAuthPending(data);
+  setHidden(dom.restartBanner, config.state !== 'changed' && !credentialNotice);
   if (config.state === 'changed') {
     setText(dom.restartBannerText, '连接配置已修改，当前网关仍在使用启动时的设置。请到「模型」页点「应用已保存的连接」，由后台服务在安全时应用；页面会如实显示是否生效。');
+  } else if (credentialNotice) {
+    setText(dom.restartBannerText, '部分已保存的连接暂时无法读取系统钥匙串。请到「模型」页查看原因并重新授权。');
   }
   setText(dom.navModelCount, fmtCount((data.models || []).length));
   /* 直连模式下预算保护不参与请求，再显示「已达预算」只会让用户以为被拦住了。 */
@@ -691,7 +696,18 @@ function computeOverviewIssue(data) {
     };
   }
   const apply = applyState(data);
-  if (['连接需要系统授权', '应用失败', '应用已超时', '等待应用', '自动应用不可用'].includes(apply.word)) {
+  /* 凭据待授权/被拒绝/钥匙串锁定在措辞上各不相同，但下一步都是同一条：
+     回模型页重授权。用 credential 标记判断，避免每次改文案都漏掉这里。 */
+  if (apply.credential === true) {
+    return {
+      tone: apply.tone || 'warn',
+      title: apply.word,
+      note: apply.note,
+      actionLabel: '前往模型页重授权',
+      action: { type: 'section', view: 'models', section: 'restart-panel' },
+    };
+  }
+  if (['应用失败', '应用已超时', '等待应用', '自动应用不可用'].includes(apply.word)) {
     return {
       tone: apply.tone || 'warn',
       title: apply.word,
@@ -1271,6 +1287,22 @@ function scheduleUpdateFastPoll(active) {
   }, 500);
 }
 
+/* 升级器只看 /api/health 的 PID/版本，所以「进程已换新」会先于「凭据可读」
+   成立。自签名升级后 securityd 按 cdhash 拒绝候选访问，网关仍在运行却读不到
+   已保存的 Key：这时报「已完成」会让人以为一切正常。只有连接凭据确实可读，
+   才算升级完全就绪；否则如实说明只完成了替换。 */
+function updateCompletionVerdict(data, actionLabel) {
+  const version = data?.updates?.currentVersion || '';
+  const credentialPending = credentialAuthPending(data);
+  if (!credentialPending) {
+    return { tone: 'ok', complete: true,
+      text: actionLabel + '已完成，当前版本 ' + version + '。' };
+  }
+  return { tone: 'warn', complete: false,
+    text: '当前版本 ' + version + '。部分已保存的连接需要系统授权。'
+      + '请到「模型」页点「重新授权并应用连接」。系统提示时可选择「始终允许」。' };
+}
+
 async function waitForUpdateReconnect(prevBuildId, actionLabel) {
   if (updateReconnectActive) return;
   updateReconnectActive = true;
@@ -1287,7 +1319,8 @@ async function waitForUpdateReconnect(prevBuildId, actionLabel) {
             if (state.data.updates?.lastRollback?.automatic) {
               showToast('新版本未能正常就绪，已自动回退到上一版本 ' + (state.data.updates.currentVersion || '') + '。', 'error');
             } else {
-              showToast(actionLabel + '已完成，当前版本 ' + (state.data.updates?.currentVersion || '') + '。', 'ok');
+              const verdict = updateCompletionVerdict(state.data, actionLabel);
+              showToast(verdict.text, verdict.tone);
             }
             return;
           }
@@ -1417,8 +1450,13 @@ function renderUpdates(data) {
       setText(historyNote, msg);
     } else if (applied && applied.toVersion) {
       historyNote.hidden = false;
-      historyNote.classList.remove('note--warn');
-      setText(historyNote, `最近一次已于 ${fmtTime(applied.at)} 从 ${applied.fromVersion || '旧版本'} 更新到 ${applied.toVersion}。`);
+      /* 升级记录只证明进程换成了新版本；凭据还没获得读取许可时必须说清楚，
+         否则这条「已于…更新到…」会显得一切就绪。 */
+      const pending = credentialAuthPending(data);
+      historyNote.classList.toggle('note--warn', pending);
+      setText(historyNote, pending
+        ? `已更新到 ${applied.toVersion}（${fmtTime(applied.at)}），但已保存的连接 Key 仍需系统授权：请到「模型」页点「重新授权并应用连接」。`
+        : `最近一次已于 ${fmtTime(applied.at)} 从 ${applied.fromVersion || '旧版本'} 更新到 ${applied.toVersion}。`);
     } else {
       historyNote.hidden = true;
     }
