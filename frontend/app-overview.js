@@ -233,6 +233,12 @@ function directImportComplete(data) {
   return info.adopted === true;
 }
 
+function directRestartRequired(data) {
+  const receipt = data?.integration?.nativeImport || {};
+  return !directImportComplete(data) && (receipt.requiresRestart === true ||
+    receipt.restartDeferred === true || receipt.state === 'requires-restart');
+}
+
 /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
    默认值是 hosts，拿它回退等于跳过真实检查。只有老后端根本没有 directMode
    行时才允许看 setup。 */
@@ -270,6 +276,10 @@ function directModeState(data) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
       note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
   }
+  if (directRestartRequired(data)) {
+    return { code: 'restart', tone: 'warn', word: '需要重启 Kimi',
+      note: '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。' };
+  }
   /* 还没同步到官方 Kimi：无论 Kimi 是否在跑，下一步都是写入直连配置。 */
   if (!synced) {
     return { code: 'pending', tone: 'warn', word: '待写入直连配置',
@@ -306,6 +316,9 @@ function nativeConnectionText(data) {
        这句话必须排在失败码之前，否则 reason 会把它说成一次失败。 */
     if (directRouteCleanupPending(data)) {
       return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
+    }
+    if (directRestartRequired(data)) {
+      return '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。';
     }
     /* 失败码由 app-core 统一归一化（native_import_ 前缀、连字符形式），
        这里不再维护第二张码表，避免两处文案各说一套。 */
@@ -974,17 +987,20 @@ function renderWorkspaceSync(data) {
   if (mode === 'direct') {
     /* directImportComplete 已经要求官方 Kimi 处于 direct，所以模式改了这里必然是 false。 */
     const synced = directImportComplete(data);
+    const restart = directRestartRequired(data) || (synced && integration.applied && !integration.adopted);
     const hosts = directStaticHostsReady(data);
     const cleanup = directRouteCleanupPending(data);
-    setText($('workspace-sync-state'), cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Work' : '待写入直连配置');
+    setText($('workspace-sync-state'), cleanup ? '切换收尾未完成' : restart ? '需要重启 Kimi' : synced ? '已直连同步到 Work' : '待写入直连配置');
     setText($('workspace-sync-note'), cleanup
       ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
-      : synced
-        ? (hosts
-          ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出 KimiWork + 与后台服务后仍可直接使用这些模型。'
-          : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
-        : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
-    setHidden($('workspace-restart'), cleanup || !(synced && integration.applied && !integration.adopted));
+      : restart
+        ? '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。'
+        : synced
+          ? (hosts
+            ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出 KimiWork + 与后台服务后仍可直接使用这些模型。'
+            : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
+          : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
+    setHidden($('workspace-restart'), cleanup || !restart);
     return;
   }
   if (modeChanged) {
@@ -1035,7 +1051,9 @@ function renderIntegrationMode(data) {
     setText(dom.integrationModeState, !showState ? ''
       : direct?.supported === false && directSaved
         ? '模式已更改，尚未同步到 Kimi Work：当前官方 Kimi 版本不支持原生直连，请改用本机网关模式。'
-        : '模式已更改，尚未同步到 Kimi Work。');
+        : directSaved && directRestartRequired(data)
+          ? '直连配置已写入，需要正常重启 Kimi 后完成应用。'
+          : '模式已更改，尚未同步到 Kimi Work。');
   }
   if (dom.nativeSyncLabel) {
     setText(dom.nativeSyncLabel, directSaved
@@ -1058,9 +1076,11 @@ function renderIntegrationMode(data) {
     ? '当前官方 Kimi 版本不支持原生直连：需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。'
     : directRouteCleanupPending(data)
       ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
-      : directImportComplete(data)
-        ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
-        : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
+      : directRestartRequired(data)
+        ? '直连配置已写入，正常重启 Kimi 后完成应用。'
+        : directImportComplete(data)
+          ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
+          : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
   setText(dom.directModeHosts, directRouteCleanupPending(data)
     ? '重新点「同步到 Work」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
     : directStaticHostsReady(data)
@@ -1508,6 +1528,7 @@ export {
   chooseIntegrationMode,
   directImportComplete,
   directModeState,
+  directRestartRequired,
   directRouteCleanupPending,
   directStaticHostsReady,
   effectiveIntegrationMode,

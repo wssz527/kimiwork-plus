@@ -31,7 +31,7 @@ const DIRECT_REASON_SOURCE = (() => {
   return source.slice(start, end + 3);
 })();
 const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
-  'directImportComplete', 'directRouteCleanupPending', 'directStaticHostsReady', 'directModeState',
+  'directImportComplete', 'directRouteCleanupPending', 'directStaticHostsReady', 'directModeState', 'directRestartRequired',
   'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
 
 function makeSyncState() {
@@ -1904,6 +1904,38 @@ test('the models sync bar names the pending direct write and the gateway fallbac
   render({ models, integration: { applied: true, adopted: false, aliases: { 'conn/resp/model-a': 'a', 'conn/chat/model-b': 'b' } } });
   assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
   assert.equal(nodes['workspace-restart'].hidden, false);
+});
+
+test('a direct write that needs restart exposes the restart action instead of another write', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }, { id: 'conn/chat/model-b' }];
+  const directMode = { mode: 'direct', supported: true, staticHostsReady: true,
+    eligibleModelIds: ['conn/resp/model-a', 'conn/chat/model-b'], eligibleModels: 2, totalModels: 2 };
+  const pending = {
+    integrationMode: 'direct', models, directMode,
+    integration: { mode: 'direct', state: 'pending', reason: 'native_profile_pending',
+      nativeImport: { state: 'requires-restart', reason: 'native_import_requires_restart', requiresRestart: true, restartDeferred: true } },
+  };
+  render(pending);
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
+  assert.match(nodes['workspace-sync-note'].textContent, /直连配置已写入/);
+  assert.match(nodes['workspace-sync-note'].textContent, /保留后台服务/);
+  assert.equal(nodes['workspace-restart'].hidden, false);
+  const syncState = makeSyncState();
+  assert.equal(syncState(pending).code, 'restart');
+  assert.equal(syncState(pending).word, '需要重启 Kimi');
+  assert.doesNotMatch(syncState(pending).word, /待写入/);
+  assert.match(makeNativeConnectionText()(pending), /正常重启 Kimi 后完成应用/);
+
+  const ready = {
+    ...pending,
+    integration: { ...pending.integration, state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a', 'conn/chat/model-b': 'byok-uuid/model-b' } },
+  };
+  render(ready);
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.equal(nodes['workspace-restart'].hidden, true);
+  assert.equal(syncState(ready).word, '直连已就绪');
 });
 
 test('direct failure codes normalize across native_import_ prefixes and dashed page codes', () => {
