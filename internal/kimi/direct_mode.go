@@ -991,15 +991,20 @@ func (n *NativeIntegration) directCatalog(settings ControllerSettings, scope str
 // gradeDirectImport turns a direct import's page answer into a state backed by
 // a Direct Mode reconcile. As with the gateway, `ok` from the page is not
 // "applied": the store and the generated config decide that.
-func (c *Controller) gradeDirectImport(result ImportResult, expectedAccount string, settings ControllerSettings) ImportResult {
+func (c *Controller) gradeDirectImport(result ImportResult, expectedAccount string, settings ControllerSettings, child *Child) ImportResult {
 	if settings.integrationMode() != IntegrationModeDirect {
-		return c.gradeImport(result, expectedAccount)
+		return c.gradeImport(result, expectedAccount, child)
 	}
 	if result.State == "" {
 		result.State = importState(result)
 	}
 	if !result.OK {
 		return result
+	}
+	if result.RequiresRestart {
+		// Same withdrawal as the gateway path: a message the page deferred leaves
+		// the running kernel on the catalog it started with.
+		c.invalidateLoadedRuntime(child)
 	}
 	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback

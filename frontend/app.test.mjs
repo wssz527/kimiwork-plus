@@ -2327,6 +2327,31 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   assert.equal(nodes['native-sync-label'].textContent, '重新准备接入');
   assert.equal(nodes['native-sync'].disabled, false);
 
+  const unmanagedRestart = {
+    ...clean,
+    kimiProcess: { running: true },
+    integration: { ...clean.integration, adopted: false, desktop: { managed: false },
+      nativeImport: { state: 'requires-restart', requiresRestart: true, restartDeferred: true } },
+  };
+  assert.equal(syncState(unmanagedRestart).code, 'synced');
+  assert.doesNotMatch(syncState(unmanagedRestart).word, /重启/);
+  renderWorkspace(unmanagedRestart);
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.equal(workspace['workspace-restart'].hidden, true);
+  assert.doesNotMatch(connectionText(unmanagedRestart), /需要重启|等待.*重启/);
+  assert.match(connectionText(unmanagedRestart), /未受本产品托管/);
+  render(unmanagedRestart);
+  assert.equal(nodes['integration-mode-state'].hidden, true);
+  assert.notEqual(nodes['native-sync-label'].textContent, '等待重启 Kimi');
+  const unmanagedCleanup = {
+    ...cleanup,
+    kimiProcess: { running: true },
+    integration: { ...cleanup.integration, adopted: false, desktop: { managed: false },
+      nativeImport: { state: 'requires-restart', requiresRestart: true, restartDeferred: true, routeCleanupPending: true } },
+  };
+  assert.equal(syncState(unmanagedCleanup).code, 'pending');
+  assert.equal(syncState(unmanagedCleanup).word, '切换收尾未完成');
+
   /* deferred 回执优先于清理提示；state=requires-restart 单独也成立。
      回执要求重启时 adopted 必为 false（重启尚未发生）。 */
   for (const receipt of [

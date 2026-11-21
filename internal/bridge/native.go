@@ -304,17 +304,31 @@ func settledNativeImportReceipt(current *kimi.IntegrationResult, receipt kimi.Im
 	return receipt
 }
 
+func (n *Native) integrationForState(current *kimi.IntegrationResult) *kimi.IntegrationResult {
+	if current == nil || current.Mode != kimi.IntegrationModeDirect || !current.Applied {
+		return current
+	}
+	home, err := n.controller.WorkHome()
+	if err != nil {
+		return current
+	}
+	updated := *current
+	updated.RouteCleanupPending = kimi.DirectGatewayRemains(home, kimi.AccountScope(home), n.controller.Settings().GatewayURL)
+	return &updated
+}
+
 func (n *Native) State() core.Document {
 	n.mu.Lock()
 	status := n.controller.Status(context.Background())
+	currentIntegration := n.integrationForState(status.Integration)
 	process := core.Document{}
 	for k, v := range n.process {
 		process[k] = v
 	}
 	desktop := nativeDesktopState(status)
 	integration := core.Document{"state": "unchecked", "imported": false, "desktop": desktop, "reason": "native_import_not_verified"}
-	if status.Integration != nil {
-		raw, _ := json.Marshal(status.Integration)
+	if currentIntegration != nil {
+		raw, _ := json.Marshal(currentIntegration)
 		var verified core.Document
 		if json.Unmarshal(raw, &verified) == nil && verified != nil {
 			integration = verified
@@ -337,7 +351,7 @@ func (n *Native) State() core.Document {
 			}
 		}
 		if receipt.State != "" || receipt.Reason != "" || receipt.OK {
-			raw, _ := json.Marshal(settledNativeImportReceipt(status.Integration, receipt))
+			raw, _ := json.Marshal(settledNativeImportReceipt(currentIntegration, receipt))
 			var published core.Document
 			if json.Unmarshal(raw, &published) == nil {
 				integration["nativeImport"] = published

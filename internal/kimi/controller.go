@@ -170,7 +170,10 @@ type Controller struct {
 	// against. A child started before an import cannot have loaded it, so
 	// adoption is decided by this number rather than by "a child is running".
 	loadedGeneration int
-	// loadedKnown is false until a child has actually been launched here.
+	// loadedKnown is false until a child has actually been launched here, and
+	// stays false when the official importer defers its own kernel reload: the
+	// running child then still holds the catalog it started with, even when a
+	// same-catalog sync left the intent generation unchanged.
 	loadedKnown bool
 }
 
@@ -913,13 +916,36 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 	return result
 }
 
+// invalidateLoadedRuntime withdraws the adoption baseline of the child that
+// answered a deferred import.
+//
+// The official importer can answer `deferred` for a sync that only changes a
+// credential: the files then hold the new value while the intent generation
+// stays the same. Comparing generations alone would keep claiming adoption, so
+// the answering child's baseline is withdrawn until a new child is launched or
+// the ready daemon's catalog is read back and verified. Both of those paths
+// write a fresh baseline, so the withdrawal only lasts for the reload that was
+// deferred. A child started after the answer read the profile itself and keeps
+// its own baseline, which is why this compares the exact child.
+func (c *Controller) invalidateLoadedRuntime(child *Child) {
+	if child == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.child == child {
+		c.loadedKnown = false
+	}
+	c.mu.Unlock()
+}
+
 // runtimeLoaded reports whether the running application can have loaded the
 // import this reconcile just read back.
 //
 // "A child is running" is not enough: a child that was already up before the
 // import may not have read the new profile. The loaded generation is recorded
 // at launch or after a verified account transition and a matching catalog read
-// through the ready daemon. Adoption requires that generation to be current.
+// through the ready daemon. Adoption requires that generation to be current
+// and the baseline not to have been withdrawn by a deferred import.
 func (c *Controller) runtimeLoaded(generation int) bool {
 	c.mu.Lock()
 	bridge := c.bridge

@@ -162,6 +162,9 @@ func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectI
 	}
 	bridge := c.bridge
 	settings := c.settings
+	// The child that answers is the one whose baseline a deferred answer
+	// withdraws; it is read under the same lock as the bridge.
+	child := c.child
 	c.importGranted = true
 	c.mu.Unlock()
 	defer func() {
@@ -203,7 +206,7 @@ func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectI
 	if err != nil {
 		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
 	}
-	return c.gradeDirectImport(result, account, settings), nil
+	return c.gradeDirectImport(result, account, settings, child), nil
 }
 
 // ImportModels runs the import without opening anything. It keeps the released
@@ -223,6 +226,10 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 	c.mu.Lock()
 	settings := c.settings
 	bridge := c.bridge
+	// The child that answers is the one whose adoption baseline a deferred answer
+	// withdraws. It is read under the same lock as the bridge so a concurrent
+	// launch cannot be mistaken for the process that performed the import.
+	child := c.child
 	c.mu.Unlock()
 
 	if bridge == nil {
@@ -270,7 +277,7 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 		// caller has to report, and it says nothing about what Kimi would have done.
 		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
 	}
-	return c.gradeImport(result, account), nil
+	return c.gradeImport(result, account, child), nil
 }
 
 // gradeImport turns the page's answer into a state backed by readback evidence.
@@ -278,13 +285,21 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 // The page only reports that the official API accepted the request. Whether the
 // models are in place is answered by reconciling the profile and the generated
 // config again, which is the same readback the periodic caller uses.
-// Confirmation remains bound to the account named before the page request.
-func (c *Controller) gradeImport(result ImportResult, expectedAccount string) ImportResult {
+// Confirmation remains bound to the account named before the page request, and
+// to the child that answered it.
+func (c *Controller) gradeImport(result ImportResult, expectedAccount string, child *Child) ImportResult {
 	if result.State == "" {
 		result.State = importState(result)
 	}
 	if !result.OK {
 		return result
+	}
+	if result.RequiresRestart {
+		// The official importer accepted the request but deferred its own kernel
+		// reload, so the running child still holds the catalog it started with.
+		// Withdrawing its baseline before the readback keeps this reconcile from
+		// claiming an adoption that a same-catalog sync never changed.
+		c.invalidateLoadedRuntime(child)
 	}
 	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback

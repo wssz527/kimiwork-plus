@@ -221,10 +221,12 @@ function directRouteCleanupPending(data) {
   return receipt?.routeCleanupPending === true || receipt?.reason === 'route_cleanup_pending';
 }
 
-/* 原生导入回执里的重启证据。直连与网关两个分支共用同一张判定，
-   避免清理提示或「已同步」文案盖住真正需要先做的重启。 */
+/* 原生导入回执里的重启证据。受管子进程退出后，下次启动会读取已写入配置；
+   非托管运行不是永久欠重启，但清理未完成仍必须继续提示。 */
 function nativeRestartReceipt(data) {
-  const receipt = data?.integration?.nativeImport || {};
+  const info = data?.integration || {};
+  if (savedIntegrationMode(data) !== 'direct' && info.applied === true && info.desktop?.managed === false) return false;
+  const receipt = info.nativeImport || {};
   return receipt.requiresRestart === true || receipt.restartDeferred === true || receipt.state === 'requires-restart';
 }
 
@@ -1065,10 +1067,13 @@ function renderWorkspaceSync(data) {
   const imported = Object.keys(integration.aliases || {}).sort();
   const saved = models.map(model => model.id).sort();
   const matches = JSON.stringify(imported) === JSON.stringify(saved);
-  const restart = matches && integration.applied && !integration.adopted;
-  const synced = matches && integration.adopted;
+  const unmanaged = integration.desktop?.managed === false;
+  const restart = matches && integration.applied && !integration.adopted && !unmanaged;
+  const synced = matches && (integration.adopted || (integration.applied && unmanaged));
   setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Work' : restart ? '需要重启 Kimi' : '待同步到 Work');
-  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced ? '已读回当前模型配置，可在 Work 的模型选择器中使用。' : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '本机网关已保存模型。点击「同步到 Work」更新官方模型选择器。');
+  setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后同步。' : synced
+    ? unmanaged ? '已读回当前模型配置；当前 Kimi 非托管运行，菜单采用情况请在官方窗口确认。' : '已读回当前模型配置，可在 Work 的模型选择器中使用。'
+    : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '本机网关已保存模型。点击「同步到 Work」更新官方模型选择器。');
   setHidden($('workspace-restart'), !restart);
 }
 

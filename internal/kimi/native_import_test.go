@@ -490,6 +490,113 @@ func TestImportOwesARestartRatherThanClaimingApplied(t *testing.T) {
 	}
 }
 
+// adoptedController is a controller whose managed child already loaded the
+// current import: reconcile reports it adopted before an import runs.
+func adoptedController(t *testing.T) (*Controller, *fakeActions, *Child) {
+	t.Helper()
+	profile, kimiHome := nativeProfile(t, "user-1")
+	seedNativeProfile(t, kimiHome, "http://127.0.0.1:9999/v1", "cred-1")
+	controller, actions := controllerFor(t, profile, nil)
+	child, _ := startFakeChild(t)
+	bridge, err := StartBridgeHost(kimiHome, child.PID(), actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bridge.Close() })
+	// The first reconcile establishes the intent the later readbacks compare
+	// against; a generation read before it is 0 and could never be adopted.
+	seeded := controller.ReconcileWithReadback(context.Background())
+	if !seeded.Applied {
+		t.Fatalf("the fixture profile was not applied: %+v", seeded)
+	}
+	generation := controller.currentGeneration()
+	if generation <= 0 {
+		t.Fatalf("the fixture has no intent generation: %d", generation)
+	}
+	controller.mu.Lock()
+	controller.child = child
+	controller.bridge = bridge
+	controller.loadedGeneration = generation
+	controller.loadedKnown = true
+	controller.mu.Unlock()
+	t.Cleanup(func() { _ = child.Stop(3 * time.Second) })
+	if adopted := controller.ReconcileWithReadback(context.Background()); !adopted.Applied || !adopted.Adopted {
+		t.Fatalf("the fixture did not start out adopted: %+v", adopted)
+	}
+	return controller, actions, child
+}
+
+// A same-catalog sync that only changes a credential leaves the intent
+// generation unchanged, so the readback alone cannot tell that the running
+// kernel kept its old catalog. A deferred answer must therefore withdraw the
+// running child's adoption instead of leaving `adopted` true behind a stale
+// generation.
+func TestDeferredImportWithdrawsAdoptionUntilAValidGeneration(t *testing.T) {
+	controller, actions, _ := adoptedController(t)
+	before := controller.ReconcileWithReadback(context.Background())
+	actions.imported = ImportResult{OK: true, State: ImportStateAccepted, Models: 2,
+		RequiresRestart: true, RestartDeferred: true}
+	result, err := controller.ImportModelsAuthorized(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != ImportStateRequiresRestart || !result.Applied {
+		t.Fatalf("a deferred import was not reported as restart-owing: %+v", result)
+	}
+	if result.Adopted {
+		t.Fatalf("a deferred import still claimed adoption: %+v", result)
+	}
+	if before.Readback == nil || result.Readback == nil ||
+		before.Readback.Generation != result.Readback.Generation {
+		t.Fatalf("the fixture did not keep the generation: before=%+v after=%+v",
+			before.Readback, result.Readback)
+	}
+	// The status a renderer reads must agree with the import answer, or the UI
+	// clears a restart prompt the running kernel still owes.
+	status := controller.Status(context.Background())
+	if status.Integration == nil || status.Integration.Adopted || !status.Integration.Applied {
+		t.Fatalf("status integration: %+v", status.Integration)
+	}
+	// A periodic reconcile cannot re-adopt the same generation either.
+	again := controller.ReconcileWithReadback(context.Background())
+	if !again.Applied || again.Adopted {
+		t.Fatalf("a later reconcile re-claimed adoption: %+v", again)
+	}
+}
+
+// A valid generation after the deferred answer does restore adoption: the
+// withdrawal belongs to the child that answered, not to adoption in general.
+func TestDeferredImportAdoptsAgainFromANewChild(t *testing.T) {
+	controller, actions, previous := adoptedController(t)
+	actions.imported = ImportResult{OK: true, State: ImportStateAccepted, Models: 2,
+		RequiresRestart: true, RestartDeferred: true}
+	if result, err := controller.ImportModelsAuthorized(context.Background()); err != nil || result.Adopted {
+		t.Fatalf("deferred import: %+v %v", result, err)
+	}
+
+	// The reload the answer asked for is a new child: it reads the profile as it
+	// is now, so Start records its baseline and adoption returns.
+	reloaded, _ := startFakeChild(t)
+	generation := controller.currentGeneration()
+	controller.mu.Lock()
+	controller.child = reloaded
+	controller.loadedGeneration = generation
+	controller.loadedKnown = true
+	controller.mu.Unlock()
+	t.Cleanup(func() { _ = reloaded.Stop(3 * time.Second) })
+	restored := controller.ReconcileWithReadback(context.Background())
+	if !restored.Applied || !restored.Adopted {
+		t.Fatalf("adoption did not recover for the reloaded child: %+v", restored)
+	}
+	// Only the child that answered is withdrawn, so the older one stays out of
+	// the picture even though it is still alive.
+	select {
+	case <-previous.Exit():
+		t.Fatal("the previous child was stopped")
+	default:
+	}
+}
+
 // TestReadbackHoldsIsStrict covers the applied condition directly: a missing
 // store, a missing credential or a different URL is not applied.
 func TestReadbackHoldsIsStrict(t *testing.T) {

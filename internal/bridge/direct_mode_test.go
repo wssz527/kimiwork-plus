@@ -880,9 +880,38 @@ func TestNativeDirectModeCleanupRequiresAnAppliedReplacement(t *testing.T) {
 	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != false {
 		t.Fatalf("an unwritten replacement claimed cleanup work: %+v", row)
 	}
+	current := n.integrationForState(&kimi.IntegrationResult{Mode: kimi.IntegrationModeDirect,
+		State: kimi.IntegrationReady, Applied: true, Adopted: true})
+	receipt := settledNativeImportReceipt(current, kimi.ImportResult{OK: true,
+		State: kimi.ImportStateRequiresRestart, Reason: kimi.NativeRequiresRestart,
+		Applied: true, RequiresRestart: true, RestartDeferred: true, RouteCleanupPending: true})
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published core.Document
+	if err := json.Unmarshal(raw, &published); err != nil {
+		t.Fatal(err)
+	}
 	integration["state"] = kimi.IntegrationReady
 	integration["applied"] = true
+	integration["adopted"] = true
+	integration["routeCleanupPending"] = current.RouteCleanupPending
+	integration["nativeImport"] = published
+	if !current.RouteCleanupPending || published["routeCleanupPending"] != true {
+		t.Fatalf("the remaining old gateway was cleared before disconnect: %+v %+v", current, published)
+	}
 	if row := n.directModeState(document, integration, core.Document{}); row["routeCleanupPending"] != true {
 		t.Fatalf("the remaining old gateway was not reported after apply: %+v", row)
+	}
+
+	store = []byte(`{"v":3,"accounts":{"account":{"revision":"a1","sources":[],"active":{"providers":[],"models":[]},"blockedAliases":{}}},"ownedResources":{}}`)
+	if err := os.WriteFile(filepath.Join(home, "byok-providers.json"), store, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current = n.integrationForState(current)
+	receipt = settledNativeImportReceipt(current, receipt)
+	if current.RouteCleanupPending || receipt.RouteCleanupPending || receipt.RequiresRestart || receipt.RestartDeferred {
+		t.Fatalf("settled direct state kept stale pending evidence: %+v %+v", current, receipt)
 	}
 }

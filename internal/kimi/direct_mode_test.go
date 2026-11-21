@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -729,6 +730,61 @@ func TestControllerImportDirectAuthorizedGradesWithReadback(t *testing.T) {
 	if !strings.Contains(string(intent), `"mode": "direct"`) ||
 		!strings.Contains(string(intent), `"directSourceId": "`+directSourceID+`"`) {
 		t.Fatalf("gateway -> direct switch did not record a direct intent: %s", intent)
+	}
+}
+
+// A Direct Mode sync that keeps the same model set only changes the credential,
+// so its intent generation also stays put. A deferred answer there must withdraw
+// adoption exactly as the gateway path does.
+func TestDeferredDirectImportWithdrawsAdoption(t *testing.T) {
+	h := newAccountHarness(t)
+	key := sha256Hex("direct-account")
+	fixture := &nativeFixture{dir: h.home, state: h.stateDir}
+	fixture.writeJSON(t, filepath.Join(h.home, NativeWorkStore), directStoreFixture(key))
+	fixture.writeJSON(t, filepath.Join(h.home, NativeWorkConfig), directConfigFixture())
+	writeIdentity(t, fixture, "direct-account")
+	h.controller.settings.IntegrationMode = IntegrationModeDirect
+	h.controller.settings.DirectSpec = directSpecFixture()
+	h.controller.settings.AccountScope = key
+	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"
+
+	actions := &fakeActions{connected: true,
+		direct: ImportResult{OK: true, SourceID: directSourceID, Models: 1}}
+	host, err := StartBridgeHost(h.home, 1, actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+	child, _ := startFakeChild(t)
+	t.Cleanup(func() { _ = child.Stop(3 * time.Second) })
+
+	seeded := h.controller.ReconcileWithReadback(context.Background())
+	if !seeded.Applied {
+		t.Fatalf("direct fixture was not applied: %+v", seeded)
+	}
+	generation := h.controller.currentGeneration()
+	h.controller.mu.Lock()
+	h.controller.child = child
+	h.controller.bridge = host
+	h.controller.loadedGeneration = generation
+	h.controller.loadedKnown = true
+	h.controller.mu.Unlock()
+	if adopted := h.controller.ReconcileWithReadback(context.Background()); !adopted.Applied || !adopted.Adopted {
+		t.Fatalf("direct fixture did not start out adopted: %+v", adopted)
+	}
+
+	actions.direct = ImportResult{OK: true, SourceID: directSourceID, Models: 1,
+		RequiresRestart: true, RestartDeferred: true}
+	result, err := h.controller.ImportDirectAuthorized(context.Background(), validDirectImportRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != ImportStateRequiresRestart || result.Adopted {
+		t.Fatalf("a deferred direct import kept adoption: %+v", result)
+	}
+	status := h.controller.Status(context.Background())
+	if status.Integration == nil || status.Integration.Adopted {
+		t.Fatalf("status integration: %+v", status.Integration)
 	}
 }
 
