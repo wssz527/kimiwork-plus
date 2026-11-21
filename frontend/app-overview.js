@@ -234,9 +234,12 @@ function directImportComplete(data) {
 }
 
 function directRestartRequired(data) {
-  const receipt = data?.integration?.nativeImport || {};
-  return !directImportComplete(data) && (receipt.requiresRestart === true ||
-    receipt.restartDeferred === true || receipt.state === 'requires-restart');
+  const info = data?.integration || {};
+  const receipt = info.nativeImport || {};
+  /* 两种重启证据共用同一入口：官方明确 deferred，或配置已读回但进程尚未采用。
+     各页面若自行补第二条判断，按钮状态就会再次和重启提示分叉。 */
+  if (directImportComplete(data)) return info.adopted !== true;
+  return receipt.requiresRestart === true || receipt.restartDeferred === true || receipt.state === 'requires-restart';
 }
 
 /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
@@ -992,7 +995,7 @@ function renderWorkspaceSync(data) {
   if (mode === 'direct') {
     /* directImportComplete 已经要求官方 Kimi 处于 direct，所以模式改了这里必然是 false。 */
     const synced = directImportComplete(data);
-    const restart = directRestartRequired(data) || (synced && integration.applied && !integration.adopted);
+    const restart = directRestartRequired(data);
     const hosts = directStaticHostsReady(data);
     const cleanup = directRouteCleanupPending(data);
     setText($('workspace-sync-state'), restart ? '需要重启 Kimi' : cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Work' : '待写入直连配置');

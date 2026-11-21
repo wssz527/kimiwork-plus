@@ -1948,6 +1948,16 @@ test('a direct write that needs restart exposes the restart action instead of an
   assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
   assert.equal(nodes['workspace-restart'].hidden, true);
   assert.equal(syncState(ready).word, '直连已就绪');
+
+  const awaitingAdoption = {
+    ...ready,
+    integration: { ...ready.integration, adopted: false },
+  };
+  render(awaitingAdoption);
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
+  assert.equal(nodes['workspace-restart'].hidden, false);
+  assert.equal(syncState(awaitingAdoption).code, 'restart');
+  assert.match(makeNativeConnectionText()(awaitingAdoption), /正常重启 Kimi 后完成应用/);
 });
 
 test('direct failure codes normalize across native_import_ prefixes and dashed page codes', () => {
@@ -2145,18 +2155,24 @@ test('the settings notice and sync button both name the pending cleanup', () => 
   assert.equal(nodes['direct-mode-notice'].dataset.tone, 'warn');
   assert.match(nodes['direct-mode-support'].textContent, /不支持原生直连/);
 
-  const restarting = {
+  const deferredRestart = {
     ...base,
     integration: { mode: 'direct', state: 'pending',
       nativeImport: { state: 'requires-restart', requiresRestart: true, restartDeferred: true, routeCleanupPending: true } },
   };
-  render(restarting);
-  assert.equal(nodes['direct-mode-notice'].dataset.tone, 'warn');
-  assert.match(nodes['direct-mode-support'].textContent, /正常重启 Kimi/);
-  assert.match(nodes['direct-mode-hosts'].textContent, /无需重复同步/);
-  assert.doesNotMatch(nodes['direct-mode-hosts'].textContent, /重试清理/);
-  assert.equal(nodes['native-sync-label'].textContent, '等待重启 Kimi');
-  assert.equal(nodes['native-sync'].disabled, true, 'renderActions must not re-enable sync');
+  const awaitingAdoption = {
+    ...base,
+    integration: { ...base.integration, adopted: false },
+  };
+  for (const restarting of [deferredRestart, awaitingAdoption]) {
+    render(restarting);
+    assert.equal(nodes['direct-mode-notice'].dataset.tone, 'warn');
+    assert.match(nodes['direct-mode-support'].textContent, /正常重启 Kimi/);
+    assert.match(nodes['direct-mode-hosts'].textContent, /无需重复同步/);
+    assert.doesNotMatch(nodes['direct-mode-hosts'].textContent, /重试清理/);
+    assert.equal(nodes['native-sync-label'].textContent, '等待重启 Kimi');
+    assert.equal(nodes['native-sync'].disabled, true, 'renderActions must not re-enable sync');
+  }
 
   render(base);
   assert.equal(nodes['native-sync-label'].textContent, '重试清理旧来源并同步');
