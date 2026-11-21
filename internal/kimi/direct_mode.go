@@ -282,12 +282,16 @@ let snapshot=await readSnapshot();
 if(!snapshot)return {ok:false,code:"contract-changed"};
 let gatewayDisconnected=false;
 const ownGateway=source=>{
-  if(!source)return false;
+  if(!source||expectedGateway==="")return false;
   const providers=Array.isArray(source.providers)?source.providers:[];
   const addresses=[];
-  if(typeof source.registryUrl==="string"&&source.registryUrl)addresses.push(source.registryUrl);
   for(const provider of providers){if(typeof provider?.baseUrl==="string"&&provider.baseUrl)addresses.push(provider.baseUrl);}
-  return expectedGateway!==""&&addresses.length>0&&addresses.every(value=>
+  const registry=typeof source.registryUrl==="string"?source.registryUrl:"";
+  if(registry){
+    // Port drift leaves older loopback providers inside our managed registry.
+    return gatewayAddress(registry)===expectedGateway&&addresses.every(isLoopback);
+  }
+  return addresses.length>0&&addresses.every(value=>
     isLoopback(value)&&gatewayAddress(value)===expectedGateway);
 };
 const gatewayAddress=value=>String(value??"").trim().replace(/\/models\/api\.json\/?$/i,"").replace(/\/+$/,"").toLowerCase();
@@ -317,6 +321,7 @@ const draftProviders=wantedProviders.map(provider=>{
 const draftModels=wantedModels.map(model=>{
   const entry={providerId:providerIDs[model.providerId]||model.providerId,model:model.model,
     displayName:model.displayName||model.model,maxContextSize:model.maxContextSize,
+    declaredContextSize:model.maxContextSize,
     capabilities:Array.isArray(model.capabilities)?model.capabilities:["tool_use"],provenance:"manual"};
   if(typeof model.maxOutputSize==="number"&&model.maxOutputSize>0)entry.maxOutputSize=model.maxOutputSize;
   if(Array.isArray(model.supportEfforts)&&model.supportEfforts.length){
@@ -411,8 +416,9 @@ func directAccountCandidates(store map[string]any) []directAccount {
 }
 
 // DirectGatewayRemains reports this installation's loopback gateway in the
-// current direct account. Matching the configured URL keeps another local
-// gateway from being disconnected or mistaken for unfinished cleanup.
+// current direct account. A matching current registry proves ownership even
+// when its providers still name older loopback ports; without a registry every
+// provider must match. Remote providers always refuse cleanup.
 func DirectGatewayRemains(kimiDir, accountScope, gatewayURL string) bool {
 	wanted := directGatewayBase(gatewayURL)
 	if !isLoopbackGateway(wanted) {
@@ -435,10 +441,8 @@ func DirectGatewayRemains(kimiDir, accountScope, gatewayURL string) bool {
 			source["quarantined"] == true || stringField(source, "status") == "disconnected" {
 			continue
 		}
+		registry := stringField(source, "registryUrl")
 		var addresses []string
-		if registry := stringField(source, "registryUrl"); registry != "" {
-			addresses = append(addresses, registry)
-		}
 		for _, group := range []string{"providers", "desired"} {
 			rows, _ := source[group].([]any)
 			if group == "desired" {
@@ -452,13 +456,13 @@ func DirectGatewayRemains(kimiDir, accountScope, gatewayURL string) bool {
 				}
 			}
 		}
-		if len(addresses) == 0 {
+		if registry == "" && len(addresses) == 0 {
 			continue
 		}
-		owned := true
+		owned := registry == "" || directGatewayBase(registry) == wanted
 		for _, address := range addresses {
 			base := directGatewayBase(address)
-			if base != wanted || !isLoopbackGateway(base) {
+			if !isLoopbackGateway(base) || registry == "" && base != wanted {
 				owned = false
 				break
 			}

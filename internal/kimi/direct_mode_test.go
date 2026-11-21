@@ -103,7 +103,7 @@ const gatewayRegistry=globalThis.gatewayRegistry||"http://127.0.0.1:9100/v1/mode
 const gatewayBase=gatewayRegistry.replace(/\/models\/api\.json$/,"");
 const kth={id:"byok-kth",kind:"kth",revision:"k1",displayName:"KimiWork +",
   registryUrl:gatewayRegistry,
-  providers:[{id:"byok-kth-resp",protocol:"openai_responses",baseUrl:gatewayBase}]};
+  providers:(globalThis.extraGatewayProviders||[]).concat([{id:"byok-kth-resp",protocol:"openai_responses",baseUrl:gatewayBase}])};
 const custom={id:"byok-src-1",kind:"custom",displayName:"KimiWork + 直连",revision:"s1",
   providers:[{id:"byok-prov-existing",protocol:"openai",baseUrl:"https://api.example.com/v1"}],
   models:[{providerId:"byok-prov-existing",model:"model-a",alias:"byok-prov-existing/model-a",status:"available"}]};
@@ -192,8 +192,10 @@ func TestDirectImportExpressionBuildsTheManualModelsDraft(t *testing.T) {
 	}
 	models := draft.Get("models").ToObject(vm)
 	model := models.Get("0").ToObject(vm)
+	declaredContextSize := model.Get("declaredContextSize")
 	if model.Get("providerId").String() != "byok-prov-existing" ||
-		model.Get("provenance").String() != "manual" {
+		model.Get("provenance").String() != "manual" ||
+		declaredContextSize == nil || declaredContextSize.ToInteger() != 128000 {
 		t.Fatalf("model row: %v", model)
 	}
 	for _, key := range model.Keys() {
@@ -255,6 +257,27 @@ func TestDirectImportExpressionDisconnectsOnlyOurLoopbackGateway(t *testing.T) {
 		calls, err := vm.RunString(`calls.join(",")`)
 		if err != nil || calls.String() != "list,preview,save,list,apply:r2,list,disconnect:byok-kth" {
 			t.Fatalf("calls = %v, err=%v", calls, err)
+		}
+	})
+
+	t.Run("older loopback providers do not block cleanup", func(t *testing.T) {
+		vm := runDirectExpression(t, request,
+			`globalThis.extraGatewayProviders=[{id:"byok-kth-kimi",protocol:"kimi",baseUrl:"http://127.0.0.1:49958/v1"}];`)
+		result := vm.Get("directResult").ToObject(vm)
+		calls, err := vm.RunString(`calls.join(",")`)
+		if !result.Get("ok").ToBoolean() || !result.Get("gatewayDisconnected").ToBoolean() ||
+			err != nil || !strings.Contains(calls.String(), "disconnect") {
+			t.Fatalf("stale loopback providers blocked cleanup: result=%v calls=%v err=%v", result, calls, err)
+		}
+	})
+
+	t.Run("a remote provider in an owned registry is never disconnected", func(t *testing.T) {
+		vm := runDirectExpression(t, request,
+			`globalThis.extraGatewayProviders=[{id:"remote",protocol:"openai",baseUrl:"https://gateway.example/v1"}];`)
+		result := vm.Get("directResult").ToObject(vm)
+		calls, err := vm.RunString(`calls.join(",")`)
+		if err != nil || strings.Contains(calls.String(), "disconnect") {
+			t.Fatalf("a remote provider was disconnected: result=%v calls=%v", result, calls)
 		}
 	})
 
@@ -961,6 +984,13 @@ func TestDirectGatewayRemainsUsesOnlyTheCurrentAccountsOwnedLoopback(t *testing.
 	if !DirectGatewayRemains(fixture.dir, scope, gateway) {
 		t.Fatal("the owned gateway left after a restart was not found")
 	}
+	account["sources"].([]any)[1].(map[string]any)["desired"] = map[string]any{
+		"providers": []any{map[string]any{"baseUrl": "http://127.0.0.1:49958/v1"}},
+	}
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if !DirectGatewayRemains(fixture.dir, scope, gateway) {
+		t.Fatal("an older loopback provider hid the currently owned gateway")
+	}
 	account["sources"].([]any)[1].(map[string]any)["registryUrl"] = "https://gateway.example/v1/models/api.json"
 	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
 	if DirectGatewayRemains(fixture.dir, scope, gateway) {
@@ -971,6 +1001,15 @@ func TestDirectGatewayRemainsUsesOnlyTheCurrentAccountsOwnedLoopback(t *testing.
 	if DirectGatewayRemains(fixture.dir, scope, gateway) {
 		t.Fatal("a different loopback gateway was claimed")
 	}
+	account["sources"].([]any)[1].(map[string]any)["registryUrl"] = "http://127.0.0.1:9100/v1/models/api.json"
+	account["sources"].([]any)[1].(map[string]any)["desired"] = map[string]any{
+		"providers": []any{map[string]any{"baseUrl": "https://gateway.example/v1"}},
+	}
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	if DirectGatewayRemains(fixture.dir, scope, gateway) {
+		t.Fatal("a remote provider in the current registry was claimed")
+	}
+	account["sources"].([]any)[1].(map[string]any)["desired"] = map[string]any{}
 	account["sources"].([]any)[1].(map[string]any)["registryUrl"] = "http://127.0.0.1:9100/v1/models/api.json"
 	account["sources"].([]any)[1].(map[string]any)["quarantined"] = true
 	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)

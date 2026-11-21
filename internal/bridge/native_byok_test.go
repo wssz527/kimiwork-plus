@@ -54,6 +54,7 @@ func newBYOKTestNative(t *testing.T) *Native {
 			return nil
 		},
 		resolverPath: filepath.Join(directory, "resolver", byokdns.Domain),
+		hostsPath:    filepath.Join(directory, "hosts"),
 	}
 }
 
