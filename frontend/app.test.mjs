@@ -343,6 +343,40 @@ test('batch context changes only selected rows and rejects unknown values', () =
   assert.match(messages.at(-1), /正整数/);
 });
 
+test('new connection flows default to custom and require an explicit preset selection', () => {
+  const select = { value: '', dataset: {}, disabled: false, replaceChildren() { this.children = []; }, append(option) { this.children.push(option); } };
+  const events = [];
+  globalThis.document = {
+    createElement: tag => ({ tagName: tag, append(...children) { this.children = children; } }),
+  };
+  try {
+    const render = new Function('select', 'events', [
+      'const providers = { menu: { families: [{ family: "kimi-code", regions: [{ region: "cn", plans: [{ plan: "coding", variants: [{ presetId: "kimi-code-cn", name: "Kimi Code（国内）" }] }] }] }] }, presets: [{ id: "kimi-code-cn", family: "kimi-code", region: "cn", kind: "coding" }] };',
+      'const state = { family: "kimi-code", region: "cn", plan: "coding" };',
+      'const family = { value: state.family, addEventListener() {}, dispatchEvent() {} };',
+      'const region = { value: state.region, addEventListener() {}, dispatchEvent() {} };',
+      'const plan = { value: state.plan, addEventListener() {}, dispatchEvent() {} };',
+      growthFunction('fillProviderOptions'),
+      'const previous = select.value;',
+      'const families = providers.menu.families;',
+      'const selectedFamily = families.find(row => row.family === state.family);',
+      'const regions = selectedFamily?.regions || [];',
+      'const selectedRegion = regions.find(row => String(row.region) === state.region);',
+      'const plans = selectedRegion?.plans || [];',
+      'const variants = plans.find(row => row.plan === state.plan)?.variants || [];',
+      'fillProviderOptions(select, [{ value: "", label: "选择接口与端点" }, ...variants.map(row => ({ value: row.presetId, label: row.name }))], select.value);',
+      'select.disabled = false;',
+      'events.push({ value: select.value, options: select.children.map(option => option.value) });',
+    ].join('\n'))(select, events);
+    assert.equal(select.value, '');
+    assert.deepEqual(events, [{ value: '', options: ['', 'kimi-code-cn'] }]);
+    assert.match(htmlSource, /id="ob-name"[^>]*placeholder="自定义名称（选填）"/);
+    assert.match(htmlSource, /id="ob-id"[^>]*placeholder="自定义连接标识（选填）"/);
+  } finally {
+    delete globalThis.document;
+  }
+});
+
 test('late provider loading refreshes wizard options without changing typed fields', async () => {
   const state = { key: 'session-key', providers: null, onboard: { touched: true } };
   const dom = { onboardPreset: { value: '' }, onboardPresetHint: null, onboardKey: { value: 'sk-user-just-typed' } };

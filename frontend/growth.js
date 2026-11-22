@@ -220,16 +220,9 @@ function mountProviderFlow(selectId) {
       ...plans.map(row => ({ value: row.plan, label: row.name }))], state.plan);
     plan.disabled = !selectedRegion || plans.length < 2;
     const variants = plans.find(row => row.plan === state.plan)?.variants || [];
-    const previous = select.value;
-    const currentVariant = variants.find(row => row.presetId === previous);
-    const next = currentVariant || (variants.length === 1 ? variants[0] : null);
     fillProviderOptions(select, [{ value: '', label: variants.length ? '选择接口与端点' : '先选择厂商、地区与服务类型' },
-      ...variants.map(row => ({ value: row.presetId, label: row.name }))], next?.presetId || '');
+      ...variants.map(row => ({ value: row.presetId, label: row.name }))], select.value);
     select.disabled = !selectedFamily || !state.plan;
-    if (next && previous !== next.presetId) {
-      select.value = previous;
-      choose(next.presetId);
-    }
   }
 
   family.addEventListener('change', () => {
