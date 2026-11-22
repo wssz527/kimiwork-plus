@@ -80,6 +80,11 @@ func applyPlatformWindowTheme(window *application.WebviewWindow, mode string) {
 	if window == nil {
 		return
 	}
+	// Wails creates the Chromium object before assigning the native handle.
+	hwnd := uintptr(window.NativeWindow())
+	if hwnd == 0 {
+		return
+	}
 	dark := false
 	switch mode {
 	case themeModeDark:
@@ -93,10 +98,6 @@ func applyPlatformWindowTheme(window *application.WebviewWindow, mode string) {
 		window.SetBackgroundColour(themeDarkBG)
 	} else {
 		window.SetBackgroundColour(themeLightBG)
-	}
-	hwnd := uintptr(window.NativeWindow())
-	if hwnd == 0 {
-		return
 	}
 	applyPlatformWindowIcon(hwnd)
 	if !w32.SupportsThemes() {
@@ -119,6 +120,7 @@ func attachPlatformWindowHooks(app *application.App, window *application.Webview
 		ctrl.onSystemThemeChanged()
 	})
 	window.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) {
+		ctrl.apply()
 		window.ExecJS(`document.documentElement.dataset.platform = "windows"; if (window.__kwpSyncTheme) window.__kwpSyncTheme();`)
 	})
 }

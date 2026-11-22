@@ -40,7 +40,7 @@ func attachWindowAppearance(app *application.App, window *application.WebviewWin
 		mode:   themeModeAuto,
 		window: window,
 	}
-	ctrl.apply(themeModeAuto)
+	ctrl.apply()
 
 	app.Event.On("kwp:theme:light", func(*application.CustomEvent) {
 		ctrl.setMode(themeModeLight)
@@ -63,23 +63,26 @@ func (c *windowAppearanceController) setMode(raw string) {
 	c.mu.Lock()
 	c.mode = mode
 	c.mu.Unlock()
-	c.apply(mode)
+	c.apply()
+}
+
+func (c *windowAppearanceController) currentMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mode
 }
 
 func (c *windowAppearanceController) onSystemThemeChanged() {
-	c.mu.Lock()
-	mode := c.mode
-	c.mu.Unlock()
-	if mode == themeModeAuto {
-		c.apply(themeModeAuto)
+	if c.currentMode() == themeModeAuto {
+		c.apply()
 	}
 }
 
-func (c *windowAppearanceController) apply(mode string) {
+func (c *windowAppearanceController) apply() {
 	if c.window == nil {
 		return
 	}
 	application.InvokeAsync(func() {
-		applyPlatformWindowTheme(c.window, mode)
+		applyPlatformWindowTheme(c.window, c.currentMode())
 	})
 }
