@@ -16,4 +16,5 @@ func validateInstalledArtifact(string) error                                    
 func swapInstallation(string, string, string, func(string, ...any)) error       { return errors.New("unsupported_platform") }
 func restoreInstallation(string, string, func(string, ...any)) error            { return errors.New("unsupported_platform") }
 func launchInstallation(string, string, string, func(string, ...any)) error     { return errors.New("unsupported_platform") }
-func postInstallUpdateMetadata(ApplyPlan, daemonHealth)                         {}
+func installedDaemonBinary(string) string                                       { return "" }
+func postInstallPlatformMetadata(ApplyPlan, daemonHealth)                       {}

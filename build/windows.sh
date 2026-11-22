@@ -17,6 +17,9 @@ fi
 if [ -n "${UPDATE_GITHUB_REPO:-}" ]; then
   LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultGitHubRepo=$UPDATE_GITHUB_REPO"
 fi
+if [ -n "${UPDATE_MIRROR_BASE:-}" ]; then
+  LDFLAGS="$LDFLAGS -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultMirrorBase=$UPDATE_MIRROR_BASE"
+fi
 
 "$GO" build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o "$OUTPUT_DIR/KimiWorkPlus.exe" ./cmd/desktop
 "$GO" build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o "$OUTPUT_DIR/gateway-daemon.exe" ./cmd/gateway-daemon

@@ -225,6 +225,9 @@ func launchInstallation(targetApp, stateDir, launchMode string, logf func(string
 	if feed := strings.TrimSpace(os.Getenv("KIMI_WORK_PLUS_UPDATE_FEED_URL")); feed != "" {
 		args = append(args, "--env", "KIMI_WORK_PLUS_UPDATE_FEED_URL="+feed)
 	}
+	if mirror := strings.TrimSpace(os.Getenv("KIMI_WORK_PLUS_UPDATE_MIRROR_BASE")); mirror != "" {
+		args = append(args, "--env", "KIMI_WORK_PLUS_UPDATE_MIRROR_BASE="+mirror)
+	}
 	args = append(args, targetApp)
 	if customState {
 		args = append(args, "--args", "--state-dir", stateDir)
@@ -238,4 +241,8 @@ func launchInstallation(targetApp, stateDir, launchMode string, logf func(string
 	return nil
 }
 
-func postInstallUpdateMetadata(_ ApplyPlan, _ daemonHealth) {}
+func installedDaemonBinary(targetApp string) string {
+	return filepath.Join(targetApp, "Contents", "MacOS", "gateway-daemon")
+}
+
+func postInstallPlatformMetadata(_ ApplyPlan, _ daemonHealth) {}

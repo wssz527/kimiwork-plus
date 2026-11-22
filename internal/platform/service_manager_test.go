@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeHost records every side effect instead of performing it, so these tests
@@ -166,6 +167,16 @@ func TestOnlyEnableTurnsLoginStartOn(t *testing.T) {
 	}
 	if !state.Enabled {
 		t.Fatalf("Enable reported enabled=false: %+v", state)
+	}
+	foundEnable := false
+	for _, line := range host.commandLines() {
+		if line == "/bin/launchctl enable gui/501/"+ServiceLabel {
+			foundEnable = true
+			break
+		}
+	}
+	if !foundEnable {
+		t.Fatalf("Enable did not run launchctl enable: %v", host.commandLines())
 	}
 
 	state, err = manager.Disable(ctx)
@@ -717,5 +728,145 @@ func TestTheWindowsUninstallTerminatesOnlyItsOwnDaemon(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(description.Uninstall[1], " "), " delete ") {
 		t.Fatal("the uninstall does not remove the Run value")
+	}
+}
+
+func TestWindowsDefaultLoginLogPath(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, "state")
+	wantLog := filepath.Join(stateDir, "login-daemon.log")
+	host := newFakeHost()
+	options := ManagerOptions{
+		Binary:   filepath.Join(home, "bin", "gateway-daemon.exe"),
+		StateDir: stateDir,
+		Port:     "43117",
+		BuildID:  "build-a",
+		Home:     home,
+		Host:     host,
+		GOOS:     "windows",
+	}
+	manager, err := OpenManager(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc, err := manager.Describe(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installLine := strings.Join(flatten(desc.Install), " ")
+	if !strings.Contains(installLine, "--log-path") || !strings.Contains(installLine, wantLog) {
+		t.Fatalf("Describe(true) missing default login-daemon.log: %s", installLine)
+	}
+	var descRecord definitionRecord
+	if err := json.Unmarshal([]byte(desc.Content), &descRecord); err != nil {
+		t.Fatal(err)
+	}
+	if descRecord.LogPath != wantLog {
+		t.Fatalf("Describe definition logPath = %q, want %q", descRecord.LogPath, wantLog)
+	}
+
+	if _, err := manager.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	foundRunLog := false
+	for _, line := range host.commandLines() {
+		if strings.Contains(line, " add ") && strings.Contains(line, "--log-path") && strings.Contains(line, wantLog) {
+			foundRunLog = true
+			break
+		}
+	}
+	if !foundRunLog {
+		t.Fatalf("Enable Run value missing default --log-path: %v", host.commandLines())
+	}
+	var savedRecord definitionRecord
+	if err := json.Unmarshal(host.files[filepath.Join(stateDir, "service-definition.json")], &savedRecord); err != nil {
+		t.Fatal(err)
+	}
+	if savedRecord.LogPath != wantLog {
+		t.Fatalf("saved provenance logPath = %q, want %q", savedRecord.LogPath, wantLog)
+	}
+
+	host.commands = nil
+	if _, err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Join(host.commandLines(), "\n"); !strings.Contains(lines, "--log-path "+wantLog) {
+		t.Fatalf("Start missing default --log-path: %s", lines)
+	}
+
+	explicit := filepath.Join(home, "custom.log")
+	explicitDesc, err := describeServiceFor("windows", ServiceOptions{
+		Binary: options.Binary, StateDir: stateDir, LogPath: explicit, Home: home,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(flatten(explicitDesc.Install), " "), explicit) {
+		t.Fatalf("explicit LogPath did not override default: %+v", explicitDesc.Install)
+	}
+
+	noStateDesc, err := describeServiceFor("windows", ServiceOptions{
+		Binary: options.Binary, Home: home,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(flatten(noStateDesc.Install), " "), "--log-path") {
+		t.Fatalf("unexpected --log-path without StateDir: %+v", noStateDesc.Install)
+	}
+}
+
+func TestStartBackgroundWritesErrorsToLogPath(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "login-daemon.log")
+	if err := StartBackground([]string{"--log-path", logPath}); err == nil {
+		t.Fatal("expected state_dir_required error")
+	}
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read background log: %v", err)
+	}
+	firstLine := strings.TrimSpace(string(content))
+	fields := strings.Fields(firstLine)
+	if len(fields) < 3 {
+		t.Fatalf("unexpected background error log line: %q", firstLine)
+	}
+	if _, err := time.Parse(time.RFC3339, fields[0]); err != nil {
+		t.Fatalf("first field is not RFC3339 timestamp: %q (%v)", fields[0], err)
+	}
+	if !strings.Contains(firstLine, "state_dir_required") {
+		t.Fatalf("log missing error reason: %q", firstLine)
+	}
+
+	prevExec := backgroundExecutable
+	backgroundExecutable = func() (string, error) {
+		return filepath.Join(dir, "missing-gateway-daemon-binary"), nil
+	}
+	t.Cleanup(func() { backgroundExecutable = prevExec })
+
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := StartBackground([]string{"--state-dir", stateDir, "--log-path", logPath}); err == nil {
+		t.Fatal("expected start failure for missing binary")
+	}
+	content, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read appended background log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 appended log lines, got %d: %q", len(lines), string(content))
+	}
+	secondFields := strings.Fields(lines[1])
+	if len(secondFields) < 3 {
+		t.Fatalf("unexpected second log line: %q", lines[1])
+	}
+	if _, err := time.Parse(time.RFC3339, secondFields[0]); err != nil {
+		t.Fatalf("second line timestamp not RFC3339: %q (%v)", secondFields[0], err)
+	}
+	if !strings.Contains(lines[1], "start_background_failed:") {
+		t.Fatalf("second line missing failure marker: %q", lines[1])
 	}
 }

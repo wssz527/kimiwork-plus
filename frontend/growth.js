@@ -44,10 +44,11 @@ function relocate(id, parent, beforeId) {
 
 function mountLegacy() {
   const maintenance = $('view-maintenance');
-  /* 接入与预览是日常设置，排在这些恢复项与运行记录之前；直接 append 会把它们
-     推到页面末尾，让每天要用的开关落到诊断区下面。 */
-  relocate('native-panel', maintenance, 'ob-advanced-toggle');
-  relocate('update-panel', maintenance, 'ob-advanced-toggle');
+  /* 新布局下接入与更新已在 settings-pane-connection 中；仅兼容旧版无分栏 DOM。 */
+  if (!$('settings-pane-connection')) {
+    relocate('native-panel', maintenance, 'ob-advanced-toggle');
+    relocate('update-panel', maintenance, 'ob-advanced-toggle');
+  }
   const diagnostics = $('sa-diagnostics-body');
   /* 挂载可能被重复调用；诊断区里只留一份契约说明。 */
   if (!diagnostics || $('role-contract')) return;
@@ -58,7 +59,7 @@ function mountLegacy() {
   summaryRole.textContent = '角色默认模型说明';
   const body = document.createElement('div');
   body.className = 'growth-disclosure__body';
-  body.innerHTML = '<p>当前 Kimi Work 内核中，不同子代理角色（如 coder、plan、explore）只决定提示词与工具权限，不单独绑定模型。普通新子代理统一使用上方的目标模型或模型池，已有会话继续保留原模型。</p>';
+  body.innerHTML = '<p>当前 Kimi Work 内核中，plan / coder / explore 等子代理角色不提供单独的模型硬锁字段；上方「按角色分配」保存时会自动生成标准 <code>[secondary_model]</code> 模型池并写入对应角色用途说明，由主模型按角色选用，已有会话继续保留原模型。</p>';
   roles.append(summaryRole, body);
   diagnostics.append(roles);
 }

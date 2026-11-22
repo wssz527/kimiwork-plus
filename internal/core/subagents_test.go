@@ -60,3 +60,54 @@ func TestSubagentPoolRowsUseTheSameAlias(t *testing.T) {
 		t.Fatalf("default alias: %q", String(policy["modelAlias"]))
 	}
 }
+
+func TestSubagentRolesValidationAndPersistence(t *testing.T) {
+	models := []any{
+		Document{"id": "magpie/deepseek", "protocol": "chat", "tools": true},
+		Document{"id": "magpie/glm", "protocol": "chat", "tools": true},
+		Document{"id": "magpie/no-tools", "protocol": "chat", "tools": false},
+	}
+	policy, err := NormalizeSubagents(Document{
+		"mode":  "pool",
+		"model": "magpie/deepseek",
+		"models": []any{
+			Document{"id": "magpie/deepseek", "description": "默认子代理；用于 coder 代码编写"},
+			Document{"id": "magpie/glm", "description": "用于 plan 规划与审查"},
+		},
+		"roles": Document{
+			"plan":    "magpie/glm",
+			"coder":   "magpie/deepseek",
+			"explore": "",
+		},
+	}, models)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	roles := Object(policy["roles"])
+	if String(roles["plan"]) != "magpie/glm" || String(roles["coder"]) != "magpie/deepseek" {
+		t.Fatalf("unexpected roles: %#v", roles)
+	}
+	if _, exists := roles["explore"]; exists {
+		t.Fatalf("empty explore role should be omitted: %#v", roles)
+	}
+
+	// Unknown role key must be rejected.
+	if _, err := NormalizeSubagents(Document{
+		"mode":   "pool",
+		"model":  "magpie/deepseek",
+		"models": []any{Document{"id": "magpie/deepseek", "description": "default"}},
+		"roles":  Document{"reviewer": "magpie/deepseek"},
+	}, models); err == nil || err.Error() != "invalid_subagent_roles" {
+		t.Fatalf("expected invalid_subagent_roles for unknown key, got %v", err)
+	}
+
+	// Role model missing from pool must be rejected.
+	if _, err := NormalizeSubagents(Document{
+		"mode":   "pool",
+		"model":  "magpie/deepseek",
+		"models": []any{Document{"id": "magpie/deepseek", "description": "default"}},
+		"roles":  Document{"plan": "magpie/glm"},
+	}, models); err == nil || err.Error() != "invalid_subagent_roles" {
+		t.Fatalf("expected invalid_subagent_roles for model not in pool, got %v", err)
+	}
+}

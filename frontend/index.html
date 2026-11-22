@@ -33,9 +33,8 @@
       <nav class="masthead__nav" aria-label="面板视图">
         <button class="masthead__tab" id="nav-overview" type="button">总览</button>
         <button class="masthead__tab" id="nav-models" type="button">模型 <span class="nav__count mono" id="nav-model-count"></span></button>
+        <button class="masthead__tab" id="nav-subagents" type="button">子代理</button>
         <button class="masthead__tab" id="nav-usage" type="button">用量</button>
-        <button class="masthead__tab" id="nav-work" type="button">Work 能力</button>
-        <button class="masthead__tab" id="nav-extensions" type="button">扩展</button>
         <button class="masthead__tab" id="nav-maintenance" type="button">设置</button>
       </nav>
     </div>
@@ -73,6 +72,42 @@
           </div>
         </div>
         <p class="note note--warn" id="ob-launch-hint" role="status" hidden></p>
+
+        <section class="quickstart" id="quickstart-guide" aria-labelledby="quickstart-heading" data-collapsed="false" hidden>
+          <div class="quickstart__head">
+            <div class="quickstart__title">
+              <strong id="quickstart-heading">快速上手引导</strong>
+              <span class="quickstart__progress mono" id="quickstart-progress">0 / 4</span>
+            </div>
+            <div class="quickstart__actions">
+              <button class="btn btn--quiet btn--sm" id="quickstart-toggle" type="button" aria-expanded="true">收起</button>
+              <button class="btn btn--quiet btn--sm" id="quickstart-dismiss" type="button">跳过引导</button>
+            </div>
+          </div>
+          <ol class="quickstart__steps" id="quickstart-steps">
+            <li class="quickstart__step" id="quickstart-step-1" data-done="false">
+              <div class="quickstart__step-head"><span class="dot" id="quickstart-step-1-dot" data-tone="neutral"></span><strong>1. 添加服务商与模型</strong><span class="quickstart__tag" id="quickstart-step-1-tag">待完成</span></div>
+              <p class="quickstart__step-note">填写上游 API 地址与 Key，勾选你要在 Kimi Work 里使用的模型。</p>
+              <div class="quickstart__step-foot"><button class="btn btn--outline btn--sm" id="quickstart-step-1-action" type="button">前往模型页</button></div>
+            </li>
+            <li class="quickstart__step" id="quickstart-step-2" data-done="false">
+              <div class="quickstart__step-head"><span class="dot" id="quickstart-step-2-dot" data-tone="neutral"></span><strong>2. 确认接入模式并同步</strong><span class="quickstart__tag" id="quickstart-step-2-tag">待完成</span></div>
+              <p class="quickstart__step-note">直连模式同步后可退出本软件直接用官方 Kimi；网关模式支持预算拦截、故障转移与耗时分析。</p>
+              <div class="quickstart__step-foot"><button class="btn btn--outline btn--sm" id="quickstart-step-2-action" type="button" data-action="connect-kimi">同步到 Work</button><button class="btn btn--quiet btn--sm" id="quickstart-step-2-mode" type="button">选择模式</button></div>
+            </li>
+            <li class="quickstart__step" id="quickstart-step-3" data-done="false">
+              <div class="quickstart__step-head"><span class="dot" id="quickstart-step-3-dot" data-tone="neutral"></span><strong>3. 分配子代理模型</strong><span class="quickstart__tag" id="quickstart-step-3-tag">可选</span></div>
+              <p class="quickstart__step-note">为默认子代理及 plan / coder / explore 角色指定模型，保存后自动同步到 Kimi Work。</p>
+              <div class="quickstart__step-foot"><button class="btn btn--outline btn--sm" id="quickstart-step-3-action" type="button">前往子代理</button></div>
+            </li>
+            <li class="quickstart__step" id="quickstart-step-4" data-done="false">
+              <div class="quickstart__step-head"><span class="dot" id="quickstart-step-4-dot" data-tone="neutral"></span><strong>4. 启动 Kimi Work 开始对话</strong><span class="quickstart__tag" id="quickstart-step-4-tag">待完成</span></div>
+              <p class="quickstart__step-note">启动后在 Kimi Work 顶部模型选择器切换第三方模型，对话 token 用量会自动计入「用量」页。</p>
+              <div class="quickstart__step-foot"><button class="btn btn--primary btn--sm" id="quickstart-step-4-action" type="button" data-action="launch-kimi">启动 Kimi Work</button></div>
+            </li>
+          </ol>
+        </section>
+
         <div class="upd-overview" id="overview-update-card" hidden>
           <div class="upd-overview__head">
             <strong id="overview-update-title">发现新版本</strong>
@@ -122,6 +157,13 @@
             <div class="overview-card__foot"><button class="btn btn--quiet btn--sm" id="overview-open-models" type="button">管理模型</button></div>
           </article>
 
+          <article class="overview-card" id="overview-subagents-card">
+            <span class="overview-card__label">子代理</span>
+            <strong class="overview-card__value"><span class="dot" id="overview-subagents-dot" data-tone="neutral"></span><span id="overview-subagents-value">继承主模型</span></strong>
+            <p class="overview-card__meta" id="overview-subagents-note">正在读取子代理配置与写入状态…</p>
+            <div class="overview-card__foot"><button class="btn btn--quiet btn--sm" id="overview-open-subagents" type="button">配置子代理</button></div>
+          </article>
+
           <article class="overview-card">
             <span class="overview-card__label">今日用量</span>
             <strong class="overview-card__value mono" id="overview-today-requests">—</strong>
@@ -142,6 +184,11 @@
     <section class="view" id="view-models" aria-labelledby="models-heading" hidden>
       <h2 class="sr-only" id="models-heading">模型与服务商</h2>
       <section class="workspace-sync" aria-label="与 Work 的同步状态"><div><strong id="workspace-sync-state">正在读取同步状态</strong><p id="workspace-sync-note" class="hint">保存服务商与模型后，在这里同步到 Kimi Work。</p></div><div class="action-line action-line--start"><button class="btn btn--outline" data-action="connect-kimi" type="button">同步到 Work</button><button class="btn btn--quiet" data-action="restart-kimi" type="button" id="workspace-restart" hidden>重启 Kimi</button></div></section>
+      <div class="subtabs" role="tablist" data-subtab-group="models" aria-label="模型分类">
+        <button id="models-tab-catalog" type="button" role="tab" data-subtab-group="models" data-subtab="catalog" aria-selected="true">模型目录</button>
+        <button id="models-tab-connections" type="button" role="tab" data-subtab-group="models" data-subtab="connections" aria-selected="false">服务商连接</button>
+      </div>
+      <div class="subtab-pane" id="models-pane-catalog" data-subtab-group="models" data-subtab-pane="catalog" role="tabpanel" aria-labelledby="models-tab-catalog">
       <div class="toolbar"><div class="search"><svg class="icon search__icon" aria-hidden="true"><use href="#i-search"/></svg><input id="model-q" type="search" placeholder="搜索 ID、名称或档位" autocomplete="off" spellcheck="false" aria-label="搜索模型"><button class="search__clear" id="model-q-clear" type="button" aria-label="清除搜索" hidden><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="segmented" role="group" aria-label="筛选模型"><button id="filter-all" type="button" aria-pressed="true">全部</button><button id="filter-vision" type="button" aria-pressed="false">视觉</button><button id="filter-tools" type="button" aria-pressed="false">工具</button><button id="filter-reasoning" type="button" aria-pressed="false">推理</button></div><p class="toolbar__count mono" id="model-count">…</p><button class="btn btn--primary" id="model-new" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>添加模型</button></div>
       <div class="workbench" id="workbench" data-open="false">
         <div class="table-wrap table-wrap--models" id="model-table-wrap"><table class="table table--models" id="model-table"><thead><tr><th scope="col">模型 ID</th><th scope="col" class="col-route">连接 · 上游</th><th scope="col" class="col-proto">接口协议</th><th scope="col" class="num">上下文窗口</th><th scope="col" class="num col-out">输出</th><th scope="col" class="col-cap">能力</th><th scope="col" class="col-efforts">思考档位</th><th scope="col" class="col-actions">操作</th></tr></thead><tbody id="model-body"></tbody></table></div>
@@ -185,6 +232,8 @@
       </div>
       <div class="picker" id="picker" hidden aria-labelledby="picker-title"><div class="picker__head"><div><h2 id="picker-title">候选模型</h2><p class="picker__lede" id="picker-lede">候选来自所选供应商目录与连接最近一次上游读取。</p></div><button class="iconbtn" id="picker-close" type="button" aria-label="关闭候选列表"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="picker__search"><div class="search"><svg class="icon search__icon" aria-hidden="true"><use href="#i-search"/></svg><input id="picker-q" type="search" placeholder="搜索模型名、厂商或片段" autocomplete="off" spellcheck="false" aria-label="搜索候选模型"></div><button class="btn btn--outline" id="picker-scan" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>读取上游目录</button><p class="picker__state mono" id="picker-state" role="status">—</p></div><p class="note note--warn" id="picker-note" hidden></p><ul class="picker__list" id="picker-list"></ul><p class="empty" id="picker-empty" hidden><span class="empty__title" id="picker-empty-title">没有候选</span><span class="empty__note" id="picker-empty-note">选择一条连接或供应商预设后，候选会自动载入。</span></p></div>
       <p class="hint" id="models-note">保存会写入本机网关；之后按顶部同步状态同步到 Kimi Work，新增或删除模型后可能需要重启 Kimi。</p>
+      </div>
+      <div class="subtab-pane" id="models-pane-connections" data-subtab-group="models" data-subtab-pane="connections" role="tabpanel" aria-labelledby="models-tab-connections" hidden>
       <section class="band" id="connections-panel"><div class="band__head"><div><h2 id="connection-heading">服务商与连接</h2><p>密钥只写入本机系统凭据存储；变更需应用后生效。</p></div><button class="btn btn--primary" id="conns-add" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>添加服务商</button></div><p class="note note--warn" id="conns-unavailable" hidden>当前面板服务尚未提供多连接接口。</p><ul class="conns" id="conns-list"></ul><p class="empty" id="conns-empty" hidden><span class="empty__title">还没有连接</span><span class="empty__note">添加一条连接并填写API 基础地址与 API Key。</span></p><div class="conn-editor" id="conn-editor" hidden aria-labelledby="conn-editor-title"><div class="conn-editor__head"><h3 id="conn-editor-title">编辑连接</h3><button class="iconbtn" id="conn-editor-close" type="button" aria-label="取消编辑"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="field-row"><label class="field" for="ce-name"><span class="field__label">显示名称</span><input id="ce-name" autocomplete="off" spellcheck="false" placeholder="DeepSeek 官方"><span class="field__hint" id="ce-name-hint">仅用于本机辨认。</span></label><label class="field" for="ce-id"><span class="field__label">标识</span><input id="ce-id" class="mono" autocomplete="off" spellcheck="false" placeholder="deepseek"><span class="field__hint">用于路由 ID 前缀；字母、数字、点、下划线与连字符。</span></label></div><label class="field" for="ce-preset"><span class="field__label">供应商预设（可选）</span><select id="ce-preset"></select><span class="field__hint" id="ce-preset-hint">填入官方地址与已知能力，仍可修改。</span></label><label class="field" for="ce-base"><span class="field__label">API 基础地址</span><input id="ce-base" class="mono" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com/v1"><span class="field__hint">HTTPS；本机回环可用 HTTP，不含凭证、查询参数或片段。</span></label><div class="field-row"><label class="field" for="ce-key"><span class="field__label">API Key</span><input id="ce-key" class="mono" type="password" autocomplete="off" spellcheck="false" aria-describedby="ce-key-hint"><span class="field__hint" id="ce-key-hint">已保存的 Key 不会显示；留空保持现有值。</span></label><p class="field__hint" id="ce-keyenv-note">API Key 变量名按连接标识自动生成，凭证只写入本机系统凭据存储。</p></div><fieldset class="field field--group"><legend class="field__label">允许的接口协议</legend><label class="check"><input type="checkbox" id="ce-chat"><span>Chat Completions</span></label><label class="check"><input type="checkbox" id="ce-responses"><span>Responses</span></label><p class="field__hint">都不勾选表示不限制。</p></fieldset><div class="action-line action-line--start"><button class="btn btn--quiet" id="conn-editor-cancel" type="button">取消</button><button class="btn btn--outline" id="conn-editor-test" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>读取上游目录</button><button class="btn btn--primary" id="conn-editor-apply" type="button">保存</button></div></div><div class="diff" id="conns-diff" hidden></div><p class="errors" id="conns-errors" hidden></p><div class="action-line"><p class="draft" id="conns-draft">草稿与配置文件一致</p><button class="btn btn--quiet" id="conns-reset" type="button">还原为已保存值</button><button class="btn btn--outline" id="conns-usage" type="button">查看用量与额度</button><button class="btn btn--primary" id="conns-save" type="button" disabled>保存</button></div></section>
         <details class="onboard-disclosure" id="onboard-disclosure">
           <summary><span>添加服务商向导</span><span class="summary-action">收起 / 展开</span></summary>
@@ -214,6 +263,7 @@
           </div>
         </details>
       <section class="band" id="restart-panel"><div class="band__head"><div><h2>应用连接修改</h2><p id="restart-head">保存后由后台服务应用连接；忙时等待 Kimi 空闲，不会打断正在进行的任务。</p></div></div><p class="restart__state" id="restart-state">读取中</p><p class="verdict" id="apply-verdict"><span class="dot" id="apply-verdict-dot" data-tone="neutral"></span><strong id="apply-verdict-word">读取中</strong><span class="verdict__note" id="apply-verdict-note"></span></p><div class="action-line action-line--start"><button class="btn btn--primary" id="apply-connections" type="button" hidden>应用已保存的连接</button></div><p class="mono restart__file" id="restart-file">—</p></section>
+      </div>
     </section>
 
     <section class="view" id="view-usage" aria-labelledby="usage-heading" hidden>
@@ -221,37 +271,52 @@
       <div id="usage-root"><p class="empty">正在读取本机真实用量记录。</p></div>
     </section>
 
-    <section class="view" id="view-work" aria-labelledby="work-heading" hidden>
-      <h2 class="sr-only" id="work-heading">Work 能力</h2>
-      <p class="hint" id="work-note">这些能力写在 Kimi Work 自己的配置里，可以分别确认保存与运行状态。写入配置不等于官方界面已经采用，以各项状态为准。</p>
-      <nav class="section-links" aria-label="Work 能力分类"><button class="btn btn--quiet" data-section="sa-target-panel" type="button">子代理</button><button class="btn btn--quiet" data-section="web-panel" type="button">联网</button><button class="btn btn--quiet" data-section="mcp-panel" type="button">MCP</button><button class="btn btn--quiet" data-section="context-panel" type="button">长对话整理</button></nav>
+    <section class="view" id="view-subagents" aria-labelledby="subagents-heading" hidden>
+      <h2 class="sr-only" id="subagents-heading">子代理</h2>
+      <div class="subtabs" role="tablist" data-subtab-group="subagents" aria-label="子代理分类">
+        <button id="subagents-tab-models" type="button" role="tab" data-subtab-group="subagents" data-subtab="models" aria-selected="true">模型与角色</button>
+        <button id="subagents-tab-swarm" type="button" role="tab" data-subtab-group="subagents" data-subtab="swarm" aria-selected="false">并行（Swarm）</button>
+      </div>
+      <div class="subtab-pane" id="subagents-pane-models" data-subtab-group="subagents" data-subtab-pane="models" role="tabpanel" aria-labelledby="subagents-tab-models">
       <section class="band" id="sa-target-panel">
-        <div class="band__head"><div><h2>子代理模型目标</h2><p>只影响之后新建的普通子代理；主模型仍由 Kimi Work 菜单选择。切换模式或编辑草稿不会保存，只有点「保存目标」才写入。</p></div></div>
+        <div class="band__head"><div><h2>子代理模型与角色分配</h2><p>只影响之后新建的普通子代理；主模型仍由 Kimi Work 菜单选择。切换模式或编辑草稿不会丢失已有配置，点「保存目标」后立即写入 Kimi Work 配置文件。</p></div></div>
         <p class="note note--warn" id="sa-capability-note" hidden></p>
         <div class="action-line action-line--start" id="sa-capability-next-row" hidden><button class="btn btn--outline btn--sm" id="sa-capability-next" type="button">前往模型页确认能力</button></div>
         <fieldset class="choices choices--three" id="sa-modes"><legend class="sr-only">子代理模式</legend>
           <label class="choice"><input type="radio" name="mode" value="inherit" id="mode-inherit"><span class="choice__body"><span class="choice__title">继承主模型</span><span class="choice__note">跟随当前主模型，撤销本面板管理的目标。</span></span></label>
-          <label class="choice"><input type="radio" name="mode" value="force" id="mode-force"><span class="choice__body"><span class="choice__title">固定一个模型</span><span class="choice__note">所有普通新子代理使用目录中的一个模型，可另设思考档位。</span></span></label>
-          <label class="choice"><input type="radio" name="mode" value="pool" id="mode-pool"><span class="choice__body"><span class="choice__title">模型池</span><span class="choice__note">给出默认模型与 1–32 个候选及用途，供调用方按 model 别名选择。</span></span></label>
+          <label class="choice"><input type="radio" name="mode" value="force" id="mode-force"><span class="choice__body"><span class="choice__title">固定一个模型</span><span class="choice__note">所有普通新子代理统一使用一个模型，可另设思考档位。</span></span></label>
+          <label class="choice"><input type="radio" name="mode" value="pool" id="mode-pool"><span class="choice__body"><span class="choice__title">按角色分配 / 模型池</span><span class="choice__note">为默认子代理以及 plan / coder / explore 分配模型，并可自定义高级模型池。</span></span></label>
         </fieldset>
         <div class="field-row" id="sa-force-fields">
           <label class="field" for="sa-model"><span class="field__label">模型</span><select id="sa-model"></select><span class="field__hint" id="sa-model-hint">只列出已声明且支持工具调用的模型。</span></label>
           <label class="field" for="sa-effort"><span class="field__label">思考档位</span><select id="sa-effort"></select><span class="field__hint" id="sa-effort-hint">只列出该模型声明的档位。</span></label>
         </div>
         <div id="sa-pool-fields" hidden>
-          <div class="field-row">
-            <label class="field" for="sa-pool-default"><span class="field__label">默认模型</span><select id="sa-pool-default"></select><span class="field__hint">必须已在候选列表中；未指定模型时普通新子代理用它。</span></label>
-            <label class="field" for="sa-pool-add"><span class="field__label">加入候选</span><select id="sa-pool-add"></select><span class="field__hint">只列出已声明且支持工具调用、尚未加入池的模型。</span></label>
+          <div class="sa-role-grid" id="sa-role-grid">
+            <label class="field" for="sa-role-default"><span class="field__label">默认子代理</span><select id="sa-role-default"></select><span class="field__hint">未指定角色或模型时使用的默认子代理模型。</span></label>
+            <label class="field" for="sa-role-plan"><span class="field__label">规划（plan）</span><select id="sa-role-plan"></select><span class="field__hint">架构规划、方案设计与任务拆解。</span></label>
+            <label class="field" for="sa-role-coder"><span class="field__label">编码（coder）</span><select id="sa-role-coder"></select><span class="field__hint">代码编写、修改与调试实现。</span></label>
+            <label class="field" for="sa-role-explore"><span class="field__label">探索（explore）</span><select id="sa-role-explore"></select><span class="field__hint">只读代码检索、项目结构与资料查阅。</span></label>
           </div>
-          <label class="field" for="sa-pool-desc"><span class="field__label">用途说明</span><input id="sa-pool-desc" class="mono" autocomplete="off" spellcheck="false" maxlength="1000" placeholder="例如：负责代码审查与重构建议"><span class="field__hint">单行用途说明，最长 1000 字符；选好模型、填写说明后点「加入池」，用途随工具定义展示给调用方。</span></label>
-          <p class="errors" id="sa-pool-errors" hidden></p>
-          <div class="action-line action-line--start"><button class="btn btn--outline btn--sm" id="sa-pool-append" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>加入池</button><span class="mono" id="sa-pool-count"></span></div>
-          <div class="pool-list" id="sa-pool-list"></div>
+          <p class="hint sa-role-note" id="sa-role-note">官方 Work 内核不提供按角色硬锁字段；保存时会自动去重生成标准 <code>[secondary_model]</code> 模型池并写入角色用途说明，由主模型按角色选用。</p>
+          <details class="growth-disclosure" id="sa-pool-advanced">
+            <summary>高级：查看或自定义模型池（<span class="mono" id="sa-pool-count">0 / 32</span>）</summary>
+            <div class="growth-disclosure__body">
+              <div class="field-row">
+                <label class="field" for="sa-pool-default"><span class="field__label">默认模型</span><select id="sa-pool-default"></select><span class="field__hint">与上方「默认子代理」同步；必须已在候选列表中。</span></label>
+                <label class="field" for="sa-pool-add"><span class="field__label">加入额外候选</span><select id="sa-pool-add"></select><span class="field__hint">只列出已声明且支持工具调用、尚未加入池的模型。</span></label>
+              </div>
+              <label class="field" for="sa-pool-desc"><span class="field__label">用途说明</span><input id="sa-pool-desc" class="mono" autocomplete="off" spellcheck="false" maxlength="1000" placeholder="例如：负责代码审查与重构建议"><span class="field__hint">单行用途说明，最长 1000 字符；选好模型、填写说明后点「加入池」，用途随工具定义展示给调用方。</span></label>
+              <p class="errors" id="sa-pool-errors" hidden></p>
+              <div class="action-line action-line--start"><button class="btn btn--outline btn--sm" id="sa-pool-append" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>加入池</button></div>
+              <div class="pool-list" id="sa-pool-list"></div>
+            </div>
+          </details>
         </div>
         <p class="note note--warn" id="sa-warning" hidden></p>
         <p class="errors" id="sa-errors" hidden></p>
         <div class="action-line"><p class="draft" id="sa-draft">草稿与已保存一致</p><button class="btn btn--quiet" id="sa-reset" type="button" disabled>放弃修改</button><button class="btn btn--primary" id="sa-save" type="button" disabled>保存目标</button></div>
-        <p class="hint">这里先保存目标，再分别报告本机配置和 Kimi 的采用情况。字段、版本与角色说明收在下方诊断区。</p>
+        <p class="hint">保存后立即尝试写入 Kimi Work 的 <code>config.toml</code> 并回读确认；在 Kimi Work 中新建会话后生效。</p>
       </section>
       <section class="band" id="sa-runtime-panel">
         <div class="band__head"><div><h2>当前状态</h2><p>这里分别报告已保存目标、本机配置和 Kimi 当前运行状态，不把写入配置当成已经采用。</p></div></div>
@@ -266,36 +331,23 @@
         <p class="hint" id="sa-observed-note">…</p>
         </div></details>
       </section>
-      <section class="band" id="web-panel"><div class="band__head"><div><h2>网页搜索与阅读</h2><p>默认沿用 Kimi 官方服务。Tavily Search 回答问题，Extract 读取已知网址；本机适配器转换为 Kimi 需要的接口，不把模型地址当搜索地址。</p></div></div>
-        <div class="field-row"><label class="field" for="web-provider"><span class="field__label">服务方式</span><select id="web-provider"><option value="official">沿用 Kimi 官方服务</option><option value="tavily">Tavily（本机适配）</option><option value="native">兼容 Kimi 原生接口的自定义服务</option></select></label><label class="field" id="web-key-field" for="web-key" hidden><span class="field__label">Tavily API Key</span><input id="web-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空保留已保存的 Key"><span class="field__hint" id="web-key-state">只写入本应用私有凭据，不进入模型连接或页面状态。</span></label></div>
-        <p class="note" id="web-state" role="status">正在读取当前服务。测试适配器不等于当前 Kimi 会话已重新加载。</p><p class="errors" id="web-errors" hidden></p><div class="action-line"><p class="draft" id="web-draft">—</p><button class="btn btn--outline" id="web-test" type="button">测试搜索与正文读取</button><button class="btn btn--primary" id="web-save" type="button">保存服务方式</button></div>
-      </section>
-      <details class="growth-disclosure" id="native-search-details"><summary>高级：自定义搜索与抓取接口</summary><div id="native-search-settings"><section class="band" id="svc-panel"><div class="band__head"><div><h2>网页搜索与抓取</h2><p>写 Kimi 内核自己的 <code>[services.moonshot_search]</code> 与 <code>[services.moonshot_fetch]</code>。默认不写任何东西，保持官方服务；只有在这里显式填入兼容服务并启用，才会替换对应工具的服务端。</p></div></div><p class="note note--warn" id="svc-unavailable" hidden>当前面板服务没有提供搜索服务接口，此处只显示状态，不能保存。搜索与抓取仍走 Kimi 官方。</p><fieldset class="choices"><label class="choice"><input type="checkbox" id="svc-search-on"><span class="choice__body"><span class="choice__title">接管网页搜索（WebSearch）</span><span class="choice__note">请求内核的搜索工具改用下面的地址，取代账号托管服务。地址必须是完整端点，内核不会追加 <code>/search</code>。</span></span></label></fieldset><div class="field-row"><label class="field" for="svc-search-url"><span class="field__label">搜索端点</span><input id="svc-search-url" type="url" inputmode="url" spellcheck="false" placeholder="https://search.example/v1/search"><span class="field__hint">必须是完整 http(s) 地址；本机可用 http，不能带账号、查询参数或片段。</span></label><label class="field" for="svc-search-key"><span class="field__label">搜索密钥</span><input id="svc-search-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空表示沿用已保存的密钥"><span class="field__hint" id="svc-search-key-hint">该服务需要密钥；内核用它发送 Authorization: Bearer。</span></label></div><fieldset class="choices"><label class="choice"><input type="checkbox" id="svc-fetch-on"><span class="choice__body"><span class="choice__title">接管网页抓取（FetchURL）</span><span class="choice__note">内核抓取改用下面的地址。抓取失败时内核会静默回落到本地 Readability，不会重发第二次网关请求。</span></span></label></fieldset><div class="field-row"><label class="field" for="svc-fetch-url"><span class="field__label">抓取端点</span><input id="svc-fetch-url" type="url" inputmode="url" spellcheck="false" placeholder="https://fetch.example/v1/fetch"><span class="field__hint">与搜索端点相同的地址规则；内核不会追加 <code>/fetch</code>。</span></label><label class="field" for="svc-fetch-key"><span class="field__label">抓取密钥</span><input id="svc-fetch-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空表示沿用已保存的密钥"><span class="field__hint">与搜索可以共用同一个密钥，也可以分别填写。</span></label></div><div class="binding binding--context"><div class="binding__col"><p class="binding__label">搜索</p><p class="binding__value" id="svc-search-saved">…</p><p class="binding__sub" id="svc-search-saved-sub">…</p></div><div class="binding__col"><p class="binding__label">抓取</p><p class="binding__value" id="svc-fetch-saved">…</p><p class="binding__sub" id="svc-fetch-saved-sub">…</p></div></div><p class="verdict" id="svc-verdict"><span class="dot" id="svc-verdict-dot" data-tone="neutral"></span><strong id="svc-verdict-word">读取中</strong><span class="verdict__note" id="svc-verdict-note"></span></p><p class="errors" id="svc-errors" hidden></p><div class="action-line"><p class="draft" id="svc-draft">—</p><button class="btn btn--quiet" id="svc-reset" type="button">还原为已保存值</button><button class="btn btn--primary" id="svc-save" type="button" disabled>保存搜索与抓取</button></div><p class="hint">Kimi 会在启动与部分设置变更时整体重写这份配置；被重写回官方值时这里会如实显示「被 Kimi 重新生成」，本工具默认不再抢写。要让新工具出现在会话里，通常需要重启 Kimi。这里不写入账号 OAuth、不改主模型端点，也不转发任何 Kimi 凭据。</p></section></div></details>
-      <details class="growth-disclosure" id="mcp-details"><summary>MCP 服务管理</summary><section class="band" id="mcp-panel"><div class="band__head"><div><h2>MCP 服务</h2><p>通过当前 Kimi 原生接口管理已有服务。浏览和保存不会启动或测试服务；只有“测试服务”会显式连接，可能启动本地命令。</p></div><button class="btn btn--primary" id="mcp-add" type="button">添加 MCP 服务</button></div>
-        <p class="note" id="mcp-state" role="status">正在读取已有 MCP 服务，不会启动它们。</p><div id="mcp-list" class="mcp-list"></div>
-        <form id="mcp-form" class="conn-editor" hidden novalidate><div class="conn-editor__head"><h3 id="mcp-form-title">添加 MCP 服务</h3><button class="iconbtn" id="mcp-close" type="button" aria-label="关闭 MCP 编辑"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="field-row"><label class="field" for="mcp-name"><span class="field__label">名称</span><input id="mcp-name" class="mono" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required></label><label class="field" for="mcp-transport"><span class="field__label">连接方式</span><select id="mcp-transport"><option value="stdio">本地命令（stdio）</option><option value="http">远程 HTTP</option><option value="sse">远程 SSE</option></select></label></div><label class="field" id="mcp-command-field" for="mcp-command"><span class="field__label">本地命令</span><input id="mcp-command" class="mono" autocomplete="off" spellcheck="false"></label><label class="field" id="mcp-args-field" for="mcp-args"><span class="field__label">命令参数</span><textarea id="mcp-args" class="mono" rows="3" placeholder="每行一个参数；已有服务留空表示保留原参数"></textarea></label><label class="field" id="mcp-url-field" for="mcp-url" hidden><span class="field__label">完整服务地址</span><input id="mcp-url" class="mono" type="url" autocomplete="off" spellcheck="false"><span class="field__hint">已有 SSE 保留 SSE，不会在编辑时改成 HTTP。</span></label><label class="field" for="mcp-secrets"><span class="field__label" id="mcp-secrets-label">环境变量（可选）</span><textarea id="mcp-secrets" class="mono" rows="3" placeholder="每行 NAME=value；已有服务留空保留已有变量或请求头"></textarea><span class="field__hint" id="mcp-secrets-hint">秘密值不会回显。已有服务的空字段不会清空旧值；填写时会整组替换并校验已有名称，防止误删。</span></label><label class="check" for="mcp-enabled"><input type="checkbox" id="mcp-enabled" checked><span>启用此服务</span></label><p class="errors" id="mcp-errors" hidden></p><div class="action-line"><button class="btn btn--quiet" id="mcp-cancel" type="button">取消</button><button class="btn btn--primary" id="mcp-save" type="submit">保存 MCP 服务</button></div></form>
-        <div id="mcp-result" class="tool-result" aria-live="polite" hidden></div>
-      </section></details>
-      <section class="band" id="context-panel"><div class="band__head"><div><h2>长对话整理</h2><p>沿用 Kimi，或自定义达到上下文窗口的多少时触发整理，以及至少预留多少 token。配置写入不表示当前运行会话已采用，请新建会话或重新加载后使用。</p></div></div><fieldset class="choices"><label class="choice"><input type="radio" name="context-mode" id="context-inherit" value="inherit"><span class="choice__body"><span class="choice__title">沿用 Kimi</span><span class="choice__note">恢复原生默认，撤销本工具管理的长对话设置。</span></span></label><label class="choice"><input type="radio" name="context-mode" id="context-custom" value="custom"><span class="choice__body"><span class="choice__title">自定义长对话整理</span><span class="choice__note">只设置触发比例与预留空间，不提供“立即整理”或固定整理后比例。</span></span></label></fieldset><div class="field-row" id="context-fields"><label class="field" for="context-ratio"><span class="field__label">触发比例（0.50–0.99）</span><input id="context-ratio" type="number" min="0.5" max="0.99" step="0.01" value="0.85"></label><label class="field" for="context-reserved"><span class="field__label">预留 token（非负整数）</span><input id="context-reserved" type="number" min="0" step="1" value="50000"></label></div><p class="note" id="context-state" role="status">正在读取原生配置。</p><p class="errors" id="context-errors" hidden></p><div class="action-line"><p class="draft" id="context-draft">—</p><button class="btn btn--primary" id="context-save" type="button">保存长对话设置</button></div></section>
-    </section>
-
-    <section class="view" id="view-extensions" aria-labelledby="extensions-heading" hidden>
-      <h2 class="sr-only" id="extensions-heading">扩展</h2>
-      <section class="band" id="extensions-panel"><div class="band__head"><div><h2>页面增强</h2><p>页面增强只改 Kimi 里的显示，可以单独关闭。关闭扩展只影响它自己，不会停止网关、模型接管或官方启动与更新。当前提供思考翻译。</p></div></div></section>
-      <section class="band" id="translation-panel">
-        <div class="band__head"><div><h2 id="translation-heading">翻译思考文字</h2><p>翻译 Kimi 页面中已经可见的思考文字。原文、代码和链接保留，不改写消息数据库，也不改变下一次模型输入。模型没有公开的隐藏推理不在此范围。</p></div></div>
-        <label class="choice" for="tr-enabled"><input type="checkbox" id="tr-enabled"><span class="choice__body"><span class="choice__title">启用思考翻译</span><span class="choice__note">共用宿主不会因关闭翻译而停止模型接管。保存后按下方运行状态确认。</span></span></label>
-        <div class="field-row"><label class="field" for="tr-provider"><span class="field__label">翻译服务</span><select id="tr-provider"><option value="bing">Bing</option><option value="google">Google</option><option value="custom">自定义 Chat Completions</option></select></label><label class="field" for="tr-language"><span class="field__label">目标语言</span><input id="tr-language" autocomplete="off" placeholder="zh"></label></div>
-        <div class="action-line action-line--start"><button class="btn btn--outline" id="tr-copy" type="button" disabled>从已生效的 Chat 模型服务复制</button><span class="hint" id="tr-copy-note">只复制一次非密钥设置，复用宿主已有凭据，不随连接自动更新。</span></div>
-        <details class="growth-disclosure" id="tr-custom-details"><summary>自定义翻译服务与凭据变量</summary><div class="form-grid"><label class="field field--wide" for="tr-endpoint"><span class="field__label">完整 Chat Completions 地址</span><input id="tr-endpoint" type="url" class="mono" spellcheck="false" placeholder="https://api.example.com/v1/chat/completions"></label><label class="field" for="tr-model"><span class="field__label">翻译模型</span><input id="tr-model" class="mono" autocomplete="off" spellcheck="false"></label><label class="field" for="tr-keyenv"><span class="field__label">API Key 环境变量名</span><input id="tr-keyenv" class="mono" autocomplete="off" spellcheck="false"><span class="field__hint" id="tr-key-state">Key 不通过页面传递或回显。</span></label><label class="field" for="tr-key"><span class="field__label">重新输入 API Key</span><input id="tr-key" class="mono" type="password" autocomplete="off" spellcheck="false" placeholder="留空沿用已保存的 Key"><span class="field__hint">只写入本机系统凭据存储；保存后生成新引用，不回显明文。</span></label></div></details>
-        <fieldset class="field field--group"><legend class="field__label">思考显示方式</legend><label class="check"><input type="radio" name="tr-view" id="tr-view-translated" value="translated"><span>优先显示译文</span></label><label class="check"><input type="radio" name="tr-view" id="tr-view-original" value="original"><span>显示原文</span></label></fieldset>
-        <p class="note" id="tr-runtime" role="status">正在读取翻译宿主状态。</p><p class="errors" id="tr-errors" hidden></p>
-        <div class="action-line"><p class="draft" id="tr-draft">尚未读取已保存设置</p><button class="btn btn--outline" id="tr-check" type="button">检查翻译运行环境</button><button class="btn btn--primary" id="tr-save" type="button">保存翻译设置</button></div>
-      </section>
-      <section class="band" aria-labelledby="tr-preview-heading"><div class="band__head"><div><h2 id="tr-preview-heading">固定示例试译</h2><p>仅在此点击后向已选择的翻译服务发送下面的短句。此预览不代表 Kimi 内已出现思考文字。</p></div><button class="btn btn--outline" id="tr-test" type="button">试译示例</button></div><p class="preview-text" id="tr-preview-original">We need to inspect the saved settings before changing the model.</p><p class="preview-text preview-text--result" id="tr-preview-result" aria-live="polite">尚未试译；原文保持不变。</p></section>
+      </div>
+      <div class="subtab-pane" id="subagents-pane-swarm" data-subtab-group="subagents" data-subtab-pane="swarm" role="tabpanel" aria-labelledby="subagents-tab-swarm" hidden>
+        <div id="plus-swarm-host"></div>
+      </div>
     </section>
 
     <section class="view" id="view-maintenance" aria-label="设置" hidden>
+      <div class="subtabs" role="tablist" data-subtab-group="maintenance" aria-label="设置分类">
+        <button id="settings-tab-accounts" type="button" role="tab" data-subtab-group="maintenance" data-subtab="accounts" aria-selected="true">账号</button>
+        <button id="settings-tab-connection" type="button" role="tab" data-subtab-group="maintenance" data-subtab="connection" aria-selected="false">接入与更新</button>
+        <button id="settings-tab-extensions" type="button" role="tab" data-subtab-group="maintenance" data-subtab="extensions" aria-selected="false">扩展与工具</button>
+        <button id="settings-tab-advanced" type="button" role="tab" data-subtab-group="maintenance" data-subtab="advanced" aria-selected="false">高级</button>
+      </div>
+      <div class="subtab-pane" id="settings-pane-accounts" data-subtab-group="maintenance" data-subtab-pane="accounts" role="tabpanel" aria-labelledby="settings-tab-accounts">
+        <div id="plus-accounts-host"></div>
+      </div>
+      <div class="subtab-pane" id="settings-pane-connection" data-subtab-group="maintenance" data-subtab-pane="connection" role="tabpanel" aria-labelledby="settings-tab-connection" hidden>
 <section class="band" id="native-panel">
   <div class="band__head"><div><h2>Kimi 接入</h2><p>只接入本机官方桌面 Work；先选择接入模式，再把模型同步到 Kimi。</p></div></div>
   <fieldset class="choices choices--mode" id="integration-mode-group">
@@ -320,7 +372,7 @@
     <p class="direct-notice__head">直连模式说明</p>
     <p class="direct-notice__line" id="direct-mode-support"></p>
     <p class="direct-notice__line" id="direct-mode-hosts"></p>
-    <p class="direct-notice__line" id="direct-mode-tradeoff">直连模式下 API Key 交由官方 Kimi 本机安全存储托管，请求不经过本机网关；用量统计、预算限制、故障转移、共享指令与网关侧联网搜索不会生效，思考翻译与多账号切换仍需打开本软件。</p>
+    <p class="direct-notice__line" id="direct-mode-tradeoff">直连模式下 API Key 交由官方 Kimi 本机安全存储托管，请求不经过本机网关；token 用量会只读采集自 Kimi Work 本地会话记录（不提供耗时与首字节延迟），预算拦截、故障转移、共享指令与网关侧联网搜索不会生效，思考翻译与多账号切换仍需打开本软件。</p>
     <p class="direct-notice__line" id="direct-mode-bypassed" hidden></p>
     <p class="direct-notice__line" id="direct-mode-skipped" hidden></p>
     <p class="hint" id="direct-mode-hint">官方更新或更改模型后，再打开本软件同步一次即可。</p>
@@ -341,7 +393,7 @@
   </div>
   <dl class="facts facts--compact">
     <div class="fact"><dt>当前版本</dt><dd class="mono" id="upd-current">—</dd><p class="fact__sub" id="upd-current-sub">读取中…</p></div>
-    <div class="fact"><dt>更新检查</dt><dd><span class="dot" id="upd-state-dot" data-tone="neutral"></span><span id="upd-state-word">未检查</span></dd><p class="fact__sub" id="upd-last-check">尚未检查</p></div>
+    <div class="fact"><dt>更新检查</dt><dd><span class="dot" id="upd-state-dot" data-tone="neutral"></span><span id="upd-state-word">未检查</span></dd><p class="fact__sub" id="upd-last-check">尚未检查</p><p class="fact__sub" id="upd-source" hidden></p></div>
     <div class="fact"><dt>后台服务</dt><dd id="preview-service-state">读取中</dd><p class="fact__sub" id="preview-service-sub">关闭窗口保留网关；开机启动需单独授权。</p></div>
   </dl>
   <div class="upd-controls">
@@ -379,13 +431,47 @@
     <button class="btn btn--primary" id="upd-download" type="button" hidden>下载并更新</button>
     <button class="btn btn--quiet" id="upd-cancel" type="button" hidden>取消</button>
     <button class="btn btn--outline" id="upd-rollback" type="button" hidden>回退到上一版本</button>
+    <a class="btn btn--quiet" id="upd-release-link" target="_blank" rel="noopener noreferrer" hidden>查看发布页</a>
   </div>
   <div id="migration-banner" hidden><p class="note" id="migration-note" role="status"></p><div class="action-line action-line--start" id="migration-actions" hidden><button class="btn btn--outline" id="migration-resume" type="button">授权并继续迁移旧凭据</button></div></div>
   <p class="note" id="preview-service-note">重新打开窗口会核对后台构建与地址。如果与 Kimi 窗口失去连接，请正常退出 Kimi 后再从面板重新启动。</p>
   <div class="action-line action-line--start"><button class="btn btn--outline" id="daemon-restart" type="button">重启增强服务</button><button class="btn btn--outline" id="service-register" type="button">注册后台服务</button><button class="btn btn--outline" id="service-stop" type="button">停止增强服务</button></div>
   <div class="action-line action-line--start"><button class="btn btn--quiet" id="service-enable" type="button">允许登录时启动</button><button class="btn btn--quiet" id="service-disable" type="button">禁止登录时启动</button><button class="btn btn--quiet" id="service-uninstall" type="button">移除服务注册</button></div>
-  <p class="hint" id="preview-service-hint">自动更新与后台服务只管理 KimiWork + 自身；更新失败或新版本无法就绪时会自动回退，网关数据与钥匙串凭据保持不变。</p>
+  <div class="action-line action-line--start"><button class="btn btn--quiet btn--sm" id="settings-reopen-guide" type="button">重新显示总览新手引导</button></div>
+  <p class="hint" id="preview-service-hint">自动更新与后台服务只管理 KimiWork + 自身；更新失败或新版本无法就绪时会自动回退，网关数据与本机加密凭据保持不变。</p>
 </section>
+      </div>
+      <div class="subtab-pane" id="settings-pane-extensions" data-subtab-group="maintenance" data-subtab-pane="extensions" role="tabpanel" aria-labelledby="settings-tab-extensions" hidden>
+      <section class="band" id="extensions-panel"><div class="band__head"><div><h2>页面增强</h2><p>页面增强只改 Kimi 里的显示，可以单独关闭。关闭扩展只影响它自己，不会停止网关、模型接管或官方启动与更新。当前提供思考翻译。</p></div></div></section>
+      <section class="band" id="translation-panel">
+        <div class="band__head"><div><h2 id="translation-heading">翻译思考文字</h2><p>翻译 Kimi 页面中已经可见的思考文字。原文、代码和链接保留，不改写消息数据库，也不改变下一次模型输入。模型没有公开的隐藏推理不在此范围。</p></div></div>
+        <label class="choice" for="tr-enabled"><input type="checkbox" id="tr-enabled"><span class="choice__body"><span class="choice__title">启用思考翻译</span><span class="choice__note">共用宿主不会因关闭翻译而停止模型接管。保存后按下方运行状态确认。</span></span></label>
+        <div class="field-row"><label class="field" for="tr-provider"><span class="field__label">翻译服务</span><select id="tr-provider"><option value="bing">Bing</option><option value="google">Google</option><option value="custom">自定义 Chat Completions</option></select></label><label class="field" for="tr-language"><span class="field__label">目标语言</span><input id="tr-language" autocomplete="off" placeholder="zh"></label></div>
+        <div class="action-line action-line--start"><button class="btn btn--outline" id="tr-copy" type="button" disabled>从已生效的 Chat 模型服务复制</button><span class="hint" id="tr-copy-note">只复制一次非密钥设置，复用宿主已有凭据，不随连接自动更新。</span></div>
+        <details class="growth-disclosure" id="tr-custom-details"><summary>自定义翻译服务与凭据变量</summary><div class="form-grid"><label class="field field--wide" for="tr-endpoint"><span class="field__label">完整 Chat Completions 地址</span><input id="tr-endpoint" type="url" class="mono" spellcheck="false" placeholder="https://api.example.com/v1/chat/completions"></label><label class="field" for="tr-model"><span class="field__label">翻译模型</span><input id="tr-model" class="mono" autocomplete="off" spellcheck="false"></label><label class="field" for="tr-keyenv"><span class="field__label">API Key 环境变量名</span><input id="tr-keyenv" class="mono" autocomplete="off" spellcheck="false"><span class="field__hint" id="tr-key-state">Key 不通过页面传递或回显。</span></label><label class="field" for="tr-key"><span class="field__label">重新输入 API Key</span><input id="tr-key" class="mono" type="password" autocomplete="off" spellcheck="false" placeholder="留空沿用已保存的 Key"><span class="field__hint">只写入本机系统凭据存储；保存后生成新引用，不回显明文。</span></label></div></details>
+        <fieldset class="field field--group"><legend class="field__label">思考显示方式</legend><label class="check"><input type="radio" name="tr-view" id="tr-view-translated" value="translated"><span>优先显示译文</span></label><label class="check"><input type="radio" name="tr-view" id="tr-view-original" value="original"><span>显示原文</span></label></fieldset>
+        <p class="note" id="tr-runtime" role="status">正在读取翻译宿主状态。</p><p class="errors" id="tr-errors" hidden></p>
+        <div class="action-line"><p class="draft" id="tr-draft">尚未读取已保存设置</p><button class="btn btn--outline" id="tr-check" type="button">检查翻译运行环境</button><button class="btn btn--primary" id="tr-save" type="button">保存翻译设置</button></div>
+      </section>
+      <section class="band" aria-labelledby="tr-preview-heading"><div class="band__head"><div><h2 id="tr-preview-heading">固定示例试译</h2><p>仅在此点击后向已选择的翻译服务发送下面的短句。此预览不代表 Kimi 内已出现思考文字。</p></div><button class="btn btn--outline" id="tr-test" type="button">试译示例</button></div><p class="preview-text" id="tr-preview-original">We need to inspect the saved settings before changing the model.</p><p class="preview-text preview-text--result" id="tr-preview-result" aria-live="polite">尚未试译；原文保持不变。</p></section>
+      <details class="growth-disclosure" id="mcp-details" open><summary>MCP 服务管理</summary><section class="band" id="mcp-panel"><div class="band__head"><div><h2>MCP 服务</h2><p>通过当前 Kimi 原生接口管理已有服务。浏览和保存不会启动或测试服务；只有“测试服务”会显式连接，可能启动本地命令。</p></div><button class="btn btn--primary" id="mcp-add" type="button">添加 MCP 服务</button></div>
+        <p class="note" id="mcp-state" role="status">正在读取已有 MCP 服务，不会启动它们。</p><div id="mcp-list" class="mcp-list"></div>
+        <form id="mcp-form" class="conn-editor" hidden novalidate><div class="conn-editor__head"><h3 id="mcp-form-title">添加 MCP 服务</h3><button class="iconbtn" id="mcp-close" type="button" aria-label="关闭 MCP 编辑"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="field-row"><label class="field" for="mcp-name"><span class="field__label">名称</span><input id="mcp-name" class="mono" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required></label><label class="field" for="mcp-transport"><span class="field__label">连接方式</span><select id="mcp-transport"><option value="stdio">本地命令（stdio）</option><option value="http">远程 HTTP</option><option value="sse">远程 SSE</option></select></label></div><label class="field" id="mcp-command-field" for="mcp-command"><span class="field__label">本地命令</span><input id="mcp-command" class="mono" autocomplete="off" spellcheck="false"></label><label class="field" id="mcp-args-field" for="mcp-args"><span class="field__label">命令参数</span><textarea id="mcp-args" class="mono" rows="3" placeholder="每行一个参数；已有服务留空表示保留原参数"></textarea></label><label class="field" id="mcp-url-field" for="mcp-url" hidden><span class="field__label">完整服务地址</span><input id="mcp-url" class="mono" type="url" autocomplete="off" spellcheck="false"><span class="field__hint">已有 SSE 保留 SSE，不会在编辑时改成 HTTP。</span></label><label class="field" for="mcp-secrets"><span class="field__label" id="mcp-secrets-label">环境变量（可选）</span><textarea id="mcp-secrets" class="mono" rows="3" placeholder="每行 NAME=value；已有服务留空保留已有变量或请求头"></textarea><span class="field__hint" id="mcp-secrets-hint">秘密值不会回显。已有服务的空字段不会清空旧值；填写时会整组替换并校验已有名称，防止误删。</span></label><label class="check" for="mcp-enabled"><input type="checkbox" id="mcp-enabled" checked><span>启用此服务</span></label><p class="errors" id="mcp-errors" hidden></p><div class="action-line"><button class="btn btn--quiet" id="mcp-cancel" type="button">取消</button><button class="btn btn--primary" id="mcp-save" type="submit">保存 MCP 服务</button></div></form>
+        <div id="mcp-result" class="tool-result" aria-live="polite" hidden></div>
+      </section></details>
+      </div>
+      <div class="subtab-pane" id="settings-pane-advanced" data-subtab-group="maintenance" data-subtab-pane="advanced" role="tabpanel" aria-labelledby="settings-tab-advanced" hidden>
+        <details class="growth-disclosure" id="advanced-web-details"><summary>网页搜索与阅读服务</summary><div class="growth-disclosure__body">
+      <section class="band" id="web-panel"><div class="band__head"><div><h2>网页搜索与阅读</h2><p>默认沿用 Kimi 官方服务。Tavily Search 回答问题，Extract 读取已知网址；本机适配器转换为 Kimi 需要的接口，不把模型地址当搜索地址。</p></div></div>
+        <div class="field-row"><label class="field" for="web-provider"><span class="field__label">服务方式</span><select id="web-provider"><option value="official">沿用 Kimi 官方服务</option><option value="tavily">Tavily（本机适配）</option><option value="native">兼容 Kimi 原生接口的自定义服务</option></select></label><label class="field" id="web-key-field" for="web-key" hidden><span class="field__label">Tavily API Key</span><input id="web-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空保留已保存的 Key"><span class="field__hint" id="web-key-state">只写入本应用私有凭据，不进入模型连接或页面状态。</span></label></div>
+        <p class="note" id="web-state" role="status">正在读取当前服务。测试适配器不等于当前 Kimi 会话已重新加载。</p><p class="errors" id="web-errors" hidden></p><div class="action-line"><p class="draft" id="web-draft">—</p><button class="btn btn--outline" id="web-test" type="button">测试搜索与正文读取</button><button class="btn btn--primary" id="web-save" type="button">保存服务方式</button></div>
+      </section>
+      <details class="growth-disclosure" id="native-search-details"><summary>高级：自定义搜索与抓取接口</summary><div id="native-search-settings"><section class="band" id="svc-panel"><div class="band__head"><div><h2>网页搜索与抓取</h2><p>写 Kimi 内核自己的 <code>[services.moonshot_search]</code> 与 <code>[services.moonshot_fetch]</code>。默认不写任何东西，保持官方服务；只有在这里显式填入兼容服务并启用，才会替换对应工具的服务端。</p></div></div><p class="note note--warn" id="svc-unavailable" hidden>当前面板服务没有提供搜索服务接口，此处只显示状态，不能保存。搜索与抓取仍走 Kimi 官方。</p><fieldset class="choices"><label class="choice"><input type="checkbox" id="svc-search-on"><span class="choice__body"><span class="choice__title">接管网页搜索（WebSearch）</span><span class="choice__note">请求内核的搜索工具改用下面的地址，取代账号托管服务。地址必须是完整端点，内核不会追加 <code>/search</code>。</span></span></label></fieldset><div class="field-row"><label class="field" for="svc-search-url"><span class="field__label">搜索端点</span><input id="svc-search-url" type="url" inputmode="url" spellcheck="false" placeholder="https://search.example/v1/search"><span class="field__hint">必须是完整 http(s) 地址；本机可用 http，不能带账号、查询参数或片段。</span></label><label class="field" for="svc-search-key"><span class="field__label">搜索密钥</span><input id="svc-search-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空表示沿用已保存的密钥"><span class="field__hint" id="svc-search-key-hint">该服务需要密钥；内核用它发送 Authorization: Bearer。</span></label></div><fieldset class="choices"><label class="choice"><input type="checkbox" id="svc-fetch-on"><span class="choice__body"><span class="choice__title">接管网页抓取（FetchURL）</span><span class="choice__note">内核抓取改用下面的地址。抓取失败时内核会静默回落到本地 Readability，不会重发第二次网关请求。</span></span></label></fieldset><div class="field-row"><label class="field" for="svc-fetch-url"><span class="field__label">抓取端点</span><input id="svc-fetch-url" type="url" inputmode="url" spellcheck="false" placeholder="https://fetch.example/v1/fetch"><span class="field__hint">与搜索端点相同的地址规则；内核不会追加 <code>/fetch</code>。</span></label><label class="field" for="svc-fetch-key"><span class="field__label">抓取密钥</span><input id="svc-fetch-key" type="password" autocomplete="off" spellcheck="false" placeholder="留空表示沿用已保存的密钥"><span class="field__hint">与搜索可以共用同一个密钥，也可以分别填写。</span></label></div><div class="binding binding--context"><div class="binding__col"><p class="binding__label">搜索</p><p class="binding__value" id="svc-search-saved">…</p><p class="binding__sub" id="svc-search-saved-sub">…</p></div><div class="binding__col"><p class="binding__label">抓取</p><p class="binding__value" id="svc-fetch-saved">…</p><p class="binding__sub" id="svc-fetch-saved-sub">…</p></div></div><p class="verdict" id="svc-verdict"><span class="dot" id="svc-verdict-dot" data-tone="neutral"></span><strong id="svc-verdict-word">读取中</strong><span class="verdict__note" id="svc-verdict-note"></span></p><p class="errors" id="svc-errors" hidden></p><div class="action-line"><p class="draft" id="svc-draft">—</p><button class="btn btn--quiet" id="svc-reset" type="button">还原为已保存值</button><button class="btn btn--primary" id="svc-save" type="button" disabled>保存搜索与抓取</button></div><p class="hint">Kimi 会在启动与部分设置变更时整体重写这份配置；被重写回官方值时这里会如实显示「被 Kimi 重新生成」，本工具默认不再抢写。要让新工具出现在会话里，通常需要重启 Kimi。这里不写入账号 OAuth、不改主模型端点，也不转发任何 Kimi 凭据。</p></section></div></details>
+        </div></details>
+        <details class="growth-disclosure" id="advanced-context-details"><summary>长对话整理（上下文压缩）</summary><div class="growth-disclosure__body">
+      <section class="band" id="context-panel"><div class="band__head"><div><h2>长对话整理</h2><p>沿用 Kimi，或自定义达到上下文窗口的多少时触发整理，以及至少预留多少 token。配置写入不表示当前运行会话已采用，请新建会话或重新加载后使用。</p></div></div><fieldset class="choices"><label class="choice"><input type="radio" name="context-mode" id="context-inherit" value="inherit"><span class="choice__body"><span class="choice__title">沿用 Kimi</span><span class="choice__note">恢复原生默认，撤销本工具管理的长对话设置。</span></span></label><label class="choice"><input type="radio" name="context-mode" id="context-custom" value="custom"><span class="choice__body"><span class="choice__title">自定义长对话整理</span><span class="choice__note">只设置触发比例与预留空间，不提供“立即整理”或固定整理后比例。</span></span></label></fieldset><div class="field-row" id="context-fields"><label class="field" for="context-ratio"><span class="field__label">触发比例（0.50–0.99）</span><input id="context-ratio" type="number" min="0.5" max="0.99" step="0.01" value="0.85"></label><label class="field" for="context-reserved"><span class="field__label">预留 token（非负整数）</span><input id="context-reserved" type="number" min="0" step="1" value="50000"></label></div><p class="note" id="context-state" role="status">正在读取原生配置。</p><p class="errors" id="context-errors" hidden></p><div class="action-line"><p class="draft" id="context-draft">—</p><button class="btn btn--primary" id="context-save" type="button">保存长对话设置</button></div></section>
+        </div></details>
+        <details class="growth-disclosure" id="advanced-kernel-details"><summary>Work 内核能力检测（Swarm / Tower）</summary><div class="growth-disclosure__body"><div id="plus-capabilities-host"></div></div></details>
       <details class="overview-records" id="overview-records">
         <summary><span>诊断与运行记录</span><span>版本自检、配置状态与最近请求</span></summary>
         <div class="overview-records__body">
@@ -415,6 +501,7 @@
           </section>
         </div>
       </details>
+      </div>
     </section>
 
   </main>

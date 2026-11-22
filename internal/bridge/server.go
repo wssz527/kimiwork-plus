@@ -20,6 +20,7 @@ import (
 	"github.com/wssz527/kimiwork-plus/frontend"
 	"github.com/wssz527/kimiwork-plus/internal/appupdate"
 	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/platform"
 	"github.com/wssz527/kimiwork-plus/internal/quota"
 	"github.com/wssz527/kimiwork-plus/internal/webtools"
 )
@@ -41,6 +42,7 @@ type Service struct {
 	Keys        KeyStore
 	Migration   *MigrationCoordinator
 	Updates     *appupdate.Manager
+	OpenURL     func(string) error
 	StateDir    string
 	Endpoint    Endpoint
 	Gateway     http.Handler
@@ -140,7 +142,7 @@ func fail(w http.ResponseWriter, e error) {
 		status = 401
 	case "origin_refused":
 		status = 403
-	case "not_found", "account_not_found":
+	case "not_found", "account_not_found", "release_url_unavailable":
 		status = 404
 	}
 	var quotaError *quota.PanelActionError
@@ -209,8 +211,14 @@ func message(code string) string {
 		return "系统凭据交互状态未能恢复，请重启后台服务后重试。"
 	case "credential_store_failed":
 		return "系统凭据操作未完成，请查看诊断状态；密钥未保存。"
+	case "invalid_subagent_roles":
+		return "角色模型分配无效，请确认所选模型均在候选池中且支持工具调用。"
 	case "updates_unavailable":
 		return "当前进程未启用自动更新管理。"
+	case "release_url_unavailable":
+		return "当前没有可打开的发布页地址，请先检查更新。"
+	case "open_url_failed":
+		return "无法调起系统默认浏览器，请手动访问发布页。"
 	case "update_not_available":
 		return "当前没有可安装的新版本，请先点击「检查更新」。"
 	case "rollback_unavailable":
@@ -371,6 +379,40 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return nil, err
 			}
 			return core.Document{"ok": true, "updates": st}, nil
+		case "/api/updates/open-release":
+			if s.Updates == nil {
+				return nil, errors.New("updates_unavailable")
+			}
+			st := s.Updates.State()
+			rawURL := ""
+			switch avail := st["available"].(type) {
+			case *appupdate.AvailableRelease:
+				if avail != nil {
+					rawURL = avail.ReleaseURL
+				}
+			case core.Document:
+				rawURL = core.String(avail["releaseUrl"])
+			case map[string]any:
+				rawURL = core.String(avail["releaseUrl"])
+			}
+			if rawURL == "" {
+				rawURL = core.String(st["releaseUrl"])
+			}
+			if rawURL == "" {
+				return nil, errors.New("release_url_unavailable")
+			}
+			safeURL, err := platform.ValidateExternalHTTPURL(rawURL)
+			if err != nil {
+				return nil, errors.New("release_url_unavailable")
+			}
+			opener := s.OpenURL
+			if opener == nil {
+				opener = platform.OpenExternalURL
+			}
+			if err := opener(safeURL); err != nil {
+				return nil, errors.New("open_url_failed")
+			}
+			return core.Document{"ok": true, "url": safeURL}, nil
 		case "/api/updates/settings":
 			if s.Updates == nil {
 				return nil, errors.New("updates_unavailable")

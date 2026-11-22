@@ -205,6 +205,77 @@ func TestSubagentStateDoesNotInventAWaitForInherit(t *testing.T) {
 	}
 }
 
+func TestSubagentPolicyUsesDirectModeIntentAliasesAndAppliesImmediately(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	p, err := newIsolatedTestPolicies(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(p.subagents.HomeDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directAliasA := "byok-91f8064f-6f7a-4bb6-b795-29d716493c30/group/deepseek-v4-1-flash"
+	directAliasB := "byok-91f8064f-6f7a-4bb6-b795-29d716493c30/group/glm-5-3-flash"
+	tomlBody := "[models.\"" + directAliasA + "\"]\nprovider = \"byok-91f8064f-6f7a-4bb6-b795-29d716493c30\"\nmodel = \"group/deepseek-v4-1-flash\"\n\n" +
+		"[models.\"" + directAliasB + "\"]\nprovider = \"byok-91f8064f-6f7a-4bb6-b795-29d716493c30\"\nmodel = \"group/glm-5-3-flash\"\n"
+	if err = os.WriteFile(p.subagents.ConfigPath(), []byte(tomlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	intent := map[string]any{
+		"schemaVersion": 1,
+		"sourceID":      "direct",
+		"ownerID":       "test-owner",
+		"kimiHome":      p.home,
+		"aliases": map[string]string{
+			"magpie/kimi-group%2Fdeepseek-v4-1-flash": directAliasA,
+			"magpie/kimi-group%2Fglm-5-3-flash":       directAliasB,
+		},
+		"active": true,
+		"mode":   "direct",
+	}
+	rawIntent, _ := json.Marshal(intent)
+	if err = os.WriteFile(filepath.Join(dir, "native-work-intent.json"), rawIntent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document := core.Document{
+		"integrationMode": "direct",
+		"models": []any{
+			core.Document{"id": "magpie/kimi-group%2Fdeepseek-v4-1-flash", "protocol": "chat", "tools": true},
+			core.Document{"id": "magpie/kimi-group%2Fglm-5-3-flash", "protocol": "chat", "tools": true},
+		},
+		"subagents": core.Document{
+			"mode":  "pool",
+			"model": "magpie/kimi-group%2Fdeepseek-v4-1-flash",
+			"models": []any{
+				core.Document{"id": "magpie/kimi-group%2Fdeepseek-v4-1-flash", "description": "默认子代理；用于 coder 代码编写与修改"},
+				core.Document{"id": "magpie/kimi-group%2Fglm-5-3-flash", "description": "用于 plan 架构规划与方案设计"},
+			},
+			"roles": core.Document{
+				"plan":  "magpie/kimi-group%2Fglm-5-3-flash",
+				"coder": "magpie/kimi-group%2Fdeepseek-v4-1-flash",
+			},
+		},
+	}
+	if err = p.Configure(document); err != nil {
+		t.Fatal(err)
+	}
+	state := subagentStateDocument(t, p, document)
+	if state["policy"].(map[string]any)["state"] != "file-applied" {
+		t.Fatalf("expected file-applied in direct mode, got %#v", state)
+	}
+	if core.Object(state["configured"])["modelAlias"] != directAliasA {
+		t.Fatalf("expected direct alias %q, got %#v", directAliasA, state["configured"])
+	}
+	content, err := os.ReadFile(p.subagents.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "[secondary_model]") || !strings.Contains(text, directAliasA) || !strings.Contains(text, directAliasB) {
+		t.Fatalf("config.toml missing direct mode secondary_model aliases:\n%s", text)
+	}
+}
+
 // subagentStateDocument renders the panel document and reads it back through
 // JSON, which is how the front end sees the nested status records.
 func subagentStateDocument(t *testing.T, p *nativePolicies, document core.Document) map[string]any {

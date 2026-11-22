@@ -24,7 +24,11 @@ func (s *Service) serviceOptions() (platform.ManagerOptions, error) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	return platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID}, nil
+	options := platform.ManagerOptions{Binary: binary, StateDir: s.StateDir, BuildID: BuildID}
+	if runtime.GOOS == "windows" && options.LogPath == "" && options.StateDir != "" {
+		options.LogPath = filepath.Join(options.StateDir, "login-daemon.log")
+	}
+	return options, nil
 }
 
 func (s *Service) serviceManager() (platform.Manager, error) {

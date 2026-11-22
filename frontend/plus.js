@@ -545,6 +545,43 @@
     return tail ? '账号 ' + tail + '（默认名）' : '未命名账号';
   }
 
+  function parseExpiryMs(value) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value < 1e12 ? value * 1000 : value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Date.parse(value.trim());
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    return null;
+  }
+
+  function accountTokenNotice(row, now = Date.now()) {
+    if (!row || typeof row !== 'object') return null;
+    const health = textOf(row.tokenHealth).trim().toLowerCase();
+    if (health === 'healthy' || health === 'unknown') return null;
+    if (health === 'expired') {
+      return { level: 'expired', text: '登录令牌可能已过期，切换失败时请重新登录' };
+    }
+    if (health === 'expiring_soon') {
+      const exp = parseExpiryMs(row.refreshExpiresAt) ?? parseExpiryMs(row.accessExpiresAt) ?? parseExpiryMs(row.cookieExpiresAt);
+      const when = exp ? '（预计 ' + stamp(Math.trunc(exp)) + ' 到期）' : '';
+      return { level: 'expiring_soon', text: '登录令牌临近过期' + when };
+    }
+    if (health) return null;
+    const refreshExp = parseExpiryMs(row.refreshExpiresAt);
+    const expiry = refreshExp ?? parseExpiryMs(row.accessExpiresAt) ?? parseExpiryMs(row.cookieExpiresAt);
+    if (expiry === null) return null;
+    if (expiry <= now) {
+      return { level: 'expired', text: '登录令牌可能已过期，切换失败时请重新登录' };
+    }
+    const soonWindowMs = refreshExp !== null ? 72 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    if (expiry - now <= soonWindowMs) {
+      return { level: 'expiring_soon', text: '登录令牌临近过期（预计 ' + stamp(Math.trunc(expiry)) + ' 到期）' };
+    }
+    return null;
+  }
+
   function renderAccountsBar(data) {
     const slot = $('plus-account-bar');
     if (!slot) return;
@@ -731,6 +768,12 @@
       if (current.lastUsedAt) meta.push('上次使用 ' + stamp(current.lastUsedAt));
       if (book.accounts.length > 1) meta.push('共 ' + book.accounts.length + ' 个已保存账号');
       if (meta.length) wrap.append(node('small', null, meta.join(' · ')));
+      const tokenNotice = accountTokenNotice(current);
+      if (tokenNotice) {
+        const hint = node('small', 'plus-account__health', tokenNotice.text);
+        hint.dataset.health = tokenNotice.level;
+        wrap.append(hint);
+      }
     } else {
       wrap.append(node('strong', 'plus-overview__value', '当前账号未记录'));
       wrap.append(node('small', null, '打开 Work 并登录后，可在设置里保存当前账号。'));
@@ -853,6 +896,12 @@
       main.append(node('small', null, meta.join(' · ')));
       /* needsLogin 只描述这一行：别的账号要登录，不能变成整页的警告。 */
       if (row.needsLogin === true) main.append(node('span', 'plus-tag plus-tag--warn', '需要重新登录'));
+      const tokenNotice = accountTokenNotice(row);
+      if (tokenNotice) {
+        const hint = node('small', 'plus-account__health', tokenNotice.text);
+        hint.dataset.health = tokenNotice.level;
+        main.append(hint);
+      }
       item.append(main);
 
       const actions = node('div', 'plus-account__actions');
@@ -1182,6 +1231,9 @@
   const capabilityReason = {
     work_kernel_unverified: '没有读到 Work 内核文件，无法判断这项能力',
     work_tower_desktop_unavailable: '当前 Work 桌面版没有提供 Tower 入口',
+    work_tower_desktop_unverified: '内核包含 Tower 模块，但尚未确认当前 Work 桌面版是否开放入口',
+    work_tower_kernel_absent: '当前 Work 内核未包含 Tower 模块',
+    work_swarm_kernel_absent: '当前 Work 内核未包含 Swarm 并行模块',
     work_swarm_requires_conversation: 'Swarm 只在具体会话里开启',
     work_swarm_page_unavailable: '读不到当前 Work 页面，无法开关 Swarm',
     work_swarm_conversation_unavailable: '当前没有打开的会话',
@@ -1197,37 +1249,46 @@
 
   function renderCapabilities(data) {
     const slot = $('plus-capabilities-body');
-    if (!slot) return;
+    const swarmSlot = $('plus-swarm-body');
     const caps = data && data.workCapabilities;
-    if (!caps || typeof caps !== 'object') {
-      slot.replaceChildren(node('p', 'hint', '还没有读到 Work 能力信息。'));
-      return;
-    }
-    const wrap = node('div');
-    const head = node('div', 'plus-cap-head');
-    head.append(node('strong', null, capabilityWords[textOf(caps.state)] || textOf(caps.state) || '未确认'));
-    const bits = [];
-    if (caps.kernelVersion) bits.push('内核 ' + caps.kernelVersion);
-    if (caps.kernelCommit) bits.push('提交 ' + String(caps.kernelCommit).slice(0, 7));
-    const force = caps.subagents && caps.subagents.forceKeySupported;
-    /* force 键是内核自己钉住单一默认模型时用的；内核声明不支持该键时，
-       只能写 default_model，不能说成「接受固定子代理模型」。 */
-    if (force === false) bits.push('固定子代理模型：当前内核不接受 force 键，改为只写默认模型');
-    else if (force === true) bits.push('固定子代理模型：当前内核支持');
+    if (slot) {
+      if (!caps || typeof caps !== 'object') {
+        slot.replaceChildren(node('p', 'hint', '还没有读到 Work 能力信息。'));
+      } else {
+        const wrap = node('div');
+        const head = node('div', 'plus-cap-head');
+        head.append(node('strong', null, capabilityWords[textOf(caps.state)] || textOf(caps.state) || '未确认'));
+        const bits = [];
+        if (caps.kernelVersion) bits.push('内核 ' + caps.kernelVersion);
+        if (caps.kernelCommit) bits.push('提交 ' + String(caps.kernelCommit).slice(0, 7));
+        const force = caps.subagents && caps.subagents.forceKeySupported;
+        /* force 键是内核自己钉住单一默认模型时用的；内核声明不支持该键时，
+           只能写 default_model，不能说成「接受固定子代理模型」。 */
+        if (force === false) bits.push('固定子代理模型：当前内核不接受 force 键，改为只写默认模型');
+        else if (force === true) bits.push('固定子代理模型：当前内核支持');
 
-    if (bits.length) head.append(node('small', null, bits.join(' · ')));
-    wrap.append(head);
+        if (bits.length) head.append(node('small', null, bits.join(' · ')));
+        wrap.append(head);
 
-    for (const [key, label] of [['swarm', 'Swarm 并行'], ['tower', 'Tower']]) {
-      const entry = caps[key] && typeof caps[key] === 'object' ? caps[key] : {};
-      const row = node('div', 'plus-cap-row');
-      row.append(node('strong', null, label));
-      row.append(node('small', null, (capabilityWords[textOf(entry.state)] || textOf(entry.state) || '未知')
-        + (entry.reason ? ' · ' + (capabilityReason[entry.reason] || entry.reason) : '')));
-      wrap.append(row);
+        for (const [key, label] of [['swarm', 'Swarm 并行'], ['tower', 'Tower']]) {
+          const entry = caps[key] && typeof caps[key] === 'object' ? caps[key] : {};
+          const row = node('div', 'plus-cap-row');
+          row.append(node('strong', null, label));
+          row.append(node('small', null, (capabilityWords[textOf(entry.state)] || textOf(entry.state) || '未知')
+            + (entry.reason ? ' · ' + (capabilityReason[entry.reason] || entry.reason) : '')));
+          wrap.append(row);
+        }
+        if (!swarmSlot) wrap.append(renderSwarmControls(caps));
+        slot.replaceChildren(wrap);
+      }
     }
-    wrap.append(renderSwarmControls(caps));
-    slot.replaceChildren(wrap);
+    if (swarmSlot) {
+      if (!caps || typeof caps !== 'object') {
+        swarmSlot.replaceChildren(node('p', 'hint', '还没有读到 Work 内核能力信息。'));
+      } else {
+        swarmSlot.replaceChildren(renderSwarmControls(caps));
+      }
+    }
   }
 
   function renderSwarmControls(caps) {
@@ -1432,7 +1493,7 @@
   }
 
   function mountAccountsManagement() {
-    const host = $('view-maintenance');
+    const host = $('plus-accounts-host') || $('settings-pane-accounts') || $('view-maintenance');
     if (!host || $('plus-accounts-panel')) return;
     const section = node('section', 'band plus-accounts-panel');
     section.id = 'plus-accounts-panel';
@@ -1448,8 +1509,22 @@
   }
 
   function mountCapabilities() {
-    const host = $('view-work');
-    if (!host || $('plus-capabilities-panel')) return;
+    const swarmHost = $('plus-swarm-host');
+    if (swarmHost && !$('plus-swarm-panel')) {
+      const swarmSection = node('section', 'band plus-swarm-panel');
+      swarmSection.id = 'plus-swarm-panel';
+      const swarmHead = node('div', 'band__head');
+      swarmHead.append(node('div'));
+      swarmHead.firstChild.append(node('h2', null, '并行子代理（Swarm）'));
+      swarmHead.firstChild.append(node('p', null, '读取当前 Kimi Work 会话并显式开关 Swarm 并行模式。并行子代理与「模型与角色」页共用同一套子代理模型策略。'));
+      swarmSection.append(swarmHead);
+      const swarmBody = node('div');
+      swarmBody.id = 'plus-swarm-body';
+      swarmSection.append(swarmBody);
+      swarmHost.append(swarmSection);
+    }
+    const capHost = $('plus-capabilities-host') || $('view-work');
+    if (!capHost || $('plus-capabilities-panel')) return;
     const section = node('section', 'band plus-cap-panel');
     section.id = 'plus-capabilities-panel';
     const head = node('div', 'band__head');
@@ -1460,7 +1535,11 @@
     const body = node('div');
     body.id = 'plus-capabilities-body';
     section.append(body);
-    host.insertBefore(section, host.firstChild ? host.firstChild.nextSibling : null);
+    if (capHost.id === 'view-work') {
+      capHost.insertBefore(section, capHost.firstChild ? capHost.firstChild.nextSibling : null);
+    } else {
+      capHost.append(section);
+    }
   }
 
   globalThis.KimiWorkPlus = Object.freeze({ mount, loadBudget, loadCode, loadMagpie, loadSwarm });

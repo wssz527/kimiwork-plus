@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,5 +166,46 @@ func TestLegacyLaunchAgentLogPathsAreTheTwoKnownLabels(t *testing.T) {
 		if !want[path] {
 			t.Fatalf("unexpected cleanup target: %s", path)
 		}
+	}
+}
+
+func TestLaunchdEnableClearsDisabledOverrideAndIgnoresFailure(t *testing.T) {
+	host := newFakeHost()
+	manager, options := managerFor(t, "darwin", host)
+	ctx := context.Background()
+	target := "gui/" + options.UID + "/" + ServiceLabel
+
+	state, err := manager.Enable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Enabled {
+		t.Fatalf("Enable reported enabled=false: %+v", state)
+	}
+	foundEnable := false
+	for _, line := range host.commandLines() {
+		if line == "/bin/launchctl enable "+target {
+			foundEnable = true
+		}
+		if strings.Contains(line, "bootout") || strings.Contains(line, "bootstrap") || strings.Contains(line, "kickstart") {
+			t.Fatalf("Enable ran an unexpected lifecycle command: %s", line)
+		}
+	}
+	if !foundEnable {
+		t.Fatalf("Enable did not clear launchd disabled override: %v", host.commandLines())
+	}
+
+	host = newFakeHost()
+	host.failOn["/bin/launchctl"] = errors.New("exit status 113")
+	manager, options = managerFor(t, "darwin", host)
+	state, err = manager.Enable(ctx)
+	if err != nil {
+		t.Fatalf("Enable failed when best-effort launchctl enable errored: %v", err)
+	}
+	if !state.Enabled {
+		t.Fatalf("Enable with failing launchctl enable did not remain enabled: %+v", state)
+	}
+	if !strings.Contains(string(host.files[definitionPathFor("darwin", options.Home)]), "<key>RunAtLoad</key>\n    <true/>") {
+		t.Fatal("RunAtLoad=true plist was not written")
 	}
 }

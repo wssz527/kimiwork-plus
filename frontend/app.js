@@ -1,13 +1,35 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setText, showGate, showToast, state } from './app-core.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { chooseIntegrationMode, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, updateAction } from './app-overview.js';
-import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
+import { chooseIntegrationMode, dismissQuickstartGuide, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 
 let renderGrowth = () => {};
 let usagePanel = { show() {}, reload: async () => {}, reset() {} };
 let plusPanel = { render() {}, refresh: async () => {} };
 
+
+const DEFAULT_SUBTABS = { models: 'catalog', subagents: 'models', maintenance: 'accounts' };
+const VALID_SUBTABS = {
+  models: new Set(['catalog', 'connections']),
+  subagents: new Set(['models', 'swarm']),
+  maintenance: new Set(['accounts', 'connection', 'extensions', 'advanced']),
+};
+
+function initSubtabs() {
+  let stored = null;
+  try {
+    const raw = sessionStorage.getItem(SUBTAB_STORE);
+    stored = raw ? JSON.parse(raw) : null;
+  } catch {
+    stored = null;
+  }
+  for (const [group, fallback] of Object.entries(DEFAULT_SUBTABS)) {
+    const candidate = stored && typeof stored[group] === 'string' ? stored[group] : '';
+    const tab = VALID_SUBTABS[group].has(candidate) ? candidate : fallback;
+    setSubtab(group, tab, { persist: false });
+  }
+}
 
 function initView() {
   let stored = null;
@@ -16,6 +38,7 @@ function initView() {
   } catch {
     stored = null;
   }
+  initSubtabs();
   setView(VIEW_COPY[VIEW_ALIASES[stored] || stored] ? stored : 'overview', { persist: false });
 }
 
@@ -43,7 +66,7 @@ function setView(view, { persist = true } = {}) {
       }
     }
     if (view === 'models') { renderModels(); renderConnection(); }
-    if (view === 'work') renderSubagents();
+    if (view === 'subagents') renderSubagents();
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
     if (state.data) renderUpdates(state.data);
@@ -420,22 +443,58 @@ function bindEvents() {
     const button = $('nav-' + view);
     if (button) button.addEventListener('click', () => setView(view));
   });
+  document.querySelectorAll('[data-subtab-group][data-subtab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      setSubtab(button.dataset.subtabGroup, button.dataset.subtab);
+    });
+  });
 
-  if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => setView('models'));
+  if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => {
+    setView('models');
+    setSubtab('models', 'connections');
+  });
   $('budget-banner-link')?.addEventListener('click', () => {
     setView('usage');
     const tab = $('usage-tab-budget');
     tab?.click();
     tab?.focus();
   });
-  $('overview-details')?.addEventListener('click', () => setView('maintenance'));
+  $('overview-details')?.addEventListener('click', () => {
+    setView('maintenance');
+    setSubtab('maintenance', 'connection');
+  });
   $('compat-details-link')?.addEventListener('click', () => {
     setView('maintenance');
     revealWorkspaceSection('compat-diagnostics-panel');
   });
   dom.overviewOpenModels?.addEventListener('click', () => setView('models'));
+  dom.overviewOpenSubagents?.addEventListener('click', () => setView('subagents'));
   dom.overviewOpenUsage?.addEventListener('click', () => setView('usage'));
   dom.overviewIssueAction?.addEventListener('click', runOverviewIssueAction);
+  dom.quickstartToggle?.addEventListener('click', toggleQuickstartGuide);
+  dom.quickstartDismiss?.addEventListener('click', dismissQuickstartGuide);
+  $('quickstart-step-1-action')?.addEventListener('click', () => {
+    const hasModels = Array.isArray(state.data?.models) && state.data.models.length > 0;
+    if (hasModels) {
+      setView('models');
+      setSubtab('models', 'catalog');
+    } else {
+      openOnboardWizard();
+    }
+  });
+  $('quickstart-step-2-mode')?.addEventListener('click', () => {
+    setView('maintenance');
+    setSubtab('maintenance', 'connection');
+    revealWorkspaceSection('native-panel');
+  });
+  $('quickstart-step-3-action')?.addEventListener('click', () => {
+    setView('subagents');
+    setSubtab('subagents', 'models');
+  });
+  $('settings-reopen-guide')?.addEventListener('click', () => {
+    reopenQuickstartGuide();
+    setView('overview');
+  });
   $('conns-usage')?.addEventListener('click', () => setView('usage'));
   document.querySelectorAll('[data-section]').forEach(button => {
     button.addEventListener('click', () => revealWorkspaceSection(button.dataset.section));
@@ -491,7 +550,11 @@ function bindEvents() {
     });
   }
   const migrationTopLink = $('migration-top-banner-link');
-  if (migrationTopLink) migrationTopLink.addEventListener('click', () => setView('maintenance'));
+  if (migrationTopLink) migrationTopLink.addEventListener('click', () => {
+    setView('maintenance');
+    setSubtab('maintenance', 'connection');
+    revealWorkspaceSection('migration-banner');
+  });
   const openUpdateSection = () => {
     setView('maintenance');
     revealWorkspaceSection('update-panel');
@@ -500,6 +563,19 @@ function bindEvents() {
   if (updTopLink) updTopLink.addEventListener('click', openUpdateSection);
   const overviewUpdGo = $('overview-update-go');
   if (overviewUpdGo) overviewUpdGo.addEventListener('click', openUpdateSection);
+  const updReleaseLink = $('upd-release-link');
+  if (updReleaseLink) updReleaseLink.addEventListener('click', async (event) => {
+    event.preventDefault();
+    if (updReleaseLink.dataset.busy === 'true') return;
+    updReleaseLink.dataset.busy = 'true';
+    try {
+      await request('/api/updates/open-release', { method: 'POST', body: {} });
+    } catch (error) {
+      showToast(error.message || '无法调起系统默认浏览器，请手动访问发布页。', 'error');
+    } finally {
+      delete updReleaseLink.dataset.busy;
+    }
+  });
   const updCheck = $('upd-check');
   if (updCheck) updCheck.addEventListener('click', async () => {
     updCheck.disabled = true;
@@ -587,6 +663,10 @@ function bindEvents() {
   });
   if (dom.saModel) dom.saModel.addEventListener('change', () => pickModel(dom.saModel.value));
   if (dom.saEffort) dom.saEffort.addEventListener('change', () => pickEffort(dom.saEffort.value));
+  if (dom.saRoleDefault) dom.saRoleDefault.addEventListener('change', () => pickRoleDefault(dom.saRoleDefault.value));
+  if (dom.saRolePlan) dom.saRolePlan.addEventListener('change', () => pickRoleModel('plan', dom.saRolePlan.value));
+  if (dom.saRoleCoder) dom.saRoleCoder.addEventListener('change', () => pickRoleModel('coder', dom.saRoleCoder.value));
+  if (dom.saRoleExplore) dom.saRoleExplore.addEventListener('change', () => pickRoleModel('explore', dom.saRoleExplore.value));
   if (dom.saPoolDefault) dom.saPoolDefault.addEventListener('change', () => pickPoolDefault(dom.saPoolDefault.value));
   if (dom.saPoolAdd) dom.saPoolAdd.addEventListener('change', () => {
     const usable = Boolean(state.data && configReady(state.data)) && !isInFlight(state.data.operation);
@@ -1030,6 +1110,7 @@ function adoptLocationKey() {
   state.draftDirty = false;
   state.draftBaseRevision = null;
   state.draftBaseEntity = null;
+  state.subagentModeCache = { force: null, pool: null };
   state.subagentSaving = false;
   state.subagentErrors = [];
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
@@ -1095,7 +1176,7 @@ function boot() {
   mountUsageRequests();
   if (typeof globalThis.KimiWorkPlus?.mount === 'function') {
     plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data),
-      onAccounts: () => { setView('maintenance'); revealWorkspaceSection('plus-accounts-panel'); } });
+      onAccounts: () => { setView('maintenance'); setSubtab('maintenance', 'accounts'); revealWorkspaceSection('plus-accounts-panel'); } });
   }
   /* 会话密钥必须先就绪：停留在「用量」等视图时，挂载就会立刻发出第一笔请求，
      先挂视图再读密钥会让那次请求带着空密钥失败，界面上闪现「缺少面板会话密钥」。 */

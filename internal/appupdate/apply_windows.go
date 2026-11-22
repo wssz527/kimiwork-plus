@@ -226,7 +226,11 @@ func launchInstallation(targetDir, stateDir, launchMode string, logf func(string
 	return nil
 }
 
-func postInstallUpdateMetadata(plan ApplyPlan, health daemonHealth) {
+func installedDaemonBinary(targetDir string) string {
+	return filepath.Join(targetDir, "gateway-daemon.exe")
+}
+
+func postInstallPlatformMetadata(plan ApplyPlan, health daemonHealth) {
 	defer func() {
 		const (
 			shcneAssocChanged = 0x08000000

@@ -499,13 +499,17 @@ func TestDirectModeRowReadyOnlyWhenFullySettled(t *testing.T) {
 }
 
 func TestDirectSupportedRejectsLegacyStore(t *testing.T) {
-	report := kimi.CompatibilityReport{Checks: kimi.CompatibilityChecks{
-		StoreFormat: kimi.StoreFormatCompatCheck{Status: kimi.CheckStatusPass, Format: kimi.StoreFormatProfiles},
-		AccountAPI:  kimi.AccountAPICompatCheck{Status: kimi.CheckStatusPass, ByokSourcesList: true},
-	}}
+	report := kimi.CompatibilityReport{
+		Status: kimi.CompatStatusDegraded,
+		Checks: kimi.CompatibilityChecks{
+			StoreFormat: kimi.StoreFormatCompatCheck{Status: kimi.CheckStatusPass, Format: kimi.StoreFormatProfiles},
+			AccountAPI:  kimi.AccountAPICompatCheck{Status: kimi.CheckStatusPass, ByokSourcesList: true},
+		},
+	}
 	if directSupported(report) {
 		t.Fatal("a legacy profiles store cannot hold a custom source")
 	}
+	report.Status = kimi.CompatStatusVerified
 	report.Checks.StoreFormat = kimi.StoreFormatCompatCheck{Status: kimi.CheckStatusPass, Format: kimi.StoreFormatAccounts}
 	report.Checks.AccountAPI = kimi.AccountAPICompatCheck{Status: kimi.CheckStatusPass, ByokSourcesList: false}
 	if directSupported(report) {
@@ -523,6 +527,32 @@ func TestDirectSupportedRejectsLegacyStore(t *testing.T) {
 	report.Checks.StoreFormat = kimi.StoreFormatCompatCheck{Status: kimi.CheckStatusAbsent, Format: kimi.StoreFormatAbsent}
 	if !directSupported(report) {
 		t.Fatal("a store that does not exist yet blocked direct mode")
+	}
+}
+
+func TestDirectSupportedAllowsInitialAndCheckingReports(t *testing.T) {
+	if !directSupported(kimi.CompatibilityReport{}) {
+		t.Fatal("empty compatibility report reported unsupported")
+	}
+	if !directSupported(initialCompatibilityReport()) {
+		t.Fatal("initial checking report reported unsupported")
+	}
+	// Even if a completed report left AccountAPI.Status empty, do not assume unsupported.
+	completedEmptyAPI := kimi.CompatibilityReport{
+		Status: kimi.CompatStatusVerified,
+		Checks: kimi.CompatibilityChecks{
+			StoreFormat: kimi.StoreFormatCompatCheck{Status: kimi.CheckStatusPass, Format: kimi.StoreFormatAccounts},
+			AccountAPI:  kimi.AccountAPICompatCheck{Status: "", ByokSourcesList: false},
+		},
+	}
+	if !directSupported(completedEmptyAPI) {
+		t.Fatal("empty AccountAPI.Status reported unsupported")
+	}
+	n := newDirectTestNative(t, false)
+	n.compatibility = initialCompatibilityReport()
+	row := n.directModeState(directDocument(nil, nil), core.Document{}, core.Document{})
+	if row["supported"] != true {
+		t.Fatalf("startup directModeState flashed supported=false: %+v", row)
 	}
 }
 

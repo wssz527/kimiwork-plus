@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/updater"
-	"github.com/wailsapp/wails/v3/pkg/updater/providers/endpoint"
 	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
@@ -31,22 +30,26 @@ const (
 )
 
 type Options struct {
-	StateDir       string
-	CurrentVersion string
-	BuildID        string
-	ExecutablePath string
-	TargetPath     string
-	FeedURL        string
-	GitHubRepo     string
-	GitHubAPIBase  string
-	PublicKey      []byte
-	HTTPClient     *http.Client
-	IdleCheck      func() (idle bool, reason string)
-	ValidateStaged func(stagedPath string) error
-	CheckPeriod    time.Duration
-	StartupDelay   time.Duration
-	DisableAutoRun bool
-	LaunchMode     string // "" (desktop app) or "daemon" (headless daemon-only verification)
+	StateDir             string
+	CurrentVersion       string
+	BuildID              string
+	ExecutablePath       string
+	TargetPath           string
+	FeedURL              string
+	MirrorBase           string
+	GitHubRepo           string
+	GitHubAPIBase        string
+	GitHubWebBase        string
+	PublicKey            []byte
+	HTTPClient           *http.Client
+	IdleCheck            func() (idle bool, reason string)
+	ValidateStaged       func(stagedPath string) error
+	CheckPeriod          time.Duration
+	StartupDelay         time.Duration
+	CheckSourceTimeout   time.Duration
+	DownloadStallTimeout time.Duration
+	DisableAutoRun       bool
+	LaunchMode           string // "" (desktop app) or "daemon" (headless daemon-only verification)
 }
 
 type Settings struct {
@@ -64,6 +67,8 @@ type AvailableRelease struct {
 	PublishedAt string `json:"publishedAt,omitempty"`
 	Filename    string `json:"filename,omitempty"`
 	Size        int64  `json:"size,omitempty"`
+	Source      string `json:"source,omitempty"`
+	ReleaseURL  string `json:"releaseUrl,omitempty"`
 }
 
 type DownloadProgress struct {
@@ -107,21 +112,34 @@ type History struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	opts     Options
-	pubKey   []byte
-	settings Settings
+	mu                sync.Mutex
+	opts              Options
+	pubKey            []byte
+	settings          Settings
+	useCustomAPI      bool
+	explicitGitHubWeb bool
 
 	state      string
 	available  *AvailableRelease
 	progress   *DownloadProgress
 	lastErr    *UpdateError
 	idleReason string
+	lastSource string
 
 	wailsUpdater *updater.Updater
 	opCancel     context.CancelFunc
+	stateEpoch   uint64
 	stopCh       chan struct{}
 	stopOnce     sync.Once
+}
+
+func isMirrorDisabledValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "none", "disabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -136,12 +154,48 @@ func NewManager(opts Options) (*Manager, error) {
 			return nil, err
 		}
 	}
+	opts.GitHubRepo = strings.TrimSpace(opts.GitHubRepo)
 	if opts.GitHubRepo == "" {
 		opts.GitHubRepo = DefaultGitHubRepo
 	}
-	if opts.GitHubAPIBase == "" {
-		opts.GitHubAPIBase = DefaultGitHubAPIBase
+
+	rawAPIBase := strings.TrimRight(strings.TrimSpace(opts.GitHubAPIBase), "/")
+	defaultAPIBase := strings.TrimRight(strings.TrimSpace(DefaultGitHubAPIBase), "/")
+	useCustomAPI := rawAPIBase != "" && rawAPIBase != defaultAPIBase
+	if rawAPIBase == "" {
+		opts.GitHubAPIBase = defaultAPIBase
+	} else {
+		opts.GitHubAPIBase = rawAPIBase
 	}
+
+	rawWebBase := strings.TrimRight(strings.TrimSpace(opts.GitHubWebBase), "/")
+	explicitGitHubWeb := rawWebBase != ""
+	if rawWebBase == "" {
+		opts.GitHubWebBase = strings.TrimRight(strings.TrimSpace(DefaultGitHubWebBase), "/")
+	} else {
+		opts.GitHubWebBase = rawWebBase
+	}
+
+	mirrorRaw := strings.TrimSpace(opts.MirrorBase)
+	mirrorExplicit := mirrorRaw != ""
+	if !mirrorExplicit {
+		if envMirror, ok := os.LookupEnv("KIMI_WORK_PLUS_UPDATE_MIRROR_BASE"); ok && strings.TrimSpace(envMirror) != "" {
+			mirrorRaw = strings.TrimSpace(envMirror)
+			mirrorExplicit = true
+		}
+	}
+	if mirrorExplicit {
+		if isMirrorDisabledValue(mirrorRaw) {
+			opts.MirrorBase = ""
+		} else {
+			opts.MirrorBase = strings.TrimRight(mirrorRaw, "/")
+		}
+	} else if !useCustomAPI && opts.GitHubRepo == DefaultGitHubRepo && !isMirrorDisabledValue(DefaultMirrorBase) {
+		opts.MirrorBase = strings.TrimRight(strings.TrimSpace(DefaultMirrorBase), "/")
+	} else {
+		opts.MirrorBase = ""
+	}
+
 	if opts.FeedURL == "" {
 		opts.FeedURL = strings.TrimSpace(os.Getenv("KIMI_WORK_PLUS_UPDATE_FEED_URL"))
 	}
@@ -154,6 +208,12 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.StartupDelay <= 0 {
 		opts.StartupDelay = startupCheckDelay
 	}
+	if opts.CheckSourceTimeout <= 0 {
+		opts.CheckSourceTimeout = defaultCheckSourceTimeout
+	}
+	if opts.DownloadStallTimeout <= 0 {
+		opts.DownloadStallTimeout = defaultDownloadStallTimeout
+	}
 	if opts.ExecutablePath == "" {
 		if exe, err := os.Executable(); err == nil {
 			opts.ExecutablePath = exe
@@ -164,10 +224,12 @@ func NewManager(opts Options) (*Manager, error) {
 	}
 
 	m := &Manager{
-		opts:   opts,
-		pubKey: pub,
-		state:  "idle",
-		stopCh: make(chan struct{}),
+		opts:              opts,
+		pubKey:            pub,
+		useCustomAPI:      useCustomAPI,
+		explicitGitHubWeb: explicitGitHubWeb,
+		state:             "idle",
+		stopCh:            make(chan struct{}),
 	}
 	m.settings = m.loadSettings()
 	if !opts.DisableAutoRun {
@@ -273,14 +335,47 @@ func (m *Manager) UpdateSettings(autoCheck *bool, channel string) (core.Document
 		m.mu.Unlock()
 		return nil, err
 	}
-	if changedChannel && (m.state == "available" || m.state == "up_to_date" || m.state == "error") {
-		m.state = "idle"
-		m.available = nil
-		m.lastErr = nil
-		m.wailsUpdater = nil
+	if changedChannel {
+		m.stateEpoch++
+		if m.state == "checking" || m.state == "available" || m.state == "up_to_date" || m.state == "error" {
+			m.state = "idle"
+			m.available = nil
+			m.lastErr = nil
+			m.lastSource = ""
+			m.wailsUpdater = nil
+		}
 	}
 	m.mu.Unlock()
 	return m.State(), nil
+}
+
+func (m *Manager) setActiveSource(source string) {
+	if source == "" {
+		return
+	}
+	m.mu.Lock()
+	m.lastSource = source
+	m.mu.Unlock()
+}
+
+func availableReleaseFromUpdater(rel *updater.Release) *AvailableRelease {
+	pubAt := ""
+	if !rel.PublishedAt.IsZero() {
+		pubAt = rel.PublishedAt.UTC().Format(time.RFC3339)
+	}
+	source, _ := rel.Metadata[metaUpdateSource].(string)
+	releaseURL, _ := rel.Metadata[metaUpdateReleaseURL].(string)
+	return &AvailableRelease{
+		Version:     rel.Version,
+		Channel:     normalizeChannel(rel.Channel),
+		Name:        rel.Name,
+		Notes:       rel.Notes,
+		PublishedAt: pubAt,
+		Filename:    rel.Artifact.Filename,
+		Size:        rel.Artifact.Size,
+		Source:      source,
+		ReleaseURL:  releaseURL,
+	}
 }
 
 func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
@@ -291,13 +386,21 @@ func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
 	var provider updater.Provider
 	var err error
 	if m.opts.FeedURL != "" {
-		provider, err = endpoint.New(endpoint.Config{
-			URL:        m.opts.FeedURL,
-			Channel:    channel,
-			HTTPClient: client,
-		})
+		provider, err = newFeedEndpointProvider(m.opts.FeedURL, channel, client, m.opts.DownloadStallTimeout, m.setActiveSource)
 	} else {
-		provider, err = newGitHubManifestProvider(m.opts.GitHubRepo, m.opts.GitHubAPIBase, channel, client)
+		provider, err = newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:              m.opts.GitHubRepo,
+			MirrorBase:        m.opts.MirrorBase,
+			GitHubWebBase:     m.opts.GitHubWebBase,
+			GitHubAPIBase:     m.opts.GitHubAPIBase,
+			UseCustomAPI:      m.useCustomAPI,
+			ExplicitGitHubWeb: m.explicitGitHubWeb,
+			Channel:           channel,
+			HTTPClient:        client,
+			CheckTimeout:      m.opts.CheckSourceTimeout,
+			StallTimeout:      m.opts.DownloadStallTimeout,
+			OnSourceActive:    m.setActiveSource,
+		})
 	}
 	if err != nil {
 		return nil, err
@@ -321,26 +424,39 @@ func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
 
 func (m *Manager) CheckNow(ctx context.Context) (core.Document, error) {
 	m.mu.Lock()
-	if m.state == "downloading" || m.state == "verifying" || m.state == "waiting_idle" || m.state == "applying" {
+	if m.state == "checking" || m.state == "downloading" || m.state == "verifying" || m.state == "waiting_idle" || m.state == "applying" {
 		st := m.stateLocked()
 		m.mu.Unlock()
 		return st, nil
 	}
 	channel := m.settings.Channel
+	m.stateEpoch++
+	epoch := m.stateEpoch
 	m.state = "checking"
 	m.lastErr = nil
 	m.mu.Unlock()
 
 	u, err := m.newWailsUpdater(channel)
 	if err != nil {
-		m.setError("check", err)
-		return m.State(), err
+		m.mu.Lock()
+		if m.state == "checking" && m.stateEpoch == epoch {
+			m.state = "error"
+			m.lastErr = classifyUpdateError("check", err)
+		}
+		st := m.stateLocked()
+		m.mu.Unlock()
+		return st, err
 	}
 
 	rel, err := u.Check(ctx)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	m.mu.Lock()
+	if m.state != "checking" || m.stateEpoch != epoch {
+		st := m.stateLocked()
+		m.mu.Unlock()
+		return st, nil
+	}
 	m.settings.LastCheckedAt = now
 	_ = m.saveSettingsLocked()
 	if err != nil {
@@ -357,19 +473,11 @@ func (m *Manager) CheckNow(ctx context.Context) (core.Document, error) {
 		m.lastErr = nil
 	} else {
 		m.state = "available"
-		pubAt := ""
-		if !rel.PublishedAt.IsZero() {
-			pubAt = rel.PublishedAt.UTC().Format(time.RFC3339)
+		avail := availableReleaseFromUpdater(rel)
+		if avail.Source != "" {
+			m.lastSource = avail.Source
 		}
-		m.available = &AvailableRelease{
-			Version:     rel.Version,
-			Channel:     normalizeChannel(rel.Channel),
-			Name:        rel.Name,
-			Notes:       rel.Notes,
-			PublishedAt: pubAt,
-			Filename:    rel.Artifact.Filename,
-			Size:        rel.Artifact.Size,
-		}
+		m.available = avail
 		m.lastErr = nil
 	}
 	st := m.stateLocked()
@@ -395,6 +503,7 @@ func (m *Manager) StartDownloadAndApply() (core.Document, error) {
 	channel := m.settings.Channel
 	targetVersion := m.available.Version
 	opCtx, cancel := context.WithCancel(context.Background())
+	m.stateEpoch++
 	m.opCancel = cancel
 	m.state = "downloading"
 	m.lastErr = nil
@@ -439,8 +548,13 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 		}
 		u = fresh
 		targetVersion = rel.Version
+		avail := availableReleaseFromUpdater(rel)
 		m.mu.Lock()
 		m.wailsUpdater = u
+		m.available = avail
+		if avail.Source != "" {
+			m.lastSource = avail.Source
+		}
 		m.mu.Unlock()
 	}
 
@@ -531,6 +645,7 @@ func (m *Manager) StartRollback() (core.Document, error) {
 		return nil, errors.New("rollback_unavailable")
 	}
 	opCtx, cancel := context.WithCancel(context.Background())
+	m.stateEpoch++
 	m.opCancel = cancel
 	m.state = "waiting_idle"
 	m.lastErr = nil
@@ -666,7 +781,7 @@ func (m *Manager) launchRollbackHelper(meta RollbackMetadata) error {
 		return err
 	}
 	safetyBackup := filepath.Join(stagingRoot, "pre-rollback-backup")
-	if err := copyAny(targetPath, safetyBackup); err != nil {
+	if err := copyInstallationSnapshot(targetPath, safetyBackup); err != nil {
 		_ = os.RemoveAll(stagingRoot)
 		return err
 	}
@@ -757,7 +872,7 @@ func (m *Manager) backupCurrentInstallation(targetPath string) (string, error) {
 	stage := filepath.Join(root, fmt.Sprintf("staging-%d", time.Now().UnixNano()))
 	finalPrev := filepath.Join(root, rollbackPrevName)
 	backupPayload := filepath.Join(stage, filepath.Base(targetPath))
-	if err := copyAny(targetPath, backupPayload); err != nil {
+	if err := copyInstallationSnapshot(targetPath, backupPayload); err != nil {
 		_ = os.RemoveAll(stage)
 		return "", err
 	}
@@ -832,19 +947,44 @@ func (m *Manager) stateLocked() core.Document {
 			"savedAt":   rbMeta.SavedAt,
 		}
 	}
+	preferredSource := "github"
+	if m.opts.FeedURL != "" {
+		preferredSource = "endpoint"
+	} else if m.opts.MirrorBase != "" {
+		preferredSource = "cnb"
+	}
 	source := "github:" + m.opts.GitHubRepo
 	if m.opts.FeedURL != "" {
 		source = "endpoint"
+	} else if m.lastSource == "cnb" || (m.lastSource == "" && m.opts.MirrorBase != "") {
+		source = "cnb:" + m.opts.GitHubRepo
+	}
+	releaseURL := ""
+	if m.available != nil && m.available.ReleaseURL != "" {
+		releaseURL = m.available.ReleaseURL
+	} else if m.opts.FeedURL == "" {
+		if (m.lastSource == "cnb" || (m.lastSource == "" && m.opts.MirrorBase != "")) && m.opts.MirrorBase != "" {
+			releaseURL = m.opts.MirrorBase + "/" + m.opts.GitHubRepo + "/-/releases"
+		} else if m.opts.GitHubWebBase != "" {
+			releaseURL = m.opts.GitHubWebBase + "/" + m.opts.GitHubRepo + "/releases"
+		}
 	}
 	doc := core.Document{
-		"currentVersion": m.opts.CurrentVersion,
-		"buildId":        m.opts.BuildID,
-		"channel":        m.settings.Channel,
-		"autoCheck":      m.settings.AutoCheck,
-		"lastCheckedAt":  m.settings.LastCheckedAt,
-		"state":          m.state,
-		"source":         source,
-		"rollback":       rollbackDoc,
+		"currentVersion":  m.opts.CurrentVersion,
+		"buildId":         m.opts.BuildID,
+		"channel":         m.settings.Channel,
+		"autoCheck":       m.settings.AutoCheck,
+		"lastCheckedAt":   m.settings.LastCheckedAt,
+		"state":           m.state,
+		"source":          source,
+		"preferredSource": preferredSource,
+		"rollback":        rollbackDoc,
+	}
+	if m.lastSource != "" {
+		doc["activeSource"] = m.lastSource
+	}
+	if releaseURL != "" {
+		doc["releaseUrl"] = releaseURL
 	}
 	if m.available != nil {
 		doc["available"] = m.available
@@ -890,7 +1030,7 @@ func classifyUpdateError(stage string, err error) *UpdateError {
 			NextStep: "请重新点击「下载并更新」重试下载。",
 			Detail:   detail,
 		}
-	case stage == "download" || strings.Contains(lower, "eof") || strings.Contains(lower, "timeout") || strings.Contains(lower, "connection"):
+	case stage == "download" || strings.Contains(lower, "eof") || strings.Contains(lower, "timeout") || strings.Contains(lower, "stalled") || strings.Contains(lower, "connection"):
 		return &UpdateError{
 			Stage:    stage,
 			Code:     "update_network_failed",
@@ -919,9 +1059,13 @@ func (h *managerHost) Emit(name string, data ...any) bool {
 	case updater.EventDownloadProgress:
 		if len(data) > 0 {
 			if p, ok := data[0].(updater.Progress); ok {
+				written := p.Written
+				if p.Total > 0 && written > p.Total {
+					written = p.Total
+				}
 				pct := 0
 				if p.Total > 0 {
-					pct = int((p.Written * 100) / p.Total)
+					pct = int((written * 100) / p.Total)
 					if pct > 100 {
 						pct = 100
 					}
@@ -929,7 +1073,7 @@ func (h *managerHost) Emit(name string, data ...any) bool {
 				h.mgr.mu.Lock()
 				h.mgr.state = "downloading"
 				h.mgr.progress = &DownloadProgress{
-					Written: p.Written,
+					Written: written,
 					Total:   p.Total,
 					Percent: pct,
 					Rate:    p.Rate,
@@ -977,6 +1121,52 @@ func resolveInstallTarget(exePath string) string {
 	}
 	// On Windows (or non-bundle dev builds), target is the directory containing both executables.
 	return filepath.Dir(abs)
+}
+
+func copyInstallationSnapshot(src, dst string) error {
+	if runtime.GOOS == "windows" {
+		return copyWindowsInstallationWhitelist(src, dst)
+	}
+	return copyAny(src, dst)
+}
+
+func copyWindowsInstallationWhitelist(srcDir, dstDir string) error {
+	info, err := os.Stat(srcDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("windows installation target is not a directory: %s", srcDir)
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	required := []string{"KimiWorkPlus.exe", "gateway-daemon.exe"}
+	optional := []string{"LICENSE", "THIRD_PARTY_NOTICES.txt"}
+	for _, name := range required {
+		srcFile := filepath.Join(srcDir, name)
+		fi, err := os.Lstat(srcFile)
+		if err != nil {
+			return fmt.Errorf("missing required installation file %s: %w", name, err)
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("installation file %s is not a regular file", name)
+		}
+		if err := copyFileExact(srcFile, filepath.Join(dstDir, name), fi.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	for _, name := range optional {
+		srcFile := filepath.Join(srcDir, name)
+		fi, err := os.Lstat(srcFile)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if err := copyFileExact(srcFile, filepath.Join(dstDir, name), fi.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyAny(src, dst string) error {

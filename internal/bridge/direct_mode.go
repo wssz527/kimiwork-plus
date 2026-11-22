@@ -528,11 +528,14 @@ func (n *Native) directBypassedFeatures(d, search core.Document) []string {
 // unknown answer stays true, because a check that could not run is not evidence
 // of a missing surface.
 func directSupported(report kimi.CompatibilityReport) bool {
+	if report.Status == "" || report.Status == kimi.CompatStatusChecking {
+		return true
+	}
 	if report.Checks.StoreFormat.Format == kimi.StoreFormatProfiles {
 		return false
 	}
 	api := report.Checks.AccountAPI
-	if api.Status == kimi.CheckStatusUnavailable || api.Status == kimi.CheckStatusAbsent {
+	if api.Status == "" || api.Status == kimi.CheckStatusUnavailable || api.Status == kimi.CheckStatusAbsent {
 		return true
 	}
 	return api.ByokSourcesList

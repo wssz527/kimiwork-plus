@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$`)
+	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+%-]{0,127}$`)
 	sourcePattern     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 	errorCodePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	digestPattern     = regexp.MustCompile(`^id_[a-f0-9]{12}$`)

@@ -175,6 +175,9 @@ func (g *budgetGate) spend(now time.Time, location *time.Location, source string
 		return day, month
 	}
 	for _, record := range g.ledger.Records() {
+		if record.Source == workUsageSource {
+			continue
+		}
 		at := parseLedgerInstant(record.At)
 		if at < monthStart {
 			continue

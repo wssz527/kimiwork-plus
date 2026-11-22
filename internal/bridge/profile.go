@@ -23,6 +23,9 @@ func (n *Native) syncWorkHome() (err error) {
 	if err != nil || !changed {
 		return err
 	}
+	if n.workUsage != nil {
+		n.workUsage.SetHome(home)
+	}
 	d, _, err := n.service.Store.Read()
 	if err != nil {
 		return err

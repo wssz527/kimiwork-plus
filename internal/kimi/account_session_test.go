@@ -2,8 +2,10 @@ package kimi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1370,4 +1372,153 @@ func TestActivateAccountWritesCredentialsOnlyOnTheWebSurface(t *testing.T) {
 	if harness.page.callsFor("identity:work") == 0 {
 		t.Fatal("the official identity read never reached the shell page")
 	}
+}
+
+func makeTestJWT(expUnix int64, extra string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	body := fmt.Sprintf(`{"sub":"user-secret-sub","exp":%d%s}`, expUnix, extra)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(body))
+	return header + "." + payload + ".signature-secret-tail"
+}
+
+func TestInspectCredentialLifetime(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+
+	t.Run("healthy refresh dominates expired access and omits secrets", func(t *testing.T) {
+		accessExp := now.Add(-1 * time.Hour)
+		refreshExp := now.Add(100 * time.Hour)
+		cookieExp := now.Add(240 * time.Hour)
+		accessJWT := makeTestJWT(accessExp.Unix(), "")
+		refreshJWT := makeTestJWT(refreshExp.Unix(), "")
+		session := AccountSession{
+			UserID: "user-1",
+			LocalStorage: []AccountStorageEntry{
+				{Key: "access_token", Value: accessJWT},
+				{Key: "refresh_token", Value: refreshJWT},
+			},
+			Cookies: []AccountCookie{
+				{Name: "kimi_session", Value: "cookie-secret-val", Domain: ".kimi.com", Path: "/", Expires: float64(cookieExp.Unix())},
+				{Name: "kimi_session_temp", Value: "temp-val", Domain: ".kimi.com", Path: "/", Expires: -1},
+				{Name: "csrf_token", Value: "csrf-val", Domain: ".kimi.com", Path: "/", Expires: float64(now.Add(1000 * time.Hour).Unix())},
+			},
+		}
+		got := InspectCredentialLifetime(session, now)
+		if got.AccessExpiresAt != accessExp.Format(time.RFC3339) {
+			t.Fatalf("AccessExpiresAt = %q, want %q", got.AccessExpiresAt, accessExp.Format(time.RFC3339))
+		}
+		if got.RefreshExpiresAt != refreshExp.Format(time.RFC3339) {
+			t.Fatalf("RefreshExpiresAt = %q, want %q", got.RefreshExpiresAt, refreshExp.Format(time.RFC3339))
+		}
+		if got.CookieExpiresAt != cookieExp.Format(time.RFC3339) {
+			t.Fatalf("CookieExpiresAt = %q, want %q", got.CookieExpiresAt, cookieExp.Format(time.RFC3339))
+		}
+		if got.TokenHealth != TokenHealthHealthy {
+			t.Fatalf("TokenHealth = %q, want %q", got.TokenHealth, TokenHealthHealthy)
+		}
+		encoded, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{accessJWT, refreshJWT, "signature-secret-tail", "user-secret-sub", "cookie-secret-val"} {
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("lifetime JSON leaked secret %q: %s", secret, string(encoded))
+			}
+		}
+	})
+
+	t.Run("refresh expiring within 72h", func(t *testing.T) {
+		session := AccountSession{
+			LocalStorage: []AccountStorageEntry{
+				{Key: "access_token", Value: makeTestJWT(now.Add(200*time.Hour).Unix(), "")},
+				{Key: "refresh_token", Value: makeTestJWT(now.Add(48*time.Hour).Unix(), "")},
+			},
+		}
+		got := InspectCredentialLifetime(session, now)
+		if got.TokenHealth != TokenHealthExpiringSoon {
+			t.Fatalf("TokenHealth = %q, want %q", got.TokenHealth, TokenHealthExpiringSoon)
+		}
+	})
+
+	t.Run("expired refresh overrides valid access", func(t *testing.T) {
+		session := AccountSession{
+			LocalStorage: []AccountStorageEntry{
+				{Key: "access_token", Value: makeTestJWT(now.Add(48*time.Hour).Unix(), "")},
+				{Key: "refresh_token", Value: makeTestJWT(now.Add(-5*time.Minute).Unix(), "")},
+			},
+		}
+		got := InspectCredentialLifetime(session, now)
+		if got.TokenHealth != TokenHealthExpired {
+			t.Fatalf("TokenHealth = %q, want %q", got.TokenHealth, TokenHealthExpired)
+		}
+	})
+
+	t.Run("access only thresholds", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			offset time.Duration
+			want   string
+		}{
+			{"healthy", 48 * time.Hour, TokenHealthHealthy},
+			{"expiring_soon", 12 * time.Hour, TokenHealthExpiringSoon},
+			{"expired", -1 * time.Second, TokenHealthExpired},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				session := AccountSession{
+					LocalStorage: []AccountStorageEntry{
+						{Key: "access_token", Value: makeTestJWT(now.Add(tc.offset).Unix(), "")},
+						{Key: "refresh_token", Value: "opaque-non-jwt-refresh"},
+					},
+				}
+				got := InspectCredentialLifetime(session, now)
+				if got.RefreshExpiresAt != "" {
+					t.Fatalf("opaque refresh produced expiry: %+v", got)
+				}
+				if got.TokenHealth != tc.want {
+					t.Fatalf("TokenHealth = %q, want %q", got.TokenHealth, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("opaque tokens and session cookies only are unknown", func(t *testing.T) {
+		session := AccountSession{
+			LocalStorage: []AccountStorageEntry{
+				{Key: "access_token", Value: "opaque-access"},
+				{Key: "refresh_token", Value: "opaque-refresh"},
+			},
+			Cookies: []AccountCookie{
+				{Name: "kimi_session", Value: "v", Domain: ".kimi.com", Path: "/", Expires: 0},
+				{Name: "kimi_auth", Value: "v", Domain: ".kimi.com", Path: "/", Expires: -1},
+			},
+		}
+		got := InspectCredentialLifetime(session, now)
+		if got.AccessExpiresAt != "" || got.RefreshExpiresAt != "" || got.CookieExpiresAt != "" || got.TokenHealth != TokenHealthUnknown {
+			t.Fatalf("unexpected opaque lifetime: %+v", got)
+		}
+	})
+
+	t.Run("cookie only health transitions", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			offset time.Duration
+			want   string
+		}{
+			{"healthy", 72 * time.Hour, TokenHealthHealthy},
+			{"expiring_soon", 6 * time.Hour, TokenHealthExpiringSoon},
+			{"expired", -1 * time.Minute, TokenHealthExpired},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				session := AccountSession{
+					Cookies: []AccountCookie{
+						{Name: "kimi_auth", Value: "v", Domain: ".kimi.com", Path: "/", Expires: float64(now.Add(tc.offset).Unix())},
+					},
+				}
+				got := InspectCredentialLifetime(session, now)
+				if got.TokenHealth != tc.want {
+					t.Fatalf("TokenHealth = %q, want %q", got.TokenHealth, tc.want)
+				}
+			})
+		}
+	})
 }

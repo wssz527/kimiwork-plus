@@ -1,4 +1,4 @@
-import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, renderErrorList, request, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, syncState } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
@@ -1324,6 +1324,7 @@ function mountedSavedModels(data, connection) {
 
 function openOnboardWizard() {
   setView('models');
+  setSubtab('models', 'connections');
   if (state.editor && editorDirty()) {
     showToast('请先保存或取消正在编辑的模型，再打开添加向导。', 'error');
     return;
@@ -1332,7 +1333,7 @@ function openOnboardWizard() {
   if (dom.onboardDisclosure) {
     dom.onboardDisclosure.open = true;
     dom.onboardDisclosure.dataset.initialized = 'true';
-    dom.onboardDisclosure.scrollIntoView({ block: 'start' });
+    scrollMainToElement(dom.onboardDisclosure);
   }
   dom.onboardPreset?.focus({ preventScroll: true });
 }
@@ -1659,6 +1660,11 @@ function credentialApplyReason(data) {
   return typeof reason === 'string' ? reason : '';
 }
 
+function isManagedBackend(service) {
+  if (!service || typeof service !== 'object') return false;
+  return service.mode === 'service' || (service.mode === 'release' && service.state === 'running');
+}
+
 /* 是否需要应用，不能只看连接对象是否相同：只换 Key、地址不变时，
    connections.restartRequired 仍是判断“尚未生效”的唯一权威；对象比较会漏掉
    这种情况并把旧进程说成已经应用。服务端没有给出该标志时，退回对象比较。 */
@@ -1668,13 +1674,11 @@ function applyAvailability(data) {
     ? connections.restartRequired : null;
   if (explicit === false) return 'idle';
   if (explicit === true) {
-    const service = data && data.service;
-    if (!service || service.mode !== 'service') return 'unsupported';
+    if (!isManagedBackend(data && data.service)) return 'unsupported';
     return 'pending';
   }
   if (!connectionsChanged(data)) return 'idle';
-  const service = data && data.service;
-  if (!service || service.mode !== 'service') return 'unsupported';
+  if (!isManagedBackend(data && data.service)) return 'unsupported';
   return 'pending';
 }
 
@@ -1736,8 +1740,7 @@ function applyState(data) {
 }
 
 function renderApply(data) {
-  const service = data && data.service;
-  const running = service && service.mode === 'service';
+  const running = isManagedBackend(data && data.service);
   const stateInfo = applyState(data);
   /* 待授权、已取消、被拒绝、钥匙串锁定都要保留同一个重授权入口：
      这些状态共用一条恢复路径，不能因为措辞不同就把按钮藏起来。 */
@@ -1745,8 +1748,8 @@ function renderApply(data) {
   if (dom.restartHead) {
     setText(dom.restartHead, credentialPrompt
       ? '由当前窗口向系统申请读取已保存的连接凭据，后台不会自动弹出授权。'
-      : running ? '本面板由后台服务运行；保存连接后在这里应用，不需要终端命令。'
-        : '本面板不是由受管后台服务运行；连接保存后需要由受管服务应用。');
+      : running ? '本面板已连接本机后台服务；保存连接后会自动或按需应用，不需要终端命令。'
+        : '本面板当前未连接运行中的后台服务；连接保存后需要由后台服务应用。');
   }
   if (dom.applyVerdict) {
     setDot(dom.applyVerdictDot, stateInfo.tone);

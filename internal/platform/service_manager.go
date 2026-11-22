@@ -319,11 +319,11 @@ func (m *serviceManager) plan(action string) ([]step, error) {
 // elevation. RunAtLoad is the login-start switch: false for Register and
 // Disable, true only for Enable.
 //
-// Enable and Disable only rewrite the definition. launchd reads it at login (and
-// at bootstrap), so rewriting is enough to change what happens at the next login
-// while leaving the daemon that is serving right now untouched. A reload
-// (bootout + bootstrap) is a separate, destructive action and is never part of a
-// preference change.
+// Enable rewrites the definition with RunAtLoad=true and runs a best-effort
+// `launchctl enable` to clear any prior disabled override from Login Items,
+// while leaving any running daemon untouched. Disable rewrites the definition
+// with RunAtLoad=false. A reload (bootout + bootstrap) is a separate,
+// destructive action and is never part of a preference change.
 func launchdPlan(action string, options ServiceOptions, definition, uid string) ([]step, error) {
 	target := "gui/" + uid + "/" + ServiceLabel
 	domain := "gui/" + uid
@@ -338,7 +338,10 @@ func launchdPlan(action string, options ServiceOptions, definition, uid string) 
 	case actionRegister:
 		return write(false), nil
 	case actionEnable:
-		return write(true), nil
+		return append(write(true), step{
+			Command:       &commandStep{Name: "/bin/launchctl", Args: []string{"enable", target}},
+			IgnoreFailure: true,
+		}), nil
 	case actionDisable:
 		return write(false), nil
 	case actionStart:
@@ -416,8 +419,8 @@ func windowsPlan(action string, options ServiceOptions, definition, stateDir str
 		return []step{{WriteFile: &fileStep{Path: definition, Content: description.Content, Mode: 0o600}}}
 	}
 	startArgs := append([]string{"--start-background"}, serviceArguments(options)...)
-	if options.LogPath != "" {
-		startArgs = append(startArgs, "--log-path", options.LogPath)
+	if logPath := windowsLogPath(options); logPath != "" {
+		startArgs = append(startArgs, "--log-path", logPath)
 	}
 	terminateArgs := []string{"--terminate-daemon"}
 	if stateDir != "" {
@@ -868,12 +871,17 @@ func (m *serviceManager) writeRecord(loginStart bool) {
 	if path == "" {
 		return
 	}
+	serviceOpts := m.serviceOptions()
+	logPath := m.options.LogPath
+	if m.goos == "windows" {
+		logPath = windowsLogPath(serviceOpts)
+	}
 	record := definitionRecord{BuildID: m.options.BuildID, Binary: m.options.Binary,
-		StateDir: m.options.StateDir, Port: m.options.Port, LogPath: m.options.LogPath,
+		StateDir: m.options.StateDir, Port: m.options.Port, LogPath: logPath,
 		LoginStart: loginStart}
 	if m.goos == "windows" {
 		record.Label = ServiceLabel
-		record.CommandLine = windowsCommandLine(m.serviceOptions())
+		record.CommandLine = windowsCommandLine(serviceOpts)
 	}
 	encoded, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {

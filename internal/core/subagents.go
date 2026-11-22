@@ -76,6 +76,39 @@ func NormalizeSubagents(value any, models []any) (Document, error) {
 		if _, exists := in["effort"]; exists {
 			return nil, errors.New("invalid_subagent_effort")
 		}
+		if rawRoles, exists := in["roles"]; exists && rawRoles != nil {
+			roleMap := Object(rawRoles)
+			if roleMap == nil {
+				return nil, errors.New("invalid_subagent_roles")
+			}
+			roles := Document{}
+			for roleKey, rawID := range roleMap {
+				if roleKey != "plan" && roleKey != "coder" && roleKey != "explore" {
+					return nil, errors.New("invalid_subagent_roles")
+				}
+				if rawID == nil {
+					continue
+				}
+				roleModelID, ok := rawID.(string)
+				if !ok {
+					return nil, errors.New("invalid_subagent_roles")
+				}
+				roleModelID = strings.TrimSpace(roleModelID)
+				if roleModelID == "" {
+					continue
+				}
+				if _, _, err := resolve(roleModelID); err != nil {
+					return nil, err
+				}
+				if !seen[roleModelID] {
+					return nil, errors.New("invalid_subagent_roles")
+				}
+				roles[roleKey] = roleModelID
+			}
+			if len(roles) > 0 {
+				out["roles"] = roles
+			}
+		}
 		out["models"] = pool
 		return out, nil
 	}

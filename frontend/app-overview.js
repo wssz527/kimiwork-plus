@@ -1,5 +1,5 @@
 import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, INTEGRATION_MODES, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
 import { handleSaveFailure, loadState, runAction, setView } from './app.js';
 
@@ -21,7 +21,7 @@ function renderShell(data) {
   if (config.state === 'changed') {
     setText(dom.restartBannerText, '连接配置已修改，当前网关仍在使用启动时的设置。请到「模型」页点「应用已保存的连接」，由后台服务在安全时应用；页面会如实显示是否生效。');
   } else if (credentialNotice) {
-    setText(dom.restartBannerText, '部分已保存的连接暂时无法读取系统钥匙串。请到「模型」页查看原因并重新授权。');
+    setText(dom.restartBannerText, '部分已保存的连接凭据暂时无法读取。请到「模型」页查看原因并重新授权。');
   }
   setText(dom.navModelCount, fmtCount((data.models || []).length));
   /* 直连模式下预算保护不参与请求，再显示「已达预算」只会让用户以为被拦住了。 */
@@ -284,6 +284,10 @@ function directModeState(data) {
   if (savedIntegrationMode(data) !== 'direct') return null;
   const info = data?.integration || {};
   const direct = directModeOf(data);
+  if (data?.compatibility?.status === 'checking' && direct?.supported !== true) {
+    return { code: 'checking', tone: 'neutral', word: '正在检查官方 Kimi 兼容性…',
+      note: '正在读取官方 Kimi 版本与直连支持，稍候自动刷新。' };
+  }
   /* 官方版本不支持直连时，任何「待写入」都是误导：再同步也不会成功。 */
   if (direct?.supported === false) {
     return { code: 'unsupported', tone: 'bad', word: '当前官方 Kimi 不支持直连',
@@ -341,6 +345,9 @@ function nativeConnectionText(data) {
   /* 直连模式下官方 Kimi 不经过网关，所以网关侧的 DNS/桥接文案都不成立。 */
   if (savedIntegrationMode(data) === 'direct') {
     const direct = directModeOf(data);
+    if (data?.compatibility?.status === 'checking' && direct?.supported !== true) {
+      return '正在检查官方 Kimi 兼容性，稍候自动刷新。';
+    }
     if (direct?.supported === false) {
       return '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。';
     }
@@ -496,9 +503,128 @@ function renderOverview(data) {
   renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
   renderRoutingFacts(data);
   renderCompatibility(data);
+  renderOverviewSubagents(data);
   renderOverviewIssue(data);
   renderOverviewToday();
+  renderQuickstartGuide(data);
   void refreshOverviewToday();
+}
+
+function renderOverviewSubagents(data) {
+  const configured = data?.subagents?.configured || {};
+  const policy = data?.subagents?.policy || {};
+  const runtime = data?.subagents?.runtime || {};
+  const mode = configured.mode === 'force' || configured.mode === 'pool' ? configured.mode : 'inherit';
+  const runtimeState = typeof runtime.state === 'string' ? runtime.state : '';
+
+  let tone = 'ok';
+  if (runtimeState === 'conflict' || policy.mode === 'blocked') tone = 'bad';
+  else if (mode !== 'inherit' && runtimeState !== 'file-applied' && runtimeState !== 'loaded') tone = 'warn';
+  setDot(dom.overviewSubagentsDot, tone);
+
+  if (mode === 'inherit') {
+    setText(dom.overviewSubagentsValue, POLICY_MODE_WORD.inherit || '继承主模型');
+    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可前往子代理页按角色分配模型。');
+    return;
+  }
+  if (mode === 'force') {
+    const model = configured.model ? displayModelId(configured.model) : '已指定';
+    setText(dom.overviewSubagentsValue, '固定 · ' + model);
+    setText(dom.overviewSubagentsNote, runtimeState === 'file-applied' || runtimeState === 'loaded'
+      ? '已写入 Kimi Work config.toml，新建会话生效。'
+      : '目标已保存，待确认写入 Kimi Work 配置。');
+    return;
+  }
+  const poolCount = Array.isArray(configured.models) ? configured.models.length : 0;
+  setText(dom.overviewSubagentsValue, '按角色 / 模型池（' + fmtCount(poolCount) + ' 个）');
+  const roles = configured.roles && typeof configured.roles === 'object' ? configured.roles : {};
+  const assigned = ['plan', 'coder', 'explore'].filter((key) => typeof roles[key] === 'string' && roles[key].trim());
+  const parts = [];
+  if (configured.model) parts.push('默认 ' + displayModelId(configured.model));
+  if (assigned.length) parts.push('角色 ' + assigned.join('/'));
+  parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已写入 config.toml' : '待写入配置');
+  setText(dom.overviewSubagentsNote, parts.join(' · '));
+}
+
+function isQuickstartDismissed() {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(GUIDE_DISMISSED_STORE) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function dismissQuickstartGuide() {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(GUIDE_DISMISSED_STORE, '1');
+  } catch {
+    /* 忽略 */
+  }
+  if (state.data) renderQuickstartGuide(state.data);
+  else setHidden(dom.quickstartGuide, true);
+}
+
+function reopenQuickstartGuide() {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(GUIDE_DISMISSED_STORE);
+  } catch {
+    /* 忽略 */
+  }
+  state.guideCollapsed = false;
+  if (state.data) renderQuickstartGuide(state.data);
+  else setHidden(dom.quickstartGuide, false);
+}
+
+function toggleQuickstartGuide() {
+  const current = dom.quickstartGuide?.dataset?.collapsed === 'true';
+  state.guideCollapsed = !current;
+  if (state.data) renderQuickstartGuide(state.data);
+}
+
+function evaluateQuickstartSteps(data) {
+  const models = Array.isArray(data?.models) ? data.models : [];
+  const verdict = syncState(data);
+  const subMode = data?.subagents?.configured?.mode || 'inherit';
+  const todayReqs = Number(state.overviewToday?.requests);
+  const metricReqs = Number(data?.metrics?.requests);
+  const step1 = models.length > 0;
+  const step2 = verdict.code === 'synced' || verdict.code === 'ready';
+  const step3 = subMode === 'force' || subMode === 'pool';
+  const step4 = data?.kimiProcess?.running === true
+    || (Number.isFinite(todayReqs) && todayReqs > 0)
+    || (Number.isFinite(metricReqs) && metricReqs > 0);
+  return [
+    { id: 1, done: step1, doneText: '已完成', pendingText: '待完成' },
+    { id: 2, done: step2, doneText: '已同步', pendingText: '待完成' },
+    { id: 3, done: step3, doneText: '已配置', pendingText: '可选' },
+    { id: 4, done: step4, doneText: '已就绪', pendingText: '待完成' },
+  ];
+}
+
+function renderQuickstartGuide(data) {
+  const root = dom.quickstartGuide;
+  if (!root) return;
+  if (isQuickstartDismissed()) {
+    setHidden(root, true);
+    return;
+  }
+  setHidden(root, false);
+  const steps = evaluateQuickstartSteps(data);
+  const doneCount = steps.filter((step) => step.done).length;
+  setText(dom.quickstartProgress, doneCount + ' / ' + steps.length);
+  for (const step of steps) {
+    const item = $('quickstart-step-' + step.id);
+    if (item) item.dataset.done = String(step.done);
+    setDot($('quickstart-step-' + step.id + '-dot'), step.done ? 'ok' : 'neutral');
+    setText($('quickstart-step-' + step.id + '-tag'), step.done ? step.doneText : step.pendingText);
+  }
+  const autoCollapse = steps[0].done && steps[1].done && steps[3].done;
+  const collapsed = state.guideCollapsed === null ? autoCollapse : Boolean(state.guideCollapsed);
+  root.dataset.collapsed = String(collapsed);
+  if (dom.quickstartToggle) {
+    dom.quickstartToggle.setAttribute('aria-expanded', String(!collapsed));
+    setText(dom.quickstartToggle, collapsed ? '展开引导' : '收起');
+  }
 }
 
 function compatToneOf(compat) {
@@ -633,6 +759,7 @@ function renderOverviewToday() {
   const tokensText = typeof today.totalTokens === 'number' && Number.isFinite(today.totalTokens)
     ? fmtTokens(today.totalTokens) : '未提供';
   setText(dom.overviewTodayTokens, '今日 Token：' + tokensText);
+  if (state.data) renderQuickstartGuide(state.data);
 }
 
 async function refreshOverviewToday({ force = false } = {}) {
@@ -682,7 +809,7 @@ function computeOverviewIssue(data) {
       title: '本机网关未运行',
       note: '模型请求当前无法发出，可在设置页重启后台服务。',
       actionLabel: '前往设置',
-      action: { type: 'view', view: 'maintenance' },
+      action: { type: 'section', view: 'maintenance', section: 'update-panel' },
     };
   }
   const compat = data && data.compatibility;
@@ -728,6 +855,15 @@ function computeOverviewIssue(data) {
     };
   }
   const verdict = syncState(data);
+  if (verdict.code === 'checking') {
+    return {
+      tone: 'neutral',
+      title: verdict.word,
+      note: verdict.note,
+      actionLabel: '',
+      action: null,
+    };
+  }
   if (verdict.code === 'empty') {
     return {
       tone: 'neutral',
@@ -754,7 +890,7 @@ function computeOverviewIssue(data) {
       title: verdict.word,
       note: verdict.note,
       actionLabel: '接入与恢复',
-      action: { type: 'view', view: 'maintenance' },
+      action: { type: 'section', view: 'maintenance', section: 'native-panel' },
     };
   }
   const recent = Array.isArray(data?.metrics?.recent) ? data.metrics.recent : [];
@@ -1121,6 +1257,8 @@ function renderIntegrationMode(data) {
 
   const direct = directModeOf(data);
   const directSaved = saved === 'direct';
+  const directChecking = data?.compatibility?.status === 'checking' && direct?.supported !== true;
+  const directUnsupported = !directChecking && direct?.supported === false;
   const cleanupPending = directRouteCleanupPending(data);
   /* 回执要求重启时优先于清理提示；从直连切回网关后同样成立。 */
   const restartRequired = directSaved ? directRestartRequired(data) : nativeRestartReceipt(data);
@@ -1129,11 +1267,11 @@ function renderIntegrationMode(data) {
     || cleanupPending;
   if (dom.integrationModeState) {
     /* 网关模式没有直连那张说明卡，重启回执与收尾标记要在这里明说。 */
-    const showState = pendingSync || (directSaved && direct?.supported === false) || (!directSaved && restartRequired);
+    const showState = pendingSync || (directSaved && directUnsupported) || (!directSaved && restartRequired);
     setHidden(dom.integrationModeState, !showState);
     dom.integrationModeState.classList.toggle('note--warn', showState);
     setText(dom.integrationModeState, !showState ? ''
-      : direct?.supported === false && directSaved
+      : directUnsupported && directSaved
         ? '模式已更改，尚未同步到 Kimi Work：当前官方 Kimi 版本不支持原生直连，请改用本机网关模式。'
         : restartRequired
           ? directSaved
@@ -1167,16 +1305,18 @@ function renderIntegrationMode(data) {
   if (!notice) return;
   setHidden(notice, !directSaved);
   if (!directSaved) return;
-  notice.dataset.tone = direct?.supported === false || restartRequired || directRouteCleanupPending(data) ? 'warn' : 'neutral';
-  setText(dom.directModeSupport, direct?.supported === false
-    ? '当前官方 Kimi 版本不支持原生直连：需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。'
-    : restartRequired
-      ? '直连配置已写入，正常重启 Kimi 后完成应用。'
-      : directRouteCleanupPending(data)
-        ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
-        : directImportComplete(data)
-          ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
-          : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
+  notice.dataset.tone = directUnsupported || restartRequired || directRouteCleanupPending(data) ? 'warn' : 'neutral';
+  setText(dom.directModeSupport, directChecking
+    ? '正在检查官方 Kimi 兼容性，稍候自动刷新。'
+    : directUnsupported
+      ? '当前官方 Kimi 版本不支持原生直连：需要 3.2.28+ 的 byokSources v3 存储。请更新官方 Kimi，或改用本机网关模式。'
+      : restartRequired
+        ? '直连配置已写入，正常重启 Kimi 后完成应用。'
+        : directRouteCleanupPending(data)
+          ? '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成。'
+          : directImportComplete(data)
+            ? '当前官方 Kimi 版本支持原生直连，直连模型已写入。'
+            : '当前官方 Kimi 版本支持原生直连；点「写入直连配置并同步」完成写入。');
   setText(dom.directModeHosts, restartRequired
     ? '请先正常退出并重启 Kimi；重启完成前无需重复同步，也请保留后台服务。'
     : directRouteCleanupPending(data)
@@ -1255,6 +1395,41 @@ function fmtBytes(bytes) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function normalizeUpdateSourceKind(value) {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!raw) return '';
+  if (raw === 'cnb' || raw.startsWith('cnb:')) return 'cnb';
+  if (raw === 'github' || raw.startsWith('github:')) return 'github';
+  if (raw === 'endpoint' || raw.startsWith('http://') || raw.startsWith('https://')) return 'endpoint';
+  return '';
+}
+
+function updateSourceLabel(updates) {
+  const preferred = normalizeUpdateSourceKind(updates?.preferredSource)
+    || normalizeUpdateSourceKind(updates?.source);
+  const active = normalizeUpdateSourceKind(updates?.activeSource)
+    || normalizeUpdateSourceKind(updates?.available?.source);
+  if (active === 'cnb') return '国内镜像（CNB）';
+  if (active === 'github') return preferred === 'github' ? 'GitHub' : 'GitHub（备用源）';
+  if (active === 'endpoint') return '自定义更新源';
+  if (preferred === 'cnb') return '优先国内镜像（CNB），失败自动回退 GitHub';
+  if (preferred === 'github') return 'GitHub';
+  if (preferred === 'endpoint') return '自定义更新源';
+  return '';
+}
+
+function safeHttpUrl(value) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : '';
+  } catch {
+    return '';
+  }
 }
 
 function updateStateSummary(updates) {
@@ -1345,6 +1520,12 @@ function renderUpdates(data) {
   setDot($('upd-state-dot'), summary.tone);
   setText($('upd-state-word'), summary.word);
   setText($('upd-last-check'), updates.lastCheckedAt ? '上次检查 · ' + fmtTime(updates.lastCheckedAt) : '尚未检查');
+  const sourceEl = $('upd-source');
+  if (sourceEl) {
+    const sourceLabel = updateSourceLabel(updates);
+    sourceEl.hidden = !sourceLabel;
+    setText(sourceEl, sourceLabel ? '更新源 · ' + sourceLabel : '');
+  }
 
   const channelSel = $('upd-channel');
   if (channelSel && document.activeElement !== channelSel) {
@@ -1484,6 +1665,16 @@ function renderUpdates(data) {
       ? `回退到上一版本（${updates.rollback.version}）`
       : '回退到上一版本';
   }
+  const releaseLink = $('upd-release-link');
+  if (releaseLink) {
+    const releaseUrl = safeHttpUrl(available?.releaseUrl) || safeHttpUrl(updates.releaseUrl);
+    releaseLink.hidden = !releaseUrl;
+    if (releaseUrl) {
+      releaseLink.setAttribute('href', releaseUrl);
+    } else {
+      releaseLink.removeAttribute('href');
+    }
+  }
 
   scheduleUpdateFastPoll(['downloading', 'verifying', 'waiting_idle'].includes(st));
   if (st === 'applying') {
@@ -1538,7 +1729,7 @@ function renderPreviewLifecycle(data) {
       actions.hidden = false;
       const pending = Number(migration.pendingCount || 0);
       const message = pending > 0
-        ? `检测到预览版遗留的 ${pending} 项凭据尚未完成迁移，需要系统授权读取旧钥匙串条目。原预览条目与旧目录均已保留。`
+        ? `检测到预览版遗留的 ${pending} 项凭据尚未完成迁移，需要系统授权读取旧版本凭据条目。原预览条目与旧目录均已保留。`
         : '预览版数据迁移尚未完成，可点击下方按钮继续迁移并读回核对。';
       setText(note, message);
       if (topBanner && topText) {
@@ -1550,7 +1741,7 @@ function renderPreviewLifecycle(data) {
     } else if (migration && migration.status === 'completed' && migration.legacyDirPreserved) {
       banner.hidden = false;
       actions.hidden = true;
-      setText(note, '已从预览版完成配置与凭据迁移。原预览目录和旧钥匙串条目均已保留，确认无误后再自行清理。');
+      setText(note, '已从预览版完成配置与凭据迁移。原预览目录和旧版本凭据条目均已保留，确认无误后再自行清理。');
       if (topBanner) topBanner.hidden = true;
     } else {
       banner.hidden = true;
@@ -1651,6 +1842,7 @@ export {
   directRestartRequired,
   directRouteCleanupPending,
   directStaticHostsReady,
+  dismissQuickstartGuide,
   effectiveIntegrationMode,
   isInFlight,
   previewServiceAction,
@@ -1663,10 +1855,12 @@ export {
   renderShell,
   renderUpdates,
   renderWorkspaceSync,
+  reopenQuickstartGuide,
   resetIntegrationModeSignature,
   resetRecentSignature,
   runOverviewIssueAction,
   savedIntegrationMode,
   syncState,
+  toggleQuickstartGuide,
   updateAction,
 };

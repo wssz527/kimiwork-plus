@@ -179,9 +179,26 @@ func run() error {
 		updates.Close()
 		return e
 	}
-	fmt.Println("KimiWork + daemon ready")
+	fmt.Println(formatDaemonReadyLine(time.Now(), service.Endpoint))
 	<-ctx.Done()
 	deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return service.Close(deadline)
+}
+
+func formatDaemonReadyLine(now time.Time, endpoint bridge.Endpoint) string {
+	pid := endpoint.PID
+	if pid <= 0 {
+		pid = os.Getpid()
+	}
+	version := endpoint.Version
+	if version == "" {
+		version = bridge.Version
+	}
+	buildID := endpoint.BuildID
+	if buildID == "" {
+		buildID = bridge.BuildID
+	}
+	return fmt.Sprintf("KimiWork + daemon ready ts=%s pid=%d version=%s buildId=%s listen=%s",
+		now.UTC().Format(time.RFC3339), pid, version, buildID, endpoint.URL)
 }

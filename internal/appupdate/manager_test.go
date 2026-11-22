@@ -628,3 +628,885 @@ func TestGitHubDownloadDoesNotUseManifestTotalTimeout(t *testing.T) {
 	waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
 	mgr.Cancel()
 }
+
+func TestMirrorPriorityHitsCNBWithoutCallingGitHub(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+
+	var ghHits atomic.Int32
+	var cnbManifestHits atomic.Int32
+	var cnbDownloadHits atomic.Int32
+	var ghSrv *httptest.Server
+	ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghHits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer ghSrv.Close()
+
+	var cnbSrv *httptest.Server
+	cnbSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/org/kwp/-/releases/latest/download/update-manifest.json":
+			cnbManifestHits.Add(1)
+			// Even when the manifest advertises an absolute GitHub artifact URL,
+			// the client should still try the CNB tag-pinned artifact URL first.
+			_ = json.NewEncoder(w).Encode(testManifestDoc{
+				SchemaVersion: 1,
+				Version:       "1.2.0",
+				Channel:       "stable",
+				Name:          "Kimi Work+ 1.2.0",
+				PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+				Artifacts: []testManifestArtifact{{
+					URL:           ghSrv.URL + "/org/kwp/releases/download/v1.2.0/pkg.zip",
+					Filename:      "pkg.zip",
+					Filetype:      "zip",
+					Size:          int64(len(zipBytes)),
+					Platform:      runtime.GOOS,
+					Arch:          runtime.GOARCH,
+					DigestAlgo:    "sha256",
+					Digest:        digestB64,
+					SignatureAlgo: "ed25519",
+					Signature:     sigB64,
+				}},
+			})
+		case "/org/kwp/-/releases/download/v1.2.0/pkg.zip":
+			cnbDownloadHits.Add(1)
+			w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+			_, _ = w.Write(zipBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cnbSrv.Close()
+
+	mgr, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.3",
+		BuildID:        "b113",
+		GitHubRepo:     "org/kwp",
+		MirrorBase:     cnbSrv.URL,
+		GitHubWebBase:  ghSrv.URL,
+		PublicKey:      pub,
+		HTTPClient:     cnbSrv.Client(),
+		DisableAutoRun: true,
+		ValidateStaged: func(string) error { return nil },
+		IdleCheck:      func() (bool, string) { return false, "busy" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	st, err := mgr.CheckNow(context.Background())
+	if err != nil {
+		t.Fatalf("CheckNow: %v", err)
+	}
+	wantReleaseURL := cnbSrv.URL + "/org/kwp/-/releases/tag/v1.2.0"
+	if st["state"] != "available" || st["preferredSource"] != "cnb" || st["activeSource"] != "cnb" || st["source"] != "cnb:org/kwp" || st["releaseUrl"] != wantReleaseURL {
+		t.Fatalf("unexpected state after CNB check: %#v", st)
+	}
+	avail, ok := st["available"].(*AvailableRelease)
+	if !ok || avail.Source != "cnb" || avail.ReleaseURL != wantReleaseURL {
+		t.Fatalf("unexpected available release: %#v", st["available"])
+	}
+	if ghHits.Load() != 0 {
+		t.Fatalf("expected 0 GitHub requests on CNB hit, got %d", ghHits.Load())
+	}
+
+	if _, err := mgr.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+	mgr.Cancel()
+	if cnbDownloadHits.Load() != 1 || ghHits.Load() != 0 {
+		t.Fatalf("expected CNB download=1 and GitHub hits=0, got cnb=%d gh=%d", cnbDownloadHits.Load(), ghHits.Load())
+	}
+
+	// Up-to-date check must also stop after CNB without hitting GitHub.
+	mgrUpToDate, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.2.0",
+		BuildID:        "b120",
+		GitHubRepo:     "org/kwp",
+		MirrorBase:     cnbSrv.URL,
+		GitHubWebBase:  ghSrv.URL,
+		PublicKey:      pub,
+		HTTPClient:     cnbSrv.Client(),
+		DisableAutoRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgrUpToDate.Close()
+	st2, err := mgrUpToDate.CheckNow(context.Background())
+	if err != nil {
+		t.Fatalf("up-to-date CheckNow: %v", err)
+	}
+	if st2["state"] != "up_to_date" || st2["activeSource"] != "cnb" || st2["releaseUrl"] != cnbSrv.URL+"/org/kwp/-/releases" {
+		t.Fatalf("unexpected up-to-date state: %#v", st2)
+	}
+	if ghHits.Load() != 0 || cnbManifestHits.Load() != 2 {
+		t.Fatalf("expected 0 GitHub requests and 2 CNB manifest checks, got gh=%d cnb=%d", ghHits.Load(), cnbManifestHits.Load())
+	}
+}
+
+func TestMirrorCheckFallbacksToGitHub(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+
+	cases := []struct {
+		name       string
+		cnbHandler func(w http.ResponseWriter, r *http.Request)
+	}{
+		{
+			name: "cnb_404",
+			cnbHandler: func(w http.ResponseWriter, r *http.Request) {
+				http.NotFound(w, r)
+			},
+		},
+		{
+			name: "cnb_500",
+			cnbHandler: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "mirror error", http.StatusInternalServerError)
+			},
+		},
+		{
+			name: "cnb_invalid_json",
+			cnbHandler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("<html>not json</html>"))
+			},
+		},
+		{
+			name: "cnb_timeout",
+			cnbHandler: func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(2 * time.Second):
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cnbSrv := httptest.NewServer(http.HandlerFunc(tc.cnbHandler))
+			defer cnbSrv.Close()
+
+			var ghSrv *httptest.Server
+			ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/org/kwp/releases/latest/download/update-manifest.json" {
+					_ = json.NewEncoder(w).Encode(testManifestDoc{
+						SchemaVersion: 1,
+						Version:       "1.2.0",
+						Channel:       "stable",
+						PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+						Artifacts: []testManifestArtifact{{
+							URL:           ghSrv.URL + "/org/kwp/releases/download/v1.2.0/pkg.zip",
+							Filename:      "pkg.zip",
+							Filetype:      "zip",
+							Size:          int64(len(zipBytes)),
+							Platform:      runtime.GOOS,
+							Arch:          runtime.GOARCH,
+							DigestAlgo:    "sha256",
+							Digest:        digestB64,
+							SignatureAlgo: "ed25519",
+							Signature:     sigB64,
+						}},
+					})
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer ghSrv.Close()
+
+			mgr, err := NewManager(Options{
+				StateDir:           t.TempDir(),
+				CurrentVersion:     "1.1.3",
+				BuildID:            "b113",
+				GitHubRepo:         "org/kwp",
+				MirrorBase:         cnbSrv.URL,
+				GitHubWebBase:      ghSrv.URL,
+				CheckSourceTimeout: 150 * time.Millisecond,
+				PublicKey:          pub,
+				HTTPClient:         &http.Client{},
+				DisableAutoRun:     true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mgr.Close()
+
+			st, err := mgr.CheckNow(context.Background())
+			if err != nil {
+				t.Fatalf("CheckNow fallback failed: %v", err)
+			}
+			wantReleaseURL := ghSrv.URL + "/org/kwp/releases/tag/v1.2.0"
+			if st["state"] != "available" || st["preferredSource"] != "cnb" || st["activeSource"] != "github" || st["source"] != "github:org/kwp" || st["releaseUrl"] != wantReleaseURL {
+				t.Fatalf("unexpected fallback state: %#v", st)
+			}
+			avail := st["available"].(*AvailableRelease)
+			if avail.Source != "github" || avail.ReleaseURL != wantReleaseURL {
+				t.Fatalf("unexpected available release: %+v", avail)
+			}
+		})
+	}
+}
+
+func TestMirrorDownloadFallbacksToGitHubCleanly(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist":           []byte("<plist/>"),
+		"Contents/MacOS/KimiWorkPlus":   bytes.Repeat([]byte("A"), 4096),
+		"Contents/MacOS/gateway-daemon": bytes.Repeat([]byte("B"), 4096),
+	})
+
+	cases := []struct {
+		name            string
+		cnbDownloadMode string
+	}{
+		{name: "cnb_midstream_drop", cnbDownloadMode: "drop"},
+		{name: "cnb_stall_timeout", cnbDownloadMode: "stall"},
+		{name: "cnb_truncated_eof", cnbDownloadMode: "truncate"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cnbDLHits atomic.Int32
+			var ghDLHits atomic.Int32
+			stallRelease := make(chan struct{})
+			defer close(stallRelease)
+
+			var ghSrv *httptest.Server
+			ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/org/kwp/releases/download/v1.2.0/pkg.zip" {
+					ghDLHits.Add(1)
+					w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+					_, _ = w.Write(zipBytes)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer ghSrv.Close()
+
+			var cnbSrv *httptest.Server
+			cnbSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/org/kwp/-/releases/latest/download/update-manifest.json":
+					_ = json.NewEncoder(w).Encode(testManifestDoc{
+						SchemaVersion: 1,
+						Version:       "1.2.0",
+						Channel:       "stable",
+						PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+						Artifacts: []testManifestArtifact{{
+							URL:           ghSrv.URL + "/org/kwp/releases/download/v1.2.0/pkg.zip",
+							Filename:      "pkg.zip",
+							Filetype:      "zip",
+							Size:          int64(len(zipBytes)),
+							Platform:      runtime.GOOS,
+							Arch:          runtime.GOARCH,
+							DigestAlgo:    "sha256",
+							Digest:        digestB64,
+							SignatureAlgo: "ed25519",
+							Signature:     sigB64,
+						}},
+					})
+				case "/org/kwp/-/releases/download/v1.2.0/pkg.zip":
+					cnbDLHits.Add(1)
+					switch tc.cnbDownloadMode {
+					case "drop":
+						w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+						_, _ = w.Write(zipBytes[:32])
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+						if hj, ok := w.(http.Hijacker); ok {
+							if conn, _, err := hj.Hijack(); err == nil {
+								_ = conn.Close()
+							}
+						}
+					case "stall":
+						w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+						_, _ = w.Write(zipBytes[:32])
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+						select {
+						case <-r.Context().Done():
+						case <-stallRelease:
+						case <-time.After(3 * time.Second):
+						}
+					case "truncate":
+						// Flush partial payload and return cleanly without Content-Length.
+						_, _ = w.Write(zipBytes[:32])
+					}
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer cnbSrv.Close()
+
+			mgr, err := NewManager(Options{
+				StateDir:             t.TempDir(),
+				CurrentVersion:       "1.1.3",
+				BuildID:              "b113",
+				GitHubRepo:           "org/kwp",
+				MirrorBase:           cnbSrv.URL,
+				GitHubWebBase:        ghSrv.URL,
+				DownloadStallTimeout: 200 * time.Millisecond,
+				PublicKey:            pub,
+				HTTPClient:           &http.Client{},
+				DisableAutoRun:       true,
+				ValidateStaged:       func(string) error { return nil },
+				IdleCheck:            func() (bool, string) { return false, "busy" },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mgr.Close()
+
+			if _, err := mgr.CheckNow(context.Background()); err != nil {
+				t.Fatalf("CheckNow: %v", err)
+			}
+			if _, err := mgr.StartDownloadAndApply(); err != nil {
+				t.Fatal(err)
+			}
+			waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+
+			st := mgr.State()
+			if st["activeSource"] != "github" {
+				t.Fatalf("expected activeSource=github after fallback download, got %#v", st["activeSource"])
+			}
+			if prog, ok := st["progress"].(*DownloadProgress); ok && prog != nil {
+				if prog.Total > 0 && prog.Written > prog.Total {
+					t.Fatalf("expected progress.Written (%d) <= progress.Total (%d)", prog.Written, prog.Total)
+				}
+			}
+			if cnbDLHits.Load() != 1 || ghDLHits.Load() != 1 {
+				t.Fatalf("expected cnbDL=1 and ghDL=1, got cnb=%d gh=%d", cnbDLHits.Load(), ghDLHits.Load())
+			}
+			mgr.Cancel()
+		})
+	}
+}
+
+func TestRelativeURLManifestWorksWithCNBAndGitHub(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	makeRelManifest := func() testManifestDoc {
+		return testManifestDoc{
+			SchemaVersion: 1,
+			Version:       "1.2.1",
+			Channel:       "stable",
+			PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+			Artifacts: []testManifestArtifact{{
+				URL:           "pkg.zip",
+				Filename:      "pkg.zip",
+				Filetype:      "zip",
+				Size:          int64(len(zipBytes)),
+				Platform:      runtime.GOOS,
+				Arch:          runtime.GOARCH,
+				DigestAlgo:    "sha256",
+				Digest:        digestB64,
+				SignatureAlgo: "ed25519",
+				Signature:     sigB64,
+			}},
+		}
+	}
+
+	var cnbAvailable atomic.Bool
+	cnbAvailable.Store(true)
+
+	cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !cnbAvailable.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/org/kwp/-/releases/latest/download/update-manifest.json":
+			_ = json.NewEncoder(w).Encode(makeRelManifest())
+		case "/org/kwp/-/releases/latest/download/pkg.zip":
+			w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+			_, _ = w.Write(zipBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cnbSrv.Close()
+
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/org/kwp/releases/latest/download/update-manifest.json":
+			_ = json.NewEncoder(w).Encode(makeRelManifest())
+		case "/org/kwp/releases/latest/download/pkg.zip":
+			w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+			_, _ = w.Write(zipBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ghSrv.Close()
+
+	// CNB relative manifest + relative sibling artifact download.
+	mgrCNB, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.3",
+		BuildID:        "b113",
+		GitHubRepo:     "org/kwp",
+		MirrorBase:     cnbSrv.URL,
+		GitHubWebBase:  ghSrv.URL,
+		PublicKey:      pub,
+		HTTPClient:     &http.Client{},
+		DisableAutoRun: true,
+		ValidateStaged: func(string) error { return nil },
+		IdleCheck:      func() (bool, string) { return false, "busy" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgrCNB.Close()
+
+	if _, err := mgrCNB.CheckNow(context.Background()); err != nil {
+		t.Fatalf("CNB relative CheckNow: %v", err)
+	}
+	if _, err := mgrCNB.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgrCNB, "waiting_idle", 5*time.Second)
+	if mgrCNB.State()["activeSource"] != "cnb" {
+		t.Fatalf("expected activeSource=cnb, got %#v", mgrCNB.State()["activeSource"])
+	}
+	mgrCNB.Cancel()
+
+	// Disable CNB so GitHub relative manifest + relative sibling artifact is exercised.
+	cnbAvailable.Store(false)
+	mgrGH, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.3",
+		BuildID:        "b113",
+		GitHubRepo:     "org/kwp",
+		MirrorBase:     cnbSrv.URL,
+		GitHubWebBase:  ghSrv.URL,
+		PublicKey:      pub,
+		HTTPClient:     &http.Client{},
+		DisableAutoRun: true,
+		ValidateStaged: func(string) error { return nil },
+		IdleCheck:      func() (bool, string) { return false, "busy" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgrGH.Close()
+
+	if _, err := mgrGH.CheckNow(context.Background()); err != nil {
+		t.Fatalf("GitHub relative CheckNow: %v", err)
+	}
+	if _, err := mgrGH.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgrGH, "waiting_idle", 5*time.Second)
+	if mgrGH.State()["activeSource"] != "github" {
+		t.Fatalf("expected activeSource=github, got %#v", mgrGH.State()["activeSource"])
+	}
+	mgrGH.Cancel()
+}
+
+func TestMirrorEnvVarDisableAndOverride(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("disable_via_env", func(t *testing.T) {
+		t.Setenv("KIMI_WORK_PLUS_UPDATE_MIRROR_BASE", "OFF")
+		mgr, err := NewManager(Options{
+			StateDir:       t.TempDir(),
+			CurrentVersion: "1.1.3",
+			PublicKey:      pub,
+			DisableAutoRun: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mgr.Close()
+		st := mgr.State()
+		if st["preferredSource"] != "github" || st["source"] != "github:"+DefaultGitHubRepo {
+			t.Fatalf("expected mirror disabled, got %#v", st)
+		}
+	})
+
+	t.Run("override_via_env", func(t *testing.T) {
+		t.Setenv("KIMI_WORK_PLUS_UPDATE_MIRROR_BASE", "https://mirror.example.test/")
+		mgr, err := NewManager(Options{
+			StateDir:       t.TempDir(),
+			CurrentVersion: "1.1.3",
+			PublicKey:      pub,
+			DisableAutoRun: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mgr.Close()
+		st := mgr.State()
+		if st["preferredSource"] != "cnb" || st["releaseUrl"] != "https://mirror.example.test/"+DefaultGitHubRepo+"/-/releases" {
+			t.Fatalf("expected mirror override, got %#v", st)
+		}
+	})
+}
+
+func TestFeedURLDownloadNoTotalTimeoutAndSupportsStallTimeout(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+
+	t.Run("slow_steady_stream_exceeds_client_timeout", func(t *testing.T) {
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/manifest.json":
+				_ = json.NewEncoder(w).Encode(testManifestDoc{
+					SchemaVersion: 1,
+					Version:       "1.2.2",
+					Channel:       "stable",
+					PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+					Artifacts: []testManifestArtifact{{
+						URL:           srv.URL + "/pkg.zip",
+						Filename:      "pkg.zip",
+						Filetype:      "zip",
+						Size:          int64(len(zipBytes)),
+						Platform:      runtime.GOOS,
+						Arch:          runtime.GOARCH,
+						DigestAlgo:    "sha256",
+						Digest:        digestB64,
+						SignatureAlgo: "ed25519",
+						Signature:     sigB64,
+					}},
+				})
+			case "/pkg.zip":
+				w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+				chunk := len(zipBytes) / 4
+				if chunk == 0 {
+					chunk = 1
+				}
+				for off := 0; off < len(zipBytes); off += chunk {
+					end := off + chunk
+					if end > len(zipBytes) {
+						end = len(zipBytes)
+					}
+					_, _ = w.Write(zipBytes[off:end])
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+					if end < len(zipBytes) {
+						time.Sleep(110 * time.Millisecond)
+					}
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		client := srv.Client()
+		client.Timeout = 200 * time.Millisecond
+		mgr, err := NewManager(Options{
+			StateDir:             t.TempDir(),
+			CurrentVersion:       "1.1.3",
+			FeedURL:              srv.URL + "/manifest.json",
+			DownloadStallTimeout: 500 * time.Millisecond,
+			PublicKey:            pub,
+			HTTPClient:           client,
+			DisableAutoRun:       true,
+			ValidateStaged:       func(string) error { return nil },
+			IdleCheck:            func() (bool, string) { return false, "busy" },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mgr.Close()
+
+		if _, err := mgr.CheckNow(context.Background()); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := mgr.StartDownloadAndApply(); err != nil {
+			t.Fatal(err)
+		}
+		waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+		if mgr.State()["activeSource"] != "endpoint" {
+			t.Fatalf("expected activeSource=endpoint, got %#v", mgr.State()["activeSource"])
+		}
+		mgr.Cancel()
+	})
+
+	t.Run("stalled_stream_aborts_on_stall_timeout", func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/manifest.json":
+				_ = json.NewEncoder(w).Encode(testManifestDoc{
+					SchemaVersion: 1,
+					Version:       "1.2.2",
+					Channel:       "stable",
+					PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+					Artifacts: []testManifestArtifact{{
+						URL:           srv.URL + "/pkg.zip",
+						Filename:      "pkg.zip",
+						Filetype:      "zip",
+						Size:          int64(len(zipBytes)),
+						Platform:      runtime.GOOS,
+						Arch:          runtime.GOARCH,
+						DigestAlgo:    "sha256",
+						Digest:        digestB64,
+						SignatureAlgo: "ed25519",
+						Signature:     sigB64,
+					}},
+				})
+			case "/pkg.zip":
+				w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+				_, _ = w.Write(zipBytes[:16])
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				case <-time.After(3 * time.Second):
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		mgr, err := NewManager(Options{
+			StateDir:             t.TempDir(),
+			CurrentVersion:       "1.1.3",
+			FeedURL:              srv.URL + "/manifest.json",
+			DownloadStallTimeout: 180 * time.Millisecond,
+			PublicKey:            pub,
+			HTTPClient:           srv.Client(),
+			DisableAutoRun:       true,
+			ValidateStaged:       func(string) error { return nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mgr.Close()
+
+		if _, err := mgr.CheckNow(context.Background()); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := mgr.StartDownloadAndApply(); err != nil {
+			t.Fatal(err)
+		}
+		waitUntilState(t, mgr, "error", 5*time.Second)
+		errObj, ok := mgr.State()["error"].(*UpdateError)
+		if !ok || errObj == nil || errObj.Code != "update_network_failed" {
+			t.Fatalf("expected update_network_failed on stall, got %#v", mgr.State()["error"])
+		}
+	})
+}
+
+func TestWindowsWhitelistBackupSkipsUninstallAndTemps(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := filepath.Join(t.TempDir(), "backup")
+
+	files := map[string]string{
+		"KimiWorkPlus.exe":                "MZ-desktop",
+		"gateway-daemon.exe":              "MZ-daemon",
+		"LICENSE":                         "MIT",
+		"THIRD_PARTY_NOTICES.txt":         "notices",
+		"uninstall.exe":                   "MZ-uninstaller",
+		"KimiWorkPlus.exe.old.12345":      "stale-old",
+		"gateway-daemon.exe.next.999.tmp": "stale-tmp",
+		"extra.log":                       "ignore-me",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "subdir", "nested.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyWindowsInstallationWhitelist(srcDir, dstDir); err != nil {
+		t.Fatalf("copyWindowsInstallationWhitelist: %v", err)
+	}
+
+	entries, err := os.ReadDir(dstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Name()] = true
+	}
+	for _, want := range []string{"KimiWorkPlus.exe", "gateway-daemon.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"} {
+		if !got[want] {
+			t.Fatalf("expected whitelisted file %s in backup, got %v", want, got)
+		}
+		raw, err := os.ReadFile(filepath.Join(dstDir, want))
+		if err != nil || string(raw) != files[want] {
+			t.Fatalf("backup content mismatch for %s: %q, %v", want, string(raw), err)
+		}
+	}
+	for _, forbidden := range []string{"uninstall.exe", "KimiWorkPlus.exe.old.12345", "gateway-daemon.exe.next.999.tmp", "extra.log", "subdir"} {
+		if got[forbidden] {
+			t.Fatalf("expected %s to be excluded from Windows backup, got %v", forbidden, got)
+		}
+	}
+
+	// Missing a required binary must fail.
+	missingSrc := t.TempDir()
+	if err := os.WriteFile(filepath.Join(missingSrc, "KimiWorkPlus.exe"), []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyWindowsInstallationWhitelist(missingSrc, filepath.Join(t.TempDir(), "bad")); err == nil {
+		t.Fatal("expected error when gateway-daemon.exe is missing from Windows backup source")
+	}
+}
+
+func TestWrapStripAuthOnMultiHopRedirect(t *testing.T) {
+	client := wrapStripAuthOnRedirect(&http.Client{})
+
+	t.Run("https_downgrade_then_same_host_http", func(t *testing.T) {
+		r0, _ := http.NewRequest("GET", "https://example.test/1", nil)
+		r1, _ := http.NewRequest("GET", "http://example.test/2", nil)
+		r2, _ := http.NewRequest("GET", "http://example.test/3", nil)
+		r2.Header.Set("Authorization", "Bearer secret")
+		if err := client.CheckRedirect(r2, []*http.Request{r0, r1}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := r2.Header.Get("Authorization"); got != "" {
+			t.Fatalf("expected Authorization stripped after prior https downgrade, got %q", got)
+		}
+	})
+
+	t.Run("parent_to_subdomain_then_same_subdomain", func(t *testing.T) {
+		r0, _ := http.NewRequest("GET", "https://example.test/1", nil)
+		r1, _ := http.NewRequest("GET", "https://sub.example.test/2", nil)
+		r2, _ := http.NewRequest("GET", "https://sub.example.test/3", nil)
+		r2.Header.Set("Authorization", "Bearer secret")
+		if err := client.CheckRedirect(r2, []*http.Request{r0, r1}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := r2.Header.Get("Authorization"); got != "" {
+			t.Fatalf("expected Authorization stripped after cross-host hop, got %q", got)
+		}
+	})
+}
+
+func TestDownloadWithStallTimeoutRejectsOversizedPayloadEarly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 1024))
+	}))
+	defer srv.Close()
+
+	var dst bytes.Buffer
+	err := downloadURLToWriter(t.Context(), srv.Client(), srv.URL, 128, true, time.Second, &dst, nil)
+	if err == nil || !strings.Contains(err.Error(), "oversized payload") {
+		t.Fatalf("expected oversized payload error, got %v", err)
+	}
+	if dst.Len() > 128 {
+		t.Fatalf("expected dst not to exceed expectedSize, wrote %d bytes", dst.Len())
+	}
+}
+
+func TestCheckNowDoesNotOverwriteChannelChangeDuringInflightCheck(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	manifestBytes, _ := json.Marshal(testManifestDoc{
+		SchemaVersion: 1,
+		Version:       "1.2.9",
+		Channel:       "stable",
+		PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+		Artifacts: []testManifestArtifact{{
+			URL:           "pkg.zip",
+			Filename:      "pkg.zip",
+			Filetype:      "zip",
+			Size:          int64(len(zipBytes)),
+			Platform:      runtime.GOOS,
+			Arch:          runtime.GOARCH,
+			DigestAlgo:    "sha256",
+			Digest:        digestB64,
+			SignatureAlgo: "ed25519",
+			Signature:     sigB64,
+		}},
+	})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		_, _ = w.Write(manifestBytes)
+	}))
+	defer srv.Close()
+
+	mgr, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.4",
+		BuildID:        "1.1.4-test",
+		PublicKey:      pub,
+		FeedURL:        srv.URL + "/update-manifest.json",
+		HTTPClient:     srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = mgr.CheckNow(t.Context())
+	}()
+	<-started
+
+	// Switch channel while stable check is in flight -> stateEpoch bumps and state resets to idle.
+	if _, err := mgr.UpdateSettings(nil, "preview"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+
+	st := mgr.State()
+	if st["state"] != "idle" || st["available"] != nil {
+		t.Fatalf("stale in-flight CheckNow overwrote post-channel-switch state: %#v", st)
+	}
+}

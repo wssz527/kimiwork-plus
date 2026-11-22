@@ -12,15 +12,20 @@ import (
 	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
 
 type AccountSummary struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	AvatarURL  string `json:"avatarURL,omitempty"`
-	CapturedAt int64  `json:"capturedAt"`
-	LastUsedAt int64  `json:"lastUsedAt,omitempty"`
-	NeedsLogin bool   `json:"needsLogin"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	AvatarURL        string `json:"avatarURL,omitempty"`
+	CapturedAt       int64  `json:"capturedAt"`
+	LastUsedAt       int64  `json:"lastUsedAt,omitempty"`
+	NeedsLogin       bool   `json:"needsLogin"`
+	AccessExpiresAt  string `json:"accessExpiresAt,omitempty"`
+	RefreshExpiresAt string `json:"refreshExpiresAt,omitempty"`
+	CookieExpiresAt  string `json:"cookieExpiresAt,omitempty"`
+	TokenHealth      string `json:"tokenHealth,omitempty"`
 }
 
 type accountRecord struct {
@@ -124,6 +129,30 @@ func (v *accountVault) cleanup(index *accountIndex) error {
 	return nil
 }
 
+func inspectAccountSessionLifetime(raw json.RawMessage, now time.Time) kimi.AccountTokenLifetime {
+	var session kimi.AccountSession
+	if json.Unmarshal(raw, &session) != nil {
+		return kimi.AccountTokenLifetime{TokenHealth: kimi.TokenHealthUnknown}
+	}
+	return kimi.InspectCredentialLifetime(session, now)
+}
+
+func applyAccountTokenLifetime(summary *AccountSummary, lifetime kimi.AccountTokenLifetime) {
+	summary.AccessExpiresAt = lifetime.AccessExpiresAt
+	summary.RefreshExpiresAt = lifetime.RefreshExpiresAt
+	summary.CookieExpiresAt = lifetime.CookieExpiresAt
+	summary.TokenHealth = lifetime.TokenHealth
+}
+
+func refreshAccountTokenHealth(summary AccountSummary, now time.Time) AccountSummary {
+	summary.TokenHealth = kimi.ComputeTokenHealth(kimi.AccountTokenLifetime{
+		AccessExpiresAt:  summary.AccessExpiresAt,
+		RefreshExpiresAt: summary.RefreshExpiresAt,
+		CookieExpiresAt:  summary.CookieExpiresAt,
+	}, now)
+	return summary
+}
+
 func (v *accountVault) summaries() ([]AccountSummary, string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -131,9 +160,10 @@ func (v *accountVault) summaries() ([]AccountSummary, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	now := v.now()
 	rows := make([]AccountSummary, 0, len(index.Accounts))
 	for _, row := range index.Accounts {
-		rows = append(rows, row.AccountSummary)
+		rows = append(rows, refreshAccountTokenHealth(row.AccountSummary, now))
 	}
 	return rows, index.CurrentID, nil
 }
@@ -177,7 +207,10 @@ func (v *accountVault) stage(snapshot accountCapture, background bool) (AccountS
 	if name == "" {
 		name = "Kimi 账号 " + id[len(id)-6:]
 	}
-	row := accountRecord{AccountSummary: AccountSummary{ID: id, Name: name, AvatarURL: snapshot.AvatarURL, CapturedAt: v.now().UnixMilli()}, CredentialRef: "account-session-" + RandomKey()}
+	now := v.now()
+	summary := AccountSummary{ID: id, Name: name, AvatarURL: snapshot.AvatarURL, CapturedAt: now.UnixMilli()}
+	applyAccountTokenLifetime(&summary, inspectAccountSessionLifetime(snapshot.Session, now))
+	row := accountRecord{AccountSummary: summary, CredentialRef: "account-session-" + RandomKey()}
 	if position >= 0 {
 		row.LastUsedAt = index.Accounts[position].LastUsedAt
 	}
@@ -274,6 +307,33 @@ func (v *accountVault) setPending(id string, adding bool) error {
 		return errors.New("account_store_write_failed")
 	}
 	return nil
+}
+
+func (v *accountVault) updateTokenLifetime(id string, lifetime kimi.AccountTokenLifetime) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	index, err := v.read()
+	if err != nil {
+		return err
+	}
+	for i := range index.Accounts {
+		if index.Accounts[i].ID != id {
+			continue
+		}
+		row := &index.Accounts[i].AccountSummary
+		if row.AccessExpiresAt == lifetime.AccessExpiresAt &&
+			row.RefreshExpiresAt == lifetime.RefreshExpiresAt &&
+			row.CookieExpiresAt == lifetime.CookieExpiresAt &&
+			row.TokenHealth == lifetime.TokenHealth {
+			return nil
+		}
+		applyAccountTokenLifetime(row, lifetime)
+		if err := core.AtomicJSON(v.path, index); err != nil {
+			return errors.New("account_store_write_failed")
+		}
+		return nil
+	}
+	return errors.New("account_not_found")
 }
 
 func (v *accountVault) mark(id string, needsLogin bool) error {

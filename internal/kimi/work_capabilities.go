@@ -54,11 +54,22 @@ func ProbeWorkCapabilities(installation Installation) WorkCapabilities {
 	if result.Swarm.KernelAvailable {
 		result.Swarm.State = "user-controlled"
 		result.Swarm.Reason = "work_swarm_requires_conversation"
+	} else {
+		result.Swarm.State = "unverified"
+		result.Swarm.Reason = "work_swarm_kernel_absent"
 	}
 	result.Tower.KernelAvailable = bytes.Contains(kernel, []byte("TOWER_MODE_USER_ENABLED_ONLY")) && bytes.Contains(kernel, []byte("TowerFeature"))
-	if result.Tower.KernelAvailable && installation.Version == "3.2.27" && metadata.KernelCommit == "ecb904a69" {
-		result.Tower.State = "unsupported"
-		result.Tower.Reason = "work_tower_desktop_unavailable"
+	if result.Tower.KernelAvailable {
+		if installation.Version == "3.2.27" && metadata.KernelCommit == "ecb904a69" {
+			result.Tower.State = "unsupported"
+			result.Tower.Reason = "work_tower_desktop_unavailable"
+		} else {
+			result.Tower.State = "unverified"
+			result.Tower.Reason = "work_tower_desktop_unverified"
+		}
+	} else {
+		result.Tower.State = "unavailable"
+		result.Tower.Reason = "work_tower_kernel_absent"
 	}
 	return result
 }

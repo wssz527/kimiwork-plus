@@ -90,6 +90,39 @@ func nativeSubagentPolicy(d core.Document) kimi.SubagentPolicy {
 	}
 	return p
 }
+func applySubagentAliases(d core.Document, aliases map[string]string) core.Document {
+	if len(aliases) == 0 || d == nil {
+		return d
+	}
+	out := core.Document{}
+	for k, v := range d {
+		out[k] = v
+	}
+	if modelID := core.String(d["model"]); modelID != "" {
+		if alias := aliases[modelID]; alias != "" {
+			out["modelAlias"] = alias
+		}
+	}
+	if rows := core.Rows(d["models"]); len(rows) > 0 {
+		updated := make([]any, 0, len(rows))
+		for _, v := range rows {
+			row := core.Object(v)
+			copied := core.Document{}
+			for k, val := range row {
+				copied[k] = val
+			}
+			if id := core.String(row["id"]); id != "" {
+				if alias := aliases[id]; alias != "" {
+					copied["modelAlias"] = alias
+				}
+			}
+			updated = append(updated, copied)
+		}
+		out["models"] = updated
+	}
+	return out
+}
+
 func (p *nativePolicies) Configure(d core.Document) error {
 	normalized, err := core.NormalizeSubagents(d["subagents"], core.Rows(d["models"]))
 	if err != nil {
@@ -97,8 +130,10 @@ func (p *nativePolicies) Configure(d core.Document) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.configured = normalized
-	p.lastSubagentStatus = p.subagents.Update(nativeSubagentPolicy(normalized), p.capabilities)
+	aliases := kimi.ReadIntentAliases(p.dir, p.home, core.IntegrationMode(d), kimi.AccountScope(p.home))
+	resolved := applySubagentAliases(normalized, aliases)
+	p.configured = resolved
+	p.lastSubagentStatus = p.subagents.Update(nativeSubagentPolicy(resolved), p.capabilities)
 	if value := d["context"]; value != nil {
 		var policy kimi.ContextPolicy
 		if decodeStrict(value, &policy) != nil {
@@ -122,7 +157,7 @@ func (p *nativePolicies) State(d core.Document) core.Document {
 		binding.Policy = waiting
 		binding.Runtime = kimi.SubagentRuntime{State: kimi.RuntimeWaitingConfig, Mode: waiting.Mode, Reason: waiting.Reason}
 	}
-	return core.Document{"subagents": core.Document{"configured": p.configured, "policy": status, "runtime": binding.Runtime}, "context": p.contextView(d), "search": p.servicesView()}
+	return core.Document{"subagents": core.Document{"configured": p.configured, "policy": status, "runtime": binding.Runtime, "configPath": p.subagents.ConfigPath()}, "context": p.contextView(d), "search": p.servicesView()}
 }
 
 // waitingStatus reports the pending update when the file has nothing to say.

@@ -64,6 +64,7 @@ test('unreadable connection credentials expose explicit system authorization eve
     const setHidden = (element, hidden) => { element.hidden = hidden; };
     const setDot = () => {};
     ${sourceFunction('credentialApplyReason')}
+    ${sourceFunction('isManagedBackend')}
     ${sourceFunction('applyAvailability')}
     ${sourceFunction('applyState')}
     ${sourceFunction('renderApply')}
@@ -402,12 +403,14 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   const calls = [];
   const state = { editor: null };
   const dom = {
-    onboardDisclosure: { open: false, dataset: {}, scrollIntoView: () => calls.push('scroll') },
+    onboardDisclosure: { open: false, dataset: {} },
     onboardPreset: { focus: () => calls.push('focus') },
   };
   const code = [
     sourceFunction('openOnboardWizard'),
     'const setView = (view) => calls.push(view);',
+    'const setSubtab = (group, tab) => calls.push(group + ":" + tab);',
+    'const scrollMainToElement = () => calls.push("scroll-main");',
     'const editorDirty = () => state.editor?.dirty === true;',
     'const closeEditor = () => { state.editor = null; calls.push("close"); };',
     'const showToast = (message) => calls.push(message);',
@@ -416,11 +419,11 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   const open = new Function('state', 'dom', 'calls', code)(state, dom, calls);
   open();
   assert.equal(dom.onboardDisclosure.open, true);
-  assert.deepEqual(calls, ['models', 'close', 'scroll', 'focus']);
+  assert.deepEqual(calls, ['models', 'models:connections', 'close', 'scroll-main', 'focus']);
   calls.length = 0;
   state.editor = { dirty: true };
   open();
-  assert.deepEqual(calls, ['models', '请先保存或取消正在编辑的模型，再打开添加向导。']);
+  assert.deepEqual(calls, ['models', 'models:connections', '请先保存或取消正在编辑的模型，再打开添加向导。']);
 });
 
 test('catalogue reads require only address and key and never borrow a key for a changed endpoint', () => {
@@ -665,14 +668,24 @@ test('mountUsageRequests is idempotent and keeps one recent-requests table', () 
   assert.equal(records.children.length, 0);
 });
 
-test('index.html lays out six flat tabs and static views without runtime mountWorkspace', () => {
-  for (const id of ['nav-overview', 'nav-models', 'nav-usage', 'nav-work', 'nav-extensions', 'nav-maintenance']) {
+test('index.html lays out five flat tabs, subtabs, and static views without scrollIntoView or overflow:clip', () => {
+  for (const id of ['nav-overview', 'nav-models', 'nav-subagents', 'nav-usage', 'nav-maintenance']) {
     assert.ok(htmlSource.includes(`id="${id}"`), 'missing top tab ' + id);
   }
+  assert.equal(htmlSource.includes('id="nav-work"'), false);
+  assert.equal(htmlSource.includes('id="nav-extensions"'), false);
   assert.equal(htmlSource.includes('id="work-index"'), false);
   assert.equal(htmlSource.includes('id="quick-models"'), false);
   assert.equal(htmlSource.includes('id="models-services"'), false);
   assert.equal(source.includes('function mountWorkspace('), false);
+  assert.equal(source.includes('.scrollIntoView('), false, 'production JS must scroll .main, never call scrollIntoView');
+  const cssSource = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+  assert.equal(cssSource.includes('overflow: clip'), false, 'styles.css must avoid overflow: clip on root');
+  assert.match(cssSource, /\.shell\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/);
+  for (const id of ['models-tab-catalog', 'models-tab-connections', 'subagents-tab-models', 'subagents-tab-swarm',
+    'settings-tab-accounts', 'settings-tab-connection', 'settings-tab-extensions', 'settings-tab-advanced']) {
+    assert.ok(htmlSource.includes(`id="${id}"`), 'missing subtab ' + id);
+  }
   const modelsIdx = htmlSource.indexOf('id="view-models"');
   const usageIdx = htmlSource.indexOf('id="view-usage"');
   const modelsSlice = htmlSource.slice(modelsIdx, usageIdx);
@@ -702,26 +715,38 @@ test('computeOverviewIssue prioritizes gateway, connection apply, budget, integr
   assert.equal(compute({ gateway: { state: 'running' }, metrics: { recent: [{ model: 'm', status: 200 }] } }).action, null);
 });
 
-test('section links open every collapsed ancestor before scrolling to the panel', () => {
+test('section links activate parent subtab and open collapsed ancestors while scrolling only .main', () => {
   const { makeNode, document } = makeDomTree();
+  const main = makeNode('main', 'MAIN');
+  main.scrollTop = 10;
+  main.getBoundingClientRect = () => ({ top: 60 });
+  const pane = makeNode('settings-pane-extensions', 'DIV');
+  pane.dataset = { subtabGroup: 'maintenance', subtabPane: 'extensions' };
   const details = makeNode('mcp-details', 'DETAILS');
   const panel = makeNode('mcp-panel');
+  panel.getBoundingClientRect = () => ({ top: 260 });
   const heading = makeNode('mcp-heading', 'H2');
   panel.append(heading);
   details.append(panel);
-  const view = makeNode('view-work');
-  view.append(details);
+  pane.append(details);
+  const view = makeNode('view-maintenance');
+  view.append(pane);
+  const subtabsActivated = [];
   const code = [
     'const $ = id => document.getElementById(id);',
+    'const setSubtab = (group, tab) => subtabsActivated.push([group, tab]);',
+    sourceFunction('scrollMainToElement'),
     sourceFunction('revealWorkspaceSection'),
     'return revealWorkspaceSection;',
   ].join('\n');
-  const reveal = new Function('document', code)(document);
+  const reveal = new Function('document', 'subtabsActivated', code)(document, subtabsActivated);
   assert.equal(details.open, false);
   const target = reveal('mcp-panel');
   assert.equal(target, panel);
+  assert.deepEqual(subtabsActivated, [['maintenance', 'extensions']]);
   assert.equal(details.open, true);
-  assert.equal(panel.scrolled, true);
+  assert.equal(panel.scrolled, false, 'must never call scrollIntoView');
+  assert.equal(main.scrollTop, 194);
   assert.equal(heading.focused, true);
   assert.equal(heading.attributes.tabindex, '-1');
 });
@@ -2456,10 +2481,11 @@ function makeCredentialEnv() {
     ${sourceFunction('credentialAuthPending')}
     ${sourceFunction('connectionRowsOf')}
     ${sourceFunction('connectionKeyText')}
+    ${sourceFunction('isManagedBackend')}
     ${sourceFunction('applyAvailability')}
     ${sourceFunction('applyState')}
     ${sourceFunction('renderApply')}
-    return { applyState, credentialAuthPending, connectionKeyText, renderApply };
+    return { applyAvailability, applyState, credentialAuthPending, connectionKeyText, isManagedBackend, renderApply };
   `;
   const fn = new Function('state', 'dom', code)(state, dom);
   return { ...fn, dom };
@@ -2572,7 +2598,8 @@ test('the shell banner keeps the credential prompt alive across pages', () => {
   renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
     connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
   assert.equal(nodes['restart-banner'].hidden, false);
-  assert.match(nodes['restart-banner-text'].textContent, /无法读取系统钥匙串/);
+  assert.match(nodes['restart-banner-text'].textContent, /部分已保存的连接凭据暂时无法读取/);
+  assert.doesNotMatch(nodes['restart-banner-text'].textContent, /钥匙串/);
   assert.match(nodes['restart-banner-text'].textContent, /「模型」页查看原因并重新授权/);
 
   /* 配置变更提示优先，保持原措辞不被覆盖。 */
@@ -2599,4 +2626,449 @@ test('local credential failures explain recovery instead of requesting keychain 
   const message = keyText({ credentialError: 'credential_master_key_invalid' });
   assert.match(message, /保留应用数据/);
   assert.doesNotMatch(message, /重新授权/);
+});
+
+test('renderUpdates displays dual-source mirror status and safe release page links', () => {
+  assert.match(htmlSource, /id="upd-release-link"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>查看发布页<\/a>/);
+  assert.doesNotMatch(htmlSource, /前往 GitHub/);
+
+  const makeEl = () => ({
+    textContent: '',
+    hidden: false,
+    disabled: false,
+    checked: false,
+    value: '',
+    style: {},
+    dataset: {},
+    attrs: {},
+    classes: new Set(),
+    classList: { toggle(name, on) { if (on) this.classes.add(name); else this.classes.delete(name); } },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    removeAttribute(name) { delete this.attrs[name]; },
+  });
+  const ids = [
+    'upd-current', 'upd-current-sub', 'upd-state-dot', 'upd-state-word', 'upd-last-check', 'upd-source',
+    'upd-channel', 'upd-auto-check', 'upd-release-box', 'upd-release-title', 'upd-release-notes',
+    'update-top-banner', 'update-top-banner-text', 'overview-update-card', 'overview-update-title', 'overview-update-notes',
+    'upd-progress-wrap', 'upd-progress-bar', 'upd-progress-label',
+    'upd-error-box', 'upd-error-msg', 'upd-error-next', 'upd-error-detail',
+    'upd-history-note', 'upd-check', 'upd-download', 'upd-cancel', 'upd-rollback', 'upd-release-link',
+  ];
+  const nodes = Object.fromEntries(ids.map(id => [id, makeEl()]));
+  for (const el of Object.values(nodes)) {
+    el.classList = { toggle(name, on) { if (on) el.classes.add(name); else el.classes.delete(name); } };
+  }
+  const $ = id => nodes[id] || null;
+  const document = { activeElement: null };
+  const state = { view: 'maintenance' };
+  const renderUpdates = new Function('$', 'document', 'state', 'setDot', 'setText', 'fmtTime', `
+    const credentialAuthPending = () => false;
+    const scheduleUpdateFastPoll = () => {};
+    const waitForUpdateReconnect = () => {};
+    ${sourceFunction('fmtBytes')}
+    ${sourceFunction('normalizeUpdateSourceKind')}
+    ${sourceFunction('updateSourceLabel')}
+    ${sourceFunction('safeHttpUrl')}
+    ${sourceFunction('updateStateSummary')}
+    ${sourceFunction('renderUpdates')}
+    return renderUpdates;
+  `)($, document, state, (el, tone) => { if (el) el.dataset.tone = tone; }, (el, text) => { if (el) el.textContent = text; }, () => '12:00:00');
+
+  renderUpdates({
+    updates: {
+      currentVersion: '1.1.3',
+      state: 'idle',
+      preferredSource: 'cnb',
+      activeSource: '',
+      source: 'cnb:wssz527/kimiwork-plus',
+      releaseUrl: 'https://cnb.cool/wssz527/kimiwork-plus/-/releases',
+    },
+  });
+  assert.equal(nodes['upd-source'].hidden, false);
+  assert.equal(nodes['upd-source'].textContent, '更新源 · 优先国内镜像（CNB），失败自动回退 GitHub');
+  assert.equal(nodes['upd-release-link'].hidden, false);
+  assert.equal(nodes['upd-release-link'].attrs.href, 'https://cnb.cool/wssz527/kimiwork-plus/-/releases');
+
+  renderUpdates({
+    updates: {
+      currentVersion: '1.1.3',
+      state: 'available',
+      preferredSource: 'cnb',
+      activeSource: 'cnb',
+      releaseUrl: 'https://cnb.cool/wssz527/kimiwork-plus/-/releases',
+      available: {
+        version: '1.1.4',
+        channel: 'stable',
+        source: 'cnb',
+        releaseUrl: 'https://cnb.cool/wssz527/kimiwork-plus/-/releases/tag/v1.1.4',
+      },
+    },
+  });
+  assert.equal(nodes['upd-source'].textContent, '更新源 · 国内镜像（CNB）');
+  assert.equal(nodes['upd-release-link'].attrs.href, 'https://cnb.cool/wssz527/kimiwork-plus/-/releases/tag/v1.1.4');
+
+  renderUpdates({
+    updates: {
+      currentVersion: '1.1.3',
+      state: 'up_to_date',
+      preferredSource: 'cnb',
+      activeSource: 'github',
+      releaseUrl: 'javascript:alert(1)',
+    },
+  });
+  assert.equal(nodes['upd-source'].textContent, '更新源 · GitHub（备用源）');
+  assert.equal(nodes['upd-release-link'].hidden, true);
+  assert.equal(nodes['upd-release-link'].attrs.href, undefined);
+
+  renderUpdates({
+    updates: {
+      currentVersion: '1.1.3',
+      state: 'up_to_date',
+      preferredSource: 'github',
+      activeSource: 'github',
+    },
+  });
+  assert.equal(nodes['upd-source'].textContent, '更新源 · GitHub');
+
+  renderUpdates({ updates: { currentVersion: '1.1.3', state: 'idle' } });
+  assert.equal(nodes['upd-source'].hidden, true);
+  assert.equal(nodes['upd-release-link'].hidden, true);
+});
+
+test('direct mode stays neutral while official compatibility check is still running', () => {
+  const syncState = makeSyncState();
+  const nativeText = makeNativeConnectionText();
+  const compute = new Function(`
+    const displayModelId = id => id;
+    const applyState = () => ({ tone: 'ok', word: '已应用', note: '' });
+    const budgetNotice = () => '';
+    const requestErrorText = () => '';
+    const fmtCount = v => String(v);
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('syncState')}
+    ${sourceFunction('computeOverviewIssue')}
+    return computeOverviewIssue;
+  `)();
+
+  const checkingData = {
+    gateway: { state: 'running' },
+    integrationMode: 'direct',
+    compatibility: { status: 'checking' },
+    directMode: { mode: 'direct', supported: false, staticHostsReady: false, eligibleModelIds: ['c1/m1'], eligibleModels: 1 },
+    models: [{ id: 'c1/m1' }],
+    integration: {},
+  };
+
+  const verdict = syncState(checkingData);
+  assert.equal(verdict.code, 'checking');
+  assert.equal(verdict.tone, 'neutral');
+  assert.match(verdict.word, /正在检查官方 Kimi 兼容性/);
+  assert.match(verdict.note, /稍候自动刷新/);
+  assert.match(nativeText(checkingData), /正在检查官方 Kimi 兼容性/);
+
+  const issue = compute(checkingData);
+  assert.equal(issue.tone, 'neutral');
+  assert.match(issue.title, /正在检查官方 Kimi 兼容性/);
+  assert.equal(issue.action, null);
+
+  const { nodes, render } = makeIntegrationModeEnv();
+  render(checkingData);
+  assert.equal(nodes['direct-mode-notice'].dataset.tone, 'neutral');
+  assert.match(nodes['direct-mode-support'].textContent, /正在检查官方 Kimi 兼容性/);
+  assert.doesNotMatch(nodes['direct-mode-support'].textContent, /不支持原生直连/);
+
+  const verifiedUnsupported = { ...checkingData, compatibility: { status: 'verified' } };
+  assert.equal(syncState(verifiedUnsupported).code, 'unsupported');
+  assert.equal(syncState(verifiedUnsupported).tone, 'bad');
+  assert.equal(syncState(verifiedUnsupported).word, '当前官方 Kimi 不支持直连');
+
+  const alreadySupported = {
+    ...checkingData,
+    directMode: { ...checkingData.directMode, supported: true },
+  };
+  assert.notEqual(syncState(alreadySupported).code, 'checking');
+});
+
+test('settings and preview migration copy avoid misleading keychain wording', () => {
+  const hintMatch = htmlSource.match(/<p[^>]*id="preview-service-hint"[^>]*>([\s\S]*?)<\/p>/);
+  assert.ok(hintMatch, 'missing preview-service-hint');
+  assert.match(hintMatch[1], /本机加密凭据保持不变/);
+  assert.doesNotMatch(hintMatch[1], /钥匙串/);
+
+  const makeEl = () => ({ textContent: '', hidden: true, disabled: false });
+  const nodes = {
+    'preview-service-state': makeEl(),
+    'preview-service-sub': makeEl(),
+    'service-register': makeEl(),
+    'service-enable': makeEl(),
+    'service-disable': makeEl(),
+    'migration-banner': makeEl(),
+    'migration-note': makeEl(),
+    'migration-actions': makeEl(),
+    'migration-top-banner': makeEl(),
+    'migration-top-banner-text': makeEl(),
+  };
+  const renderPreviewLifecycle = new Function('$', 'setText', `
+    let trackedServiceOperation = '';
+    const renderUpdates = () => {};
+    const trackServiceOperation = () => {};
+    ${sourceFunction('renderPreviewLifecycle')}
+    return renderPreviewLifecycle;
+  `)(id => nodes[id] || null, (el, text) => { if (el) el.textContent = text; });
+
+  renderPreviewLifecycle({
+    service: { state: 'running', registered: true, loginStartup: 'manual' },
+    migration: { status: 'needs_authorization', pendingCount: 2 },
+  });
+  assert.equal(nodes['migration-banner'].hidden, false);
+  assert.match(nodes['migration-note'].textContent, /旧版本凭据条目/);
+  assert.doesNotMatch(nodes['migration-note'].textContent, /钥匙串/);
+
+  renderPreviewLifecycle({
+    service: { state: 'running', registered: true, loginStartup: 'manual' },
+    migration: { status: 'completed', legacyDirPreserved: true },
+  });
+  assert.match(nodes['migration-note'].textContent, /旧版本凭据条目/);
+  assert.doesNotMatch(nodes['migration-note'].textContent, /钥匙串/);
+});
+
+test('release running service is recognized as managed backend for connection apply', () => {
+  const { isManagedBackend, applyAvailability, applyState, renderApply, dom } = makeCredentialEnv();
+
+  assert.equal(isManagedBackend({ mode: 'release', state: 'running' }), true);
+  assert.equal(isManagedBackend({ mode: 'service' }), true);
+  assert.equal(isManagedBackend({ mode: 'release', state: 'stopped' }), false);
+  assert.equal(isManagedBackend({ mode: 'foreground', state: 'running' }), false);
+  assert.equal(isManagedBackend(null), false);
+
+  const releaseRunning = {
+    service: { mode: 'release', state: 'running' },
+    connections: { restartRequired: true },
+  };
+  assert.equal(applyAvailability(releaseRunning), 'pending');
+  assert.equal(applyState(releaseRunning).word, '等待应用');
+  renderApply(releaseRunning);
+  assert.equal(dom.applyButton.hidden, false);
+  assert.equal(dom.applyButton.disabled, false);
+  assert.equal(dom.applyButton.textContent, '应用已保存的连接');
+  assert.match(dom.restartHead.textContent, /本面板已连接本机后台服务/);
+  assert.doesNotMatch(dom.restartHead.textContent, /不是由受管后台服务运行/);
+
+  const releaseStopped = {
+    service: { mode: 'release', state: 'stopped' },
+    connections: { restartRequired: true },
+  };
+  assert.equal(applyAvailability(releaseStopped), 'unsupported');
+  assert.equal(applyState(releaseStopped).word, '自动应用不可用');
+  renderApply(releaseStopped);
+  assert.equal(dom.applyButton.hidden, true);
+  assert.match(dom.restartHead.textContent, /未连接运行中的后台服务/);
+});
+
+test('subagent role assignment syncs deduplicated pool rows, preserves drafts across mode switches, and strips autoRole on save', async () => {
+  const models = [
+    { id: 'ds/chat', name: 'DeepSeek', tools: true, reasoning: true, reasoningEfforts: ['low', 'high'] },
+    { id: 'glm/flash', name: 'GLM Flash', tools: true, reasoning: false },
+    { id: 'kimi/k2', name: 'Kimi K2', tools: true, reasoning: false },
+  ];
+  const state = {
+    key: 'sess',
+    stateReadEpoch: 1,
+    subagentSaving: false,
+    subagentErrors: [],
+    subagentModeCache: { force: null, pool: null },
+    data: {
+      revision: 'rev-1',
+      configuration: { state: 'ready' },
+      models,
+      subagents: { configured: { mode: 'inherit' } },
+    },
+    draft: null,
+    draftDirty: false,
+    draftBaseRevision: 'rev-1',
+    draftBaseEntity: null,
+    lastSync: 0,
+  };
+  const posted = [];
+  const toasts = [];
+  const roleConst = source.slice(source.indexOf('const SUBAGENT_ROLES = ['), source.indexOf('\nfunction emptyRoles('));
+  const code = `
+    ${roleConst}
+    const API = { subagents: '/api/subagents' };
+    const SUBAGENT_CAPABILITY_MISSING = 'missing';
+    const configReady = d => d?.configuration?.state === 'ready';
+    const isCapable = m => Boolean(m && m.tools === true);
+    const findModel = id => (state.data.models || []).find(m => m.id === id) || null;
+    const capableModels = () => (state.data.models || []).filter(isCapable);
+    const modelIdFromAlias = () => null;
+    const resolveAlias = x => x;
+    const declaredEfforts = m => m?.reasoningEfforts || [];
+    const renderSubagents = () => {};
+    const renderAll = () => {};
+    const adoptState = (next) => { state.data = next; };
+    const loadState = async () => true;
+    const handleSaveFailure = async () => {};
+    const showToast = (msg, tone) => toasts.push([msg, tone]);
+    const request = async (path, opts) => {
+      posted.push({ path, body: opts.body });
+      return {
+        state: {
+          ...state.data,
+          revision: 'rev-2',
+          subagents: {
+            configured: { mode: opts.body.mode, model: opts.body.model, models: opts.body.models, roles: opts.body.roles },
+            policy: { mode: opts.body.mode, transport: 'native-config' },
+            runtime: { state: 'file-applied', mode: opts.body.mode },
+          },
+        },
+      };
+    };
+    ${sourceFunction('emptyRoles')}
+    ${sourceFunction('normalizeRoles')}
+    ${sourceFunction('roleDescriptionFor')}
+    ${sourceFunction('isGeneratedRoleDescription')}
+    ${sourceFunction('syncRoleAssignmentsToPool')}
+    ${sourceFunction('cacheDraftMode')}
+    ${sourceFunction('savedTarget')}
+    ${sourceFunction('draftFromSaved')}
+    ${sourceFunction('sameTarget')}
+    ${sourceFunction('recomputeDraftDirty')}
+    ${sourceFunction('evaluateSubagentDraft')}
+    ${sourceFunction('poolRow')}
+    ${sourceFunction('poolDraftIds')}
+    ${sourceFunction('setMode')}
+    ${sourceFunction('pickModel')}
+    ${sourceFunction('pickEffort')}
+    ${sourceFunction('pickRoleDefault')}
+    ${sourceFunction('pickRoleModel')}
+    ${sourceFunction('appendPoolModel')}
+    ${sourceFunction('removePoolModel')}
+    ${sourceFunction('discardDraft')}
+    ${sourceFunction('saveSubagentTarget')}
+    return { draftFromSaved, evaluateSubagentDraft, setMode, pickModel, pickEffort, pickRoleDefault, pickRoleModel, appendPoolModel, removePoolModel, discardDraft, saveSubagentTarget };
+  `;
+  const api = new Function('state', 'posted', 'toasts', code)(state, posted, toasts);
+  state.draft = api.draftFromSaved(state.data);
+  state.draftBaseEntity = api.draftFromSaved(state.data);
+
+  api.setMode('pool');
+  const emptyEval = api.evaluateSubagentDraft(state.draft, state.data);
+  assert.equal(emptyEval.problems.some(p => p.includes('未声明工具调用')), false);
+
+  api.pickRoleDefault('ds/chat');
+  api.pickRoleModel('plan', 'ds/chat');
+  api.pickRoleModel('coder', 'glm/flash');
+  api.pickRoleModel('explore', 'kimi/k2');
+  assert.equal(state.draft.model, 'ds/chat');
+  assert.deepEqual(state.draft.roles, { plan: 'ds/chat', coder: 'glm/flash', explore: 'kimi/k2' });
+  assert.deepEqual(state.draft.models.map(r => r.id), ['ds/chat', 'glm/flash', 'kimi/k2']);
+  assert.match(state.draft.models[0].description, /默认子代理；用于 plan/);
+
+  // Switching pool -> force -> inherit -> pool must preserve all unsaved pool roles and models.
+  api.setMode('force');
+  api.pickModel('ds/chat');
+  api.pickEffort('high');
+  api.setMode('inherit');
+  api.setMode('pool');
+  assert.equal(state.draft.model, 'ds/chat');
+  assert.deepEqual(state.draft.roles, { plan: 'ds/chat', coder: 'glm/flash', explore: 'kimi/k2' });
+  assert.deepEqual(state.draft.models.map(r => r.id), ['ds/chat', 'glm/flash', 'kimi/k2']);
+
+  // Switching back to force preserves force model and effort too.
+  api.setMode('force');
+  assert.equal(state.draft.model, 'ds/chat');
+  assert.equal(state.draft.effort, 'high');
+
+  // Switch back to pool, remove explore model, verify role reference is cleared cleanly.
+  api.setMode('pool');
+  api.removePoolModel('kimi/k2');
+  assert.equal(state.draft.roles.explore, '');
+  assert.deepEqual(state.draft.models.map(r => r.id), ['ds/chat', 'glm/flash']);
+
+  await api.saveSubagentTarget();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].path, '/api/subagents');
+  assert.equal(posted[0].body.mode, 'pool');
+  assert.equal(posted[0].body.model, 'ds/chat');
+  assert.deepEqual(posted[0].body.roles, { plan: 'ds/chat', coder: 'glm/flash' });
+  assert.equal(posted[0].body.models.every(row => !Object.hasOwn(row, 'autoRole')), true);
+  assert.match(toasts[0][0], /config\.toml/);
+
+  // Discard resets cached drafts.
+  api.setMode('inherit');
+  api.discardDraft();
+  assert.equal(state.draft.mode, 'pool');
+  assert.equal(state.subagentModeCache.pool, null);
+});
+
+test('4-step quickstart guide tracks real state, auto-collapses once ready, and supports toggle/dismiss/reopen', () => {
+  const storage = new Map();
+  const localStorage = {
+    getItem: k => (storage.has(k) ? storage.get(k) : null),
+    setItem: (k, v) => storage.set(k, String(v)),
+    removeItem: k => storage.delete(k),
+  };
+  const makeEl = () => ({ hidden: false, textContent: '', dataset: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); } });
+  const nodes = {};
+  for (const id of [
+    'quickstart-guide', 'quickstart-progress', 'quickstart-toggle',
+    'quickstart-step-1', 'quickstart-step-1-dot', 'quickstart-step-1-tag',
+    'quickstart-step-2', 'quickstart-step-2-dot', 'quickstart-step-2-tag',
+    'quickstart-step-3', 'quickstart-step-3-dot', 'quickstart-step-3-tag',
+    'quickstart-step-4', 'quickstart-step-4-dot', 'quickstart-step-4-tag',
+  ]) nodes[id] = makeEl();
+  const dom = {
+    quickstartGuide: nodes['quickstart-guide'],
+    quickstartProgress: nodes['quickstart-progress'],
+    quickstartToggle: nodes['quickstart-toggle'],
+  };
+  const state = { guideCollapsed: null, overviewToday: { requests: 0 }, data: null };
+  const fn = new Function('$', 'dom', 'state', 'localStorage', `
+    const GUIDE_DISMISSED_STORE = 'kwg.panel.guide.dismissed';
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    const setDot = (el, tone) => { if (el) el.dataset.tone = tone; };
+    const syncState = (d) => d._sync || { code: 'empty' };
+    ${sourceFunction('isQuickstartDismissed')}
+    ${sourceFunction('dismissQuickstartGuide')}
+    ${sourceFunction('reopenQuickstartGuide')}
+    ${sourceFunction('toggleQuickstartGuide')}
+    ${sourceFunction('evaluateQuickstartSteps')}
+    ${sourceFunction('renderQuickstartGuide')}
+    return { dismissQuickstartGuide, reopenQuickstartGuide, toggleQuickstartGuide, renderQuickstartGuide };
+  `)(id => nodes[id] || null, dom, state, localStorage);
+
+  // Fresh install: 0/4 and expanded.
+  state.data = { models: [], _sync: { code: 'empty' }, subagents: { configured: { mode: 'inherit' } }, kimiProcess: { running: false } };
+  fn.renderQuickstartGuide(state.data);
+  assert.equal(nodes['quickstart-guide'].hidden, false);
+  assert.equal(nodes['quickstart-guide'].dataset.collapsed, 'false');
+  assert.equal(nodes['quickstart-progress'].textContent, '0 / 4');
+  assert.equal(nodes['quickstart-step-3-tag'].textContent, '可选');
+
+  // Models + synced + Kimi running: 3/4 and auto-collapsed.
+  state.data = { models: [{ id: 'm1' }], _sync: { code: 'ready' }, subagents: { configured: { mode: 'inherit' } }, kimiProcess: { running: true } };
+  fn.renderQuickstartGuide(state.data);
+  assert.equal(nodes['quickstart-progress'].textContent, '3 / 4');
+  assert.equal(nodes['quickstart-guide'].dataset.collapsed, 'true');
+  assert.equal(nodes['quickstart-toggle'].textContent, '展开引导');
+
+  // Toggle expands explicitly.
+  fn.toggleQuickstartGuide();
+  assert.equal(nodes['quickstart-guide'].dataset.collapsed, 'false');
+  assert.equal(nodes['quickstart-toggle'].textContent, '收起');
+
+  // Dismiss hides, reopen restores expanded.
+  fn.dismissQuickstartGuide();
+  assert.equal(nodes['quickstart-guide'].hidden, true);
+  fn.reopenQuickstartGuide();
+  assert.equal(nodes['quickstart-guide'].hidden, false);
+  assert.equal(nodes['quickstart-guide'].dataset.collapsed, 'false');
+});
+
+test('app.js wires subagents view rendering and release link external browser endpoint', () => {
+  assert.match(source, /if \(view === 'subagents'\) renderSubagents\(\);/);
+  assert.match(source, /request\('\/api\/updates\/open-release',\s*\{\s*method:\s*'POST',\s*body:\s*\{\s*\}\s*\}\)/);
+  assert.match(source, /const signature = JSON\.stringify\(\[pool, draft\.model \|\| null, state\.subagentSaving\]\);/);
+  assert.match(source, /已保存为继承主模型，但配置文件存在冲突未被覆盖/);
 });

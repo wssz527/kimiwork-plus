@@ -13,6 +13,7 @@ import (
 	"github.com/wssz527/kimiwork-plus/internal/byokdns"
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
+	"github.com/wssz527/kimiwork-plus/internal/ledger"
 	"github.com/wssz527/kimiwork-plus/internal/platform"
 )
 
@@ -50,6 +51,7 @@ type Native struct {
 	accountSyncID     string
 	accountSyncAt     time.Time
 	swarm             kimi.SwarmSnapshot
+	workUsage         *workUsageCollector
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -83,6 +85,8 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	capabilities := kimi.ProbeWorkCapabilities(install)
 	policies.capabilities = capabilities.Subagents
 	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, compatibility: initialCompatibilityReport(), jobs: make(chan struct{}, 2), workCapabilities: capabilities}
+	n.workUsage = newWorkUsageCollector(s.StateDir, home, gateway.usage, s.Store, gateway.budget)
+	n.workUsage.Sync()
 	n.quota = newNativeQuota(s, controller.KimiCodeKey, kimi.LocalKimiCodeKey)
 	if err := n.initAccounts(gateway); err != nil {
 		n.accountReason = core.ErrorCode(err)
@@ -119,6 +123,18 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 			return core.Document{"accounts": n.accountsState()}, nil
 		case "/api/work/swarm":
 			return n.readSwarm(ctx)
+		case "/api/usage/query", "/api/usage/export":
+			if n.workUsage != nil {
+				n.workUsage.Sync()
+			}
+		case "/api/usage/clear":
+			res, err := gateway.Action(ctx, path, in)
+			if err == nil && n.workUsage != nil {
+				if cr, ok := res.(ledger.ClearResult); ok && cr.OK {
+					n.workUsage.MarkCleared(in["before"], core.String(in["timeZone"]))
+				}
+			}
+			return res, err
 		}
 		return gateway.Action(ctx, path, in)
 	}
@@ -215,6 +231,9 @@ func (n *Native) watch(ctx context.Context) {
 			}
 			if err := n.syncWorkHome(); err == nil {
 				configObserved = n.reconcile(configObserved)
+			}
+			if n.workUsage != nil {
+				n.workUsage.Sync()
 			}
 			if !accountBlocked {
 				n.observeAccounts(ctx)
@@ -487,6 +506,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 					n.clearStaleAccountActivation()
 				}
 				n.refreshAccountQuota(deadline)
+				if action == "account-switch" {
+					if d, _, readErr := n.service.Store.Read(); readErr == nil {
+						_ = n.policies.Configure(d)
+					}
+				}
 			}
 		case "launch-kimi":
 			settings := n.controller.Settings()
@@ -531,6 +555,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if err == nil {
 				err = importResultError(imported)
 			}
+			if err == nil {
+				if d, _, readErr := n.service.Store.Read(); readErr == nil {
+					_ = n.policies.Configure(d)
+				}
+			}
 			state = imported.State
 			if state == "" || state == "accepted" || state == "applied" {
 				state = "prepared"
@@ -558,6 +587,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if imported != nil {
 				if err == nil {
 					err = importResultError(*imported)
+				}
+				if err == nil {
+					if d, _, readErr := n.service.Store.Read(); readErr == nil {
+						_ = n.policies.Configure(d)
+					}
 				}
 				state = imported.State
 				if state == "" || state == "accepted" || state == "applied" {

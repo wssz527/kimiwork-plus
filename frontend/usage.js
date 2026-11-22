@@ -89,7 +89,7 @@
           <label class="field" for="usage-filter-account"><span class="field__label">账户标识</span><select id="usage-filter-account" data-usage-filter="account"><option value="">全部已识别账户</option></select></label>
           <label class="field" id="usage-filter-conversation-wrap" for="usage-filter-conversation" hidden><span class="field__label">会话</span><select id="usage-filter-conversation" data-usage-filter="conversationId"><option value="">全部会话</option></select><span class="field__hint" id="usage-conversation-hint">只使用有可靠来源的会话 ID。</span></label>
         </div>
-        <p class="note usage-coverage" id="usage-coverage">仅统计经过本机网关的可观察请求；官方直连和接入前历史不会补算。</p>
+        <p class="note usage-coverage" id="usage-coverage">统计本机网关请求及 Kimi Work 本地会话用量（只读解析 token 计数，不读取对话内容）。</p>
         <section class="usage-detail" id="usage-bucket-detail" hidden><h3 class="usage-detail__title" id="usage-bucket-title"></h3><div id="usage-bucket-records"></div></section>
         <section class="usage-detail" aria-labelledby="usage-records-title">
           <div class="band__head"><div><h3 class="usage-detail__title" id="usage-records-title">请求明细</h3><p>按时间倒序，不保存或展示 prompt、响应正文和 API Key。</p></div><div><button class="btn btn--outline btn--sm" id="usage-export" type="button">导出脱敏 JSON</button><button class="btn btn--quiet btn--sm" id="usage-clear" type="button">清除历史</button></div></div>
@@ -238,7 +238,15 @@
     text('usage-stat-errors', fmt(number(summary.errors ?? summary.errorCount) ?? 0));
     text('usage-stat-cost', costText(summary.estimatedCost, summary.currency));
     const coverage = result.coverage || {};
-    text('usage-coverage', '仅统计经过本机网关的可观察请求；官方直连和接入前历史不会补算。'
+    const sources = Array.isArray(coverage.sources) ? coverage.sources : [];
+    const hasSession = sources.includes('kimi_work_session');
+    const hasGateway = sources.some(item => item && item !== 'kimi_work_session');
+    const coverageBase = hasSession && hasGateway
+      ? '已合并统计本机网关请求与 Kimi Work 本地会话用量（含直连与官方模型）；会话来源只读 token 计数、不读取对话文本，耗时与首字节延迟仅网关模式提供。'
+      : hasSession
+        ? '当前统计来自 Kimi Work 本地会话用量记录（只读解析 token 计数，不读取对话文本）；耗时与首字节延迟仅在网关模式下提供。'
+        : '统计本机网关请求与 Kimi Work 本地会话用量（只读解析 token 计数，不读取对话文本）；耗时与首字节延迟仅在网关模式下提供。';
+    text('usage-coverage', coverageBase
       + (coverage.recordingSince ? ' 账本最早记录：' + time(coverage.recordingSince) + '。' : '')
       + (['unavailable', 'write_failed', 'unsafe_file'].includes(coverage.state) ? ' 持久化当前不可用，重启后可能无法保留。'
         : coverage.state === 'corrupt' ? ' 账本中有无法读取的行，其余记录仍保留。' : ''));
@@ -384,7 +392,12 @@
         cell(row, time(record.at || record.timestamp || record.completedAt)); cell(row, record.modelId || record.model || '未知'); cell(row, fmt(token(record, 'input')), 'num'); cell(row, fmt(token(record, 'output')), 'num'); cell(row, statusText(record));
       } else {
         cell(row, time(record.at || record.timestamp || record.completedAt));
-        cell(row, [record.providerId, record.connectionId].filter(Boolean).join(' / ') || record.source || '本机网关');
+        const providerLabel = record.providerId === 'kimi-official' ? 'Kimi 官方' : record.providerId;
+        const routeSource = [providerLabel, record.connectionId].filter(Boolean).join(' / ');
+        const sourceLabel = record.source === 'kimi_work_session'
+          ? (routeSource ? routeSource + ' · Work 会话' : 'Kimi Work 会话')
+          : (routeSource || record.source || '本机网关');
+        cell(row, sourceLabel);
         cell(row, record.modelId || record.model || '未知');
         cell(row, fmt(token(record, 'input')), 'num'); cell(row, fmt(token(record, 'output')), 'num');
         cell(row, fmt(token(record, 'cacheRead') ?? number(record.cachedInputTokens)), 'num'); cell(row, fmt(token(record, 'cacheWrite')), 'num');

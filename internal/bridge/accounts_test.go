@@ -3,12 +3,17 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
 
 type accountManagerFixture struct {
@@ -445,5 +450,151 @@ func TestSyncCurrentAccountCredentialsThrottlesSteadyStateAndProtectsEmptyTokens
 	rows, _, _ = f.vault.summaries()
 	if !rows[0].NeedsLogin {
 		t.Fatal("NeedsLogin cleared despite empty tokens")
+	}
+}
+
+func makeBridgeTestJWT(exp time.Time) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.UTC().Unix())))
+	return header + "." + payload + ".sig-secret"
+}
+
+func TestAccountVaultPersistsLifetimeAndRecomputesWithoutDecryptingKeys(t *testing.T) {
+	baseNow := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	currentNow := baseNow
+	keys := &countedKeys{values: map[string]string{}}
+	vault := newAccountVault(t.TempDir(), keys)
+	vault.now = func() time.Time { return currentNow }
+
+	accessExp := baseNow.Add(6 * time.Hour)
+	refreshExp := baseNow.Add(120 * time.Hour)
+	cookieExp := baseNow.Add(240 * time.Hour)
+	accessJWT := makeBridgeTestJWT(accessExp)
+	refreshJWT := makeBridgeTestJWT(refreshExp)
+
+	sessionRaw, err := json.Marshal(kimi.AccountSession{
+		SchemaVersion: kimi.AccountSessionSchema,
+		UserID:        "user-life",
+		Name:          "Lifetime User",
+		LocalStorage: []kimi.AccountStorageEntry{
+			{Key: "access_token", Value: accessJWT},
+			{Key: "refresh_token", Value: refreshJWT},
+		},
+		Cookies: []kimi.AccountCookie{
+			{Name: "kimi_session", Value: "cookie-secret", Domain: ".kimi.com", Path: "/", Expires: float64(cookieExp.Unix())},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := vault.capture(accountCapture{UserID: "user-life", Name: "Lifetime User", Session: sessionRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.AccessExpiresAt != accessExp.Format(time.RFC3339) ||
+		summary.RefreshExpiresAt != refreshExp.Format(time.RFC3339) ||
+		summary.CookieExpiresAt != cookieExp.Format(time.RFC3339) ||
+		summary.TokenHealth != kimi.TokenHealthHealthy {
+		t.Fatalf("captured lifetime metadata mismatch: %+v", summary)
+	}
+
+	rawIndex, err := os.ReadFile(vault.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{accessJWT, refreshJWT, "sig-secret", "cookie-secret"} {
+		if strings.Contains(string(rawIndex), secret) {
+			t.Fatalf("accounts.json leaked secret %q", secret)
+		}
+	}
+
+	readsAfterCapture := keys.reads
+
+	// Advance time into the 72h refresh expiring_soon window; summaries/State must
+	// recompute dynamically without touching the key store.
+	currentNow = baseNow.Add(60 * time.Hour)
+	rows, _, err := vault.summaries()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("summaries failed: %v %+v", err, rows)
+	}
+	if rows[0].TokenHealth != kimi.TokenHealthExpiringSoon {
+		t.Fatalf("TokenHealth at +60h = %q, want %q", rows[0].TokenHealth, kimi.TokenHealthExpiringSoon)
+	}
+	if keys.reads != readsAfterCapture {
+		t.Fatalf("summaries decrypted keys: reads=%d want %d", keys.reads, readsAfterCapture)
+	}
+
+	// Advance past refresh expiry; must recompute as expired with zero key reads.
+	currentNow = baseNow.Add(130 * time.Hour)
+	manager, err := newAccountManager(vault, accountHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRows, _ := manager.State()["accounts"].([]AccountSummary)
+	if len(stateRows) != 1 || stateRows[0].TokenHealth != kimi.TokenHealthExpired {
+		t.Fatalf("State TokenHealth at +130h = %+v", stateRows)
+	}
+	if keys.reads != readsAfterCapture {
+		t.Fatalf("State decrypted keys: reads=%d want %d", keys.reads, readsAfterCapture)
+	}
+}
+
+func TestAccountStoreReadsLegacyIndexAndSyncBackfillsLifetime(t *testing.T) {
+	prevInterval := accountRotationSyncInterval
+	accountRotationSyncInterval = 0
+	t.Cleanup(func() { accountRotationSyncInterval = prevInterval })
+
+	baseNow := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	keys := &countedKeys{values: map[string]string{}}
+	vault := newAccountVault(t.TempDir(), keys)
+	vault.now = func() time.Time { return baseNow }
+
+	id := accountID("legacy-user")
+	ref := "account-session-" + strings.Repeat("a", 64)
+	refreshExp := baseNow.Add(120 * time.Hour)
+	sessionRaw, err := json.Marshal(kimi.AccountSession{
+		SchemaVersion: kimi.AccountSessionSchema,
+		UserID:        "legacy-user",
+		Name:          "Legacy User",
+		LocalStorage: []kimi.AccountStorageEntry{
+			{Key: "access_token", Value: makeBridgeTestJWT(baseNow.Add(2 * time.Hour))},
+			{Key: "refresh_token", Value: makeBridgeTestJWT(refreshExp)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys.values[ref] = string(sessionRaw)
+
+	// Write a legacy accounts.json without any token lifetime fields.
+	legacyJSON := fmt.Sprintf(`{"version":1,"currentId":%q,"accounts":[{"id":%q,"name":"Legacy User","capturedAt":1000,"needsLogin":false,"credentialRef":%q}]}`, id, id, ref)
+	if err := os.WriteFile(vault.path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, current, err := vault.summaries()
+	if err != nil || current != id || len(rows) != 1 {
+		t.Fatalf("legacy accounts.json read failed: %v %q %+v", err, current, rows)
+	}
+	if rows[0].TokenHealth != kimi.TokenHealthUnknown {
+		t.Fatalf("legacy summary TokenHealth = %q, want %q", rows[0].TokenHealth, kimi.TokenHealthUnknown)
+	}
+
+	manager, err := newAccountManager(vault, accountHooks{
+		Capture: func(context.Context) (accountCapture, error) {
+			return accountCapture{UserID: "legacy-user", Name: "Legacy User", Session: sessionRaw}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &Native{accounts: manager}
+	native.syncCurrentAccountCredentials(context.Background(), id, rows)
+
+	updated, _, err := vault.summaries()
+	if err != nil || len(updated) != 1 {
+		t.Fatalf("summaries after sync failed: %v", err)
+	}
+	if updated[0].RefreshExpiresAt != refreshExp.Format(time.RFC3339) || updated[0].TokenHealth != kimi.TokenHealthHealthy {
+		t.Fatalf("sync did not backfill lifetime metadata: %+v", updated[0])
 	}
 }

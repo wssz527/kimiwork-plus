@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 )
+
+var backgroundExecutable = os.Executable
 
 // BackgroundFlag starts the daemon detached from the caller's console. The Run
 // value and the panel's Start button both use it: a login start must not open a
@@ -54,16 +57,20 @@ func RunBackgroundFromArgs(args []string) (int, bool) {
 func StartBackground(args []string) error {
 	options, err := parseDaemonArguments(args, true)
 	if err != nil {
+		appendBackgroundError(options.LogPath, err)
 		return err
 	}
 	if options.StateDir == "" {
-		return errors.New("state_dir_required")
+		err = errors.New("state_dir_required")
+		appendBackgroundError(options.LogPath, err)
+		return err
 	}
 	if healthyDaemon(context.Background(), options.StateDir) {
 		return nil
 	}
-	executable, err := os.Executable()
+	executable, err := backgroundExecutable()
 	if err != nil {
+		appendBackgroundError(options.LogPath, err)
 		return err
 	}
 	childArgs := []string{"--state-dir", options.StateDir}
@@ -72,8 +79,9 @@ func StartBackground(args []string) error {
 	}
 	command := exec.Command(executable, childArgs...)
 	command.Stdin = nil
+	var log *os.File
 	if options.LogPath != "" {
-		log, err := openHelperLog(options.LogPath)
+		log, err = openHelperLog(options.LogPath)
 		if err != nil {
 			return err
 		}
@@ -83,9 +91,33 @@ func StartBackground(args []string) error {
 	}
 	detach(command)
 	if err = command.Start(); err != nil {
+		writeBackgroundError(log, err)
 		return err
 	}
-	return command.Process.Release()
+	if err = command.Process.Release(); err != nil {
+		writeBackgroundError(log, err)
+		return err
+	}
+	return nil
+}
+
+func appendBackgroundError(logPath string, err error) {
+	if logPath == "" || !filepath.IsAbs(logPath) || err == nil {
+		return
+	}
+	log, openErr := openHelperLog(logPath)
+	if openErr != nil {
+		return
+	}
+	defer log.Close()
+	writeBackgroundError(log, err)
+}
+
+func writeBackgroundError(w io.Writer, err error) {
+	if w == nil || err == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s start_background_failed: %s\n", time.Now().UTC().Format(time.RFC3339), err.Error())
 }
 
 // TerminateDaemon ends the daemon recorded for a state directory.
@@ -176,13 +208,16 @@ func parseDaemonArguments(args []string, withLog bool) (daemonOptions, error) {
 		set.StringVar(&options.LogPath, "log-path", "", "")
 	}
 	if err := set.Parse(args); err != nil {
-		return daemonOptions{}, err
-	}
-	if options.StateDir != "" && !filepath.IsAbs(options.StateDir) {
-		return daemonOptions{}, errors.New("service_state_dir_not_absolute")
+		if options.LogPath != "" && !filepath.IsAbs(options.LogPath) {
+			options.LogPath = ""
+		}
+		return options, err
 	}
 	if options.LogPath != "" && !filepath.IsAbs(options.LogPath) {
 		return daemonOptions{}, errors.New("service_log_path_not_absolute")
+	}
+	if options.StateDir != "" && !filepath.IsAbs(options.StateDir) {
+		return options, errors.New("service_state_dir_not_absolute")
 	}
 	return options, nil
 }

@@ -19,6 +19,8 @@ const POLL_MS = 2000;
 const KEY_STORE = 'kwg.panel.key';
 const THEME_STORE = 'kwg.panel.theme';
 const VIEW_STORE = 'kwg.panel.view';
+const SUBTAB_STORE = 'kwg.panel.subtabs';
+const GUIDE_DISMISSED_STORE = 'kwg.panel.guide.dismissed';
 const MODEL_ALIAS_PREFIXES = ['byok-kth-kimi/', 'byok-kth-resp/'];
 /* Kimi 3.2.28 的自定义源别名是 `byok-<uuid>/<modelId>`；UUID 每台机器不同，
    所以只能按形状匹配，不能写死成一个值。 */
@@ -85,15 +87,23 @@ const UPSTREAM_REASON = {
 
 
 const VIEW_COPY = {
-  overview: { title: '总览', lede: '网关、Kimi Work 接入、当前账号与今日用量。' },
-  models: { title: '模型', lede: '在这里管理服务商与模型，保存后同步到 Kimi Work。' },
-  usage: { title: '用量', lede: '查看真实请求、服务商余额与 Kimi Code 额度。' },
-  work: { title: 'Work 能力', lede: '管理子代理、并行、MCP、联网与长对话整理。' },
-  extensions: { title: '扩展', lede: '独立管理思考翻译，关闭扩展不会影响网关与 Work。' },
-  maintenance: { title: '设置', lede: '账号管理、后台服务、版本与 Kimi 接入诊断。' },
+  overview: { title: '总览', lede: '快速上手、网关与 Kimi Work 接入、当前账号、子代理与今日用量。' },
+  models: { title: '模型', lede: '管理服务商连接与模型目录，保存后同步到 Kimi Work。' },
+  subagents: { title: '子代理', lede: '按角色分配子代理模型，管理模型池与当前会话 Swarm 并行。' },
+  usage: { title: '用量', lede: '查看本机网关与 Kimi Work 会话用量、服务商余额与预算保护。' },
+  maintenance: { title: '设置', lede: '账号管理、接入与自动更新、扩展工具与高级诊断。' },
 };
 
-const VIEW_ALIASES = { connection: 'models', enhancements: 'work', subagents: 'work', tools: 'work', settings: 'work', translation: 'extensions' };
+const VIEW_ALIASES = {
+  connection: 'models',
+  connections: 'models',
+  enhancements: 'subagents',
+  work: 'subagents',
+  tools: 'maintenance',
+  extensions: 'maintenance',
+  translation: 'maintenance',
+  settings: 'maintenance',
+};
 
 /* 用量面板整体重写 #usage-root，因此「最近请求」只能在面板 mount 之后
    移入它的请求页；按父节点判断，重复调用不会产生第二份表。 */
@@ -104,20 +114,60 @@ function mountUsageRequests() {
   pane.append(section);
 }
 
-/* Work 能力页的分类入口：目标可能在折叠区里（MCP 面板就在 mcp-details 内），
-   只展开目标本身不够，祖先 details 必须依次打开，否则滚动会落在隐藏节点上。 */
+/* 显式滚动 .main 容器，禁止调用 scrollIntoView()，避免 macOS WKWebView 将外层视口
+   连同顶栏 .masthead 一起向上滚出视野。 */
+function scrollMainToElement(target) {
+  const main = $('main');
+  if (!main || !target) return;
+  if (typeof target.getBoundingClientRect === 'function' && typeof main.getBoundingClientRect === 'function') {
+    const mainRect = main.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = Math.max(0, (main.scrollTop || 0) + (targetRect.top - mainRect.top) - 16);
+    main.scrollTop = top;
+  } else {
+    main.scrollTop = 0;
+  }
+}
+
+function setSubtab(group, tab, { persist = true } = {}) {
+  if (!group || !tab) return;
+  state.subtabs = { ...(state.subtabs || {}), [group]: tab };
+  if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+    document.querySelectorAll(`[data-subtab-group="${group}"][data-subtab]`).forEach((btn) => {
+      btn.setAttribute('aria-selected', String(btn.dataset.subtab === tab));
+    });
+    document.querySelectorAll(`[data-subtab-group="${group}"][data-subtab-pane]`).forEach((pane) => {
+      pane.hidden = pane.dataset.subtabPane !== tab;
+    });
+  }
+  const main = $('main');
+  if (main) main.scrollTop = 0;
+  if (persist) {
+    try {
+      sessionStorage.setItem(SUBTAB_STORE, JSON.stringify(state.subtabs));
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
+/* 跨区块定位：若目标位于某个二级标签页或折叠区中，先激活对应二级页签并展开所有祖先
+   details，再只滚动 .main 内部容器。 */
 function revealWorkspaceSection(id) {
   const target = id ? $(id) : null;
   if (!target) return null;
-  if (target.tagName === 'DETAILS') target.open = true;
-  for (let node = target.parentElement; node; node = node.parentElement) {
+  for (let node = target; node; node = node.parentElement) {
+    if (node.dataset && node.dataset.subtabGroup && node.dataset.subtabPane) {
+      setSubtab(node.dataset.subtabGroup, node.dataset.subtabPane);
+    }
     if (node.tagName === 'DETAILS') node.open = true;
   }
-  target.scrollIntoView({ block: 'start' });
-  /* 快捷入口也把焦点交给区块标题，键盘用户才不会停在页首。 */
-  const heading = target.querySelector('h2, h3, summary') || target;
+  scrollMainToElement(target);
+  const heading = (typeof target.querySelector === 'function' && target.querySelector('h2, h3, summary')) || target;
   if (typeof heading.focus === 'function') {
-    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    if (typeof heading.hasAttribute === 'function' && !heading.hasAttribute('tabindex')) {
+      heading.setAttribute('tabindex', '-1');
+    }
     heading.focus({ preventScroll: true });
   }
   return target;
@@ -324,6 +374,7 @@ const ERROR_HINT = {
   unmanaged_service: '当前面板不是由受管后台服务运行，无法自动应用连接。',
   invalid_subagent_policy: '提交的目标格式不被接受，请重新选择模式与模型。',
   invalid_subagent_pool: '模型池需要 1–32 个不重复、均已声明用途说明的候选模型。',
+  invalid_subagent_roles: '角色模型分配无效，请确认所选模型均支持工具调用且在候选池中。',
   invalid_subagent_description: '用途说明必须是单行文本，最长 1000 字符。',
   subagent_pool_default_required: '默认模型必须在候选列表中。',
   subagent_model_unavailable: '所选模型已不在目录中，请重新选择。',
@@ -374,9 +425,8 @@ const dom = {
 
   navOverview: $('nav-overview'),
   navModels: $('nav-models'),
+  navSubagents: $('nav-subagents'),
   navUsage: $('nav-usage'),
-  navWork: $('nav-work'),
-  navExtensions: $('nav-extensions'),
   navMaintenance: $('nav-maintenance'),
   navModelCount: $('nav-model-count'),
 
@@ -391,7 +441,16 @@ const dom = {
   factModels: $('fact-models'),
   factModelsSub: $('fact-models-sub'),
   overviewOpenModels: $('overview-open-models'),
+  overviewOpenSubagents: $('overview-open-subagents'),
+  overviewSubagentsDot: $('overview-subagents-dot'),
+  overviewSubagentsValue: $('overview-subagents-value'),
+  overviewSubagentsNote: $('overview-subagents-note'),
   overviewOpenUsage: $('overview-open-usage'),
+  quickstartGuide: $('quickstart-guide'),
+  quickstartProgress: $('quickstart-progress'),
+  quickstartToggle: $('quickstart-toggle'),
+  quickstartDismiss: $('quickstart-dismiss'),
+  quickstartSteps: $('quickstart-steps'),
   overviewTodayRequests: $('overview-today-requests'),
   overviewTodayTokens: $('overview-today-tokens'),
   overviewIssueCard: $('overview-issue-card'),
@@ -597,6 +656,13 @@ const dom = {
   saCapabilityNext: $('sa-capability-next'),
   saForceFields: $('sa-force-fields'),
   saPoolFields: $('sa-pool-fields'),
+  saRoleGrid: $('sa-role-grid'),
+  saRoleDefault: $('sa-role-default'),
+  saRolePlan: $('sa-role-plan'),
+  saRoleCoder: $('sa-role-coder'),
+  saRoleExplore: $('sa-role-explore'),
+  saRoleNote: $('sa-role-note'),
+  saPoolAdvanced: $('sa-pool-advanced'),
   saModel: $('sa-model'),
   saModelHint: $('sa-model-hint'),
   saEffort: $('sa-effort'),
@@ -653,6 +719,9 @@ const state = {
   key: null,
   data: null,
   view: 'overview',
+  subtabs: { models: 'catalog', subagents: 'models', maintenance: 'accounts' },
+  subagentModeCache: { force: null, pool: null },
+  guideCollapsed: null,
   query: '',
   filter: 'all',
   editor: null,
@@ -1141,6 +1210,7 @@ export {
   DIRECT_SKIP_REASON,
   DISCOVERY_REASON,
   EFFORT_PATTERN,
+  GUIDE_DISMISSED_STORE,
   INTEGRATION_MODES,
   KEY_STORE,
   LOOPBACK,
@@ -1150,6 +1220,7 @@ export {
   POLICY_TRANSPORT_WORD,
   POLL_MS,
   RUNTIME_STATE,
+  SUBTAB_STORE,
   UPSTREAM_REASON,
   VIEW_ALIASES,
   VIEW_COPY,
@@ -1177,9 +1248,11 @@ export {
   renderErrorList,
   request,
   revealWorkspaceSection,
+  scrollMainToElement,
   setConnErrors,
   setDot,
   setHidden,
+  setSubtab,
   setText,
   shortRev,
   showGate,

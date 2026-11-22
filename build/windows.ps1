@@ -4,7 +4,8 @@ param(
   [string]$Version = "1.0.0",
   [string]$BuildId = "development",
   [string]$UpdatePublicKey = "",
-  [string]$UpdateGitHubRepo = ""
+  [string]$UpdateGitHubRepo = "",
+  [string]$UpdateMirrorBase = $env:UPDATE_MIRROR_BASE
 )
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -16,6 +17,7 @@ $env:CGO_ENABLED = "0"
 $Flags = "-s -w -X github.com/wssz527/kimiwork-plus/internal/bridge.Version=$Version -X github.com/wssz527/kimiwork-plus/internal/bridge.BuildID=$BuildId"
 if ($UpdatePublicKey) { $Flags += " -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultPublicKeyHex=$UpdatePublicKey" }
 if ($UpdateGitHubRepo) { $Flags += " -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultGitHubRepo=$UpdateGitHubRepo" }
+if ($UpdateMirrorBase) { $Flags += " -X github.com/wssz527/kimiwork-plus/internal/appupdate.DefaultMirrorBase=$UpdateMirrorBase" }
 
 $DesktopExe = Join-Path $OutputDir "KimiWorkPlus.exe"
 $DaemonExe = Join-Path $OutputDir "gateway-daemon.exe"

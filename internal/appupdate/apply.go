@@ -17,6 +17,19 @@ import (
 
 const ApplyHelperFlag = "--apply-update"
 
+var (
+	applyValidateStaged        = validateStagedArtifact
+	applyValidateInstalled     = validateInstalledArtifact
+	applyStopDesktop           = stopTargetDesktop
+	applyStopDaemon            = stopRunningDaemon
+	applySwapInstallation      = swapInstallation
+	applyRestoreInstallation   = restoreInstallation
+	applyLaunchInstallation    = launchInstallation
+	applyStabilityDelay        = 1500 * time.Millisecond
+	applyRollbackHealthTimeout = 15 * time.Second
+	openPlatformServiceManager = platform.OpenManager
+)
+
 type ApplyPlan struct {
 	Mode              string `json:"mode"` // "update" or "rollback"
 	StateDir          string `json:"stateDir"`
@@ -77,29 +90,29 @@ func executeApplyPlan(plan ApplyPlan, planPath string) int {
 		}
 	}()
 
-	if err := validateStagedArtifact(plan.StagedPath); err != nil {
+	if err := applyValidateStaged(plan.StagedPath); err != nil {
 		logf("staged artifact validation failed: %v", err)
 		recordApplyFailure(plan, "staged_validation_failed: "+err.Error())
 		return 10
 	}
 
-	stopTargetDesktop(plan.TargetPath, logf)
-	stopRunningDaemon(plan.StateDir, plan.DaemonPID, logf)
+	applyStopDesktop(plan.TargetPath, logf)
+	applyStopDaemon(plan.StateDir, plan.DaemonPID, logf)
 
-	if err := swapInstallation(plan.TargetPath, plan.StagedPath, plan.BackupPath, logf); err != nil {
+	if err := applySwapInstallation(plan.TargetPath, plan.StagedPath, plan.BackupPath, logf); err != nil {
 		logf("swap failed: %v — attempting relaunch of existing installation", err)
-		_ = launchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf)
+		_ = applyLaunchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf)
 		recordApplyFailure(plan, "swap_failed: "+err.Error())
 		return 11
 	}
 
-	if err := validateInstalledArtifact(plan.TargetPath); err != nil {
+	if err := applyValidateInstalled(plan.TargetPath); err != nil {
 		logf("installed artifact validation failed: %v — rolling back", err)
 		autoRollback(plan, "installed_validation_failed", logf)
 		return 12
 	}
 
-	if err := launchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf); err != nil {
+	if err := applyLaunchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf); err != nil {
 		logf("launch new installation failed: %v — rolling back", err)
 		autoRollback(plan, "new_version_launch_failed", logf)
 		return 13
@@ -117,29 +130,34 @@ func executeApplyPlan(plan ApplyPlan, planPath string) int {
 	}
 
 	// Second stability probe after 1.5s to ensure the new version did not crash right after startup.
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(applyStabilityDelay)
 	if second, err := probeDaemonHealth(plan.StateDir); err != nil || !second.Alive || second.PID != health.PID {
 		logf("stability probe failed (first pid=%d, second=%+v, err=%v) — rolling back", health.PID, second, err)
 		autoRollback(plan, "new_version_crashed_after_startup", logf)
 		return 15
 	}
 
-	postInstallUpdateMetadata(plan, health)
+	postInstallUpdateMetadata(plan, health, logf)
 	recordApplySuccess(plan, health)
 	logf("apply succeeded: version=%s buildId=%s pid=%d", health.Version, health.BuildID, health.PID)
 	return 0
 }
 
 func autoRollback(plan ApplyPlan, reason string, logf func(string, ...any)) {
-	stopTargetDesktop(plan.TargetPath, logf)
-	stopRunningDaemon(plan.StateDir, 0, logf)
+	applyStopDesktop(plan.TargetPath, logf)
+	applyStopDaemon(plan.StateDir, 0, logf)
 
 	if plan.BackupPath != "" {
 		if _, err := os.Stat(plan.BackupPath); err == nil {
-			if err := restoreInstallation(plan.TargetPath, plan.BackupPath, logf); err != nil {
+			if err := applyRestoreInstallation(plan.TargetPath, plan.BackupPath, logf); err != nil {
 				logf("rollback restore failed: %v", err)
+				recordApplyFailure(plan, "rollback_restore_failed: "+err.Error())
 				return
 			}
+		} else {
+			logf("rollback backup unavailable at %s: %v", plan.BackupPath, err)
+			recordApplyFailure(plan, "rollback_backup_unavailable: "+err.Error())
+			return
 		}
 	}
 
@@ -154,11 +172,11 @@ func autoRollback(plan ApplyPlan, reason string, logf func(string, ...any)) {
 	}
 	_ = saveHistory(plan.StateDir, h)
 
-	if err := launchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf); err != nil {
+	if err := applyLaunchInstallation(plan.TargetPath, plan.StateDir, plan.LaunchMode, logf); err != nil {
 		logf("relaunch after rollback failed: %v", err)
 	} else {
 		logf("relaunch after rollback dispatched")
-		rbDeadline := time.Now().Add(15 * time.Second)
+		rbDeadline := time.Now().Add(applyRollbackHealthTimeout)
 		for time.Now().Before(rbDeadline) {
 			if h, err := probeDaemonHealth(plan.StateDir); err == nil && h.Alive {
 				logf("rollback recovery healthy: version=%s buildId=%s pid=%d", h.Version, h.BuildID, h.PID)
@@ -167,6 +185,74 @@ func autoRollback(plan ApplyPlan, reason string, logf func(string, ...any)) {
 			time.Sleep(250 * time.Millisecond)
 		}
 	}
+}
+
+func postInstallUpdateMetadata(plan ApplyPlan, health daemonHealth, logf func(string, ...any)) {
+	refreshStaleServiceDefinition(plan, health, logf)
+	postInstallPlatformMetadata(plan, health)
+}
+
+func refreshStaleServiceDefinition(plan ApplyPlan, health daemonHealth, logf func(string, ...any)) {
+	if plan.TargetPath == "" || plan.StateDir == "" || health.BuildID == "" {
+		return
+	}
+	daemonBin := installedDaemonBinary(plan.TargetPath)
+	if daemonBin == "" {
+		return
+	}
+	absBin, err := filepath.Abs(daemonBin)
+	if err != nil {
+		logf("service refresh skipped: resolve binary: %v", err)
+		return
+	}
+	absState, err := filepath.Abs(plan.StateDir)
+	if err != nil {
+		logf("service refresh skipped: resolve state dir: %v", err)
+		return
+	}
+	opts := platform.ManagerOptions{
+		Binary:   absBin,
+		StateDir: absState,
+		BuildID:  health.BuildID,
+	}
+	if raw, readErr := os.ReadFile(filepath.Join(absState, "service-definition.json")); readErr == nil {
+		var prev struct {
+			Port    string `json:"port"`
+			LogPath string `json:"logPath"`
+		}
+		if json.Unmarshal(raw, &prev) == nil {
+			opts.Port = prev.Port
+			opts.LogPath = prev.LogPath
+		}
+	}
+	mgr, err := openPlatformServiceManager(opts)
+	if err != nil {
+		logf("service refresh skipped: open manager: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := mgr.Status(ctx)
+	if err != nil {
+		logf("service refresh skipped: status failed: %v", err)
+		return
+	}
+	if !st.Registered || !st.Stale {
+		return
+	}
+	if st.Enabled {
+		if _, err := mgr.Enable(ctx); err != nil {
+			logf("service refresh (enable) failed: %v", err)
+			return
+		}
+		logf("refreshed stale login-enabled service definition to buildId=%s", health.BuildID)
+		return
+	}
+	if _, err := mgr.Register(ctx); err != nil {
+		logf("service refresh (register) failed: %v", err)
+		return
+	}
+	logf("refreshed stale manual service definition to buildId=%s", health.BuildID)
 }
 
 func recordApplySuccess(plan ApplyPlan, health daemonHealth) {

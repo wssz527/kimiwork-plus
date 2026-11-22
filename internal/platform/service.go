@@ -234,12 +234,25 @@ func serviceHome(options ServiceOptions) string {
 	return homeDirectory()
 }
 
+// windowsLogPath returns the daemon log path for Windows background starts.
+// When the caller does not supply one, the log sits inside the state directory,
+// matching macOS's default <StateDir>/launchd-daemon.log layout.
+func windowsLogPath(options ServiceOptions) string {
+	if options.LogPath != "" {
+		return options.LogPath
+	}
+	if options.StateDir != "" {
+		return filepath.Join(options.StateDir, "login-daemon.log")
+	}
+	return ""
+}
+
 // windowsDefinitionContent is the JSON record written next to the product's own
 // configuration. It is deliberately not the login-start mechanism: the Run value
 // is, and this file only says what was registered and by which build.
 func windowsDefinitionContent(options ServiceOptions, loginStart bool) string {
 	record := definitionRecord{BuildID: options.BuildID, Binary: options.Binary,
-		StateDir: options.StateDir, Port: options.Port, LogPath: options.LogPath,
+		StateDir: options.StateDir, Port: options.Port, LogPath: windowsLogPath(options),
 		CommandLine: windowsCommandLine(options), LoginStart: loginStart, Label: ServiceLabel}
 	encoded, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
@@ -266,8 +279,8 @@ func windowsTerminateCommand(options ServiceOptions) []string {
 // would be split into the wrong executable.
 func windowsCommandLine(options ServiceOptions) string {
 	arguments := append([]string{"--start-background"}, serviceArguments(options)...)
-	if options.LogPath != "" {
-		arguments = append(arguments, "--log-path", options.LogPath)
+	if logPath := windowsLogPath(options); logPath != "" {
+		arguments = append(arguments, "--log-path", logPath)
 	}
 	commandLine := quoteWindows(options.Binary)
 	for _, argument := range arguments {

@@ -553,7 +553,14 @@ func replaceFile(file string, content []byte, mode os.FileMode) error {
 }
 
 func (n *NativeIntegration) readIntent() (*nativeIntent, error) {
-	file := filepath.Join(n.stateDir, NativeWorkIntent)
+	return readIntentFile(n.stateDir)
+}
+
+func readIntentFile(stateDir string) (*nativeIntent, error) {
+	if stateDir == "" {
+		return nil, nil
+	}
+	file := filepath.Join(stateDir, NativeWorkIntent)
 	info, err := os.Lstat(file)
 	if err != nil {
 		return nil, nil
@@ -570,6 +577,39 @@ func (n *NativeIntegration) readIntent() (*nativeIntent, error) {
 		return nil, nil
 	}
 	return &intent, nil
+}
+
+// ReadIntentAliases returns the active logical-model-id -> runtime-alias map
+// recorded in native-work-intent.json for the given state directory, Kimi home,
+// integration mode, and account scope.
+func ReadIntentAliases(stateDir, kimiHome, mode, accountScope string) map[string]string {
+	intent, err := readIntentFile(stateDir)
+	if err != nil || intent == nil || !intent.Active || len(intent.Aliases) == 0 {
+		return nil
+	}
+	if kimiHome != "" && intent.KimiHome != "" && filepath.Clean(intent.KimiHome) != filepath.Clean(kimiHome) {
+		return nil
+	}
+	intentMode := intent.Mode
+	if intentMode == "" {
+		intentMode = IntegrationModeGateway
+	}
+	if mode != "" && intentMode != mode {
+		return nil
+	}
+	if accountScope != "" && intent.AccountDigest != "" && sha256Hex(accountScope) != intent.AccountDigest {
+		return nil
+	}
+	out := make(map[string]string, len(intent.Aliases))
+	for modelID, alias := range intent.Aliases {
+		if modelID != "" && alias != "" {
+			out[modelID] = alias
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (n *NativeIntegration) writeIntent(intent *nativeIntent) error {

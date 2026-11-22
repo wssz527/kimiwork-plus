@@ -18,6 +18,14 @@ var (
 
 	// DefaultGitHubAPIBase is the GitHub API origin.
 	DefaultGitHubAPIBase = "https://api.github.com"
+
+	// DefaultMirrorBase is the CNB domestic mirror origin queried before GitHub.
+	// Overridable at build time via -ldflags -X.
+	DefaultMirrorBase = "https://cnb.cool"
+
+	// DefaultGitHubWebBase is the GitHub web origin used for direct release
+	// manifest and artifact fallback downloads. Overridable at build time via -ldflags -X.
+	DefaultGitHubWebBase = "https://github.com"
 )
 
 func PinnedPublicKey() ([]byte, error) {

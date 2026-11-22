@@ -970,3 +970,72 @@ test('a rolled-back failure keeps the target-account wording', () => {
     assert.doesNotMatch(text, /需要在该窗口登录/);
   } finally { env.restore(); }
 });
+
+test('account cards show calm token health hints only for expired or expiring tokens', () => {
+  const now = Date.now();
+  const collectByClass = (root, cls, out = []) => {
+    if (!root) return out;
+    if ((root.className || '').split(/\s+/).includes(cls)) out.push(root);
+    for (const child of root.children || []) collectByClass(child, cls, out);
+    return out;
+  };
+  const env = makePlus({ data: { accounts: {
+    state: 'ready',
+    currentId: 'acc-healthy',
+    accounts: [
+      { id: 'acc-healthy', name: '健康账号', tokenHealth: 'healthy', refreshExpiresAt: now - 60000 },
+      { id: 'acc-unknown', name: '未知账号', tokenHealth: 'unknown' },
+      { id: 'acc-plain', name: '无字段账号' },
+      { id: 'acc-expired', name: '过期账号', tokenHealth: 'expired' },
+      { id: 'acc-soon', name: '临近过期账号', tokenHealth: 'expiring_soon' },
+      { id: 'acc-refresh-past', name: '刷新已过期账号', refreshExpiresAt: new Date(now - 60000).toISOString() },
+      { id: 'acc-refresh-soon', name: '刷新临近过期账号', refreshExpiresAt: now + 3600 * 1000 },
+      { id: 'acc-refresh-ok-access-past', name: '刷新有效账号', refreshExpiresAt: now + 20 * 24 * 3600 * 1000, accessExpiresAt: now - 60000 },
+      { id: 'acc-access-past', name: '访问已过期账号', accessExpiresAt: now - 60000 },
+    ],
+  } } });
+  try {
+    env.panel.render(env.getState());
+    const body = env.byId('plus-accounts-body');
+    const cards = collectByClass(body, 'plus-account');
+    assert.equal(cards.length, 9);
+
+    const hintOf = (name) => {
+      const card = cards.find(item => textOf(item).includes(name));
+      assert.ok(card, 'missing card: ' + name);
+      return collectByClass(card, 'plus-account__health');
+    };
+
+    assert.equal(hintOf('健康账号').length, 0);
+    assert.equal(hintOf('未知账号').length, 0);
+    assert.equal(hintOf('无字段账号').length, 0);
+    assert.equal(hintOf('刷新有效账号').length, 0);
+
+    const expired = hintOf('过期账号');
+    assert.equal(expired.length, 1);
+    assert.equal(expired[0].dataset.health, 'expired');
+    assert.match(expired[0].textContent, /登录令牌可能已过期，切换失败时请重新登录/);
+
+    const soon = hintOf('临近过期账号');
+    assert.equal(soon.length, 1);
+    assert.equal(soon[0].dataset.health, 'expiring_soon');
+    assert.match(soon[0].textContent, /登录令牌临近过期/);
+
+    const refreshPast = hintOf('刷新已过期账号');
+    assert.equal(refreshPast.length, 1);
+    assert.equal(refreshPast[0].dataset.health, 'expired');
+    assert.match(refreshPast[0].textContent, /登录令牌可能已过期/);
+
+    const refreshSoon = hintOf('刷新临近过期账号');
+    assert.equal(refreshSoon.length, 1);
+    assert.equal(refreshSoon[0].dataset.health, 'expiring_soon');
+    assert.match(refreshSoon[0].textContent, /登录令牌临近过期/);
+
+    const accessPast = hintOf('访问已过期账号');
+    assert.equal(accessPast.length, 1);
+    assert.equal(accessPast[0].dataset.health, 'expired');
+
+    const overviewHints = collectByClass(env.byId('plus-overview-account'), 'plus-account__health');
+    assert.equal(overviewHints.length, 0);
+  } finally { env.restore(); }
+});

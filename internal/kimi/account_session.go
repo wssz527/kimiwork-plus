@@ -2,8 +2,10 @@ package kimi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -196,6 +198,212 @@ type AccountSession struct {
 	KimiCode map[string]any `json:"kimiCode,omitempty"`
 	// CodeKey is the Work kernel's `kimi-code-key.json` content.
 	CodeKey json.RawMessage `json:"codeKey,omitempty"`
+}
+
+// Token health labels derived purely from expiry metadata.
+const (
+	TokenHealthHealthy      = "healthy"
+	TokenHealthExpiringSoon = "expiring_soon"
+	TokenHealthExpired      = "expired"
+	TokenHealthUnknown      = "unknown"
+)
+
+const (
+	accessTokenExpiringWindow  = 24 * time.Hour
+	refreshTokenExpiringWindow = 72 * time.Hour
+	maxValidTokenUnixSeconds   = 253402300799
+)
+
+// AccountTokenLifetime carries read-only expiry metadata extracted from an
+// account session. It never contains tokens, cookies or other secrets.
+type AccountTokenLifetime struct {
+	AccessExpiresAt  string `json:"accessExpiresAt,omitempty"`
+	RefreshExpiresAt string `json:"refreshExpiresAt,omitempty"`
+	CookieExpiresAt  string `json:"cookieExpiresAt,omitempty"`
+	TokenHealth      string `json:"tokenHealth,omitempty"`
+}
+
+// InspectCredentialLifetime extracts non-secret expiry timestamps from an
+// AccountSession and classifies its token health at now.
+func InspectCredentialLifetime(session AccountSession, now time.Time) AccountTokenLifetime {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	var lifetime AccountTokenLifetime
+	if token := sessionTokenValue(session, "access_token", "accessToken"); token != "" {
+		if exp, ok := jwtExpiresAt(token); ok {
+			lifetime.AccessExpiresAt = exp.UTC().Format(time.RFC3339)
+		}
+	}
+	if token := sessionTokenValue(session, "refresh_token", "refreshToken"); token != "" {
+		if exp, ok := jwtExpiresAt(token); ok {
+			lifetime.RefreshExpiresAt = exp.UTC().Format(time.RFC3339)
+		}
+	}
+	if exp, ok := accountCookieExpiresAt(session.Cookies); ok {
+		lifetime.CookieExpiresAt = exp.UTC().Format(time.RFC3339)
+	}
+	lifetime.TokenHealth = ComputeTokenHealth(lifetime, now)
+	return lifetime
+}
+
+// ComputeTokenHealth derives the token health label from persisted RFC3339
+// expiry timestamps without inspecting or decrypting credential secrets.
+func ComputeTokenHealth(lifetime AccountTokenLifetime, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	refreshAt, hasRefresh := parseTokenExpiryRFC3339(lifetime.RefreshExpiresAt)
+	accessAt, hasAccess := parseTokenExpiryRFC3339(lifetime.AccessExpiresAt)
+	cookieAt, hasCookie := parseTokenExpiryRFC3339(lifetime.CookieExpiresAt)
+
+	if hasRefresh {
+		if !refreshAt.After(now) {
+			return TokenHealthExpired
+		}
+		if refreshAt.Sub(now) <= refreshTokenExpiringWindow {
+			return TokenHealthExpiringSoon
+		}
+		return TokenHealthHealthy
+	}
+	if hasAccess {
+		if !accessAt.After(now) {
+			return TokenHealthExpired
+		}
+		if accessAt.Sub(now) <= accessTokenExpiringWindow {
+			return TokenHealthExpiringSoon
+		}
+		return TokenHealthHealthy
+	}
+	if hasCookie {
+		if !cookieAt.After(now) {
+			return TokenHealthExpired
+		}
+		if cookieAt.Sub(now) <= accessTokenExpiringWindow {
+			return TokenHealthExpiringSoon
+		}
+		return TokenHealthHealthy
+	}
+	return TokenHealthUnknown
+}
+
+func sessionTokenValue(session AccountSession, storageKey, webField string) string {
+	for _, entry := range session.LocalStorage {
+		if entry.Key == storageKey && strings.TrimSpace(entry.Value) != "" {
+			return entry.Value
+		}
+	}
+	if session.KimiWeb != nil {
+		if value, ok := session.KimiWeb[webField].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func jwtExpiresAt(token string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" || len(trimmed) > maxAccountStoragePayload {
+		return time.Time{}, false
+	}
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return time.Time{}, false
+	}
+	header, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[0], "="))
+	if err != nil || len(header) == 0 || header[0] != '{' || !json.Valid(header) {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil || len(payload) == 0 {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	exp := *claims.Exp
+	if math.IsNaN(exp) || math.IsInf(exp, 0) || exp <= 0 || exp > maxValidTokenUnixSeconds {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(math.Trunc(exp)), 0).UTC(), true
+}
+
+func isPrimaryAuthCookieName(name string) bool {
+	if !isAccountCookieName(name) {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, ignored := range []string{"csrf", "xsrf", "anonymous"} {
+		if strings.Contains(lower, ignored) {
+			return false
+		}
+	}
+	for _, marker := range []string{"auth", "token", "session", "sid"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSecondaryAuthCookieName(name string) bool {
+	if !isAccountCookieName(name) {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, ignored := range []string{"csrf", "xsrf", "anonymous"} {
+		if strings.Contains(lower, ignored) {
+			return false
+		}
+	}
+	return true
+}
+
+func accountCookieExpiresAt(cookies []AccountCookie) (time.Time, bool) {
+	pick := func(match func(string) bool) (time.Time, bool) {
+		var best float64
+		found := false
+		for _, cookie := range cookies {
+			if !match(cookie.Name) {
+				continue
+			}
+			exp := cookie.Expires
+			if math.IsNaN(exp) || math.IsInf(exp, 0) || exp <= 0 || exp > maxValidTokenUnixSeconds {
+				continue
+			}
+			if !found || exp > best {
+				best = exp
+				found = true
+			}
+		}
+		if !found {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(math.Trunc(best)), 0).UTC(), true
+	}
+	if exp, ok := pick(isPrimaryAuthCookieName); ok {
+		return exp, true
+	}
+	return pick(isSecondaryAuthCookieName)
+}
+
+func parseTokenExpiryRFC3339(raw string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed.UTC(), true
 }
 
 // AccountIdentity is the non-secret answer of an identity read. It carries no

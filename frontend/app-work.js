@@ -16,6 +16,111 @@ function capableModels() {
   return list.filter(isCapable);
 }
 
+const SUBAGENT_ROLES = [
+  { key: 'plan', label: '规划（plan）', phrase: '用于 plan 架构规划、方案设计与任务拆解' },
+  { key: 'coder', label: '编码（coder）', phrase: '用于 coder 代码编写、修改与调试' },
+  { key: 'explore', label: '探索（explore）', phrase: '用于 explore 只读代码检索与资料查阅' },
+];
+
+function emptyRoles() {
+  return { plan: '', coder: '', explore: '' };
+}
+
+function normalizeRoles(raw) {
+  const out = emptyRoles();
+  if (!raw || typeof raw !== 'object') return out;
+  for (const role of SUBAGENT_ROLES) {
+    if (typeof raw[role.key] === 'string' && raw[role.key].trim()) {
+      out[role.key] = raw[role.key].trim();
+    }
+  }
+  return out;
+}
+
+function roleDescriptionFor(modelId, defaultId, roles) {
+  const phrases = [];
+  if (modelId === defaultId) phrases.push('默认子代理');
+  for (const role of SUBAGENT_ROLES) {
+    if (roles && roles[role.key] === modelId) phrases.push(role.phrase);
+  }
+  return phrases.join('；');
+}
+
+function isGeneratedRoleDescription(desc) {
+  const text = String(desc || '').trim();
+  if (!text) return true;
+  if (text === '默认子代理') return true;
+  return text.startsWith('默认子代理；用于 ') || SUBAGENT_ROLES.some((role) => text.startsWith(role.phrase));
+}
+
+function syncRoleAssignmentsToPool(draft, prevDefault, prevRoles) {
+  if (!draft || draft.mode !== 'pool') return draft;
+  const roles = normalizeRoles(draft.roles);
+  const nextDefault = draft.model || '';
+  const assignedIds = new Set();
+  if (nextDefault) assignedIds.add(nextDefault);
+  for (const role of SUBAGENT_ROLES) {
+    if (roles[role.key]) assignedIds.add(roles[role.key]);
+  }
+  const prevAssigned = new Set();
+  if (prevDefault) prevAssigned.add(prevDefault);
+  if (prevRoles) {
+    for (const role of SUBAGENT_ROLES) {
+      if (prevRoles[role.key]) prevAssigned.add(prevRoles[role.key]);
+    }
+  }
+
+  const existing = Array.isArray(draft.models) ? draft.models : [];
+  const byId = new Map();
+  const order = [];
+  for (const row of existing) {
+    if (!row || !row.id) continue;
+    const stillAssigned = assignedIds.has(row.id);
+    const wasAutoOnly = !stillAssigned && prevAssigned.has(row.id) && (row.autoRole || isGeneratedRoleDescription(row.description));
+    if (wasAutoOnly) continue;
+    const copy = { id: row.id, description: row.description, ...(row.autoRole ? { autoRole: true } : {}) };
+    if (stillAssigned) {
+      const autoDesc = roleDescriptionFor(row.id, nextDefault, roles);
+      if (autoDesc && (copy.autoRole || isGeneratedRoleDescription(copy.description))) {
+        copy.description = autoDesc;
+        copy.autoRole = true;
+      }
+    }
+    byId.set(row.id, copy);
+    order.push(row.id);
+  }
+
+  for (const id of assignedIds) {
+    if (byId.has(id)) continue;
+    const autoDesc = roleDescriptionFor(id, nextDefault, roles) || '默认子代理';
+    byId.set(id, { id, description: autoDesc, autoRole: true });
+    order.push(id);
+  }
+
+  return {
+    ...draft,
+    model: nextDefault || null,
+    roles,
+    models: order.map((id) => byId.get(id)).filter(Boolean),
+  };
+}
+
+function cacheDraftMode(draft) {
+  if (!draft || !state.subagentModeCache) return;
+  if (draft.mode === 'force') {
+    state.subagentModeCache.force = {
+      model: draft.model || null,
+      effort: draft.effort || null,
+    };
+  } else if (draft.mode === 'pool') {
+    state.subagentModeCache.pool = {
+      model: draft.model || null,
+      models: Array.isArray(draft.models) ? draft.models.map((row) => ({ ...row })) : [],
+      roles: normalizeRoles(draft.roles),
+    };
+  }
+}
+
 /* 已保存目标来自 configured；model 缺失时按 modelAlias 反查目录 ID，
    pool 只保留带单行用途说明的候选，外来或缺失的字段不会被猜成默认值。 */
 function savedTarget(data) {
@@ -36,13 +141,15 @@ function savedTarget(data) {
         .filter((row) => row && typeof row.id === 'string' && typeof row.description === 'string')
         .map((row) => ({ id: row.id, description: row.description }))
       : [],
+    roles: mode === 'pool' ? normalizeRoles(configured && configured.roles) : emptyRoles(),
   };
 }
 
 function draftFromSaved(data) {
   const saved = savedTarget(data);
   return { mode: saved.mode, model: saved.model, effort: saved.effort,
-    models: saved.models.map((row) => ({ ...row })) };
+    models: saved.models.map((row) => ({ ...row })),
+    roles: { ...saved.roles } };
 }
 
 function sameTarget(a, b) {
@@ -52,8 +159,12 @@ function sameTarget(a, b) {
   if (a.mode === 'pool') {
     const left = Array.isArray(a.models) ? a.models : [];
     const right = Array.isArray(b.models) ? b.models : [];
-    return left.length === right.length && left.every((row, index) => row && right[index]
+    const sameModels = left.length === right.length && left.every((row, index) => row && right[index]
       && row.id === right[index].id && row.description === right[index].description);
+    if (!sameModels) return false;
+    const lr = normalizeRoles(a.roles);
+    const rr = normalizeRoles(b.roles);
+    return SUBAGENT_ROLES.every((role) => lr[role.key] === rr[role.key]);
   }
   return (a.effort || null) === (b.effort || null);
 }
@@ -83,13 +194,13 @@ function evaluateSubagentDraft(draft, data) {
   if (!draft.model && draft.mode !== 'pool') {
     problems.push(capable.length ? '尚未选择模型。' : SUBAGENT_CAPABILITY_MISSING);
   } else if (draft.model && !model) problems.push('所选模型已不在目录中，请重新选择。');
-  else if (!isCapable(model)) problems.push('所选模型未声明工具调用，不能作为子代理。');
+  else if (draft.model && !isCapable(model)) problems.push('所选模型未声明工具调用，不能作为子代理。');
 
   if (draft.mode === 'pool') {
     const pool = Array.isArray(draft.models) ? draft.models : [];
     const ids = new Set(pool.map((row) => row && row.id));
     if (!capable.length) problems.push(SUBAGENT_CAPABILITY_MISSING);
-    else if (!pool.length) problems.push('候选列表为空，至少加入 1 个模型。');
+    else if (!pool.length) problems.push('候选列表为空，至少选择默认子代理或加入 1 个模型。');
     if (pool.length > 32) problems.push('候选模型最多 32 个。');
     if (pool.some((row) => !row || typeof row.description !== 'string' || !row.description.trim()
       || row.description.length > 1000 || /[\r\n\t]/.test(row.description))) {
@@ -101,6 +212,15 @@ function evaluateSubagentDraft(draft, data) {
       problems.push('候选列表中有模型未声明工具调用，不能作为子代理。');
     }
     if (!draft.model || !ids.has(draft.model)) problems.push('默认模型必须在候选列表中。');
+    const roles = normalizeRoles(draft.roles);
+    for (const role of SUBAGENT_ROLES) {
+      const assigned = roles[role.key];
+      if (!assigned) continue;
+      const entry = list.find((item) => item && item.id === assigned) || null;
+      if (!entry) problems.push(role.label + ' 所选模型已不在目录中，请重新选择。');
+      else if (!isCapable(entry)) problems.push(role.label + ' 所选模型未声明工具调用，不能作为子代理。');
+      else if (!ids.has(assigned)) problems.push(role.label + ' 所选模型不在候选池中，请重新选择。');
+    }
     return { problems, notes };
   }
 
@@ -179,7 +299,7 @@ function evaluateBinding(data) {
 function renderPoolList(draft, capable) {
   if (!dom.saPoolList) return;
   const pool = draft.mode === 'pool' && Array.isArray(draft.models) ? draft.models : [];
-  const signature = JSON.stringify([pool, state.subagentSaving]);
+  const signature = JSON.stringify([pool, draft.model || null, state.subagentSaving]);
   if (dom.saPoolList.dataset.signature === signature) return;
   dom.saPoolList.dataset.signature = signature;
   const rows = pool.map((row) => {
@@ -270,6 +390,31 @@ function renderSubagents() {
 
   if (draft.mode === 'pool') {
     const poolIds = poolDraftIds(draft);
+    const roles = normalizeRoles(draft.roles);
+    const modelOptions = (emptyLabel, currentValue) => {
+      const opts = [{ value: '', label: emptyLabel }].concat(capable.map((model) => ({
+        value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
+      })));
+      if (currentValue && !capable.some((model) => model.id === currentValue)) {
+        opts.push({ value: currentValue, label: '（不在目录）' + displayModelId(currentValue) });
+      }
+      return opts;
+    };
+    const roleDisabled = !ready || busy || state.subagentSaving || missingCapable;
+    if (dom.saRoleDefault) {
+      syncSelectOptions(dom.saRoleDefault, modelOptions(
+        missingCapable ? '目录中没有声明支持工具的模型' : '选择默认子代理模型',
+        draft.model || '',
+      ), draft.model || '');
+      dom.saRoleDefault.disabled = roleDisabled;
+    }
+    const roleSelects = { plan: dom.saRolePlan, coder: dom.saRoleCoder, explore: dom.saRoleExplore };
+    for (const role of SUBAGENT_ROLES) {
+      const sel = roleSelects[role.key];
+      if (!sel) continue;
+      syncSelectOptions(sel, modelOptions('跟随默认子代理', roles[role.key]), roles[role.key]);
+      sel.disabled = roleDisabled;
+    }
     const remaining = capable.filter((model) => !poolIds.has(model.id));
     const pendingAdd = dom.saPoolAdd && remaining.some((model) => model.id === dom.saPoolAdd.value)
       ? dom.saPoolAdd.value : '';
@@ -290,7 +435,7 @@ function renderSubagents() {
         const model = capable.find((entry) => entry.id === id) || null;
         return { value: id, label: modelLabel(model, id) + ' · ' + displayModelId(id) };
       })
-      : [{ value: '', label: '先加入候选模型' }];
+      : [{ value: '', label: '先选择默认子代理或加入候选模型' }];
     syncSelectOptions(dom.saPoolDefault, defaultOptions, draft.model || '');
     if (dom.saPoolDefault) dom.saPoolDefault.disabled = !ready || busy || state.subagentSaving || !poolIds.size;
     setText(dom.saPoolCount, poolIds.size + ' / 32');
@@ -383,15 +528,22 @@ function renderSubagents() {
   const saved = savedTarget(data);
   const policy = (data.subagents && data.subagents.policy) || {};
   const runtime = (data.subagents && data.subagents.runtime) || {};
+  const configPath = data.subagents && typeof data.subagents.configPath === 'string' ? data.subagents.configPath : '';
+  const savedRoles = SUBAGENT_ROLES.filter((role) => saved.roles && saved.roles[role.key])
+    .map((role) => role.key + '=' + displayModelId(saved.roles[role.key]));
   setText(dom.saSavedMode, POLICY_MODE_WORD[saved.mode] || saved.mode);
   setText(dom.saSavedSub, saved.mode === 'inherit' ? '跟随主模型 · 未写入目标'
-    : saved.mode === 'pool' ? (saved.model || '未指定默认') + ' · ' + saved.models.length + ' 个候选'
-      : (saved.model || '未选择') + (saved.effort ? ' · 档位 ' + saved.effort : ' · 档位自动'));
+    : saved.mode === 'pool'
+      ? [saved.model ? '默认 ' + displayModelId(saved.model) : '未指定默认',
+        savedRoles.length ? savedRoles.join(' · ') : '',
+        saved.models.length + ' 个候选'].filter(Boolean).join(' · ')
+      : (saved.model ? displayModelId(saved.model) : '未选择') + (saved.effort ? ' · 档位 ' + saved.effort : ' · 档位自动'));
   setText(dom.saPolicyMode, POLICY_MODE_WORD[policy.mode] || policy.mode || '—');
   setText(dom.saPolicySub, policy.mode === 'blocked'
     ? '策略文件里存在阻止项或外来归属冲突，未被覆盖，保存已拒绝'
-    : (POLICY_TRANSPORT_WORD[policy.transport || 'native-config'] || '原生配置文件') + ' · 策略文件已读取');
-  if (dom.saPolicySub) dom.saPolicySub.title = [policy.transport, policy.reason].filter(Boolean).join(' · ');
+    : (POLICY_TRANSPORT_WORD[policy.transport || 'native-config'] || '原生配置文件')
+      + (configPath ? ' · ' + configPath : ' · 策略文件已读取'));
+  if (dom.saPolicySub) dom.saPolicySub.title = [policy.transport, configPath, policy.reason].filter(Boolean).join(' · ');
   const runtimeInfo = RUNTIME_STATE[runtime.state] || { tone: 'neutral', word: runtime.state || '未知', note: '' };
   setDot(dom.rtStateDot, runtimeInfo.tone);
   setText(dom.rtState, runtimeInfo.word);
@@ -416,32 +568,48 @@ function renderSubagents() {
 function setMode(mode) {
   if (!state.draft || !configReady(state.data)) return;
   if (!['inherit', 'force', 'pool'].includes(mode) || mode === state.draft.mode) return;
+  cacheDraftMode(state.draft);
   const saved = state.data ? savedTarget(state.data) : null;
   if (mode === 'inherit') {
-    state.draft = { mode: 'inherit', model: null, effort: null, models: [] };
+    state.draft = { mode: 'inherit', model: null, effort: null, models: [], roles: emptyRoles() };
   } else if (mode === 'pool') {
-    /* 从已有草稿与已保存池热身：只保留仍可用且带用途说明的成员，
-       不覆盖用户已有的 pool/description，也不默认切继承。 */
+    const cached = state.subagentModeCache && state.subagentModeCache.pool;
     const seen = new Set();
     const seed = [];
-    const push = (id, description) => {
+    const push = (id, description, autoRole = false) => {
       if (typeof id !== 'string' || !id || seen.has(id)) return;
       const model = findModel(id);
       if (!model || !isCapable(model)) return;
       const row = poolRow(id, description);
       if (!row.description) return;
+      if (autoRole) row.autoRole = true;
       seen.add(id);
       seed.push(row);
     };
-    (Array.isArray(state.draft.models) ? state.draft.models : []).forEach((row) => push(row && row.id, row && row.description));
-    if (saved && Array.isArray(saved.models)) saved.models.forEach((row) => push(row.id, row.description));
-    state.draft = { mode: 'pool', effort: null, models: seed,
-      model: seed.some((row) => row.id === (saved && saved.model)) ? saved.model : seed.length ? seed[0].id : null };
+    if (cached) {
+      (Array.isArray(cached.models) ? cached.models : []).forEach((row) => push(row && row.id, row && row.description, Boolean(row && row.autoRole)));
+    } else {
+      (Array.isArray(state.draft.models) ? state.draft.models : []).forEach((row) => push(row && row.id, row && row.description, Boolean(row && row.autoRole)));
+      if (saved && Array.isArray(saved.models)) saved.models.forEach((row) => push(row.id, row.description));
+    }
+    const rawRoles = normalizeRoles(cached ? cached.roles : (saved && saved.mode === 'pool' ? saved.roles : null));
+    const cleanRoles = emptyRoles();
+    for (const role of SUBAGENT_ROLES) {
+      if (rawRoles[role.key] && seen.has(rawRoles[role.key])) cleanRoles[role.key] = rawRoles[role.key];
+    }
+    const preferredDefault = (cached && cached.model && seen.has(cached.model) && cached.model)
+      || (saved && saved.model && seen.has(saved.model) && saved.model)
+      || (seed.length ? seed[0].id : null);
+    state.draft = { mode: 'pool', effort: null, models: seed, model: preferredDefault, roles: cleanRoles };
   } else {
-    const seed = (saved && saved.mode !== 'inherit' && saved.model && isCapable(findModel(saved.model)) && saved.model)
+    const cached = state.subagentModeCache && state.subagentModeCache.force;
+    const cachedModel = cached && cached.model && isCapable(findModel(cached.model)) ? cached.model : null;
+    const seed = cachedModel
+      || (saved && saved.mode !== 'inherit' && saved.model && isCapable(findModel(saved.model)) && saved.model)
       || (state.draft.model && isCapable(findModel(state.draft.model)) && state.draft.model)
       || (capableModels()[0] ? capableModels()[0].id : null);
-    state.draft = { mode: 'force', model: seed || null, effort: null, models: [] };
+    const cachedEffort = cachedModel && cached.effort ? cached.effort : null;
+    state.draft = { mode: 'force', model: seed || null, effort: cachedEffort, models: [], roles: emptyRoles() };
   }
   state.subagentErrors = [];
   recomputeDraftDirty();
@@ -453,6 +621,7 @@ function pickModel(id) {
   const model = findModel(id);
   if (!model || !isCapable(model)) return;
   state.draft = { ...state.draft, model: id, effort: state.draft.model === id ? state.draft.effort : null };
+  cacheDraftMode(state.draft);
   state.subagentErrors = [];
   recomputeDraftDirty();
   renderSubagents();
@@ -461,6 +630,40 @@ function pickModel(id) {
 function pickEffort(value) {
   if (!state.draft || state.draft.mode !== 'force') return;
   state.draft = { ...state.draft, effort: value || null };
+  cacheDraftMode(state.draft);
+  state.subagentErrors = [];
+  recomputeDraftDirty();
+  renderSubagents();
+}
+
+function pickRoleDefault(id) {
+  if (!state.draft || state.draft.mode !== 'pool') return;
+  if (id) {
+    const model = findModel(id);
+    if (!model || !isCapable(model)) return;
+  }
+  const prevDefault = state.draft.model || '';
+  const prevRoles = normalizeRoles(state.draft.roles);
+  state.draft = syncRoleAssignmentsToPool({ ...state.draft, model: id || null, roles: prevRoles }, prevDefault, prevRoles);
+  cacheDraftMode(state.draft);
+  state.subagentErrors = [];
+  recomputeDraftDirty();
+  renderSubagents();
+}
+
+function pickRoleModel(roleKey, id) {
+  if (!state.draft || state.draft.mode !== 'pool') return;
+  if (!SUBAGENT_ROLES.some((role) => role.key === roleKey)) return;
+  if (id) {
+    const model = findModel(id);
+    if (!model || !isCapable(model)) return;
+  }
+  const prevDefault = state.draft.model || '';
+  const prevRoles = normalizeRoles(state.draft.roles);
+  const nextRoles = { ...prevRoles, [roleKey]: id || '' };
+  const nextDefault = state.draft.model || id || null;
+  state.draft = syncRoleAssignmentsToPool({ ...state.draft, model: nextDefault, roles: nextRoles }, prevDefault, prevRoles);
+  cacheDraftMode(state.draft);
   state.subagentErrors = [];
   recomputeDraftDirty();
   renderSubagents();
@@ -469,7 +672,10 @@ function pickEffort(value) {
 function pickPoolDefault(id) {
   if (!state.draft || state.draft.mode !== 'pool') return;
   if (!id || !poolDraftIds(state.draft).has(id)) return;
-  state.draft = { ...state.draft, model: id };
+  const prevDefault = state.draft.model || '';
+  const prevRoles = normalizeRoles(state.draft.roles);
+  state.draft = syncRoleAssignmentsToPool({ ...state.draft, model: id, roles: prevRoles }, prevDefault, prevRoles);
+  cacheDraftMode(state.draft);
   state.subagentErrors = [];
   recomputeDraftDirty();
   renderSubagents();
@@ -485,6 +691,7 @@ function appendPoolModel(id, description) {
   if (state.draft.models.length >= 32) return;
   const models = state.draft.models.concat([row]);
   state.draft = { ...state.draft, models, model: state.draft.model || id };
+  cacheDraftMode(state.draft);
   state.subagentErrors = [];
   recomputeDraftDirty();
   renderSubagents();
@@ -494,7 +701,13 @@ function removePoolModel(id) {
   if (!state.draft || state.draft.mode !== 'pool') return;
   if (!poolDraftIds(state.draft).has(id)) return;
   const models = state.draft.models.filter((row) => row.id !== id);
-  state.draft = { ...state.draft, model: state.draft.model === id ? null : state.draft.model, models };
+  const nextRoles = normalizeRoles(state.draft.roles);
+  for (const role of SUBAGENT_ROLES) {
+    if (nextRoles[role.key] === id) nextRoles[role.key] = '';
+  }
+  const nextDefault = state.draft.model === id ? (models[0] ? models[0].id : null) : state.draft.model;
+  state.draft = { ...state.draft, model: nextDefault, models, roles: nextRoles };
+  cacheDraftMode(state.draft);
   state.subagentErrors = [];
   recomputeDraftDirty();
   renderSubagents();
@@ -502,6 +715,7 @@ function removePoolModel(id) {
 
 function discardDraft() {
   if (!state.data) return;
+  if (state.subagentModeCache) state.subagentModeCache = { force: null, pool: null };
   state.draft = draftFromSaved(state.data);
   state.draftBaseEntity = draftFromSaved(state.data);
   state.draftBaseRevision = state.data.revision ?? null;
@@ -537,7 +751,13 @@ async function saveSubagentTarget() {
       if (state.draft.effort) payload.effort = state.draft.effort;
     } else if (state.draft.mode === 'pool') {
       payload.model = state.draft.model;
-      payload.models = state.draft.models;
+      payload.models = state.draft.models.map((row) => ({ id: row.id, description: row.description }));
+      const roles = normalizeRoles(state.draft.roles);
+      const activeRoles = {};
+      for (const role of SUBAGENT_ROLES) {
+        if (roles[role.key]) activeRoles[role.key] = roles[role.key];
+      }
+      if (Object.keys(activeRoles).length) payload.roles = activeRoles;
     }
     const res = await request(API.subagents, { method: 'POST', body: payload });
     if (!current()) return;
@@ -551,17 +771,24 @@ async function saveSubagentTarget() {
       if (!current()) return;
     }
     /* 只有成功保存才重置草稿；错误回读时保留用户已编辑的 pool/description。 */
+    if (state.subagentModeCache) state.subagentModeCache = { force: null, pool: null };
     state.draft = draftFromSaved(state.data);
+    cacheDraftMode(state.draft);
     state.draftBaseEntity = draftFromSaved(state.data);
     state.draftBaseRevision = state.data.revision ?? null;
     state.draftDirty = false;
     state.subagentErrors = [];
     renderAll();
+    const runtimeState = state.data?.subagents?.runtime?.state;
+    const policyState = state.data?.subagents?.policy?.state;
+    const policyMode = state.data?.subagents?.policy?.mode;
+    const conflicted = runtimeState === 'conflict' || policyState === 'conflict' || policyMode === 'blocked';
+    const written = runtimeState === 'file-applied' || runtimeState === 'loaded';
     showToast(state.draft.mode === 'inherit'
-      ? '已保存为继承主模型；是否采用见运行时状态。'
+      ? (conflicted ? '已保存为继承主模型，但配置文件存在冲突未被覆盖；请查看当前状态。' : '已保存为继承主模型并同步到 Kimi Work 配置。')
       : state.draft.mode === 'pool'
-        ? '模型池已保存；配置写入与内核采用情况见运行时状态。'
-        : '目标已保存；配置写入与内核采用情况见运行时状态。', 'ok');
+        ? (written ? '子代理角色与模型池已保存并写入 config.toml，新建会话后生效。' : '模型池已保存；配置写入与内核采用情况见当前状态。')
+        : (written ? '固定子代理模型已保存并写入 config.toml，新建会话后生效。' : '目标已保存；配置写入与内核采用情况见当前状态。'), conflicted ? 'warn' : 'ok');
   } catch (error) {
     if (!current()) return;
     state.subagentSaving = false;
@@ -586,10 +813,14 @@ export {
   pickEffort,
   pickModel,
   pickPoolDefault,
+  pickRoleDefault,
+  pickRoleModel,
   recomputeDraftDirty,
   removePoolModel,
   renderSubagents,
   resetSubagentSignatures,
   saveSubagentTarget,
+  savedTarget,
   setMode,
+  syncRoleAssignmentsToPool,
 };

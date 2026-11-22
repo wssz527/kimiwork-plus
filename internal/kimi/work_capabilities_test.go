@@ -27,13 +27,13 @@ func TestWorkCapabilitiesFollowActualKernelContract(t *testing.T) {
 		t.Fatal(got)
 	}
 	installation.Version = "3.3.0"
-	if got := ProbeWorkCapabilities(installation); got.Tower.State != "unverified" {
-		t.Fatal("a future desktop version must be checked again", got)
+	if got := ProbeWorkCapabilities(installation); got.Tower.State != "unverified" || got.Tower.Reason != "work_tower_desktop_unverified" {
+		t.Fatal("a future desktop version must be checked again without reporting missing kernel", got)
 	}
 	if err := os.WriteFile(kernel, []byte(`old kernel without confirmed capability declarations`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := ProbeWorkCapabilities(installation); got.Subagents.ForceKeySupported != nil || got.Swarm.State != "unverified" || got.Tower.KernelAvailable {
+	if got := ProbeWorkCapabilities(installation); got.Subagents.ForceKeySupported != nil || got.Swarm.State != "unverified" || got.Swarm.Reason != "work_swarm_kernel_absent" || got.Tower.KernelAvailable || got.Tower.State != "unavailable" || got.Tower.Reason != "work_tower_kernel_absent" {
 		t.Fatal(got)
 	}
 }
@@ -72,7 +72,7 @@ func TestWorkCapabilitiesReadPackagedCore(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := ProbeWorkCapabilities(Installation{Archive: filepath.Join(root, "app.asar"), Version: "3.2.28"})
-	if got.State != "inspected" || got.KernelVersion != "1.0.14" || got.KernelCommit != "303f4196e" || got.Swarm.State != "user-controlled" {
+	if got.State != "inspected" || got.KernelVersion != "1.0.14" || got.KernelCommit != "303f4196e" || got.Swarm.State != "user-controlled" || got.Tower.State != "unavailable" || got.Tower.Reason != "work_tower_kernel_absent" {
 		t.Fatal(got)
 	}
 }

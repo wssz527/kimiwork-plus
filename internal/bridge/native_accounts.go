@@ -215,7 +215,17 @@ func (n *Native) syncCurrentAccountCredentials(ctx context.Context, id string, r
 		return
 	}
 	merged, changed := mergeRotatedAccountSession(storedRaw, fresh.Session)
-	if len(merged) == 0 || (!changed && !currentRow.NeedsLogin) {
+	if len(merged) == 0 {
+		return
+	}
+	if !changed && !currentRow.NeedsLogin {
+		lifetime := inspectAccountSessionLifetime(merged, n.accounts.vault.now())
+		if currentRow.AccessExpiresAt != lifetime.AccessExpiresAt ||
+			currentRow.RefreshExpiresAt != lifetime.RefreshExpiresAt ||
+			currentRow.CookieExpiresAt != lifetime.CookieExpiresAt ||
+			currentRow.TokenHealth != lifetime.TokenHealth {
+			_ = n.accounts.vault.updateTokenLifetime(id, lifetime)
+		}
 		return
 	}
 	fresh.Session = merged
