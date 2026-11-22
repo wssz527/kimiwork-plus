@@ -16,10 +16,10 @@ go test -race -count=1 ./...
 node --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs
 
 # 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
-VERSION=1.1.0 BUILD_ID=1.1.0-local bash build/macos-dmg.sh
+VERSION=1.1.2 BUILD_ID=1.1.2-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 二进制、便携 .zip 与用户级 setup.exe 安装程序
-VERSION=1.1.0 BUILD_ID=1.1.0-local bash build/windows.sh
+VERSION=1.1.2 BUILD_ID=1.1.2-local bash build/windows.sh
 ```
 
 可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output` 指定本地工具链与独立输出目录，并用 `CODESIGN_IDENTITY="<证书名或 SHA-1>"`、`UPDATE_PUBLIC_KEY="<hex>"`、`UPDATE_GITHUB_REPO="<owner/repo>"` 绑定发布证书与自动更新源。固定自签名证书可用 `build/create-signing-cert.sh` 在仓库外生成；自动更新清单位与 Ed25519 签名由 `cmd/signrelease` 生成（签名私钥必须保存在仓库之外）。脚本不安装、不启动、不覆盖本机既有安装，并会自动把根目录的 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt` 打入应用包、DMG 与 Windows 安装器。
@@ -36,7 +36,7 @@ VERSION=1.1.0 BUILD_ID=1.1.0-local bash build/windows.sh
 
 守护进程日志默认写在状态目录下的 `launchd-daemon.log`；没有状态目录时落到 `~/Library/Logs/KimiWorkPlus/`。旧版本把日志放在 `~/Library/LaunchAgents` 与 plist 并列，卸载时会一并删除那些遗留文件。排障时先看状态目录里的日志与 `service-operations/<operationId>.helper.log`，不要假设 `LaunchAgents` 里还有当前日志。
 
-维护页可以显式注册、启停、允许登录启动和卸载本产品注册的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。连接、翻译和 Tavily 密钥写入系统 Keychain/DPAPI，配置只保存新引用；写入后从系统存储读回再提交，不解密旧版 safeStorage。ad-hoc 更新导致 ACL 拒绝时，连接可通过界面的“重新授权并应用连接”读取原有凭据，不显示或改写 Key；凭据确实缺失时仍需要重新保存。
+维护页可以显式注册、启停、允许登录启动和卸载本产品注册的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。macOS 的连接、翻译、Tavily 与账号凭据使用应用目录内的 AES-GCM 加密文件，Windows 使用 DPAPI；配置只保存引用，写入后读回再提交，不解密旧版 safeStorage。v1.1.2 之前的 macOS 钥匙串条目会在本地缺失时迁移，新值写入并读回一致后才清理旧条目；只有旧条目需要系统确认时，显式重授权操作才可能显示一次系统提示。
 
 ### 生命周期操作由独立执行者完成
 
@@ -58,7 +58,7 @@ if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 
 `bridge` 侧建议用 `platform.OpenController(platform.ControllerOptions{ManagerOptions: ..., HelperPath: daemonExecutable})`，`Begin` 后对 `PhasePending`/`PhaseRunning` 立即返回 `202` 与 `operationId`，由 `Read`/`Active` 提供状态；不要在同一次 HTTP 响应里等待破坏性操作完成。
 
-本机 Security SDK 提供 Keychain 的函数声明、CoreFoundation 回调和引用所有权；普通后台读写不显示隐藏授权，显式界面保存可通过 `VisibleSaveStore` 请求一次系统交互。缺失、锁定、取消、拒绝、会话不可用与读回失败分别返回可诊断状态。系统实测与最终 GUI 的完成级别以回传证据为准，不用单元测试替代。
+本机 Security SDK 仅用于读取和清理旧版本 Keychain 条目；普通后台迁移不显示隐藏授权，显式重授权可通过 `VisibleSaveStore` 请求一次系统交互。新凭据使用应用内 AES-GCM 存储，不经过该 SDK。缺失、锁定、取消、拒绝、会话不可用与读回失败分别返回可诊断状态。系统实测与最终 GUI 的完成级别以回传证据为准，不用单元测试替代。
 
 `build/install-preview.sh` 只安装到当前用户的 `Applications/Kimi Work+ Preview.app`。升级前验证新包并正常停止旧预览，保留 `Kimi Work+ Preview.previous.app`；停止或校验失败不会替换旧预览。稳定版不在脚本目标中。
 
@@ -91,13 +91,13 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 
 导航为总览、模型、用量、Work 能力、扩展、设置。服务商与模型共用一次保存事务；保存本机目录与同步到 Work 是不同操作，新增/删除模型后按同步状态重新导入，必要时正常重启 Kimi。
 
-- 用量页包含真实请求、Kimi Code 三来源、Magpie 余额和预算。Work 来源随当前官方凭据重新读取。本机 Kimi Code 登录只有显式采用后才使用，手填 Key 保存在本产品的系统凭据存储中。读取失败保留错误和过期标记，不能解释为额度为 0。
-- 账号库保存可恢复会话到系统钥匙串，窗口顶部、菜单栏和设置共用后台状态。先捕获当前最新凭据，再通过官方 TokenStore 完整写入目标 Cookie 和令牌，优先由官方协调器切换账号与内核。免桌面重启成功要求切换前安装的监听观察到非就绪态，再读回协调器就绪、内核只读模型查询成功、官方 Work shell 和配置身份一致。成功时保留官方轮换后的令牌与 Code Key。内核核验总等待最多 12 秒，无法核实时最多正常重启桌面一次；写入不完整不重启，失败尝试恢复原账号，上层不会重复自动切换。任务在跑或忙状态未知时拒绝切换。开发候选已完成两真实账号五次往返、额度跟随及添加/取消恢复，全程桌面 PID 不变。最终产物与 GUI 验收状态以工作区交接记录为准。
+- 用量页包含真实请求、Kimi Code 三来源、Magpie 余额和预算。Work 来源随当前官方凭据重新读取。本机 Kimi Code 登录只有显式采用后才使用，手填 Key 保存在本产品的加密凭据存储中。读取失败保留错误和过期标记，不能解释为额度为 0。
+- 账号库把可恢复会话保存在本产品的加密凭据存储（macOS 应用内 AES-GCM，Windows DPAPI），窗口顶部、菜单栏和设置共用后台状态。先捕获当前最新凭据，再通过官方 TokenStore 完整写入目标 Cookie 和令牌，优先由官方协调器切换账号与内核。免桌面重启成功要求切换前安装的监听观察到非就绪态，再读回协调器就绪、内核只读模型查询成功、官方 Work shell 和配置身份一致。成功时保留官方轮换后的令牌与 Code Key。内核核验总等待最多 12 秒，无法核实时最多正常重启桌面一次；写入不完整不重启，失败尝试恢复原账号，上层不会重复自动切换。任务在跑或忙状态未知时拒绝切换。开发候选已完成两真实账号五次往返、额度跟随及添加/取消恢复，全程桌面 PID 不变。最终产物与 GUI 验收状态以工作区交接记录为准。
 - Swarm 通过当前官方会话的 `app.swarmMode.get/set` 接口控制，不直接修改会话文件。当前内核的 Agent/AgentSwarm 共享 `secondary_model`；没有独立 Swarm 模型池。Tower 在当前官方桌面版本没有入口，显示不支持，不通过注入伪造入口。
 - 预算依赖模型定价和本机账本估算，按所选时区计算日/月提醒或拒绝。删除模型定价不清除已经记录的同币种历史费用，不同币种不相加。可能产生费用但缺少价格或用量的记录列为未计价。网关在转发前明确拒绝的请求不增加未计价数，在途请求单独统计。供应商的真实账单与硬限额不由它保证。可选串行模式在上一笔入账后再判断下一笔，最后一笔已放行请求仍可能越过上限。达到上限后，Work+ 跨页提示当前预算状态，可跳到用量页查看预算。
 - 备用连接按配置顺序尝试。只在拨号失败或指定限流/服务错误状态且尚未转发响应时切换，不在流开始后重发。账本归属实际回答的连接。主凭据不可读属于配置错误，不静默使用备用连接掩盖。
 
-候选构建使用单独输出目录并设置 `BUILD_ID`。验收时核对桌面、daemon 的 buildinfo 与 `/api/health` 的 buildId/PID，未提交工作区不能冒充干净提交构建。更换 ad-hoc 签名可能使旧钥匙串引用不可读。已观察到 macOS 对自签名构建的钥匙串条目按代码哈希校验访问。升级后 `/api/health` 可正常返回，新后台仍可能无法读取既有凭据。升级验收应额外核对连接可读性及真实模型请求。模型页的「重新授权并应用连接」沿用原 `apiKeyRef`。在「登录钥匙串」窗口选择「始终允许」后，应验证重启后的可读性，并验证旧版回退后仍可读。显式应用连接可通过系统可见授权读取原引用，全部连接可读后才应用配置；拒绝或取消保留原配置和重试入口。账号切换/取消也可通过系统可见授权读取已有快照。后台捕获的写入、存储读回和退休清理使用非交互路径，遇到正在等待用户的系统授权立即返回，保留原账号索引供后续重试。等待系统授权时，缓存凭据保持可读，未缓存的后台读取立即返回需授权状态，不阻塞面板轮询。取消授权不会缓存失败结果，可重新尝试。这不等于真实账号登录凭据已失效。
+候选构建使用单独输出目录并设置 `BUILD_ID`。验收时核对桌面、daemon 的 buildinfo 与 `/api/health` 的 buildId/PID，未提交工作区不能冒充干净提交构建。v1.1.2 起 macOS 已迁移凭据不再受签名 ACL 影响，但升级验收仍必须核对连接 `apiKeySet`、真实模型请求以及全过程没有钥匙串授权，不能只看健康接口。旧版本首次升级优先后台迁移；旧条目需确认时，模型页的「重新授权并应用连接」沿用原引用完成一次可见迁移。新值读回失败会清理未验证的本地值并保留旧条目。预览迁移只读旧 Keychain，正式存储验证完成前不得删除预览凭据。本地主密钥或密文异常不得回退到旧值、静默重建主密钥或报告成未配置。
 
 当前已有三来源额度真实查询、预算提醒/拒绝与真实备用模型账本证据，以及预算界面保存/清除。2026-11-17 的连接授权候选已在官方界面选择 DeepSeek、GLM 并取得真实回复；Swarm 启用后两个并行助手完成任务，当前网关账本记录对应请求，结束后开关恢复关闭。e6d2ac1 最终包已完成两真实账号五次往返、添加/取消、托盘切换、双账号各 DeepSeek/GLM 实际回复和 Work 额度跟随。本轮继续验收前端备用行、预算和凭据补修，最终运行包及证据以工作区交接记录为准。Windows 真机与长期令牌寿命尚未验证。未提交候选的证据不能代替提交绑定包的验收。
 

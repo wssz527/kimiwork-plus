@@ -245,7 +245,7 @@
       input.placeholder = '粘贴官方 Kimi Code Key';
       input.value = code.form.key;
       input.addEventListener('input', () => { code.form.key = input.value; });
-      label.append(input, node('span', 'field__hint', '只写入本机系统凭据存储；保存后会立即回读校验。'));
+      label.append(input, node('span', 'field__hint', '只写入本机加密凭据存储；保存后会立即回读校验。'));
       const line = node('div', 'action-line action-line--start');
       line.append(
         button('保存并改用这个 Key', { className: 'btn btn--primary btn--sm', onClick: () => saveManual(input) }),
@@ -702,7 +702,8 @@
     account_session_identity_mismatch: '切换后读到的账号与所选不一致，已恢复原账号',
     account_identity_mismatch: '切换后读到的账号与所选不一致，已恢复原账号',
     operation_busy: '已有操作在进行，等它结束再试',
-    credentials_unavailable: '系统凭据存储不可用',
+    credentials_unavailable: '加密凭据存储不可用',
+    credential_master_key_invalid: '本机凭据主密钥缺失或无效，请保留应用数据并从备份恢复。',
     compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；其余功能照常运行。',
   };
 
@@ -904,7 +905,7 @@
       }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));
-    line.append(node('span', 'hint', '切换时优先保持 Work 打开，必要时正常重启。添加账号会打开官方登录页。凭据仅保存在本机系统钥匙串，不上传或写入日志。'));
+    line.append(node('span', 'hint', '切换时优先保持 Work 打开，必要时正常重启。添加账号会打开官方登录页。凭据仅保存在本机加密存储，不上传或写入日志。'));
     return line;
   }
 
@@ -1438,7 +1439,7 @@
     const head = node('div', 'band__head');
     head.append(node('div'));
     head.firstChild.append(node('h2', null, '账号'));
-    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在系统凭据存储；切换时优先保持 Work 打开，必要时正常重启。运行中的任务会阻止切换。'));
+    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在本机加密存储；切换时优先保持 Work 打开，必要时正常重启。运行中的任务会阻止切换。'));
     section.append(head);
     const body = node('div');
     body.id = 'plus-accounts-body';

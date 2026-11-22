@@ -6,17 +6,13 @@ import (
 	"strings"
 )
 
-// Credentials is the native secret store: Keychain on macOS, DPAPI on Windows.
+// Credentials stores encrypted secrets: application-managed AES-GCM files on
+// macOS and DPAPI-protected files on Windows.
 //
-// Two rules are not negotiable here:
-//
-//  1. There is no plaintext fallback. A platform that cannot provide a real
-//     store reports ErrUnsupported; writing the value to a file instead would
-//     turn a missing capability into a silent downgrade.
-//  2. This store never reads a value the old Electron build encrypted with
-//     safeStorage. Those blobs are bound to that build's code identity and are
-//     not a format this package decrypts. Migration of existing secrets is a
-//     separate, explicit, user-authorised operation.
+// There is no plaintext fallback. A platform that cannot provide a real store
+// reports ErrUnsupported instead of silently writing the value as plaintext.
+// Values encrypted by the old Electron build with safeStorage remain a separate
+// format; migration of those secrets is an explicit, user-authorised operation.
 type Credentials interface {
 	// Get returns the stored value, or ErrCredentialMissing.
 	Get(key string) (string, error)
@@ -37,7 +33,20 @@ func OpenCredentials(service string) (Credentials, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return newKeychain(service)
+		// Preview migration reads must not delete the source before the stable
+		// store has committed its copy, so the preview namespace stays read-only.
+		if strings.HasPrefix(service, "dev.kimi-work-plus.preview") {
+			return newKeychain(service)
+		}
+		current, err := newLocalSecretStore(service)
+		if err != nil {
+			return nil, err
+		}
+		legacy, err := newKeychain(service)
+		if err != nil {
+			return nil, err
+		}
+		return &migratingCredentialStore{current: current, legacy: legacy}, nil
 	case "windows":
 		return newDPAPI(service)
 	}
@@ -45,7 +54,8 @@ func OpenCredentials(service string) (Credentials, error) {
 }
 
 // validateService refuses a name that could collide or confuse the store. The
-// value ends up as a Keychain service attribute or a DPAPI file name.
+// value scopes the encrypted file path, authenticates macOS ciphertext, and is
+// also used to find a legacy Keychain item during migration.
 func validateService(service string) error {
 	if service == "" || len(service) > 128 {
 		return ErrCredentialInvalid
@@ -76,8 +86,8 @@ func validateKey(key string) error {
 	return nil
 }
 
-// maxSecretBytes bounds one value. A model key is far smaller; the limit exists
-// so a mistake cannot write a megabyte into the Keychain.
+// maxSecretBytes bounds one value. A model key is far smaller; the limit also
+// bounds ciphertext reads and rejects unexpectedly large stored values.
 const maxSecretBytes = 64 << 10
 
 func validateValue(value string) error {
@@ -87,8 +97,8 @@ func validateValue(value string) error {
 	return nil
 }
 
-// Available reports whether this host has a usable native store, so the panel
-// can disable the field instead of failing on save.
+// Available reports whether this host has an encrypted credential store, so the
+// panel can disable the field instead of failing on save.
 func Available() bool {
 	switch runtime.GOOS {
 	case "darwin", "windows":
@@ -101,8 +111,7 @@ func Available() bool {
 // fallback. It exists so the refusal is explicit in code.
 var ErrPlaintextUnsupported = errors.New("plaintext_credential_storage_refused")
 
-// ErrCredentialAccessDenied means the item exists but this binary may not read
-// it: its code identity is not on the item's ACL. Reading must fail rather than
-// block, because a background service cannot show the unlock prompt, so the
-// panel turns this into "re-enter the key" instead of waiting forever.
+// ErrCredentialAccessDenied means an item exists but cannot be read or
+// authenticated: a legacy Keychain ACL may deny it, or local ciphertext may fail
+// authentication. Background reads fail rather than request a hidden prompt.
 var ErrCredentialAccessDenied = errors.New("credential_access_denied")

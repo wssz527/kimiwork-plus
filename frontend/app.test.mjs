@@ -76,7 +76,8 @@ test('unreadable connection credentials expose explicit system authorization eve
   /* 待授权不是 Key 丢失：文案要说清条目还在、需要系统授权。 */
   assert.equal(dom.applyVerdictWord.textContent, '连接凭据待授权');
   assert.match(dom.applyVerdictNote.textContent, /仍在系统钥匙串里/);
-  assert.match(dom.applyVerdictNote.textContent, /始终允许/);
+  assert.match(dom.applyVerdictNote.textContent, /允许一次即可迁移/);
+  assert.match(dom.applyVerdictNote.textContent, /后续升级不再需要钥匙串授权/);
   assert.doesNotMatch(dom.applyVerdictNote.textContent, /重新输入|密钥未保存/);
   assert.equal(dom.restartHead.textContent, '由当前窗口向系统申请读取已保存的连接凭据，后台不会自动弹出授权。');
   render({ ...data, operation: { action: 'apply-connections', state: 'running' } });
@@ -2476,7 +2477,7 @@ test('a cancelled or denied system authorization is reported as what actually ha
   assert.equal(cancelled.word, '已取消系统授权');
   assert.equal(cancelled.credential, true);
   assert.match(cancelled.note, /没有改动/);
-  assert.match(cancelled.note, /始终允许/);
+  assert.match(cancelled.note, /允许一次即可完成迁移/);
   assert.doesNotMatch(cancelled.note, /密钥未保存/);
   renderApply(failed('credential_authorization_cancelled'));
   assert.equal(dom.applyButton.hidden, false);
@@ -2583,4 +2584,19 @@ test('the shell banner keeps the credential prompt alive across pages', () => {
   renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
     connections: { saved: [{ id: 'c1', apiKeySet: true }] } });
   assert.equal(nodes['restart-banner'].hidden, true);
+});
+
+test('local credential failures explain recovery instead of requesting keychain authorization', () => {
+  const start = source.indexOf('const ERROR_HINT = {');
+  assert.notEqual(start, -1);
+  const end = source.indexOf('\n};', start);
+  assert.notEqual(end, -1);
+  const hints = new Function(`${source.slice(start, end + 3)}; return ERROR_HINT;`)();
+  assert.match(hints.credential_master_key_invalid, /保留应用数据并从备份恢复/);
+  assert.match(hints.credential_readback_mismatch, /未验证的值已清理/);
+  const keyText = new Function('CREDENTIAL_VAULT_BLOCKED',
+    `${sourceFunction('connectionKeyText')}; return connectionKeyText;`)([]);
+  const message = keyText({ credentialError: 'credential_master_key_invalid' });
+  assert.match(message, /保留应用数据/);
+  assert.doesNotMatch(message, /重新授权/);
 });

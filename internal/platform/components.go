@@ -44,12 +44,10 @@ const (
 // Two of these are deliberately not reimplemented in Go:
 //
 //	remote_credentials  the released build runs a headless Electron process to
-//	                    reach safeStorage under a fixed bundle identity. The
-//	                    Keychain ACL of that identity is what existing
-//	                    ciphertext is bound to. Go can read and write its own
-//	                    Keychain items (see OpenCredentials), but it cannot
-//	                    reproduce that identity, and it must not try to decrypt
-//	                    the old blobs.
+//	                    reach safeStorage under a fixed bundle identity. Go keeps
+//	                    its own secrets in the platform store (see
+//	                    OpenCredentials), but cannot reproduce that identity and
+//	                    must not try to decrypt the old blobs.
 //	official_updater    remote-official-updater.node drives Squirrel/Sparkle
 //	                    inside the official application's framework, including
 //	                    signature checks of ShipIt and the update requirement.

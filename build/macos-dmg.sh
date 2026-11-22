@@ -49,8 +49,8 @@ KimiWork + 安装与首次打开说明（macOS）
    方法 B（终端命令）：
    xattr -dr com.apple.quarantine "/Applications/Kimi Work+.app"
 
-4. 后续版本使用应用内自动更新下载安装，不会再次触发拦截，且固定签名证书
-   可保持系统钥匙串连续读取已保存的账号和 API Key。
+4. 后续版本使用应用内自动更新下载安装，不会再次触发拦截。v1.1.2 起
+   凭据使用应用内加密存储，正常升级不再需要系统钥匙串授权。
 EOF
 
 if [ -f build/dmg-first-open.png ]; then

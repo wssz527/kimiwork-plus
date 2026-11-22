@@ -1616,12 +1616,12 @@ const APPLY_COPY = {
   unsupported: { tone: 'bad', word: '自动应用不可用',
     note: '连接已保存，当前网关尚未应用；没有可自动应用的受管服务。' },
   failed: { tone: 'bad', word: '应用失败', note: '连接已保存，但应用未完成；可重试，不会结束正在运行的任务。' },
-  /* 升级/换签名后凭据条目仍在钥匙串，只是当前版本还没被允许读取。
+  /* 旧版本凭据条目仍在钥匙串，当前版本尚未获得迁移读取许可。
      这里不能说成 Key 丢失，也不能要求重新输入 Key。 */
   authorization: { tone: 'bad', word: '连接凭据待授权', credential: true,
-    note: '已保存的 Key 仍在系统钥匙串里，只是当前版本还没获得读取许可。点「重新授权并应用连接」后，在 macOS 弹出的「登录钥匙串」窗口选择「始终允许」，本版本之后重启也不必再授权；取消或拒绝不会改动已保存的连接，可随时重试。' },
+    note: '旧版本保存的 Key 仍在系统钥匙串里，只是当前版本还没获得读取许可。点「重新授权并应用连接」并按系统提示允许一次即可迁移；成功后正常重启和后续升级不再需要钥匙串授权。取消或拒绝不会改动已保存的连接，可随时重试。' },
   authorizationCancelled: { tone: 'warn', word: '已取消系统授权', credential: true,
-    note: '你取消了系统授权窗口：已保存的 Key 与连接配置都没有改动，当前网关仍读不到它们。可再次点「重新授权并应用连接」，这次在窗口里选择「始终允许」。' },
+    note: '你取消了系统授权窗口：已保存的 Key 与连接配置都没有改动，当前网关仍读不到它们。可再次点「重新授权并应用连接」，按系统提示允许一次即可完成迁移。' },
   authorizationDenied: { tone: 'bad', word: '系统未允许读取凭据', credential: true,
     note: '系统拒绝了这次读取已保存 Key 的授权，连接配置未被改动。若在钥匙串窗口点过「拒绝」，可在「登录钥匙串」里重新允许本应用，或再次点「重新授权并应用连接」。' },
   keychainLocked: { tone: 'warn', word: '登录钥匙串已锁定', credential: true,
@@ -1638,10 +1638,9 @@ const APPLY_REFUSAL = {
   service_stopped: '后台服务当前没有运行，无法自动应用连接。',
 };
 
-/* 升级、换签名或重装后，已保存的 Key 还在钥匙串里，但 macOS securityd 会把
-   访问权绑到旧二进制的 cdhash（自签名没有固定 Team ID）。这时网关照常运行、
-   只是读不到 Key：必须说成“待授权”，不能说成 Key 丢失或需要重新输入。
-   条目存在却读不到，才是这条路径的特征；缺条目仍按缺失处理。 */
+/* 旧版本钥匙串中的条目可能仍受签名 ACL 或锁屏状态限制。迁移时网关照常运行、
+   只是读不到旧 Key：必须说成“待授权”，不能说成 Key 丢失或需要重新输入。
+   本地密文已经可读时不会进入这条路径；缺条目仍按缺失处理。 */
 const CREDENTIAL_VAULT_BLOCKED = ['credential_keychain_locked', 'credential_keychain_unavailable',
   'credential_session_unavailable', 'credential_authorization_required', 'credential_authorization_failed'];
 
@@ -1920,6 +1919,9 @@ function connectionKeyText(row) {
   if (!code) return 'Key 未在运行环境中';
   if (CREDENTIAL_VAULT_BLOCKED.includes(code)) {
     return '已保存 Key 待系统授权：请在下方点「重新授权并应用连接」';
+  }
+  if (code === 'credential_master_key_invalid') {
+    return '本机凭据主密钥缺失或无效，请保留应用数据并按下方提示恢复';
   }
   if (code === 'credential_store_corrupt' || code === 'credential_store_failed') {
     return '已保存 Key 无法读取，请编辑并重新输入 Key 后保存';

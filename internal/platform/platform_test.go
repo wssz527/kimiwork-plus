@@ -243,7 +243,7 @@ func TestCredentialRoundTrip(t *testing.T) {
 	if !Available() {
 		t.Skip("no native credential store on this platform")
 	}
-	service := "dev.kimi-work-plus.preview.test." + sanitize(t.Name())
+	service := "dev.kimi-work-plus.test." + sanitize(t.Name())
 	store, err := OpenCredentials(service)
 	if err != nil {
 		t.Fatalf("open: %v", err)

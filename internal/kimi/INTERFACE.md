@@ -148,7 +148,7 @@ Verified with Go 1.26.10 at `toolchain/go/bin/go`, `GOPATH=toolchain/gopath`.
 | time budget | killed at 1.20 s (`ErrProbeTimeout`) |
 | RSS budget 96 MiB | killed at 180 ms (`ErrProbeResource`) |
 | sandbox surface | 8/8 probes `undefined` |
-| Keychain round trip | get/set/replace/delete pass on macOS |
+| Encrypted credential round trip | application store get/set/replace/delete and legacy Keychain migration tests pass |
 
 The live tests are read-only and skip when no installation exists. They are
 skipped, not failed, when `KIMI_SKIP_LIVE=1`.

@@ -172,7 +172,7 @@ func message(code string) string {
 	case "connection_in_use":
 		return "仍有模型使用此连接，请先修改模型。"
 	case "credentials_unavailable":
-		return "系统凭据存储不可用，密钥未保存。"
+		return "加密凭据存储不可用，密钥未保存。"
 	case "account_work_busy":
 		return "Work 仍有任务运行，请等待任务结束后再切换账号。"
 	case "account_work_state_unavailable":
@@ -201,6 +201,10 @@ func message(code string) string {
 		return "系统未接受授权，密钥未保存；原配置仍保留。"
 	case "credential_store_corrupt":
 		return "凭据条目内容无法识别，请从应用窗口重新输入并保存。"
+	case "credential_master_key_invalid":
+		return "本机凭据主密钥缺失或无效，原文件未被覆盖。请保留应用数据并从备份恢复；不要删除后重建，否则已有凭据无法恢复。"
+	case "credential_readback_mismatch", "credentials_readback_failed":
+		return "新凭据写入后未通过读回验证，未验证的值已清理。请重试；若仍失败，请重启后台服务。"
 	case "credential_interaction_not_restored":
 		return "系统凭据交互状态未能恢复，请重启后台服务后重试。"
 	case "credential_store_failed":
