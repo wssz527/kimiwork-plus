@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,13 +90,13 @@ func TestCheckAndVerifyFailClosed(t *testing.T) {
 	}
 
 	zipBytes, digestB64, validSigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
-		"Contents/Info.plist":          []byte("<plist/>"),
-		"Contents/MacOS/KimiWorkPlus":  []byte("stub"),
+		"Contents/Info.plist":           []byte("<plist/>"),
+		"Contents/MacOS/KimiWorkPlus":   []byte("stub"),
 		"Contents/MacOS/gateway-daemon": []byte("stub"),
 	})
 	_, _, wrongSigB64 := makeSignedTestZip(t, wrongPriv, "Kimi Work+.app", map[string][]byte{
-		"Contents/Info.plist":          []byte("<plist/>"),
-		"Contents/MacOS/KimiWorkPlus":  []byte("stub"),
+		"Contents/Info.plist":           []byte("<plist/>"),
+		"Contents/MacOS/KimiWorkPlus":   []byte("stub"),
 		"Contents/MacOS/gateway-daemon": []byte("stub"),
 	})
 
@@ -206,8 +207,8 @@ func TestDownloadInterruptionAllowsCleanRetryAndIdleGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
-		"Contents/Info.plist":          []byte("<plist/>"),
-		"Contents/MacOS/KimiWorkPlus":  []byte("stub"),
+		"Contents/Info.plist":           []byte("<plist/>"),
+		"Contents/MacOS/KimiWorkPlus":   []byte("stub"),
 		"Contents/MacOS/gateway-daemon": []byte("stub"),
 	})
 
@@ -566,4 +567,64 @@ func waitUntilState(t *testing.T, m *Manager, want string, timeout time.Duration
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for state=%s; got=%#v", want, m.State())
+}
+
+func TestGitHubDownloadDoesNotUseManifestTotalTimeout(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/kwp/releases/latest":
+			_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v1.1.2", Assets: []githubAsset{{
+				Name: "update-manifest.json", BrowserDownloadURL: srv.URL + "/manifest.json",
+			}}})
+		case "/manifest.json":
+			_ = json.NewEncoder(w).Encode(testManifestDoc{
+				SchemaVersion: 1, Version: "1.1.2", Channel: "stable",
+				PublishedAt: time.Now().UTC().Format(time.RFC3339),
+				Artifacts: []testManifestArtifact{{
+					URL: srv.URL + "/pkg.zip", Filename: "pkg.zip", Filetype: "zip",
+					Size: int64(len(zipBytes)), Platform: runtime.GOOS, Arch: runtime.GOARCH,
+					DigestAlgo: "sha256", Digest: digestB64, SignatureAlgo: "ed25519", Signature: sigB64,
+				}},
+			})
+		case "/pkg.zip":
+			w.Header().Set("Content-Length", fmt.Sprint(len(zipBytes)))
+			_, _ = w.Write(zipBytes[:16])
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			time.Sleep(500 * time.Millisecond)
+			_, _ = w.Write(zipBytes[16:])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	client := srv.Client()
+	client.Timeout = 250 * time.Millisecond
+	mgr, err := NewManager(Options{
+		StateDir: t.TempDir(), CurrentVersion: "1.1.1", BuildID: "old",
+		GitHubRepo: "org/kwp", GitHubAPIBase: srv.URL, PublicKey: pub, HTTPClient: client,
+		DisableAutoRun: true, ValidateStaged: func(string) error { return nil },
+		IdleCheck: func() (bool, string) { return false, "waiting for the regression test" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	if _, err := mgr.CheckNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+	mgr.Cancel()
 }

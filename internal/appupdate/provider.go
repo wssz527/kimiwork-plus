@@ -95,10 +95,15 @@ func (p *githubManifestProvider) Download(ctx context.Context, r *updater.Releas
 	if manifestURL == "" {
 		return errors.New("github-releases: missing manifest url")
 	}
+	// http.Client.Timeout includes reading the response body. Use the same
+	// transport and proxy settings without turning a large or slow download into
+	// a fixed-duration request; the operation context still supports cancellation.
+	downloadClient := *p.httpClient
+	downloadClient.Timeout = 0
 	ep, err := endpoint.New(endpoint.Config{
 		URL:        manifestURL,
 		Channel:    p.channel,
-		HTTPClient: p.httpClient,
+		HTTPClient: &downloadClient,
 	})
 	if err != nil {
 		return err

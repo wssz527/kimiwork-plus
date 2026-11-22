@@ -110,7 +110,8 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ## 版本说明
 
-- **v1.1.2（当前版本）**：macOS 服务商、翻译、搜索与账号凭据改用应用内 AES-GCM 加密存储，正常升级不再因签名变化触发钥匙串授权；支持从旧钥匙串条目安全迁移，新存储读回一致后才清理旧条目。Windows 继续使用 DPAPI。
+- **v1.1.3（当前版本）**：修复慢速网络下 GitHub 更新下载被固定总超时中断的问题；下载保留取消能力，检查更新仍使用原有超时。包含 v1.1.2 的 macOS 凭据迁移与升级授权修复。
+- **v1.1.2（历史）**：macOS 服务商、翻译、搜索与账号凭据改用应用内 AES-GCM 加密存储，正常升级不再因签名变化触发钥匙串授权；支持从旧钥匙串条目安全迁移，新存储读回一致后才清理旧条目。Windows 继续使用 DPAPI。
 - **v1.1.1（历史）**：修复新增服务商表单默认选中预设或填入示例值的问题，新建表单默认保持自定义空白。
 - **v1.1.0（历史）**：新增可选的「零网关直连模式」，把服务商与模型直接写入官方 Kimi 3.2.28+，同步后可退出本软件与后台服务。默认行为仍是本机网关模式，升级后既有连接、模型、账本与账号配置保持不变。同时包含：macOS 后台服务日志改写到后台状态目录（未设置时为 `~/Library/Logs/KimiWorkPlus/`），不再与 LaunchAgent 定义混放，并在卸载时清理旧版本留在 `LaunchAgents` 的日志；受管 Kimi 正常退出后释放页面动作通道，避免重开时复用失效引用；系统凭据报错文案不再使用「预览版」措辞；移除账号或重新捕获账号后不再保留上一次切换失败/回滚的过时提示；识别 `byok-<uuid>/模型` 形式的官方模型别名；清理旧 Node 版遗留的 `byok-kwp-*` 死服务商与模型。
   Windows 修复了 WebView2 初始化时主题设置可能导致的偶发启动崩溃。
@@ -146,10 +147,10 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 
 # 构建 macOS Universal 应用与 DMG
-VERSION=1.1.2 BUILD_ID=1.1.2-local bash build/macos-dmg.sh
+VERSION=1.1.3 BUILD_ID=1.1.3-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 便携包与用户级安装程序
-VERSION=1.1.2 BUILD_ID=1.1.2-local bash build/windows.sh
+VERSION=1.1.3 BUILD_ID=1.1.3-local bash build/windows.sh
 ```
 
 更多关于证书管理、自动更新签名工具（`cmd/signrelease`）、独立开发态运行参数与架构契约的说明，请参阅 [BUILDING.md](BUILDING.md) 与 [internal/kimi/INTERFACE.md](internal/kimi/INTERFACE.md)。
