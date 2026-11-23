@@ -920,6 +920,67 @@ func TestPreviewManifestCheckUsesMirrorFallback(t *testing.T) {
 	}
 }
 
+func TestPreviewChannelAcceptsNewerStableRelease(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	var ghSrv *httptest.Server
+	ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/kwp/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubRelease{{
+			TagName: "v1.1.6",
+			Assets: []githubAsset{{
+				Name:               "update-manifest.json",
+				BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.6/update-manifest.json",
+			}},
+		}})
+	}))
+	defer ghSrv.Close()
+	cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/org/kwp/-/releases/download/v1.1.6/update-manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(testManifestDoc{
+			SchemaVersion: 1, Version: "1.1.6", Channel: "stable",
+			Artifacts: []testManifestArtifact{{
+				URL: "pkg.zip", Filename: "pkg.zip", Filetype: "zip",
+				Size: int64(len(zipBytes)), Platform: runtime.GOOS, Arch: runtime.GOARCH,
+				DigestAlgo: "sha256", Digest: digestB64, SignatureAlgo: "ed25519", Signature: sigB64,
+			}},
+		})
+	}))
+	defer cnbSrv.Close()
+
+	mgr, err := NewManager(Options{
+		StateDir: t.TempDir(), CurrentVersion: "1.1.6-preview.2", BuildID: "preview-2",
+		GitHubRepo: "org/kwp", MirrorBase: cnbSrv.URL, GitHubAPIBase: ghSrv.URL, GitHubWebBase: ghSrv.URL,
+		PublicKey: pub, HTTPClient: &http.Client{}, DisableAutoRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	if _, err := mgr.UpdateSettings(nil, "preview"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := mgr.CheckNow(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	avail, ok := st["available"].(*AvailableRelease)
+	if !ok || avail.Version != "1.1.6" || avail.Channel != "stable" || avail.Source != "cnb" {
+		t.Fatalf("preview channel must accept a newer stable release: %#v", st)
+	}
+}
+
 type githubTestTransport func(*http.Request) (*http.Response, error)
 
 func (f githubTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {

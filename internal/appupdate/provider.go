@@ -49,6 +49,7 @@ type githubAsset struct {
 type manifestHeader struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Version       string `json:"version"`
+	Channel       string `json:"channel"`
 }
 
 type mirrorProviderConfig struct {
@@ -281,9 +282,13 @@ func (p *mirrorFallbackProvider) fetchDirectManifest(ctx context.Context, source
 			}, nil
 		}),
 	}
+	endpointChannel := p.channel
+	if p.channel == "preview" && strings.EqualFold(hdr.Channel, "stable") {
+		endpointChannel = ""
+	}
 	ep, err := endpoint.New(endpoint.Config{
 		URL:        manifestURL,
-		Channel:    p.channel,
+		Channel:    endpointChannel,
 		HTTPClient: memClient,
 	})
 	if err != nil {

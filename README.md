@@ -114,7 +114,11 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ## 版本说明
 
-- **v1.1.5（当前版本）**：
+- **v1.1.6（当前版本）**：
+  - **模型同步稳定性**：等待官方 Work 与设置页完成挂载，恢复失效只读会话；真实模型写入不自动重放，修复超时、断连、账号边界与待重启回执状态。
+  - **模型编辑与本地诊断**：自定义模型支持名称、上下文、输出、能力、思考档位和默认档位；保存成功收起向导，失败保留表单与 Key；设置页支持导出脱敏诊断日志，不自动上传。
+  - **Windows 登录目录与连续更新**：支持通过安全校验的官方登录目录 Junction；预览清单按同标签优先读取 CNB 并回退 GitHub；从本版起，预览通道可升级到更新的正式版，旧版首次升级本版时可先手动切换到稳定通道。
+- **v1.1.5（历史）**：
   - **更新取消与重试隔离**：修复取消下载或回退后立即重试时，旧协程及其延迟进度事件取消或覆盖新任务状态的问题；下载、校验、等待空闲与回退均按操作代次隔离。
   - **CNB 镜像发布完整性**：稳定版同步在 `main` 分支推送失败时立即中止，不再继续推送标签和发布资产，避免镜像分支与发布版本不一致。
 - **v1.1.4（历史）**：
@@ -160,10 +164,10 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 
 # 构建 macOS Universal 应用与 DMG
-VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/macos-dmg.sh
+VERSION=1.1.6 BUILD_ID=1.1.6-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 便携包与用户级安装程序
-VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/windows.sh
+VERSION=1.1.6 BUILD_ID=1.1.6-local bash build/windows.sh
 ```
 
 更多关于证书管理、自动更新签名工具（`cmd/signrelease`）、独立开发态运行参数与架构契约的说明，请参阅 [BUILDING.md](BUILDING.md) 与 [internal/kimi/INTERFACE.md](internal/kimi/INTERFACE.md)。
