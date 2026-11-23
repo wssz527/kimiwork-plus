@@ -127,7 +127,9 @@ type Manager struct {
 	lastSource string
 
 	wailsUpdater *updater.Updater
+	wailsHost    *managerHost
 	opCancel     context.CancelFunc
+	operationID  uint64
 	stateEpoch   uint64
 	stopCh       chan struct{}
 	stopOnce     sync.Once
@@ -378,7 +380,7 @@ func availableReleaseFromUpdater(rel *updater.Release) *AvailableRelease {
 	}
 }
 
-func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
+func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, *managerHost, error) {
 	client := m.opts.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
@@ -403,10 +405,11 @@ func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
 		})
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	u := updater.New(&managerHost{mgr: m})
+	host := &managerHost{mgr: m}
+	u := updater.New(host)
 	err = u.Init(updater.Config{
 		CurrentVersion: m.opts.CurrentVersion,
 		Providers:      []updater.Provider{provider},
@@ -417,9 +420,9 @@ func (m *Manager) newWailsUpdater(channel string) (*updater.Updater, error) {
 		Window:         updater.WindowNone,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return u, nil
+	return u, host, nil
 }
 
 func (m *Manager) CheckNow(ctx context.Context) (core.Document, error) {
@@ -436,7 +439,7 @@ func (m *Manager) CheckNow(ctx context.Context) (core.Document, error) {
 	m.lastErr = nil
 	m.mu.Unlock()
 
-	u, err := m.newWailsUpdater(channel)
+	u, host, err := m.newWailsUpdater(channel)
 	if err != nil {
 		m.mu.Lock()
 		if m.state == "checking" && m.stateEpoch == epoch {
@@ -467,6 +470,7 @@ func (m *Manager) CheckNow(ctx context.Context) (core.Document, error) {
 		return st, err
 	}
 	m.wailsUpdater = u
+	m.wailsHost = host
 	if rel == nil {
 		m.state = "up_to_date"
 		m.available = nil
@@ -500,10 +504,13 @@ func (m *Manager) StartDownloadAndApply() (core.Document, error) {
 		return nil, errors.New("update_not_available")
 	}
 	u := m.wailsUpdater
+	host := m.wailsHost
 	channel := m.settings.Channel
 	targetVersion := m.available.Version
 	opCtx, cancel := context.WithCancel(context.Background())
 	m.stateEpoch++
+	m.operationID++
+	operationID := m.operationID
 	m.opCancel = cancel
 	m.state = "downloading"
 	m.lastErr = nil
@@ -512,14 +519,17 @@ func (m *Manager) StartDownloadAndApply() (core.Document, error) {
 	st := m.stateLocked()
 	m.mu.Unlock()
 
-	go m.runDownloadAndApply(opCtx, u, channel, targetVersion)
+	go m.runDownloadAndApply(opCtx, u, host, channel, targetVersion, operationID)
 	return st, nil
 }
 
-func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, channel, targetVersion string) {
+func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, host *managerHost, channel, targetVersion string, operationID uint64) {
 	defer func() {
 		m.mu.Lock()
-		if m.opCancel != nil {
+		if m.operationID == operationID && m.opCancel != nil {
+			if host != nil {
+				host.operationID = 0
+			}
 			m.opCancel()
 			m.opCancel = nil
 		}
@@ -528,18 +538,22 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 
 	// Re-run Check if updater was cleared or prior attempt failed so retry always works cleanly.
 	if u == nil || u.State() != updater.StateAvailable {
-		fresh, err := m.newWailsUpdater(channel)
+		fresh, freshHost, err := m.newWailsUpdater(channel)
 		if err != nil {
-			m.setError("download", err)
+			m.setError(operationID, "download", err)
 			return
 		}
 		rel, err := fresh.Check(ctx)
 		if err != nil {
-			m.setError("check", err)
+			m.setError(operationID, "check", err)
 			return
 		}
 		if rel == nil {
 			m.mu.Lock()
+			if m.operationID != operationID {
+				m.mu.Unlock()
+				return
+			}
 			m.state = "up_to_date"
 			m.available = nil
 			m.progress = nil
@@ -547,10 +561,16 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 			return
 		}
 		u = fresh
+		host = freshHost
 		targetVersion = rel.Version
 		avail := availableReleaseFromUpdater(rel)
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.wailsUpdater = u
+		m.wailsHost = host
 		m.available = avail
 		if avail.Source != "" {
 			m.lastSource = avail.Source
@@ -558,9 +578,23 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 		m.mu.Unlock()
 	}
 
+	m.mu.Lock()
+	if m.operationID != operationID {
+		m.mu.Unlock()
+		return
+	}
+	if host != nil {
+		host.operationID = operationID
+	}
+	m.mu.Unlock()
+
 	if err := u.DownloadAndInstall(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
 			m.mu.Lock()
+			if m.operationID != operationID {
+				m.mu.Unlock()
+				return
+			}
 			m.state = "available"
 			m.progress = nil
 			m.lastErr = nil
@@ -574,15 +608,19 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 		}
 		// Reset updater instance so next click retries cleanly from scratch.
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.wailsUpdater = nil
 		m.mu.Unlock()
-		m.setError(stage, err)
+		m.setError(operationID, stage, err)
 		return
 	}
 
 	stagedPath := u.DownloadedPath()
 	if stagedPath == "" {
-		m.setError("install", errors.New("staged_payload_missing"))
+		m.setError(operationID, "install", errors.New("staged_payload_missing"))
 		return
 	}
 
@@ -593,15 +631,23 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 	if err := validate(stagedPath); err != nil {
 		_ = os.RemoveAll(filepath.Dir(stagedPath))
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.wailsUpdater = nil
 		m.mu.Unlock()
-		m.setError("verify", err)
+		m.setError(operationID, "verify", err)
 		return
 	}
 
-	if err := m.waitUntilIdle(ctx); err != nil {
+	if err := m.waitUntilIdle(ctx, operationID); err != nil {
 		_ = os.RemoveAll(filepath.Dir(stagedPath))
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.wailsUpdater = nil
 		if errors.Is(err, context.Canceled) {
 			m.state = "available"
@@ -617,6 +663,11 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 	}
 
 	m.mu.Lock()
+	if m.operationID != operationID {
+		m.mu.Unlock()
+		_ = os.RemoveAll(filepath.Dir(stagedPath))
+		return
+	}
 	m.state = "applying"
 	m.idleReason = ""
 	m.mu.Unlock()
@@ -624,9 +675,13 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, c
 	if err := m.prepareAndLaunchHelper(stagedPath, targetVersion, "update"); err != nil {
 		_ = os.RemoveAll(filepath.Dir(stagedPath))
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.wailsUpdater = nil
 		m.mu.Unlock()
-		m.setError("install", err)
+		m.setError(operationID, "install", err)
 		return
 	}
 }
@@ -646,6 +701,8 @@ func (m *Manager) StartRollback() (core.Document, error) {
 	}
 	opCtx, cancel := context.WithCancel(context.Background())
 	m.stateEpoch++
+	m.operationID++
+	operationID := m.operationID
 	m.opCancel = cancel
 	m.state = "waiting_idle"
 	m.lastErr = nil
@@ -656,14 +713,18 @@ func (m *Manager) StartRollback() (core.Document, error) {
 	go func() {
 		defer func() {
 			m.mu.Lock()
-			if m.opCancel != nil {
+			if m.operationID == operationID && m.opCancel != nil {
 				m.opCancel()
 				m.opCancel = nil
 			}
 			m.mu.Unlock()
 		}()
-		if err := m.waitUntilIdle(opCtx); err != nil {
+		if err := m.waitUntilIdle(opCtx, operationID); err != nil {
 			m.mu.Lock()
+			if m.operationID != operationID {
+				m.mu.Unlock()
+				return
+			}
 			if errors.Is(err, context.Canceled) {
 				m.state = "idle"
 				m.idleReason = ""
@@ -676,11 +737,15 @@ func (m *Manager) StartRollback() (core.Document, error) {
 			return
 		}
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return
+		}
 		m.state = "applying"
 		m.idleReason = ""
 		m.mu.Unlock()
 		if err := m.launchRollbackHelper(meta); err != nil {
-			m.setError("rollback", err)
+			m.setError(operationID, "rollback", err)
 		}
 	}()
 	return st, nil
@@ -688,9 +753,12 @@ func (m *Manager) StartRollback() (core.Document, error) {
 
 func (m *Manager) Cancel() core.Document {
 	m.mu.Lock()
+	m.operationID++
 	if m.opCancel != nil {
 		m.opCancel()
 		m.opCancel = nil
+		m.wailsUpdater = nil
+		m.wailsHost = nil
 	}
 	if m.state == "downloading" || m.state == "waiting_idle" {
 		if m.available != nil {
@@ -706,7 +774,7 @@ func (m *Manager) Cancel() core.Document {
 	return st
 }
 
-func (m *Manager) waitUntilIdle(ctx context.Context) error {
+func (m *Manager) waitUntilIdle(ctx context.Context, operationID uint64) error {
 	if m.opts.IdleCheck == nil {
 		return nil
 	}
@@ -716,6 +784,10 @@ func (m *Manager) waitUntilIdle(ctx context.Context) error {
 			return nil
 		}
 		m.mu.Lock()
+		if m.operationID != operationID {
+			m.mu.Unlock()
+			return context.Canceled
+		}
 		m.state = "waiting_idle"
 		m.idleReason = reason
 		m.mu.Unlock()
@@ -922,10 +994,12 @@ func (m *Manager) readRollbackMetadata() (RollbackMetadata, bool) {
 	return meta, true
 }
 
-func (m *Manager) setError(stage string, err error) {
+func (m *Manager) setError(operationID uint64, stage string, err error) {
 	m.mu.Lock()
-	m.state = "error"
-	m.lastErr = classifyUpdateError(stage, err)
+	if m.operationID == operationID {
+		m.state = "error"
+		m.lastErr = classifyUpdateError(stage, err)
+	}
 	m.mu.Unlock()
 }
 
@@ -1051,7 +1125,17 @@ func classifyUpdateError(stage string, err error) *UpdateError {
 
 // managerHost bridges Wails pkg/updater lifecycle events into Manager state.
 type managerHost struct {
-	mgr *Manager
+	mgr         *Manager
+	operationID uint64
+}
+
+func (h *managerHost) lockOperation() bool {
+	h.mgr.mu.Lock()
+	if h.operationID == 0 || h.operationID != h.mgr.operationID {
+		h.mgr.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 func (h *managerHost) Emit(name string, data ...any) bool {
@@ -1070,32 +1154,35 @@ func (h *managerHost) Emit(name string, data ...any) bool {
 						pct = 100
 					}
 				}
-				h.mgr.mu.Lock()
-				h.mgr.state = "downloading"
-				h.mgr.progress = &DownloadProgress{
-					Written: written,
-					Total:   p.Total,
-					Percent: pct,
-					Rate:    p.Rate,
+				if h.lockOperation() {
+					h.mgr.state = "downloading"
+					h.mgr.progress = &DownloadProgress{
+						Written: written,
+						Total:   p.Total,
+						Percent: pct,
+						Rate:    p.Rate,
+					}
+					h.mgr.mu.Unlock()
 				}
-				h.mgr.mu.Unlock()
 			}
 		}
 	case updater.EventVerifying:
-		h.mgr.mu.Lock()
-		h.mgr.state = "verifying"
-		h.mgr.mu.Unlock()
+		if h.lockOperation() {
+			h.mgr.state = "verifying"
+			h.mgr.mu.Unlock()
+		}
 	case updater.EventInstalling:
-		h.mgr.mu.Lock()
-		h.mgr.state = "verifying"
-		h.mgr.mu.Unlock()
+		if h.lockOperation() {
+			h.mgr.state = "verifying"
+			h.mgr.mu.Unlock()
+		}
 	}
 	return true
 }
 
-func (h *managerHost) OnEvent(string, func(any)) func()          { return func() {} }
+func (h *managerHost) OnEvent(string, func(any)) func()                      { return func() {} }
 func (h *managerHost) OpenWindow(updater.WindowOptions) updater.WindowHandle { return nil }
-func (h *managerHost) Quit()                                     {}
+func (h *managerHost) Quit()                                                 {}
 
 func resolveInstallTarget(exePath string) string {
 	if exePath == "" {

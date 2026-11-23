@@ -170,6 +170,23 @@ class SyncCNBReleaseTest(unittest.TestCase):
         self.assertEqual(sync.resolve_token("", str(tok_path)), "file-tok")
         self.assertEqual(sync.resolve_token("", "", default_path=self.tmpdir / "missing"), "")
 
+    def test_stable_main_push_failure_aborts_before_tag_push(self):
+        calls = []
+        original_run = sync.subprocess.run
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return sync.subprocess.CompletedProcess(command, 1, stdout="", stderr="main rejected")
+
+        sync.subprocess.run = fake_run
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                sync.push_git_refs("https://cnb.example", "owner/repo", "test-token", "v1.1.4", False)
+            self.assertIn("main", str(ctx.exception))
+            self.assertEqual(len(calls), 1)
+        finally:
+            sync.subprocess.run = original_run
+
     def test_untrusted_verify_url_rejected(self):
         server = FakeCNBServer(existing_release_id="rel-99")
         self.addCleanup(server.close)

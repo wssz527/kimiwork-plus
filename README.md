@@ -112,7 +112,10 @@ KimiWork + 是面向官方 **Kimi 桌面版 Work** 的本机模型网关与增�
 
 ## 版本说明
 
-- **v1.1.4（当前版本）**：
+- **v1.1.5（当前版本）**：
+  - **更新取消与重试隔离**：修复取消下载或回退后立即重试时，旧协程及其延迟进度事件取消或覆盖新任务状态的问题；下载、校验、等待空闲与退出现均按操作代次隔离。
+  - **CNB 镜像发布完整性**：稳定版同步在 `main` 分支推送失败时立即中止，不再继续推送标签和发布资产，避免镜像分支与发布版本不一致。
+- **v1.1.4（历史）**：
   - **国内镜像优先更新与外链修复**：默认优先从国内 CNB 镜像检查和下载更新，失败自动回退 GitHub Releases，统一使用同一份相对路径清单与 Ed25519 验签；更新下载支持停滞超时保护并在跨源重定向时清理鉴权头；桌面 WebView 中点击「查看发布页」改为由后端校验 HTTP(S) 后调起系统默认浏览器。
   - **五入口导航重构、顶栏防滚失与新手引导**：顶栏重构为「总览 / 模型 / 子代理 / 用量 / 设置」五个一级入口并按二级标签分栏；移除生产代码中的 `scrollIntoView` 与根元素 `overflow: clip`，固定外层 `.shell` 仅在 `.main` 内滚动，根治 macOS WKWebView 长页滚动时顶栏滚出视野的问题；总览页新增子代理摘要卡与 4 步可折叠/可跳过的新手引导（可在设置页重新打开）。
   - **直连子代理与角色分配**：支持直连模式下按 `native-work-intent.json` 自动解析 `byok-<uuid>/模型` 别名写入官方 `config.toml` 并回读确认；新增默认子代理及 `plan` / `coder` / `explore` 角色可视化分配；切换继承/固定/模型池模式时保留未保存草稿。
@@ -155,10 +158,10 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 
 # 构建 macOS Universal 应用与 DMG
-VERSION=1.1.4 BUILD_ID=1.1.4-local bash build/macos-dmg.sh
+VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 便携包与用户级安装程序
-VERSION=1.1.4 BUILD_ID=1.1.4-local bash build/windows.sh
+VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/windows.sh
 ```
 
 更多关于证书管理、自动更新签名工具（`cmd/signrelease`）、独立开发态运行参数与架构契约的说明，请参阅 [BUILDING.md](BUILDING.md) 与 [internal/kimi/INTERFACE.md](internal/kimi/INTERFACE.md)。

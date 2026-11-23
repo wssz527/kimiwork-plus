@@ -16,16 +16,16 @@ go test -race -count=1 ./...
 node --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs
 
 # 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
-VERSION=1.1.4 BUILD_ID=1.1.4-local bash build/macos-dmg.sh
+VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 二进制、便携 .zip 与用户级 setup.exe 安装程序
-VERSION=1.1.4 BUILD_ID=1.1.4-local bash build/windows.sh
+VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/windows.sh
 
 # 一键构建、签名双端发布包并生成跨源相对路径 update-manifest.json
-VERSION=1.1.4 BUILD_ID=1.1.4-local NOTES_FILE=/path/to/notes.txt bash scripts/package_release.sh
+VERSION=1.1.5 BUILD_ID=1.1.5-local NOTES_FILE=/path/to/notes.txt bash scripts/package_release.sh
 
 # 同步发布包到国内 CNB 镜像
-python3 scripts/sync_cnb_release.py --tag v1.1.4 --notes-file /path/to/notes.txt /path/to/release-assets/*
+python3 scripts/sync_cnb_release.py --tag v1.1.5 --notes-file /path/to/notes.txt /path/to/release-assets/*
 ```
 
 可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output` 指定本地工具链与独立输出目录，并用 `CODESIGN_IDENTITY="<证书名或 SHA-1>"`、`UPDATE_PUBLIC_KEY="<hex>"`、`UPDATE_GITHUB_REPO="<owner/repo>"` 绑定发布证书与自动更新源。固定自签名证书可用 `build/create-signing-cert.sh` 在仓库外生成；自动更新清单位与 Ed25519 签名由 `cmd/signrelease` 生成（签名私钥必须保存在仓库之外）。脚本不安装、不启动、不覆盖本机既有安装，并会自动把根目录的 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt` 打入应用包、DMG 与 Windows 安装器。

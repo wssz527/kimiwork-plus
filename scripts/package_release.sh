@@ -9,8 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 : "${GO:=go}"
-: "${VERSION:?VERSION is required, e.g. 1.1.4}"
-: "${BUILD_ID:?BUILD_ID is required, e.g. 1.1.4-abcdef0}"
+: "${VERSION:?VERSION is required, e.g. 1.1.5}"
+: "${BUILD_ID:?BUILD_ID is required, e.g. 1.1.5-abcdef0}"
 : "${OUTPUT_DIR:=$PWD/build/release-$VERSION}"
 : "${NOTES_FILE:?NOTES_FILE is required (path to UTF-8 release notes)}"
 : "${CHANNEL:=stable}"

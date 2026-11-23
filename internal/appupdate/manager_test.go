@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wailsapp/wails/v3/pkg/updater"
 	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
@@ -309,6 +310,83 @@ func TestDownloadInterruptionAllowsCleanRetryAndIdleGate(t *testing.T) {
 	cancelled := mgr.Cancel()
 	if cancelled["state"] != "available" {
 		t.Fatalf("expected available after cancel, got %v", cancelled["state"])
+	}
+}
+
+func TestCancelledRollbackCannotCancelImmediateRetry(t *testing.T) {
+	stateDir := t.TempDir()
+	backupPath := filepath.Join(stateDir, "backup.app")
+	if err := os.WriteFile(backupPath, []byte("backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, rollbackDirName, rollbackPrevName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AtomicJSON(filepath.Join(stateDir, rollbackDirName, rollbackPrevName, rollbackMetaFile), RollbackMetadata{
+		Version:    "1.1.3",
+		BuildID:    "1.1.3-test",
+		TargetPath: backupPath,
+		BackupPath: backupPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	mgr, err := NewManager(Options{
+		StateDir:       stateDir,
+		CurrentVersion: "1.1.4",
+		BuildID:        "1.1.4-test",
+		DisableAutoRun: true,
+		IdleCheck: func() (bool, string) {
+			switch calls.Add(1) {
+			case 1:
+				close(firstEntered)
+				<-releaseFirst
+			case 2:
+				close(secondEntered)
+			}
+			return false, "busy"
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	if _, err := mgr.StartRollback(); err != nil {
+		t.Fatal(err)
+	}
+	<-firstEntered
+	mgr.Cancel()
+	if _, err := mgr.StartRollback(); err != nil {
+		t.Fatal(err)
+	}
+	<-secondEntered
+	close(releaseFirst)
+	time.Sleep(100 * time.Millisecond)
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if mgr.opCancel == nil || mgr.state != "waiting_idle" {
+		t.Fatalf("old rollback cleanup cancelled its replacement: state=%s opCancelPresent=%v", mgr.state, mgr.opCancel != nil)
+	}
+}
+
+func TestStaleUpdaterEventsDoNotOverwriteReplacementOperation(t *testing.T) {
+	mgr := &Manager{state: "waiting_idle", operationID: 2}
+	host := &managerHost{mgr: mgr, operationID: 1}
+	host.Emit(updater.EventDownloadProgress, updater.Progress{Written: 9, Total: 10})
+	host.Emit(updater.EventVerifying)
+	if mgr.state != "waiting_idle" || mgr.progress != nil {
+		t.Fatalf("stale updater events changed replacement operation: state=%s progress=%#v", mgr.state, mgr.progress)
+	}
+	host.operationID = 2
+	host.Emit(updater.EventVerifying)
+	if mgr.state != "verifying" {
+		t.Fatalf("current updater event was rejected: state=%s", mgr.state)
 	}
 }
 

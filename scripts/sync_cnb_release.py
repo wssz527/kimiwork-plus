@@ -206,7 +206,7 @@ def push_git_refs(web_base, repo, token, tag, prerelease):
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["CNB_GIT_PASSWORD"] = token
         if not prerelease:
-            subprocess.run(
+            result = subprocess.run(
                 ["git", "-c", "credential.helper=", "push", remote_url, "HEAD:refs/heads/main"],
                 env=env,
                 check=False,
@@ -215,6 +215,8 @@ def push_git_refs(web_base, repo, token, tag, prerelease):
                 text=True,
                 timeout=120,
             )
+            if result.returncode != 0:
+                raise RuntimeError(f"git push main to CNB failed: {result.stderr.strip()}")
         result = subprocess.run(
             ["git", "-c", "credential.helper=", "push", remote_url, f"refs/tags/{tag}:refs/tags/{tag}"],
             env=env,
@@ -247,7 +249,7 @@ def sync_release(api_base, web_base, repo, token, tag, notes, files, prerelease,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True, help="Release tag name, e.g. v1.1.4")
+    parser.add_argument("--tag", required=True, help="Release tag name, e.g. v1.1.5")
     parser.add_argument("--repo", default=os.environ.get("CNB_REPO", DEFAULT_CNB_REPO), help="CNB repo slug")
     parser.add_argument("--api-base", default=os.environ.get("CNB_API_BASE", DEFAULT_CNB_API))
     parser.add_argument("--web-base", default=os.environ.get("CNB_WEB_BASE", DEFAULT_CNB_WEB))
