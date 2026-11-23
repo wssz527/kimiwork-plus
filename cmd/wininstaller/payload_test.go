@@ -122,4 +122,12 @@ func TestBuildStopDesktopScriptEnforcesTrailingBackslash(t *testing.T) {
 	if got := normalizeWindowsDirPrefix(`C:\Users\alice\Kimi Work+\`); got != `C:\Users\alice\Kimi Work+\` {
 		t.Fatalf("unexpected normalized prefix: %q", got)
 	}
+	for _, bad := range []string{"", "   ", `\`, `///`} {
+		if got := buildStopDesktopScript(bad); got != "" {
+			t.Fatalf("expected empty stop script for invalid installDir %q, got %q", bad, got)
+		}
+		if got := buildSelfDeleteScript(bad); got != "" {
+			t.Fatalf("expected empty self-delete script for invalid installDir %q, got %q", bad, got)
+		}
+	}
 }

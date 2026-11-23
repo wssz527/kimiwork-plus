@@ -75,7 +75,7 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 		hostsPath = DefaultHostsPath(nil)
 	}
 	if action == "prepare" {
-		if HasManagedHostsEntry(hostsPath) && (s.Probe == nil || s.Probe.DNS(ctx).Passed) {
+		if HasManagedHostsEntry(hostsPath) && s.Probe != nil && s.Probe.DNS(ctx).Passed {
 			return RevealFlag(s.FlagFile)
 		}
 		if beforeHosts, readErr := readHostsForSetup(hostsPath); readErr == nil {

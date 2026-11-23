@@ -761,11 +761,18 @@ func parseReleaseSemver(raw string) (releaseSemver, bool) {
 			if id == "" {
 				return releaseSemver{}, false
 			}
+			allDigits := true
 			for i := 0; i < len(id); i++ {
 				c := id[i]
-				if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') {
-					return releaseSemver{}, false
+				if c < '0' || c > '9' {
+					allDigits = false
+					if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') {
+						return releaseSemver{}, false
+					}
 				}
+			}
+			if allDigits && len(id) > 1 && id[0] == '0' {
+				return releaseSemver{}, false
 			}
 		}
 	}
@@ -773,7 +780,7 @@ func parseReleaseSemver(raw string) (releaseSemver, bool) {
 }
 
 func parseNonNegDecimal(s string) (int, bool) {
-	if s == "" {
+	if s == "" || (len(s) > 1 && s[0] == '0') {
 		return 0, false
 	}
 	for i := 0; i < len(s); i++ {
@@ -831,7 +838,10 @@ func compareReleaseSemver(a, b releaseSemver) int {
 			if na > nb {
 				return 1
 			}
-			return -1
+			if na < nb {
+				return -1
+			}
+			continue
 		case aNum && !bNum:
 			return -1
 		case !aNum && bNum:

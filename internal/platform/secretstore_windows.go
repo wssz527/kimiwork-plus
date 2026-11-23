@@ -166,16 +166,13 @@ func (d *dpapi) Delete(key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	var firstErr error
-	if err := os.Remove(d.hashPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		firstErr = err
-	}
-	if legacy, ok := d.legacyHexPath(key); ok && legacy != d.hashPath(key) {
-		if err := os.Remove(legacy); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
+	target := d.hashPath(key)
+	if legacy, ok := d.legacyHexPath(key); ok && legacy != target {
+		if err := os.Remove(legacy); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.New("credential_store_failed")
 		}
 	}
-	if firstErr != nil {
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.New("credential_store_failed")
 	}
 	return nil

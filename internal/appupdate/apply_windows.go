@@ -76,6 +76,9 @@ func normalizeWindowsDirPrefix(dir string) string {
 
 func buildWindowsStopProcessScript(targetDir string, names ...string) string {
 	prefix := normalizeWindowsDirPrefix(targetDir)
+	if prefix == "" || len(names) == 0 {
+		return ""
+	}
 	quoted := make([]string, len(names))
 	for i, name := range names {
 		quoted[i] = "'" + strings.ReplaceAll(name, "'", "''") + "'"
@@ -85,6 +88,9 @@ func buildWindowsStopProcessScript(targetDir string, names ...string) string {
 }
 
 func runWindowsPowerShell(script string) {
+	if strings.TrimSpace(script) == "" {
+		return
+	}
 	u16 := utf16.Encode([]rune(script))
 	raw := make([]byte, len(u16)*2)
 	for i, code := range u16 {
@@ -101,13 +107,21 @@ func runWindowsPowerShell(script string) {
 }
 
 func stopTargetDesktop(targetDir string, logf func(string, ...any)) {
-	runWindowsPowerShell(buildWindowsStopProcessScript(targetDir, "KimiWorkPlus"))
+	script := buildWindowsStopProcessScript(targetDir, "KimiWorkPlus")
+	if script == "" {
+		return
+	}
+	runWindowsPowerShell(script)
 	time.Sleep(400 * time.Millisecond)
 	logf("stopped Windows desktop processes under %s", targetDir)
 }
 
 func forceStopTargetDaemon(targetDir string, logf func(string, ...any)) {
-	runWindowsPowerShell(buildWindowsStopProcessScript(targetDir, "gateway-daemon"))
+	script := buildWindowsStopProcessScript(targetDir, "gateway-daemon")
+	if script == "" {
+		return
+	}
+	runWindowsPowerShell(script)
 	time.Sleep(400 * time.Millisecond)
 	logf("force-stopped lingering Windows gateway-daemon under %s", targetDir)
 }

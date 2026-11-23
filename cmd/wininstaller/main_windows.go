@@ -395,7 +395,11 @@ func runPowerShellHidden(script string) ([]byte, error) {
 }
 
 func stopDesktopInDir(installDir string) {
-	_, _ = runPowerShellHidden(buildStopDesktopScript(installDir))
+	script := buildStopDesktopScript(installDir)
+	if script == "" {
+		return
+	}
+	_, _ = runPowerShellHidden(script)
 	time.Sleep(300 * time.Millisecond)
 }
 
@@ -521,6 +525,9 @@ func deleteUninstallRegistry() {
 
 func scheduleSelfDelete(installDir string) {
 	script := buildSelfDeleteScript(installDir)
+	if script == "" {
+		return
+	}
 	u16 := utf16.Encode([]rune(script))
 	raw := make([]byte, len(u16)*2)
 	for i, code := range u16 {

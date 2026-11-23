@@ -8,8 +8,13 @@ param(
   [string]$UpdateMirrorBase = $env:UPDATE_MIRROR_BASE
 )
 $ErrorActionPreference = "Stop"
+$CallerDir = (Get-Location).ProviderPath
+if ($PSBoundParameters.ContainsKey("OutputDir") -and -not [System.IO.Path]::IsPathRooted($OutputDir)) {
+  $OutputDir = [System.IO.Path]::GetFullPath((Join-Path $CallerDir $OutputDir))
+}
 Set-Location (Join-Path $PSScriptRoot "..")
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"

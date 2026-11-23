@@ -2357,10 +2357,93 @@ func TestPreviewChannelCNBListFirstAndGitHubFallback(t *testing.T) {
 			t.Fatalf("expected concise per-source reasons, got %q", msg)
 		}
 	})
+
+	t.Run("cnb_empty_200_list_falls_back_to_github_api", func(t *testing.T) {
+		var cnbListHits, ghAPIHits atomic.Int32
+		cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/org/kwp/-/releases" {
+				cnbListHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("[]"))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer cnbSrv.Close()
+
+		var ghSrv *httptest.Server
+		ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/org/kwp/releases":
+				ghAPIHits.Add(1)
+				_ = json.NewEncoder(w).Encode([]githubRelease{{
+					TagName:    "v1.1.8-preview.3",
+					Prerelease: true,
+					Assets: []githubAsset{{
+						Name:               "update-manifest-preview.json",
+						BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.8-preview.3/update-manifest-preview.json",
+					}},
+				}})
+			case "/org/kwp/releases/download/v1.1.8-preview.3/update-manifest-preview.json":
+				_ = json.NewEncoder(w).Encode(makeManifest("1.1.8-preview.3", "preview"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ghSrv.Close()
+
+		p, err := newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:          "org/kwp",
+			MirrorBase:    cnbSrv.URL,
+			GitHubAPIBase: ghSrv.URL,
+			GitHubWebBase: ghSrv.URL,
+			UseCustomAPI:  false,
+			Channel:       "preview",
+			HTTPClient:    &http.Client{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := p.Check(context.Background(), updater.CheckRequest{
+			CurrentVersion: "1.1.7",
+			Platform:       runtime.GOOS,
+			Arch:           runtime.GOARCH,
+		})
+		if err != nil {
+			t.Fatalf("expected fallback after empty CNB 200 list: %v", err)
+		}
+		if rel == nil || rel.Version != "1.1.8-preview.3" || rel.Metadata[metaUpdateSource] != "github" {
+			t.Fatalf("unexpected fallback release: %+v", rel)
+		}
+		if cnbListHits.Load() != 1 || ghAPIHits.Load() != 1 {
+			t.Fatalf("expected cnbList=1 ghAPI=1, got %d/%d", cnbListHits.Load(), ghAPIHits.Load())
+		}
+	})
 }
 
 func TestSelectBestManifestCandidateSemverOrder(t *testing.T) {
+	for _, invalid := range []string{"v01.9.0", "v1.02.0", "v1.1.08", "v1.1.8-preview.01"} {
+		if _, ok := parseReleaseSemver(invalid); ok {
+			t.Fatalf("expected leading-zero tag %q to be rejected as semver", invalid)
+		}
+	}
+	v1, ok1 := parseReleaseSemver("v1.1.8-preview.2")
+	v2, ok2 := parseReleaseSemver("v1.1.8-preview.10")
+	if !ok1 || !ok2 || compareReleaseSemver(v1, v2) != -1 || compareReleaseSemver(v2, v1) != 1 || compareReleaseSemver(v1, v1) != 0 {
+		t.Fatalf("unexpected semver comparison results: ok=%v/%v cmp=%d/%d/%d", ok1, ok2, compareReleaseSemver(v1, v2), compareReleaseSemver(v2, v1), compareReleaseSemver(v1, v1))
+	}
+
 	list := []githubRelease{
+		{
+			TagName:    "v01.9.0",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/invalid-leading-zero"}},
+		},
+		{
+			TagName:    "v1.1.8-preview.09",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/invalid-pre-zero"}},
+		},
 		{
 			TagName: "v1.1.7",
 			Assets:  []githubAsset{{Name: "update-manifest.json", BrowserDownloadURL: "https://example.test/1.1.7"}},

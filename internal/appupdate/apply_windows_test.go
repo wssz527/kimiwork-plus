@@ -44,4 +44,9 @@ func TestBuildWindowsStopProcessScriptSeparatesDesktopAndDaemonWithTrailingBacks
 	if !strings.Contains(daemonScript, "'gateway-daemon'") {
 		t.Fatalf("daemon stop script missing gateway-daemon target: %s", daemonScript)
 	}
+	for _, bad := range []string{"", "   ", `\`, `///`} {
+		if got := buildWindowsStopProcessScript(bad, "KimiWorkPlus"); got != "" {
+			t.Fatalf("expected empty stop script for invalid targetDir %q, got %q", bad, got)
+		}
+	}
 }

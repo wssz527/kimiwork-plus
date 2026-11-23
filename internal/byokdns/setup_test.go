@@ -406,6 +406,26 @@ func TestSetupWindowsReusesManagedHostsWithoutUAC(t *testing.T) {
 		}
 	})
 
+	t.Run("prepare_runs_uac_when_probe_is_nil", func(t *testing.T) {
+		adminCalls := 0
+		setup := Setup{
+			FlagFile:  flag,
+			Platform:  "windows",
+			HostsPath: hosts,
+			Admin: func(_ context.Context, _ string, report string) error {
+				adminCalls++
+				return os.WriteFile(report, []byte("done"), 0o600)
+			},
+			Probe: nil,
+		}
+		if err := setup.Run(context.Background(), "prepare"); err != nil {
+			t.Fatalf("prepare with nil probe: %v", err)
+		}
+		if adminCalls != 1 {
+			t.Fatalf("expected 1 admin call when probe is nil, got %d", adminCalls)
+		}
+	})
+
 	t.Run("remove_dns_skips_uac_when_no_managed_entry", func(t *testing.T) {
 		cleanHosts := filepath.Join(t.TempDir(), "hosts")
 		if err := os.WriteFile(cleanHosts, []byte("127.0.0.1 localhost\r\n"), 0o600); err != nil {

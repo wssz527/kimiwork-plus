@@ -307,12 +307,19 @@ func normalizeWindowsDirPrefix(dir string) string {
 
 func buildStopDesktopScript(installDir string) string {
 	prefix := normalizeWindowsDirPrefix(installDir)
+	if prefix == "" {
+		return ""
+	}
 	return fmt.Sprintf(`$dir = %s; Get-Process -Name 'KimiWorkPlus','gateway-daemon' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue`, psQuote(prefix))
 }
 
 func buildSelfDeleteScript(installDir string) string {
 	cleanDir := normalizeWindowsDir(installDir)
-	uninstallExe := normalizeWindowsDirPrefix(installDir) + "uninstall.exe"
+	prefix := normalizeWindowsDirPrefix(installDir)
+	if cleanDir == "" || prefix == "" {
+		return ""
+	}
+	uninstallExe := prefix + "uninstall.exe"
 	return fmt.Sprintf(
 		`$dir = %s; $exe = %s; for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Milliseconds 300; if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue }; if (-not (Test-Path -LiteralPath $exe)) { break } }; try { if ((Test-Path -LiteralPath $dir) -and ((Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop | Measure-Object).Count -eq 0)) { Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue } } catch {}`,
 		psQuote(cleanDir), psQuote(uninstallExe),
