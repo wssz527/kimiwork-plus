@@ -7,12 +7,38 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wssz527/kimiwork-plus/internal/bridge"
 )
+
+func trayAccountLabel(row bridge.AccountSummary) string {
+	name := strings.TrimSpace(row.Name)
+	if name == "" {
+		var alnum strings.Builder
+		for _, r := range row.ID {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				alnum.WriteRune(r)
+			}
+		}
+		cleaned := alnum.String()
+		if len(cleaned) > 6 {
+			cleaned = cleaned[len(cleaned)-6:]
+		}
+		if cleaned != "" {
+			name = "账号 " + cleaned + "（默认名）"
+		} else {
+			name = "未命名账号"
+		}
+	}
+	if row.NeedsLogin {
+		name += " · 需重新登录"
+	}
+	return name
+}
 
 type trayAccounts struct {
 	State            string                  `json:"state"`
@@ -90,10 +116,7 @@ func installAccountTray(app *application.App, tray *application.SystemTray, menu
 				} else {
 					for _, row := range response.Accounts.Accounts {
 						id := row.ID
-						label := row.Name
-						if row.NeedsLogin {
-							label += " · 需重新登录"
-						}
+						label := trayAccountLabel(row)
 						item := accounts.AddCheckbox(label, row.ID == response.Accounts.CurrentID)
 						item.SetEnabled(row.ID != response.Accounts.CurrentID && !response.Accounts.Adding && response.Accounts.RestoreAccountID == "")
 						item.OnClick(func(*application.Context) {

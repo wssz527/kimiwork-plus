@@ -1,4 +1,4 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderOnboardOverview, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, routeIdPreservingProtocol, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
 import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
@@ -65,11 +65,33 @@ function setView(view, { persist = true } = {}) {
         /* 忽略 */
       }
     }
-    if (view === 'models') { renderModels(); renderConnection(); }
+    clearDisconnectConfirm();
+    if (state.data && view === 'overview') {
+      renderOverview(state.data, { view: 'overview' });
+      renderOnboardOverview(state.data);
+    }
+    if (view === 'models') {
+      if (state.data) {
+        renderWorkspaceSync(state.data);
+        if (!state.onboard?.busy && !state.onboard?.saving) renderOnboard();
+      }
+      renderModels();
+      renderConnection();
+      renderPicker();
+      if (state.data) renderGrowth(state.data, { view: 'models' });
+    }
     if (view === 'subagents') renderSubagents();
+    if (state.data && view === 'maintenance') {
+      renderOverview(state.data, { view: 'maintenance' });
+      renderIntegrationMode(state.data);
+      renderGrowth(state.data, { view: 'maintenance' });
+    }
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
-    if (state.data) renderUpdates(state.data);
+    if (state.data) {
+      plusPanel.render(state.data);
+      renderUpdates(state.data);
+    }
   };
   apply();
 }
@@ -80,6 +102,13 @@ function setView(view, { persist = true } = {}) {
 function adoptState(next, { initial = false, external = false } = {}) {
   /* A save's returned state is newer than any poll that started before it.
      Otherwise a late response could roll the view back to the pre-save revision. */
+  if (state.pendingService && next && typeof next === 'object') {
+    next = {
+      ...next,
+      service: { ...next.service, ...state.pendingService, loginStartup: state.pendingService.enabled ? 'enabled' : 'manual' },
+    };
+    state.pendingService = null;
+  }
   state.data = next;
 
   /* 子代理草稿同一规则：默认继承只用于展示，绝不自动提交；轮询不覆盖
@@ -110,13 +139,11 @@ function adoptState(next, { initial = false, external = false } = {}) {
 
   /* 搜索与抓取服务遵守同一规则：非脏状态才回填，密钥草稿永不回填。 */
   if (searchAvailable(next)) {
-    if (initial) {
+    if (initial || !state.services.dirty) {
       state.services.draft = serviceDraftFrom(next);
       state.services.baseRow = { search: serviceRowOf(next, 'search'), fetch: serviceRowOf(next, 'fetch') };
       state.services.base = serviceSignature(state.services.draft);
       state.services.dirty = false;
-    } else if (!state.services.dirty) {
-      state.services.base = serviceSignature(serviceDraftFrom(next));
     }
   }
 
@@ -147,20 +174,27 @@ function settlePending(next) {
 
 function renderAll() {
   if (!state.data) return;
-  renderWorkspaceSync(state.data);
-  renderIntegrationMode(state.data);
+  const view = state.view || 'overview';
   renderShell(state.data);
-  renderOverview(state.data);
-  renderOnboard();
   renderOperation(state.data);
-  renderModels();
-  renderSubagents();
-  renderConnection();
-  renderPicker();
   renderActions(state.data);
-  renderGrowth(state.data);
   plusPanel.render(state.data);
   renderPreviewLifecycle(state.data);
+  if (view === 'overview') {
+    renderOverview(state.data, { view: 'overview' });
+  } else if (view === 'models') {
+    renderWorkspaceSync(state.data);
+    renderModels();
+    renderConnection();
+    renderPicker();
+    renderGrowth(state.data, { view: 'models' });
+  } else if (view === 'subagents') {
+    renderSubagents();
+  } else if (view === 'maintenance') {
+    renderOverview(state.data, { view: 'maintenance' });
+    renderIntegrationMode(state.data);
+    renderGrowth(state.data, { view: 'maintenance' });
+  }
 }
 
 
@@ -235,7 +269,10 @@ function handleApiFailure(error) {
   setText(dom.sync, state.lastSync ? '最后同步 ' + fmtTime(state.lastSync) + ' · 连接中断' : '尚未连接');
   if (!state.data) {
     renderLoading();
-    if (!state.started) dom.shell.hidden = false;
+    if (!state.started) {
+      if (dom.shell) dom.shell.hidden = false;
+      setHidden(dom.gate, true);
+    }
   }
 }
 
@@ -254,9 +291,13 @@ function startPolling() {
 /* 任何正在进行的保存或向导请求都拥有输入焦点：状态轮询只该刷新快照，
    不能让一次 2 秒后的读取覆盖用户刚敲进去的连接或模型。 */
 function editingBusy() {
-  return Boolean(state.modelsSaving || state.connsSaving || state.services.saving || state.subagentSaving
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  const connEditing = Boolean(state.conns && state.conns.editing && active
+    && ((dom.connEditor && typeof dom.connEditor.contains === 'function' && dom.connEditor.contains(active))
+      || ['ce-name', 'ce-id', 'ce-base', 'ce-key', 'ce-keyenv'].includes(active.id)));
+  return Boolean(state.composing || state.modelsSaving || state.connsSaving || state.services.saving || state.subagentSaving
     || (state.onboard && (state.onboard.saving || state.onboard.busy)) || onboardEditingText()
-    || (state.conns && state.conns.editing && state.conns.editing.discovering));
+    || (state.conns && state.conns.editing && (state.conns.editing.discovering || connEditing)));
 }
 
 function stopPolling() {
@@ -436,13 +477,10 @@ async function handleSaveFailure(error, context) {
       showToast(error.message, 'error');
       return;
     }
-    if (context === 'services' && dom.svcErrors) {
-      setHidden(dom.svcErrors, false);
-      dom.svcErrors.replaceChildren(...[error.message].map((message) => {
-        const p = document.createElement('p');
-        p.textContent = message;
-        return p;
-      }));
+    if (context === 'services') {
+      state.services.serverErrors = [error.message];
+      if (state.data) renderServices(state.data);
+      else if (dom.svcErrors) renderErrorList(dom.svcErrors, [error.message]);
       return;
     }
     if (context === 'models' && state.editor) {
@@ -490,6 +528,78 @@ async function handleSaveFailure(error, context) {
   await loadState({ silent: true });
 }
 
+
+function clearDisconnectConfirm() {
+  const active = state.disconnectConfirm;
+  if (active && active.timer != null) window.clearTimeout(active.timer);
+  state.disconnectConfirm = null;
+  const targets = new Set(['workspace-disconnect-confirm', 'native-disconnect-confirm']);
+  if (active && active.targetId) targets.add(active.targetId);
+  for (const id of targets) {
+    const box = $(id);
+    if (!box) continue;
+    setHidden(box, true);
+    if (typeof box.replaceChildren === 'function') box.replaceChildren();
+  }
+  if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+    document.querySelectorAll('[data-action="disconnect-models"]').forEach((btn) => {
+      if (typeof btn.setAttribute === 'function') btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+}
+
+function requestDisconnectConfirm(button) {
+  const targetId = (button && button.dataset && button.dataset.confirmTarget) || 'workspace-disconnect-confirm';
+  const box = $(targetId);
+  clearDisconnectConfirm();
+  if (!box) return false;
+  const directNote = state.data?.integrationMode === 'direct' ? '直连模式下的静态 hosts 也会保留。' : '';
+  const text = document.createElement('p');
+  text.className = 'inline-confirm__text';
+  text.textContent = '确定移除 KimiWork + 接管的模型来源吗？这会从官方 Kimi 移除本产品同步的模型，保留登录、对话、其他模型来源以及本软件中的服务商配置。' + directNote + '之后可随时重新同步接管。';
+  const actions = document.createElement('div');
+  actions.className = 'inline-confirm__actions';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'btn btn--danger btn--sm';
+  confirmBtn.dataset.disconnectConfirm = 'confirm';
+  confirmBtn.textContent = '确认移除接管';
+  confirmBtn.addEventListener('click', () => {
+    const profileMode = button?.dataset?.profileMode;
+    clearDisconnectConfirm();
+    void runAction('disconnect-models', profileMode);
+  });
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn btn--quiet btn--sm';
+  cancelBtn.dataset.disconnectConfirm = 'cancel';
+  cancelBtn.textContent = '取消';
+  cancelBtn.addEventListener('click', () => clearDisconnectConfirm());
+  actions.append(confirmBtn, cancelBtn);
+  box.replaceChildren(text, actions);
+  setHidden(box, false);
+  if (button && typeof button.setAttribute === 'function') button.setAttribute('aria-expanded', 'true');
+  const timer = window.setTimeout(() => clearDisconnectConfirm(), 10000);
+  state.disconnectConfirm = { targetId, timer };
+  if (typeof cancelBtn.focus === 'function') cancelBtn.focus({ preventScroll: true });
+  return true;
+}
+
+function refreshServiceStatus() {
+  if (!state.key) return;
+  const epoch = state.stateReadEpoch;
+  const key = state.key;
+  request('/api/service').then(result => {
+    if (!result?.service || epoch !== state.stateReadEpoch || key !== state.key) return;
+    if (!state.data) {
+      state.pendingService = result.service;
+      return;
+    }
+    state.pendingService = null;
+    state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
+    renderPreviewLifecycle(state.data);
+  }).catch(() => {});
+}
 
 function bindEvents() {
   Object.keys(VIEW_COPY).forEach(view => {
@@ -572,7 +682,8 @@ function bindEvents() {
 
   if (dom.connRetry) dom.connRetry.addEventListener('click', async () => {
     dom.connRetry.disabled = true;
-    await loadState();
+    const ok = await loadState();
+    if (ok && !state.timer) startPolling();
     dom.connRetry.disabled = false;
   });
 
@@ -600,7 +711,10 @@ function bindEvents() {
       button.disabled = true;
       try { await previewServiceAction(action); }
       catch (error) { showToast(error.message || '后台服务操作未完成，原运行状态未替换。', 'error'); }
-      finally { button.disabled = false; }
+      finally {
+        if (state.data) renderPreviewLifecycle(state.data);
+        else button.disabled = false;
+      }
     });
   }
   const migrationTopLink = $('migration-top-banner-link');
@@ -635,28 +749,40 @@ function bindEvents() {
     updCheck.disabled = true;
     try { await updateAction('/api/updates/check', {}); }
     catch (error) { showToast(error.message || '检查更新失败，当前运行未受影响。', 'error'); }
-    finally { updCheck.disabled = false; }
+    finally {
+      if (state.data) renderUpdates(state.data);
+      else updCheck.disabled = false;
+    }
   });
   const updDownload = $('upd-download');
   if (updDownload) updDownload.addEventListener('click', async () => {
     updDownload.disabled = true;
     try { await updateAction('/api/updates/download', {}); }
     catch (error) { showToast(error.message || '未能启动更新下载。', 'error'); }
-    finally { updDownload.disabled = false; }
+    finally {
+      if (state.data) renderUpdates(state.data);
+      else updDownload.disabled = false;
+    }
   });
   const updCancel = $('upd-cancel');
   if (updCancel) updCancel.addEventListener('click', async () => {
     updCancel.disabled = true;
     try { await updateAction('/api/updates/cancel', {}, '已取消当前更新操作。'); }
     catch (error) { showToast(error.message || '取消更新未成功。', 'error'); }
-    finally { updCancel.disabled = false; }
+    finally {
+      if (state.data) renderUpdates(state.data);
+      else updCancel.disabled = false;
+    }
   });
   const updRollback = $('upd-rollback');
   if (updRollback) updRollback.addEventListener('click', async () => {
     updRollback.disabled = true;
     try { await updateAction('/api/updates/rollback', {}); }
     catch (error) { showToast(error.message || '未能启动版本回退。', 'error'); }
-    finally { updRollback.disabled = false; }
+    finally {
+      if (state.data) renderUpdates(state.data);
+      else updRollback.disabled = false;
+    }
   });
   const updChannel = $('upd-channel');
   if (updChannel) updChannel.addEventListener('change', async () => {
@@ -674,8 +800,8 @@ function bindEvents() {
     try {
       const result = await request('/api/migration/resume', { method: 'POST', body: {} });
       if (result.state) {
-        state.data = result.state;
-        renderAll(state.data);
+        adoptState(result.state, { external: true });
+        renderAll();
       } else {
         await loadState({ silent: true });
       }
@@ -688,11 +814,6 @@ function bindEvents() {
       migrationResume.disabled = false;
     }
   });
-  request('/api/service').then(result => {
-    if (!result.service || !state.data) return;
-    state.data.service = { ...state.data.service, ...result.service, loginStartup: result.service.enabled ? 'enabled' : 'manual' };
-    renderPreviewLifecycle(state.data);
-  }).catch(() => {});
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
 
@@ -1093,8 +1214,8 @@ function bindEvents() {
   document.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => {
       if (button.dataset.action === 'disconnect-models') {
-        const directNote = state.data?.integrationMode === 'direct' ? '直连模式下的静态 hosts 也会保留。' : '';
-        if (!window.confirm('确定移除 KimiWork + 接管的模型来源吗？\n\n这会从官方 Kimi 移除本产品同步的模型，保留登录、对话、其他模型来源以及本软件中的服务商配置。' + directNote + '之后可随时重新同步接管。')) return;
+        requestDisconnectConfirm(button);
+        return;
       }
       void runAction(button.dataset.action, button.dataset.profileMode);
     });
@@ -1121,6 +1242,7 @@ function bindEvents() {
     state.services.draft = serviceDraftFrom(state.data);
     state.services.searchKey = '';
     state.services.fetchKey = '';
+    state.services.serverErrors = [];
     state.services.base = serviceSignature(state.services.draft);
     state.services.dirty = false;
     fillServiceForm();
@@ -1129,13 +1251,14 @@ function bindEvents() {
   });
   if (dom.svcSave) dom.svcSave.addEventListener('click', saveSearchServices);
 
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.key && !editingBusy()) {
-      loadState({ silent: true });
-    }
-  });
+  document.addEventListener('compositionstart', () => { state.composing = true; });
+  document.addEventListener('compositionend', () => { state.composing = false; });
   window.addEventListener('online', () => {
-    if (state.key && !editingBusy()) loadState({ silent: true });
+    if (state.key && !editingBusy()) {
+      loadState({ silent: true }).then((ok) => {
+        if (ok && !state.timer) startPolling();
+      });
+    }
   });
 }
 
@@ -1174,7 +1297,7 @@ function adoptLocationKey() {
   /* 新会话属于另一份配置：旧草稿与已读候选必须丢弃，否则会把上一会话的
      连接、Key 或上下文设置带进这一份。 */
   state.conns = { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] };
-  state.services = { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '' };
+  state.services = { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '', serverErrors: [] };
   state.draft = null;
   state.draftDirty = false;
   state.draftBaseRevision = null;
@@ -1192,6 +1315,9 @@ function adoptLocationKey() {
   state.applyRefusal = null;
   state.diagnosticsExporting = false;
   state.diagnosticsExportError = '';
+  state.diagnosticsExportPath = '';
+  state.pendingService = null;
+  clearDisconnectConfirm();
   state.providers = null;
   state.overviewToday = { key: null, requests: null, totalTokens: null, loading: false, fetchedAt: 0, requestCount: -1 };
   state.overviewIssueAction = null;
@@ -1206,10 +1332,10 @@ function adoptLocationKey() {
   dom.shell.hidden = true;
   showGate('checking');
   void loadProviders();
+  refreshServiceStatus();
   loadState().then((ok) => {
-    if (!ok) return;
-    if (typeof usagePanel !== 'undefined' && usagePanel && state.view === 'usage') usagePanel.show();
-    startPolling();
+    if (ok && typeof usagePanel !== 'undefined' && usagePanel && state.view === 'usage') usagePanel.show();
+    if (ok || (state.key && dom.gate && dom.gate.hidden === true)) startPolling();
   });
   return true;}
 
@@ -1226,6 +1352,7 @@ async function loadProviders() {
       renderConnectionEditor();
       fillOnboardPresets();
       renderOnboard();
+      if (state.data && state.view === 'models') renderGrowth(state.data, { view: 'models' });
       refreshSavedProtocolDeclarations();
     }
   } catch {
@@ -1237,6 +1364,12 @@ async function loadProviders() {
 function boot() {
   initTheme();
   initWindowChrome();
+  const openAccountsTab = () => {
+    setView('maintenance');
+    setSubtab('maintenance', 'accounts');
+    revealWorkspaceSection('plus-accounts-panel');
+  };
+  window.__kwpOpenAccounts = openAccountsTab;
   if (typeof globalThis.KimiWorkGrowth?.mountGrowth === 'function') {
     renderGrowth = globalThis.KimiWorkGrowth.mountGrowth({ request, getState: () => state.data, getProviders: () => state.providers,
       refresh: loadState, notify: showToast, runAction });
@@ -1246,8 +1379,9 @@ function boot() {
   }
   mountUsageRequests();
   if (typeof globalThis.KimiWorkPlus?.mount === 'function') {
-    plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data, setState: (data) => adoptState(data),
-      onAccounts: () => { setView('maintenance'); setSubtab('maintenance', 'accounts'); revealWorkspaceSection('plus-accounts-panel'); } });
+    plusPanel = globalThis.KimiWorkPlus.mount({ request, notify: showToast, getState: () => state.data,
+      setState: (data, opts) => adoptState(data, { external: true, ...opts }),
+      onAccounts: openAccountsTab });
   }
   /* 会话密钥必须先就绪：停留在「用量」等视图时，挂载就会立刻发出第一笔请求，
      先挂视图再读密钥会让那次请求带着空密钥失败，界面上闪现「缺少面板会话密钥」。 */
@@ -1264,10 +1398,18 @@ function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     if (adoptLocationKey()) return;
-    if (!state.key || state.started) return;
-    loadState().then((ok) => {
-      if (ok && !state.timer) startPolling();
-    });
+    if (!state.key) return;
+    if (!state.started) {
+      loadState().then((ok) => {
+        if (ok && !state.timer) startPolling();
+      });
+      return;
+    }
+    if (!editingBusy()) {
+      loadState({ silent: true }).then((ok) => {
+        if (ok && !state.timer) startPolling();
+      });
+    }
   });
 
   if (!state.key) {
@@ -1276,10 +1418,10 @@ function boot() {
   }
 
   void loadProviders();
+  refreshServiceStatus();
   showGate('checking');
   loadState().then((ok) => {
-    if (!ok) return;
-    startPolling();
+    if (ok || (state.key && dom.gate && dom.gate.hidden === true)) startPolling();
   });
 }
 

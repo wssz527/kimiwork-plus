@@ -204,3 +204,91 @@ test('every point of both series is keyboard reachable', () => {
     assert.match(point.attrs['aria-label'], /输入|输出/);
   }
 });
+
+test('usage export uses POST /api/usage/export, official quota links use POST /api/open-url, and quota boundary copy is present', async () => {
+  assert.equal(source.includes('createObjectURL'), false);
+  assert.equal(source.includes("target = '_blank'"), false);
+  assert.equal(source.includes('target="_blank"'), false);
+  assert.match(source, /联网搜索、调用 Kimi 资料库，以及 PPT、3D、图片生成、视频生成等能力仍走 Kimi Work 官方自身额度；KimiWork \+ 仅接管对话与子代理模型请求/);
+
+  const nodes = new Map();
+  const makeEl = (tag = 'div', id = '') => {
+    const el = {
+      tag, id, className: '', textContent: '', value: '', hidden: false, disabled: false, open: false,
+      href: '', rel: '', dataset: {}, style: {}, children: [], listeners: {},
+      setAttribute() {},
+      append(...items) { this.children.push(...items); },
+      replaceChildren(...items) { this.children = [...items]; },
+      addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+      querySelector() { return makeEl('span'); },
+      querySelectorAll() { return []; },
+      focus() {},
+    };
+    if (id) nodes.set(id, el);
+    return el;
+  };
+  for (const id of [
+    'usage-root', 'usage-error', 'usage-custom-form', 'usage-from', 'usage-to',
+    'usage-filter-model', 'usage-export', 'usage-clear', 'quota-refresh', 'quota-add',
+    'quota-list', 'quota-empty', 'quota-sources', 'quota-source-editor',
+  ]) makeEl('div', id);
+
+  const prevDoc = globalThis.document;
+  const calls = [];
+  const toasts = [];
+  globalThis.document = {
+    getElementById: (id) => nodes.get(id) || null,
+    createElement: (tag) => makeEl(tag),
+    querySelectorAll: () => [],
+  };
+  try {
+    const mod = {};
+    new Function('globalThis', source)(mod);
+    let exportResponse = { ok: true, path: '/tmp/usage/export-20261124.json' };
+    mod.KimiWorkUsage.mount({
+      request: async (path, opts) => {
+        calls.push({ path, opts });
+        if (path === '/api/usage/export') return exportResponse;
+        if (path === '/api/quota/refresh') {
+          return {
+            records: [
+              { sourceId: 'ds', sourceName: 'DeepSeek', kind: 'api_balance', status: 'ok', officialUrl: 'https://platform.deepseek.com/usage' },
+              { sourceId: 'bad', sourceName: 'Bad', kind: 'api_balance', status: 'ok', officialUrl: 'http://insecure.example.com' },
+            ],
+            sources: [],
+          };
+        }
+        return { ok: true };
+      },
+      notify: (msg, tone) => toasts.push({ msg, tone }),
+    });
+
+    await nodes.get('usage-export').listeners.click[0]();
+    const expCall = calls.find(c => c.path === '/api/usage/export');
+    assert.ok(expCall);
+    assert.equal(expCall.opts.method, 'POST');
+    assert.match(toasts.at(-1).msg, /\/tmp\/usage\/export-20261124\.json/);
+
+    exportResponse = { ok: true };
+    await nodes.get('usage-export').listeners.click[0]();
+    assert.match(nodes.get('usage-error').textContent, /未返回导出文件路径/);
+
+    await nodes.get('quota-refresh').listeners.click[0]();
+    const links = [];
+    (function collectLinks(n) {
+      if (!n) return;
+      if (n.tag === 'a') links.push(n);
+      for (const c of n.children || []) collectLinks(c);
+    })(nodes.get('quota-list'));
+    assert.equal(links.length, 1, 'only https officialUrl links may render');
+    let prevented = false;
+    await links[0].listeners.click[0]({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.deepEqual(calls.find(c => c.path === '/api/open-url'), {
+      path: '/api/open-url',
+      opts: { method: 'POST', body: { url: 'https://platform.deepseek.com/usage' } },
+    });
+  } finally {
+    globalThis.document = prevDoc;
+  }
+});

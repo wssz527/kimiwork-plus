@@ -70,3 +70,43 @@ func TestAccountTrayRejectsUntrustedEndpoint(t *testing.T) {
 		t.Fatal("untrusted endpoint was accepted", err)
 	}
 }
+
+func TestTrayAccountLabelFallback(t *testing.T) {
+	if got := trayAccountLabel(bridge.AccountSummary{ID: "acct-abcdef", Name: "Work A"}); got != "Work A" {
+		t.Fatalf("unexpected named label: %q", got)
+	}
+	if got := trayAccountLabel(bridge.AccountSummary{ID: "acct-abcdef", Name: "   "}); got != "\u8d26\u53f7 abcdef\uff08\u9ed8\u8ba4\u540d\uff09" {
+		t.Fatalf("unexpected fallback tail label: %q", got)
+	}
+	if got := trayAccountLabel(bridge.AccountSummary{ID: "---", Name: "", NeedsLogin: true}); got != "\u672a\u547d\u540d\u8d26\u53f7 \u00b7 \u9700\u91cd\u65b0\u767b\u5f55" {
+		t.Fatalf("unexpected unnamed needsLogin label: %q", got)
+	}
+}
+
+func TestSingleInstanceKeyAndPlatformDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	k1 := singleInstanceEncryptionKey(dir)
+	k2 := singleInstanceEncryptionKey(dir + string(filepath.Separator) + ".")
+	if k1 != k2 {
+		t.Fatalf("singleInstanceEncryptionKey must be stable across path forms")
+	}
+	other := t.TempDir()
+	if k1 == singleInstanceEncryptionKey(other) {
+		t.Fatalf("distinct state directories must derive distinct keys")
+	}
+	winNormal := windowDiagnosticMessage("windows", "window_created")
+	if strings.Contains(winNormal, "macOS") || !strings.Contains(winNormal, "Windows") {
+		t.Fatalf("windows diagnostic message unexpected: %q", winNormal)
+	}
+	winTerm := windowDiagnosticMessage("windows", "web_content_process_terminated")
+	if strings.Contains(winTerm, "macOS") || !strings.Contains(winTerm, "Windows") {
+		t.Fatalf("windows terminated message unexpected: %q", winTerm)
+	}
+	macNormal := windowDiagnosticMessage("darwin", "window_created")
+	if !strings.Contains(macNormal, "macOS") {
+		t.Fatalf("darwin diagnostic message unexpected: %q", macNormal)
+	}
+	if !strings.Contains(openAccountsJS, "settings-tab-accounts") {
+		t.Fatalf("openAccountsJS must switch to accounts subtab")
+	}
+}

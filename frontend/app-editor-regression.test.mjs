@@ -533,6 +533,59 @@ test('changing the connection or the upstream id drops the stale context limit',
   assert.match(upstreamBlock, /routeIdPreservingProtocol/);
 });
 
+test('editingBusy pauses polling during connection editor typing or IME composition', () => {
+  const state = {
+    composing: false, modelsSaving: false, connsSaving: false, services: { saving: false }, subagentSaving: false,
+    onboard: { saving: false, busy: false }, conns: { editing: { discovering: false } },
+  };
+  const ceName = { id: 'ce-name' };
+  const documentStub = { activeElement: null };
+  const dom = {
+    onboardModels: { contains: () => false },
+    connEditor: { contains: (node) => node === ceName },
+  };
+  const editingBusy = new Function('state', 'document', 'dom', `
+    const onboardEditingText = () => false;
+    ${appFunction('editingBusy')}
+    return editingBusy;
+  `)(state, documentStub, dom);
+
+  assert.equal(editingBusy(), false);
+  documentStub.activeElement = ceName;
+  assert.equal(editingBusy(), true, 'focused connection editor input must pause polling');
+  documentStub.activeElement = null;
+  state.composing = true;
+  assert.equal(editingBusy(), true, 'IME composition must pause polling');
+  state.composing = false;
+  assert.equal(editingBusy(), false);
+});
+
+test('runDiscovery failure preserves picker reason through subsequent searchCandidates', async () => {
+  const state = {
+    data: { revision: 'rev-1', connections: { saved: [{ id: 'ds', name: 'DeepSeek' }] } },
+    picker: { open: true, busy: false, seq: 0, query: 'deepseek', models: null, state: null, checkedAt: null, source: null, reason: null, hint: null, scope: null },
+  };
+  const fn = new Function('state', 'request', `
+    const API = { discovery: '/api/discovery', modelSearch: '/api/models/search' };
+    const connectionRowsOf = (d) => d.connections.saved;
+    const pickerScope = () => 'ds';
+    const discoveryReasonText = (code) => code;
+    const renderPicker = () => {};
+    const showToast = () => {};
+    const adoptState = () => {};
+    ${modelFunction('searchCandidates')}
+    ${modelFunction('runDiscovery')}
+    return { runDiscovery };
+  `)(state, async (path) => {
+    if (path === '/api/discovery') return { discovery: { state: 'failed', reason: 'upstream_unauthorized', models: [] } };
+    return { models: [{ id: 'deepseek-chat', upstreamModelId: 'deepseek-chat' }], source: 'preset' };
+  });
+
+  await fn.runDiscovery('ds');
+  assert.equal(state.picker.reason, 'upstream_unauthorized', 'discovery failure reason must not be cleared by fallback searchCandidates');
+  assert.equal(state.picker.models.length, 1);
+});
+
 /* 事件回调在源码里是内联的，用花括号配对截出整段。 */
 function appFunctionSpan(text, token) {
   const start = text.indexOf(token);

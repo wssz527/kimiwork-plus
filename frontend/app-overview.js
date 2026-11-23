@@ -1,4 +1,4 @@
-import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard } from './app-connections.js';
+import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard, renderOnboardOverview } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
 import { handleSaveFailure, loadState, runAction, setView } from './app.js';
@@ -516,45 +516,53 @@ function renderGatewayModeFact(data) {
 }
 
 
-function renderOverview(data) {
-  setText($('native-state'), nativeConnectionText(data));
-  const scope = desktopScopeInfo(data);
-  setHidden(dom.nativeRemote, !scope);
-  if (scope) {
-    setDot(dom.nativeRemoteDot, scope.tone);
-    setText(dom.nativeRemoteWord, scope.word);
-    setText(dom.nativeRemoteNote, scope.note);
+function renderOverview(data, { view } = {}) {
+  const showOverview = !view || view === 'overview';
+  const showMaintenance = !view || view === 'maintenance';
+  if (showMaintenance) {
+    setText($('native-state'), nativeConnectionText(data));
+    const scope = desktopScopeInfo(data);
+    setHidden(dom.nativeRemote, !scope);
+    if (scope) {
+      setDot(dom.nativeRemoteDot, scope.tone);
+      setText(dom.nativeRemoteWord, scope.word);
+      setText(dom.nativeRemoteNote, scope.note);
+    }
+    const info = configInfo(data);
+    setDot(dom.factConfigDot, info.tone);
+    setText(dom.factConfig, info.word);
+    setText(dom.factConfigFile, (data.configuration && data.configuration.file) || '—');
+
+    const metrics = data.metrics || {};
+    setText(dom.metricRequests, fmtCount(metrics.requests || 0));
+    setText(dom.metricFailures, fmtCount(metrics.failures || 0));
+    setText(dom.metricUptime, typeof metrics.startedAt === 'number' ? fmtDuration(Date.now() - metrics.startedAt) : '—');
+    renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
+    renderRoutingFacts(data);
+    renderDiagnosticsExport(data);
   }
-  const gw = (data && data.gateway) || {};
-  const running = gw.state === 'running';
-  setDot(dom.factGatewayDot, running ? 'ok' : 'bad');
-  setText(dom.factGateway, running ? '运行中' : '已停止');
-  setText(dom.factGatewayUrl, gw.url || '—');
-  renderGatewayModeFact(data);
+  if (showOverview || showMaintenance) {
+    renderCompatibility(data);
+  }
+  if (showOverview) {
+    const gw = (data && data.gateway) || {};
+    const running = gw.state === 'running';
+    setDot(dom.factGatewayDot, running ? 'ok' : 'bad');
+    setText(dom.factGateway, running ? '运行中' : '已停止');
+    setText(dom.factGatewayUrl, gw.url || '—');
+    renderGatewayModeFact(data);
 
-  const models = Array.isArray(data.models) ? data.models : [];
-  setText(dom.factModels, fmtCount(models.length) + ' 个模型');
-  const rows = connectionRowsOf(data);
-  setText(dom.factModelsSub, '来自 ' + fmtCount(rows ? rows.filter((row) => !row.legacy).length : 0) + ' 条模型服务');
+    const models = Array.isArray(data.models) ? data.models : [];
+    setText(dom.factModels, fmtCount(models.length) + ' 个模型');
+    const rows = connectionRowsOf(data);
+    setText(dom.factModelsSub, '来自 ' + fmtCount(rows ? rows.filter((row) => !row.legacy).length : 0) + ' 条模型服务');
 
-  const info = configInfo(data);
-  setDot(dom.factConfigDot, info.tone);
-  setText(dom.factConfig, info.word);
-  setText(dom.factConfigFile, (data.configuration && data.configuration.file) || '—');
-
-  const metrics = data.metrics || {};
-  setText(dom.metricRequests, fmtCount(metrics.requests || 0));
-  setText(dom.metricFailures, fmtCount(metrics.failures || 0));
-  setText(dom.metricUptime, typeof metrics.startedAt === 'number' ? fmtDuration(Date.now() - metrics.startedAt) : '—');
-  renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
-  renderRoutingFacts(data);
-  renderCompatibility(data);
-  renderDiagnosticsExport(data);
-  renderOverviewSubagents(data);
-  renderOverviewIssue(data);
-  renderOverviewToday();
-  renderQuickstartGuide(data);
-  void refreshOverviewToday();
+    renderOverviewSubagents(data);
+    renderOverviewIssue(data);
+    renderOverviewToday();
+    renderQuickstartGuide(data);
+    void refreshOverviewToday();
+  }
 }
 
 function renderOverviewSubagents(data) {
@@ -816,29 +824,28 @@ function renderDiagnosticsExport(data) {
   const note = $('diagnostics-export-note');
   const errors = $('diagnostics-export-errors');
   if (!button) return;
-  setText(note, diagnosticsOperationLogNote(data));
+  const baseNote = diagnosticsOperationLogNote(data);
+  const pathNote = state.diagnosticsExportPath ? ' · 已导出至 ' + state.diagnosticsExportPath : '';
+  setText(note, baseNote + pathNote);
   setText(errors, state.diagnosticsExportError || '');
   setHidden(errors, !state.diagnosticsExportError);
   button.disabled = state.diagnosticsExporting === true;
   setText(button, state.diagnosticsExporting ? '正在导出…' : '导出诊断日志');
 }
 
-/* 导出只做一次只读请求；服务端已脱敏的对象原样落成 JSON 文件。 */
 async function exportDiagnostics() {
   if (state.diagnosticsExporting) return false;
   state.diagnosticsExporting = true;
   state.diagnosticsExportError = '';
   renderDiagnosticsExport(state.data);
   try {
-    const payload = await request(API.diagnosticsExport);
-    const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'kimi-work-plus-diagnostics.json';
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('已导出脱敏诊断日志；不含 API Key、令牌或对话正文。', 'ok');
+    const res = await request(API.diagnosticsExport, { method: 'POST', body: {} });
+    const savedPath = typeof res?.path === 'string' ? res.path.trim() : '';
+    if (!res || res.ok !== true || !savedPath) {
+      throw new Error('服务未返回导出文件路径，请稍后重试。');
+    }
+    state.diagnosticsExportPath = savedPath;
+    showToast('脱敏诊断日志已保存至：' + savedPath + '（不含 API Key、令牌或对话正文）。', 'ok');
     return true;
   } catch (error) {
     state.diagnosticsExportError = '导出失败：' + (error?.message || '请稍后重试。');
@@ -858,8 +865,9 @@ function renderOverviewToday() {
     return;
   }
   setText(dom.overviewTodayRequests, fmtCount(today.requests) + ' 次请求');
-  const tokensText = typeof today.totalTokens === 'number' && Number.isFinite(today.totalTokens)
-    ? fmtTokens(today.totalTokens) : '未提供';
+  const tokensText = typeof today.totalTokens === 'number' && Number.isFinite(today.totalTokens) && today.totalTokens >= 0
+    ? (today.totalTokens === 0 ? '0' : fmtTokens(today.totalTokens))
+    : '未提供';
   setText(dom.overviewTodayTokens, '今日 Token：' + tokensText);
   if (state.data) renderQuickstartGuide(state.data);
 }
@@ -1240,7 +1248,10 @@ function renderOperation(data) {
 }
 
 function renderActions(data) {
-  if (data && !onboardBusy()) renderOnboard();
+  if (data && !onboardBusy()) {
+    if (state.view === 'models') renderOnboard();
+    else renderOnboardOverview(data);
+  }
   if (!state.actionButtons.length) return;
   const running = isInFlight(data && data.operation);
   /* 保存模式期间也锁定同步按钮：否则 renderActions 会把 renderIntegrationMode
@@ -1593,9 +1604,11 @@ function updateCompletionVerdict(data, actionLabel) {
     return { tone: 'ok', complete: true,
       text: actionLabel + '已完成，当前版本 ' + version + '。' };
   }
+  const isWindows = typeof document !== 'undefined' && document.documentElement?.dataset?.platform === 'windows';
   return { tone: 'warn', complete: false,
-    text: '当前版本 ' + version + '。部分已保存的连接需要系统授权。'
-      + '请到「模型」页点「重新授权并应用连接」。系统提示时可选择「始终允许」。' };
+    text: isWindows
+      ? '当前版本 ' + version + '。部分旧版连接凭据需要系统授权迁移，请到「模型」页点「重新授权并应用连接」。'
+      : '当前版本 ' + version + '。部分旧版连接凭据仍待迁移授权，请到「模型」页点「重新授权并应用连接」（若 macOS 弹出钥匙串提示可选择「始终允许」一次完成迁移）。' };
 }
 
 async function waitForUpdateReconnect(prevBuildId, actionLabel) {
@@ -1832,11 +1845,18 @@ function renderPreviewLifecycle(data) {
   const busy = operation && ['pending', 'running'].includes(operation.phase);
   setText($('preview-service-sub'), busy ? '后台操作进行中，正在读回结果；登录启动与当前运行状态分开管理。' : data.service?.loginStartup === 'enabled' ? '已允许登录时启动；更改此偏好不会重启当前后台' : '未开启登录时启动；窗口关闭不停止网关');
   const register = $('service-register');
-  if (register) register.textContent = data.service?.registered ? '更新服务注册' : '注册后台服务';
+  if (register) {
+    register.textContent = data.service?.registered ? '更新服务注册' : '注册后台服务';
+    register.disabled = Boolean(busy);
+  }
   const enable = $('service-enable');
   if (enable) enable.disabled = Boolean(busy) || data.service?.loginStartup === 'enabled';
   const disable = $('service-disable');
   if (disable) disable.disabled = Boolean(busy) || data.service?.loginStartup !== 'enabled';
+  for (const id of ['daemon-restart', 'service-stop', 'service-uninstall']) {
+    const el = $(id);
+    if (el) el.disabled = Boolean(busy);
+  }
   const migration = data.migration;
   const banner = $('migration-banner');
   const note = $('migration-note');

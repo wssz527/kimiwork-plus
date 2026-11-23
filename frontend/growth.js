@@ -27,6 +27,46 @@ const translationStateReasons = {
   no_managed_child: '还没有受管启动的 Kimi；启动后才会应用翻译。',
   translation_waiting_view: '已准备好，等待 Work 页面出现后接入。',
 };
+const contextStatusWords = {
+  inherit: '沿用 Kimi 默认',
+  applied: '已写入配置',
+  unchanged: '与已保存一致',
+  repaired: '已修复并写入',
+  restored: '已恢复原生默认',
+  conflict: '存在配置冲突（未覆盖）',
+  unavailable: '当前不可读取',
+  unsupported: '当前版本不支持',
+  waiting: '等待应用',
+  pending: '待写入',
+  error: '读取失败',
+};
+const contextReasonWords = {
+  config_not_found: '尚未找到 Kimi 配置文件',
+  config_unreadable: '配置文件不可读',
+  conflict: '存在外来配置块，未覆盖',
+  foreign_block: '存在外来配置块，未覆盖',
+  invalid_config: '配置内容无效',
+  read_failed: '读取失败',
+  write_failed: '写入失败',
+  unsupported: '当前版本不支持',
+  unavailable: '当前不可用',
+};
+const mcpTransportWords = {
+  stdio: '本地命令（stdio）',
+  http: '远程 HTTP',
+  sse: '远程 SSE',
+};
+const mcpResultWords = {
+  added: '已添加',
+  updated: '已更新',
+  removed: '已移除',
+  passed: '连接成功',
+  ok: '已完成',
+  failed: '未通过',
+  error: '操作失败',
+  unavailable: '接口不可用',
+  unsupported: '暂不支持',
+};
 
 function errorText(error) {
   return escapeMap[error?.code] || error?.message || '操作未完成，请检查当前状态。';
@@ -112,7 +152,7 @@ function capabilityText(value) {
   return value === 'unknown' ? '待确认' : value === true ? '支持' : value === false ? '不支持' : value ?? '待确认';
 }
 
-function providerDocument(selectId, hintId, providers) {
+function providerDocument(selectId, hintId, providers, openExternalUrl) {
   const select = $(selectId);
   const preset = providers?.presets?.find(row => row.id === select?.value);
   const id = 'provider-document-' + selectId;
@@ -140,9 +180,12 @@ function providerDocument(selectId, hintId, providers) {
       if (url.protocol !== 'https:') return;
       const link = document.createElement('a');
       link.href = url.href;
-      link.target = '_blank';
-      link.rel = 'noreferrer';
+      link.rel = 'noopener noreferrer';
       link.textContent = '获取 API Key（官网）';
+      link.addEventListener('click', event => {
+        event.preventDefault();
+        if (typeof openExternalUrl === 'function') void openExternalUrl(url.href, link);
+      });
       note.append(document.createElement('br'), link);
     } catch {}
   }
@@ -200,11 +243,30 @@ function mountProviderFlow(selectId) {
   function render(nextProviders) {
     providers = nextProviders || providers;
     const families = providers?.menu?.families || [];
-    const current = providers?.presets?.find(row => row.id === select.value);
+    if (!families.length) {
+      delete select.dataset.providerFlow;
+      family.closest('label').hidden = true;
+      region.closest('label').hidden = true;
+      plan.closest('label').hidden = true;
+      select.disabled = false;
+      return;
+    }
+    select.dataset.providerFlow = 'managed';
+    family.closest('label').hidden = false;
+    region.closest('label').hidden = false;
+    plan.closest('label').hidden = false;
+    const desired = select.dataset.desiredPreset;
+    if (desired !== undefined) delete select.dataset.desiredPreset;
+    const targetPreset = desired !== undefined ? desired : select.value;
+    const current = providers?.presets?.find(row => row.id === targetPreset);
     if (current) {
       state.family = current.family || current.id;
       state.region = current.region || 'null';
       state.plan = current.kind;
+    } else if (desired === '') {
+      state.family = '';
+      state.region = '';
+      state.plan = '';
     }
     fillProviderOptions(family, [{ value: '', label: '自定义（不套用预设）' },
       ...families.map(row => ({ value: row.family, label: row.name }))], state.family);
@@ -221,8 +283,9 @@ function mountProviderFlow(selectId) {
       ...plans.map(row => ({ value: row.plan, label: row.name }))], state.plan);
     plan.disabled = !selectedRegion || plans.length < 2;
     const variants = plans.find(row => row.plan === state.plan)?.variants || [];
+    const nextValue = variants.some(row => row.presetId === targetPreset) ? targetPreset : '';
     fillProviderOptions(select, [{ value: '', label: variants.length ? '选择接口与端点' : '先选择厂商、地区与服务类型' },
-      ...variants.map(row => ({ value: row.presetId, label: row.name }))], select.value);
+      ...variants.map(row => ({ value: row.presetId, label: row.name }))], nextValue);
     select.disabled = !selectedFamily || !state.plan;
   }
 
@@ -245,12 +308,35 @@ function mountProviderFlow(selectId) {
     render(providers);
   });
   select.addEventListener('change', () => { if (!syncing) render(providers); });
+  select.addEventListener('kwp:sync-provider-flow', () => render(providers));
   return render;
 }
 
 function mountGrowth({ request, getState, getProviders = () => null, refresh, notify, runAction }) {
   mountLegacy();
-  const local = { trKey: '', trDraft: null, trCopyKey: '', ctxKey: '', ctxDraft: null, mcp: null, busy: false, webDraft: null, webResult: null };
+  const local = { trKey: '', trDraft: null, trCopyKey: '', ctxKey: '', ctxDraft: null, mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false, webDraft: null, webResult: null };
+  async function openExternalUrl(href, anchor) {
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      notify('链接地址无效，无法打开。', 'error');
+      return;
+    }
+    if (parsed.protocol !== 'https:') {
+      notify('仅允许在系统浏览器打开 HTTPS 链接。', 'error');
+      return;
+    }
+    if (anchor && anchor.dataset.busy === 'true') return;
+    if (anchor) anchor.dataset.busy = 'true';
+    try {
+      await request('/api/open-url', { method: 'POST', body: { url: parsed.href } });
+    } catch (error) {
+      notify(error?.message || '无法在系统默认浏览器中打开链接，请手动访问官网。', 'error');
+    } finally {
+      if (anchor) delete anchor.dataset.busy;
+    }
+  }
   const copyLabel = document.createElement('label');
   copyLabel.className = 'field';
   copyLabel.htmlFor = 'tr-copy-model';
@@ -363,27 +449,41 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     }
     $('context-ratio').disabled = !$('context-custom').checked;
     $('context-reserved').disabled = !$('context-custom').checked;
-    text('context-state', `原生配置状态：${ctx.status || '未报告'}。${ctx.reason ? `原因：${ctx.reason}。` : ''} 保存成功不代表当前会话已经采用。`);
+    const statusLabel = contextStatusWords[ctx.status] || (ctx.status ? '状态未确认' : '未报告');
+    const reasonLabel = ctx.reason ? (contextReasonWords[ctx.reason] || escapeMap[ctx.reason] || '详见诊断信息') : '';
+    text('context-state', `原生配置状态：${statusLabel}。${reasonLabel ? `原因：${reasonLabel}。` : ''} 保存成功不代表当前会话已经采用。`);
+    const ctxStateNode = $('context-state');
+    if (ctxStateNode) ctxStateNode.title = [ctx.status, ctx.reason].filter(Boolean).join(' · ');
     text('context-draft', same(local.ctxDraft, contextDraft()) ? '与已保存策略一致' : '有未保存的修改');
   }
 
   async function saveContext() {
-    local.ctxDraft = contextDraft();
+    const nextPolicy = contextDraft();
     showError('context-errors', '');
-    if (local.ctxDraft.mode === 'custom' && (!Number.isFinite(local.ctxDraft.triggerRatio)
-      || local.ctxDraft.triggerRatio < 0.5 || local.ctxDraft.triggerRatio > 0.99
-      || !Number.isSafeInteger(local.ctxDraft.reservedTokens) || local.ctxDraft.reservedTokens < 0)) {
+    if (nextPolicy.mode === 'custom' && (!Number.isFinite(nextPolicy.triggerRatio)
+      || nextPolicy.triggerRatio < 0.5 || nextPolicy.triggerRatio > 0.99
+      || !Number.isSafeInteger(nextPolicy.reservedTokens) || nextPolicy.reservedTokens < 0)) {
       showError('context-errors', '触发比例须为 0.50–0.99，预留 token 须为非负整数。');
       return;
     }
     try {
-      const res = await request('/api/context', { method: 'POST', body: { policy: local.ctxDraft } });
+      const res = await request('/api/context', { method: 'POST', body: { policy: nextPolicy } });
       const data = getState();
       if (data && res.context) data.context = res.context;
-      local.ctxKey = JSON.stringify(res.context?.policy || local.ctxDraft);
+      const saved = res.context?.policy || nextPolicy;
+      local.ctxDraft = { ...saved };
+      local.ctxKey = JSON.stringify(saved);
       renderContext(getState());
       notify('长对话设置已保存；新建会话或重新加载后使用。', 'ok');
     } catch (error) { showError('context-errors', errorText(error)); }
+  }
+
+  function clearMcpConfirm() {
+    if (local.mcpConfirmTimer) {
+      clearTimeout(local.mcpConfirmTimer);
+      local.mcpConfirmTimer = null;
+    }
+    local.mcpConfirm = null;
   }
 
   function renderMcp(data) {
@@ -391,7 +491,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     text('mcp-state', tools.available ? `原生接口可用，共 ${tools.servers.length} 个服务。读取列表不会启动服务。`
       : `MCP 配置当前不可读取：${tools.reason ? errorText({ code: tools.reason }) : '等待原生接口'}。其他功能不受影响。`);
     const list = $('mcp-list');
-    const signature = JSON.stringify([tools.available, tools.reason, tools.servers, local.busy]);
+    const signature = JSON.stringify([tools.available, tools.reason, tools.servers, local.busy, local.mcpConfirm]);
     if (local.mcpKey === signature) return;
     local.mcpKey = signature;
     list.replaceChildren();
@@ -401,7 +501,8 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       const title = document.createElement('h3');
       title.textContent = server.name;
       const detail = document.createElement('p');
-      detail.textContent = `${server.transport} · ${server.enabled ? '已启用' : '已停用'} · ${server.command || server.url || '未公开连接细节'}`;
+      const transportLabel = mcpTransportWords[server.transport] || server.transport || '未知方式';
+      detail.textContent = `${transportLabel} · ${server.enabled ? '已启用' : '已停用'} · ${server.command || server.url || '未公开连接细节'}`;
       const meta = document.createElement('p');
       meta.className = 'hint';
       meta.textContent = `参数 ${server.argsCount ?? '—'} 项；环境变量 ${(server.envNames || []).join('、') || '无／未公开'}；请求头 ${(server.headerNames || []).join('、') || '无／未公开'}`;
@@ -419,6 +520,32 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
         actions.append(button);
       }
       row.append(title, detail, meta, actions);
+      if (local.mcpConfirm === server.name) {
+        const confirmBar = document.createElement('div');
+        confirmBar.className = 'inline-confirm';
+        confirmBar.dataset.mcpConfirmRow = server.name;
+        const prompt = document.createElement('p');
+        prompt.className = 'inline-confirm__text';
+        prompt.textContent = `确认从 Kimi 全局 MCP 配置中移除 ${server.name}？此操作不会卸载软件包。`;
+        const confirmActions = document.createElement('div');
+        confirmActions.className = 'inline-confirm__actions';
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'btn btn--primary btn--sm';
+        confirmBtn.textContent = '确认移除';
+        confirmBtn.dataset.mcpAction = 'remove-confirm';
+        confirmBtn.dataset.mcpName = server.name;
+        confirmBtn.disabled = local.busy;
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn--quiet btn--sm';
+        cancelBtn.textContent = '取消';
+        cancelBtn.dataset.mcpAction = 'remove-cancel';
+        cancelBtn.dataset.mcpName = server.name;
+        confirmActions.append(confirmBtn, cancelBtn);
+        confirmBar.append(prompt, confirmActions);
+        row.append(confirmBar);
+      }
       list.append(row);
     }
   }
@@ -455,13 +582,33 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
 
   async function mcpAction(action, name) {
     const server = getState()?.tools?.servers?.find(row => row.name === name);
-    if (action === 'edit') { editMcp(server); return; }
-    if (action === 'remove' && !window.confirm(`确认从 Kimi 全局 MCP 配置中移除 ${name}？此操作不会卸载软件包。`)) return;
+    if (action === 'edit') { clearMcpConfirm(); renderMcp(getState()); editMcp(server); return; }
+    if (action === 'remove') {
+      clearMcpConfirm();
+      local.mcpConfirm = name;
+      local.mcpConfirmTimer = setTimeout(() => {
+        if (local.mcpConfirm === name) {
+          local.mcpConfirm = null;
+          local.mcpConfirmTimer = null;
+          const data = getState();
+          if (data) renderMcp(data);
+        }
+      }, 10000);
+      renderMcp(getState());
+      return;
+    }
+    if (action === 'remove-cancel') {
+      clearMcpConfirm();
+      renderMcp(getState());
+      return;
+    }
+    clearMcpConfirm();
+    const apiAction = action === 'remove-confirm' ? 'remove' : action;
     local.busy = true;
     showError('mcp-errors', '');
     try {
-      const body = action === 'test' ? { action, name } : action === 'toggle'
-        ? { action: 'update', name, patch: { enabled: !server.enabled } } : { action, name };
+      const body = apiAction === 'test' ? { action: apiAction, name } : apiAction === 'toggle'
+        ? { action: 'update', name, patch: { enabled: !server.enabled } } : { action: apiAction, name };
       const res = await request('/api/tools', { method: 'POST', body });
       const data = getState();
       if (data && res.tools) data.tools = res.tools;
@@ -469,11 +616,15 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       hidden('mcp-result', false);
       $('mcp-result').replaceChildren();
       const heading = document.createElement('strong');
-      heading.textContent = action === 'test' ? res.result?.ok ? `${name} 连接成功` : `${name} 测试未完成` : `${name}：${res.result?.state || '已处理'}`;
+      const stateWord = mcpResultWords[res.result?.state] || '已处理';
+      heading.textContent = apiAction === 'test' ? res.result?.ok ? `${name} 连接成功` : `${name} 测试未完成` : `${name}：${stateWord}`;
       const names = document.createElement('p');
-      names.textContent = res.result?.tools?.length ? `工具：${res.result.tools.join('、')}` : `状态：${res.result?.reason || res.result?.state || '未返回工具名单'}`;
+      const reasonWord = res.result?.reason ? (escapeMap[res.result.reason] || mcpResultWords[res.result.reason] || '详见诊断信息') : '';
+      names.textContent = res.result?.tools?.length ? `工具：${res.result.tools.join('、')}` : `状态：${reasonWord || stateWord || '未返回工具名单'}`;
+      names.title = [res.result?.state, res.result?.reason].filter(Boolean).join(' · ');
       $('mcp-result').append(heading, names);
-      if (action === 'test') notify(res.result?.ok ? 'MCP 显式测试已通过。' : 'MCP 测试未通过，请查看原因。', res.result?.ok ? 'ok' : 'error');
+      if (apiAction === 'test') notify(res.result?.ok ? 'MCP 显式测试已通过。' : 'MCP 测试未通过，请查看原因。', res.result?.ok ? 'ok' : 'error');
+      else if (apiAction === 'remove') notify(`已从全局 MCP 配置中移除 ${name}。`, 'ok');
     } catch (error) { showError('mcp-errors', errorText(error)); }
     finally { local.busy = false; renderMcp(getState()); }
   }
@@ -518,13 +669,18 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   function renderWeb(data) {
     const web = data.webTools;
     if (!web) { text('web-state', '本机适配服务尚未接入，请刷新面板状态。'); return; }
+    const providerWords = { official: '沿用 Kimi 官方服务', tavily: 'Tavily（本机适配）', native: '自定义原生服务' };
+    const probeWords = { passed: '正常', ok: '正常', ready: '就绪', failed: '失败', error: '失败', timeout: '超时', unavailable: '不可用', unsupported: '不支持', not_configured: '未配置', skipped: '已跳过' };
     $('web-provider').value = local.webDraft || web.provider || 'official';
     hidden('web-key-field', $('web-provider').value !== 'tavily');
     text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
-    text('web-state', local.webResult?.message || web.message || `当前方式：${web.provider || 'official'}。测试与当前会话采用分开报告。`);
+    const providerLabel = providerWords[web.provider || 'official'] || '自定义服务';
+    text('web-state', local.webResult?.message || web.message || `当前方式：${providerLabel}。测试与当前会话采用分开报告。`);
     hidden('native-search-details', $('web-provider').value !== 'native');
+    const searchWord = local.webResult?.search?.state ? (probeWords[local.webResult.search.state] || '已检查') : '—';
+    const fetchWord = local.webResult?.fetch?.state ? (probeWords[local.webResult.fetch.state] || '已检查') : '—';
     text('web-draft', local.webResult
-      ? `搜索：${local.webResult.search?.state || '—'}；正文读取：${local.webResult.fetch?.state || '—'}。这不是当前会话已重新加载的证明。`
+      ? `搜索：${searchWord}；正文读取：${fetchWord}。这不是当前会话已重新加载的证明。`
       : local.webDraft && local.webDraft !== web.provider ? '服务方式有未保存修改。'
         : web.pendingRestart ? '已保存；需要重新加载 Kimi 会话后使用。' : '默认官方服务不会写入接管配置。');
   }
@@ -583,18 +739,22 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   const providerFlows = [['ob-preset', 'ob-preset-hint'], ['ce-preset', 'ce-preset-hint']]
     .map(([select, hint]) => ({ select, hint, render: mountProviderFlow(select) }));
   for (const { select, hint } of providerFlows) {
-    $(select)?.addEventListener('change', () => providerDocument(select, hint, getProviders()));
+    $(select)?.addEventListener('change', () => providerDocument(select, hint, getProviders(), openExternalUrl));
   }
 
-  return function render(data) {
+  return function render(data, { view } = {}) {
     if (!data) return;
-    renderTranslation(data);
-    renderContext(data);
-    renderMcp(data);
-    renderWeb(data);
-    for (const { select, hint, render } of providerFlows) {
-      render(getProviders());
-      providerDocument(select, hint, getProviders());
+    if (!view || view === 'maintenance') {
+      renderTranslation(data);
+      renderContext(data);
+      renderMcp(data);
+      renderWeb(data);
+    }
+    if (!view || view === 'models') {
+      for (const { select, hint, render } of providerFlows) {
+        render(getProviders());
+        providerDocument(select, hint, getProviders(), openExternalUrl);
+      }
     }
   };
 }

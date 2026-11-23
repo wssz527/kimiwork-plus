@@ -787,7 +787,7 @@ async function saveSubagentTarget() {
     showToast(state.draft.mode === 'inherit'
       ? (conflicted ? '已保存为继承主模型，但配置文件存在冲突未被覆盖；请查看当前状态。' : '已保存为继承主模型并同步到 Kimi Work 配置。')
       : state.draft.mode === 'pool'
-        ? (written ? '子代理角色与模型池已保存并写入 config.toml，新建会话后生效。' : '模型池已保存；配置写入与内核采用情况见当前状态。')
+        ? (written ? '角色分配已写入 config.toml 模型池用途说明，供主模型派发 plan / coder / explore 子代理时参考选用，新建会话后生效。' : '模型池已保存；配置写入与内核采用情况见当前状态。')
         : (written ? '固定子代理模型已保存并写入 config.toml，新建会话后生效。' : '目标已保存；配置写入与内核采用情况见当前状态。'), conflicted ? 'warn' : 'ok');
   } catch (error) {
     if (!current()) return;

@@ -90,6 +90,7 @@
           <label class="field" id="usage-filter-conversation-wrap" for="usage-filter-conversation" hidden><span class="field__label">会话</span><select id="usage-filter-conversation" data-usage-filter="conversationId"><option value="">全部会话</option></select><span class="field__hint" id="usage-conversation-hint">只使用有可靠来源的会话 ID。</span></label>
         </div>
         <p class="note usage-coverage" id="usage-coverage">统计本机网关请求及 Kimi Work 本地会话用量（只读解析 token 计数，不读取对话内容）。</p>
+        <p class="note" id="usage-quota-boundary">说明：联网搜索、调用 Kimi 资料库，以及 PPT、3D、图片生成、视频生成等能力仍走 Kimi Work 官方自身额度；KimiWork + 仅接管对话与子代理模型请求。</p>
         <section class="usage-detail" id="usage-bucket-detail" hidden><h3 class="usage-detail__title" id="usage-bucket-title"></h3><div id="usage-bucket-records"></div></section>
         <section class="usage-detail" aria-labelledby="usage-records-title">
           <div class="band__head"><div><h3 class="usage-detail__title" id="usage-records-title">请求明细</h3><p>按时间倒序，不保存或展示 prompt、响应正文和 API Key。</p></div><div><button class="btn btn--outline btn--sm" id="usage-export" type="button">导出脱敏 JSON</button><button class="btn btn--quiet btn--sm" id="usage-clear" type="button">清除历史</button></div></div>
@@ -101,6 +102,7 @@
       <section class="usage-pane" id="usage-pane-quotas" role="tabpanel" aria-labelledby="usage-tab-quotas" hidden>
         <div class="band__head"><div><h2>额度总览</h2><p>订阅窗口、Coding Plan、API 余额和外部网关自设额度是不同账目，不跨来源求和。</p></div><button class="btn btn--outline" id="quota-refresh" type="button">刷新已接入来源</button></div>
         <p class="note">只有点击刷新才会查询已授权的非推理接口。失败时保留最后成功值并标记过期，不把失败显示为 0 或无限额。</p>
+        <p class="note">联网搜索、调用 Kimi 资料库，以及 PPT、3D、图片生成、视频生成等能力仍走 Kimi Work 官方自身额度；KimiWork + 仅接管对话与子代理模型请求。</p>
         <div class="usage-quota-list" id="quota-list"></div><p class="empty" id="quota-empty">尚未接入可查询的额度来源。这不表示余额为 0。</p>
       </section>
       <section class="usage-pane" id="usage-pane-sources" role="tabpanel" aria-labelledby="usage-tab-sources" hidden>
@@ -434,7 +436,30 @@
       for (const part of record.parts || []) { const detail = document.createElement('p'); detail.textContent = part.label + '：' + fmtAmount(part.amount) + ' ' + (part.unit || record.unit || ''); meta.append(detail); }
       if (record.stale) { const age = document.createElement('p'); age.textContent = '当前读数已过期，请手动刷新；上次值仍保留。'; meta.append(age); }
       if (record.errorReason) { const reason = document.createElement('p'); reason.textContent = '原因：' + quotaReason(record.errorReason); meta.append(reason); }
-      if (record.officialUrl) { const link = document.createElement('a'); link.href = record.officialUrl; link.target = '_blank'; link.rel = 'noreferrer'; link.textContent = '打开官方额度页'; meta.append(link); }
+      if (record.officialUrl) {
+        try {
+          const parsed = new URL(record.officialUrl);
+          if (parsed.protocol === 'https:') {
+            const link = document.createElement('a');
+            link.href = parsed.href;
+            link.rel = 'noopener noreferrer';
+            link.textContent = '打开官方额度页';
+            link.addEventListener('click', async event => {
+              event.preventDefault();
+              if (link.dataset.busy === 'true') return;
+              link.dataset.busy = 'true';
+              try {
+                await request('/api/open-url', { method: 'POST', body: { url: parsed.href } });
+              } catch (error) {
+                notify(error?.message || '无法在系统默认浏览器中打开链接，请手动访问官方额度页。', 'error');
+              } finally {
+                delete link.dataset.busy;
+              }
+            });
+            meta.append(link);
+          }
+        } catch {}
+      }
       row.append(meta); list.append(row);
       if (amount(record.limit) > 0 && amount(record.remaining) !== null) { const bar = document.createElement('div'); bar.className = 'quota-progress'; const fill = document.createElement('span'); fill.style.width = Math.max(0, Math.min(100, record.remaining / record.limit * 100)) + '%'; bar.append(fill); main.append(bar); }
     }
@@ -448,7 +473,7 @@
       <div class="band__head"><div><h3>添加余额或外部网关额度来源</h3><p>这里只保存非敏感配置。认证复用连接中已有的 Key，页面不会回显或另存 Key；保存后不会自动查询。</p></div></div>
       <label class="field" for="quota-source-adapter"><span class="field__label">厂商适配器</span><select id="quota-source-adapter"><option value="deepseek">DeepSeek 官方余额</option><option value="moonshot-cn">Moonshot 国内余额</option><option value="moonshot-global">Moonshot 国际余额</option><option value="custom">高级：自定义非推理接口</option></select><span class="field__hint">官方适配器使用固定文档端点；自定义接口只读取声明的数值路径。</span></label>
       <div class="field-row"><label class="field" for="quota-source-name"><span class="field__label">显示名称</span><input id="quota-source-name" maxlength="80" required placeholder="例如：DeepSeek 余额"></label><label class="field" for="quota-source-id" id="quota-source-id-field"><span class="field__label">来源标识</span><input id="quota-source-id" class="mono" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="my-balance"><span class="field__hint">自定义来源使用；官方来源按连接自动生成。</span></label></div>
-      <label class="field" for="quota-source-connection"><span class="field__label">复用连接凭据</span><select id="quota-source-connection"></select><span class="field__hint">没有可用连接时，先到「连接」保存并应用。</span></label>
+      <label class="field" for="quota-source-connection"><span class="field__label">复用连接凭据</span><select id="quota-source-connection"></select><span class="field__hint">没有可用连接时，先到「模型 → 服务商连接」保存并应用。</span></label>
       <details class="growth-disclosure" id="quota-adapter-details"><summary id="quota-adapter-summary">查看官方接口与适配规则</summary><div class="growth-disclosure__body">
       <p class="note" id="quota-custom-note">请使用服务方文档提供的余额或额度接口；此处只查询数据，不调用模型。</p>
       <div class="field-row"><label class="field" for="quota-source-kind"><span class="field__label">账目类型</span><select id="quota-source-kind"><option value="api_balance">API 余额</option><option value="gateway_limit">外部网关自设额度</option><option value="coding_plan">外部网关 Coding Plan 窗口</option></select></label><label class="field" for="quota-source-unit"><span class="field__label">数值单位</span><select id="quota-source-unit"><option>CNY</option><option>USD</option><option>EUR</option><option>JPY</option><option>HKD</option><option>GBP</option><option>credits</option><option>requests</option><option>tokens</option></select><span class="field__hint">必须与服务方返回单位一致。</span></label></div>
@@ -594,12 +619,22 @@
       if (event.key === 'Escape') { event.preventDefault(); $('usage-filter-model').open = false; $('usage-filter-model').querySelector('summary').focus(); }
     });
     $('usage-export').addEventListener('click', async () => {
+      const button = $('usage-export');
+      if (button) button.disabled = true;
+      showError(null);
       try {
-        const data = await request('/api/usage/export');
-        const blob = new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json' });
-        const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'kimi-work-usage.json'; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-        notify('已生成脱敏用量 JSON；不包含 prompt、正文或 API Key。', 'ok');
+        let body = {};
+        try {
+          body = queryPayload();
+        } catch {
+          body = { filters: { ...state.filters }, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+        }
+        const res = await request('/api/usage/export', { method: 'POST', body });
+        const savedPath = typeof res?.path === 'string' ? res.path.trim() : '';
+        if (!res || res.ok !== true || !savedPath) throw Error('服务未返回导出文件路径，请稍后重试。');
+        notify('脱敏用量 JSON 已保存至：' + savedPath + '（不包含 prompt、正文或 API Key）。', 'ok');
       } catch (error) { showError(error); }
+      finally { if (button) button.disabled = false; }
     });
     $('usage-clear').addEventListener('click', async () => {
       if (!state.clearArmed) { state.clearArmed = true; text('usage-clear', '再次点击确认清除'); clearTimeout(clearTimer); clearTimer = setTimeout(() => { state.clearArmed = false; text('usage-clear', '清除历史'); }, 8000); return; }

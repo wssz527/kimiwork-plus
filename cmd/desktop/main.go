@@ -7,13 +7,63 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wssz527/kimiwork-plus/internal/bridge"
 )
+
+const openAccountsJS = `(() => {
+  const open = () => {
+    if (typeof window.__kwpOpenAccounts === 'function') {
+      window.__kwpOpenAccounts();
+      return;
+    }
+    document.getElementById('nav-maintenance')?.click();
+    document.getElementById('settings-tab-accounts')?.click();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open, { once: true });
+  } else {
+    open();
+  }
+})();`
+
+func singleInstanceEncryptionKey(stateDir string) [32]byte {
+	clean := filepath.Clean(strings.TrimSpace(stateDir))
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = resolved
+	}
+	return sha256.Sum256([]byte(bridge.AppIdentifier + "\x00single-instance\x00" + clean))
+}
+
+func windowDiagnosticMessage(goos, status string) string {
+	terminated := status == "web_content_process_terminated"
+	switch goos {
+	case "windows":
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从托盘菜单导出窗口诊断，确认当前 Windows 用户目录和 WebView2 运行时可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请确认当前 Windows 用户目录和 WebView2 运行时可用，并从托盘重新打开窗口。"
+	case "darwin":
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
+	default:
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从托盘菜单导出窗口诊断，确认当前用户目录可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请确认当前用户目录可用，并从托盘重新打开窗口。"
+	}
+}
 
 func main() {
 	defaultDir, startupErr := bridge.DefaultStateDir()
@@ -35,11 +85,8 @@ func main() {
 	}
 
 	var window *application.WebviewWindow
-	var openWindow func()
-	encryptionKey := sha256.Sum256([]byte("startup"))
-	if startupErr == nil {
-		encryptionKey = sha256.Sum256([]byte(ep.Key))
-	}
+	var openWindow func() bool
+	encryptionKey := singleInstanceEncryptionKey(*dir)
 	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", Icon: platformAppIcon(), SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
 			openWindow()
@@ -65,7 +112,14 @@ func main() {
 		URL:                  ep.URL + "/#key=" + ep.Key,
 		AllowSimpleEventEmit: true,
 	}))
-	attachWindowAppearance(app, window)
+	var navLoaded atomic.Bool
+	var pendingOpenAccounts atomic.Bool
+	attachWindowAppearance(app, window, func() {
+		navLoaded.Store(true)
+		if pendingOpenAccounts.Swap(false) {
+			window.ExecJS(openAccountsJS)
+		}
+	})
 	var epMu sync.Mutex
 	currentEndpoint := func() bridge.Endpoint {
 		epMu.Lock()
@@ -94,6 +148,7 @@ func main() {
 		return confirmed, true
 	}
 	applyEndpoint := func(next bridge.Endpoint) {
+		navLoaded.Store(false)
 		application.InvokeAsync(func() {
 			epMu.Lock()
 			defer epMu.Unlock()
@@ -103,13 +158,16 @@ func main() {
 			window.SetURL(next.URL + "/#key=" + next.Key)
 		})
 	}
-	openWindow = func() {
+	openWindow = func() bool {
+		reloading := false
 		if next, changed := syncEndpoint(); changed {
+			reloading = true
 			applyEndpoint(next)
 		}
 		window.Show()
 		window.Restore()
 		window.Focus()
+		return reloading
 	}
 	stopSync := make(chan struct{})
 	defer close(stopSync)
@@ -145,10 +203,7 @@ func main() {
 	trayMenu := app.NewMenu()
 	trayMenu.Add("打开 KimiWork +").OnClick(func(*application.Context) { openWindow() })
 	trayMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
-		message := "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
-		if diagnostics.Status() == "web_content_process_terminated" {
-			message = "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
-		}
+		message := windowDiagnosticMessage(runtime.GOOS, diagnostics.Status())
 		app.Dialog.Info().SetTitle("KimiWork + 窗口诊断").SetMessage(message).Show()
 	})
 	trayMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
@@ -160,8 +215,12 @@ func main() {
 		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
 	})
 	installAccountTray(app, tray, trayMenu, *dir, func() {
-		openWindow()
-		window.ExecJS("document.getElementById('nav-maintenance')?.click()")
+		reloading := openWindow()
+		if (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && (reloading || !navLoaded.Load()) {
+			pendingOpenAccounts.Store(true)
+			return
+		}
+		window.ExecJS(openAccountsJS)
 	})
 	trayMenu.AddSeparator()
 	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })
