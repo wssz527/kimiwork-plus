@@ -435,6 +435,7 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
 /* 每次打开抽屉都从草稿副本开始，取消不会留下半个编辑。 */
 function openConnectionEditor(row) {
   const rows = state.conns.draft || [];
+  state.composing = false;
   state.conns.editing = {
     originalId: row && !row.legacy ? row.id : null,
     baseRevision: state.conns.baseRevision ?? state.data?.revision ?? null,
@@ -442,13 +443,16 @@ function openConnectionEditor(row) {
     draft: row ? { ...connectionDraftRow(row), apiKey: '', secretSet: row.apiKeySet === true }
       : { id: '', name: '', providerPresetId: '', baseURL: '', apiKeyEnv: '', protocols: null,
         legacy: false, modelCount: null, apiKeySet: false, credentialError: '', apiKey: '', secretSet: false },
+    keyEdited: false,
     errors: [],
   };
   renderConnections();
+  renderConnectionEditor({ force: true });
   if (dom.ceName && dom.ceName.focus) dom.ceName.focus();
 }
 
 function closeConnectionEditor() {
+  state.composing = false;
   state.conns.editing = null;
   renderConnections();
 }
@@ -512,6 +516,7 @@ function applyProviderPreset(presetId) {
   if (!preset) return;
   editing.draft.providerPresetId = preset.id;
   editing.draft.apiKey = '';
+  editing.draft.secretSet = Boolean(editing.baseRow?.apiKeySet);
   editing.keyEdited = false;
   editing.draft.baseURL = typeof preset.baseURL === 'string' ? preset.baseURL : editing.draft.baseURL;
   if (Array.isArray(preset.protocols) && preset.protocols.length) {
@@ -2275,7 +2280,6 @@ function renderConnection() {
   setText(dom.restartFile, (config.file || '—') + ' · 修订 ' + shortRev(data.revision));
 
   renderConnections();
-  renderServices(data);
 }
 
 /* ---------- render: named connections ---------- */
@@ -2465,7 +2469,7 @@ function upstreamReasonText(code) {
   return UPSTREAM_REASON[code] || DIAG_REASON[code] || code;
 }
 
-function renderConnectionEditor() {
+function renderConnectionEditor({ force = false } = {}) {
   const editing = state.conns.editing;
   if (!editing) {
     setHidden(dom.connEditor, true);
@@ -2474,19 +2478,19 @@ function renderConnectionEditor() {
   setHidden(dom.connEditor, false);
   setText(dom.connEditorTitle, editing.originalId ? '编辑连接' : '添加连接');
   const draft = editing.draft;
-  if (dom.ceName && !isInputActive(dom.ceName) && dom.ceName.value !== (draft.name || '')) dom.ceName.value = draft.name || '';
+  if (dom.ceName && (force || !isInputActive(dom.ceName)) && dom.ceName.value !== (draft.name || '')) dom.ceName.value = draft.name || '';
   if (dom.ceId) {
-    if (!isInputActive(dom.ceId) && dom.ceId.value !== (draft.id || '')) dom.ceId.value = draft.id || '';
+    if ((force || !isInputActive(dom.ceId)) && dom.ceId.value !== (draft.id || '')) dom.ceId.value = draft.id || '';
     dom.ceId.disabled = Boolean(editing.originalId);
   }
-  if (dom.ceBase && !isInputActive(dom.ceBase) && dom.ceBase.value !== (draft.baseURL || '')) dom.ceBase.value = draft.baseURL || '';
-  if (dom.ceKeyEnv && !isInputActive(dom.ceKeyEnv) && dom.ceKeyEnv.value !== (draft.apiKeyEnv || '')) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
+  if (dom.ceBase && (force || !isInputActive(dom.ceBase)) && dom.ceBase.value !== (draft.baseURL || '')) dom.ceBase.value = draft.baseURL || '';
+  if (dom.ceKeyEnv && (force || !isInputActive(dom.ceKeyEnv)) && dom.ceKeyEnv.value !== (draft.apiKeyEnv || '')) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
   if (dom.ceChat) dom.ceChat.checked = (draft.protocols || []).includes('chat');
   if (dom.ceResponses) dom.ceResponses.checked = (draft.protocols || []).includes('responses');
   if (dom.cePreset) {
     const desired = draft.providerPresetId || '';
     if (dom.cePreset.dataset?.providerFlow === 'managed') {
-      if (!isInputActive(dom.cePreset) && dom.cePreset.value !== desired) {
+      if (force || (!isInputActive(dom.cePreset) && dom.cePreset.value !== desired)) {
         dom.cePreset.dataset.desiredPreset = desired;
         if (typeof Event === 'function' && typeof dom.cePreset.dispatchEvent === 'function') {
           dom.cePreset.dispatchEvent(new Event('kwp:sync-provider-flow'));
@@ -2509,7 +2513,7 @@ function renderConnectionEditor() {
       : '新连接必须填写 API Key；只写入本机私有凭据文件，不回显。');
   }
   if (dom.ceKey) {
-    if (!editing.keyEdited && !isInputActive(dom.ceKey)) dom.ceKey.value = '';
+    if (force || (!editing.keyEdited && !isInputActive(dom.ceKey))) dom.ceKey.value = '';
     dom.ceKey.placeholder = editing.originalId ? '留空保持现有 Key' : 'sk-…';
   }
   if (dom.connEditorTest) {

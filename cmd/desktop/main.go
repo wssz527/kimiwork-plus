@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -42,6 +41,78 @@ func singleInstanceEncryptionKey(stateDir string) [32]byte {
 		clean = resolved
 	}
 	return sha256.Sum256([]byte(bridge.AppIdentifier + "\x00single-instance\x00" + clean))
+}
+
+type windowNavController struct {
+	mu                  sync.Mutex
+	waitForNavFinish    bool
+	navLoaded           bool
+	loadedOriginURL     string
+	loadedKey           string
+	pendingOpenAccounts bool
+	setURL              func(string)
+	execJS              func(string)
+}
+
+func newWindowNavController(waitForNavFinish bool, initialOriginURL, initialKey string, setURL, execJS func(string)) *windowNavController {
+	return &windowNavController{
+		waitForNavFinish: waitForNavFinish,
+		loadedOriginURL:  initialOriginURL,
+		loadedKey:        initialKey,
+		setURL:           setURL,
+		execJS:           execJS,
+	}
+}
+
+func (c *windowNavController) OnNavigationFinished() {
+	c.mu.Lock()
+	c.navLoaded = true
+	run := c.pendingOpenAccounts
+	c.pendingOpenAccounts = false
+	execJS := c.execJS
+	c.mu.Unlock()
+	if run && execJS != nil {
+		execJS(openAccountsJS)
+	}
+}
+
+func (c *windowNavController) prepareApplyEndpoint(next bridge.Endpoint) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	crossOrigin := next.URL != c.loadedOriginURL
+	keyChanged := next.Key != c.loadedKey
+	if crossOrigin {
+		c.navLoaded = false
+		c.loadedOriginURL = next.URL
+		c.loadedKey = next.Key
+		return next.URL + "/#key=" + next.Key
+	}
+	if keyChanged {
+		c.loadedKey = next.Key
+		return next.URL + "/#key=" + next.Key
+	}
+	return ""
+}
+
+func (c *windowNavController) ApplyEndpoint(next bridge.Endpoint) {
+	if targetURL := c.prepareApplyEndpoint(next); targetURL != "" && c.setURL != nil {
+		c.setURL(targetURL)
+	}
+}
+
+func (c *windowNavController) RequestOpenAccounts() {
+	c.mu.Lock()
+	if c.waitForNavFinish && !c.navLoaded {
+		c.pendingOpenAccounts = true
+		c.mu.Unlock()
+		return
+	}
+	c.pendingOpenAccounts = false
+	execJS := c.execJS
+	c.mu.Unlock()
+	if execJS != nil {
+		execJS(openAccountsJS)
+	}
 }
 
 func windowDiagnosticMessage(goos, status string) string {
@@ -85,7 +156,7 @@ func main() {
 	}
 
 	var window *application.WebviewWindow
-	var openWindow func() bool
+	var openWindow func()
 	encryptionKey := singleInstanceEncryptionKey(*dir)
 	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", Icon: platformAppIcon(), SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
@@ -112,14 +183,14 @@ func main() {
 		URL:                  ep.URL + "/#key=" + ep.Key,
 		AllowSimpleEventEmit: true,
 	}))
-	var navLoaded atomic.Bool
-	var pendingOpenAccounts atomic.Bool
-	attachWindowAppearance(app, window, func() {
-		navLoaded.Store(true)
-		if pendingOpenAccounts.Swap(false) {
-			window.ExecJS(openAccountsJS)
-		}
-	})
+	nav := newWindowNavController(
+		runtime.GOOS == "darwin" || runtime.GOOS == "windows",
+		ep.URL,
+		ep.Key,
+		func(target string) { window.SetURL(target) },
+		func(js string) { window.ExecJS(js) },
+	)
+	attachWindowAppearance(app, window, nav.OnNavigationFinished)
 	var epMu sync.Mutex
 	currentEndpoint := func() bridge.Endpoint {
 		epMu.Lock()
@@ -148,26 +219,26 @@ func main() {
 		return confirmed, true
 	}
 	applyEndpoint := func(next bridge.Endpoint) {
-		navLoaded.Store(false)
 		application.InvokeAsync(func() {
 			epMu.Lock()
-			defer epMu.Unlock()
 			if ep != next {
+				epMu.Unlock()
 				return
 			}
-			window.SetURL(next.URL + "/#key=" + next.Key)
+			targetURL := nav.prepareApplyEndpoint(next)
+			epMu.Unlock()
+			if targetURL != "" {
+				window.SetURL(targetURL)
+			}
 		})
 	}
-	openWindow = func() bool {
-		reloading := false
+	openWindow = func() {
 		if next, changed := syncEndpoint(); changed {
-			reloading = true
 			applyEndpoint(next)
 		}
 		window.Show()
 		window.Restore()
 		window.Focus()
-		return reloading
 	}
 	stopSync := make(chan struct{})
 	defer close(stopSync)
@@ -215,12 +286,10 @@ func main() {
 		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
 	})
 	installAccountTray(app, tray, trayMenu, *dir, func() {
-		reloading := openWindow()
-		if (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && (reloading || !navLoaded.Load()) {
-			pendingOpenAccounts.Store(true)
-			return
-		}
-		window.ExecJS(openAccountsJS)
+		openWindow()
+		application.InvokeAsync(func() {
+			nav.RequestOpenAccounts()
+		})
 	})
 	trayMenu.AddSeparator()
 	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })

@@ -1,7 +1,7 @@
 import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard, renderOnboardOverview } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
-import { handleSaveFailure, loadState, runAction, setView } from './app.js';
+import { clearDisconnectConfirm, handleSaveFailure, loadState, runAction, setView } from './app.js';
 
 /* ---------- render: shell ---------- */
 
@@ -1248,6 +1248,7 @@ function renderOperation(data) {
 }
 
 function renderActions(data) {
+  if (isInFlight(data && data.operation)) clearDisconnectConfirm();
   if (data && !onboardBusy()) {
     if (state.view === 'models') renderOnboard();
     else renderOnboardOverview(data);
@@ -1488,6 +1489,7 @@ async function chooseIntegrationMode(mode, { onSaved } = {}) {
   const data = state.data;
   if (!data || integrationModeBusy(data)) return false;
   if (savedIntegrationMode(data) === mode) return true;
+  clearDisconnectConfirm();
   integrationModeSaving = true;
   renderIntegrationMode(data);
   renderActions(data);

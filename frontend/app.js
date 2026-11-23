@@ -65,6 +65,7 @@ function setView(view, { persist = true } = {}) {
         /* 忽略 */
       }
     }
+    state.composing = false;
     clearDisconnectConfirm();
     if (state.data && view === 'overview') {
       renderOverview(state.data, { view: 'overview' });
@@ -84,12 +85,13 @@ function setView(view, { persist = true } = {}) {
     if (state.data && view === 'maintenance') {
       renderOverview(state.data, { view: 'maintenance' });
       renderIntegrationMode(state.data);
+      renderServices(state.data);
       renderGrowth(state.data, { view: 'maintenance' });
     }
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
     if (state.data) {
-      plusPanel.render(state.data);
+      plusPanel.render(state.data, { view });
       renderUpdates(state.data);
     }
   };
@@ -178,10 +180,11 @@ function renderAll() {
   renderShell(state.data);
   renderOperation(state.data);
   renderActions(state.data);
-  plusPanel.render(state.data);
+  plusPanel.render(state.data, { view });
   renderPreviewLifecycle(state.data);
   if (view === 'overview') {
     renderOverview(state.data, { view: 'overview' });
+    renderOnboardOverview(state.data);
   } else if (view === 'models') {
     renderWorkspaceSync(state.data);
     renderModels();
@@ -193,6 +196,7 @@ function renderAll() {
   } else if (view === 'maintenance') {
     renderOverview(state.data, { view: 'maintenance' });
     renderIntegrationMode(state.data);
+    renderServices(state.data);
     renderGrowth(state.data, { view: 'maintenance' });
   }
 }
@@ -309,6 +313,7 @@ function stopPolling() {
 
 
 async function runAction(action, profileMode) {
+  clearDisconnectConfirm();
   const data = state.data;
   if (!data || state.pendingAction) return;
   if (isInFlight(data.operation)) {
@@ -1253,6 +1258,8 @@ function bindEvents() {
 
   document.addEventListener('compositionstart', () => { state.composing = true; });
   document.addEventListener('compositionend', () => { state.composing = false; });
+  document.addEventListener('focusout', () => { state.composing = false; });
+  window.addEventListener('blur', () => { state.composing = false; });
   window.addEventListener('online', () => {
     if (state.key && !editingBusy()) {
       loadState({ silent: true }).then((ok) => {
@@ -1317,6 +1324,7 @@ function adoptLocationKey() {
   state.diagnosticsExportError = '';
   state.diagnosticsExportPath = '';
   state.pendingService = null;
+  state.composing = false;
   clearDisconnectConfirm();
   state.providers = null;
   state.overviewToday = { key: null, requests: null, totalTokens: null, loading: false, fetchedAt: 0, requestCount: -1 };
@@ -1429,6 +1437,7 @@ boot();
 
 export {
   adoptState,
+  clearDisconnectConfirm,
   clearOnboardSaveErrors,
   handleSaveFailure,
   loadState,

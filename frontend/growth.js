@@ -531,7 +531,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
         confirmActions.className = 'inline-confirm__actions';
         const confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
-        confirmBtn.className = 'btn btn--primary btn--sm';
+        confirmBtn.className = 'btn btn--danger btn--sm';
         confirmBtn.textContent = '确认移除';
         confirmBtn.dataset.mcpAction = 'remove-confirm';
         confirmBtn.dataset.mcpName = server.name;
@@ -581,6 +581,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   }
 
   async function mcpAction(action, name) {
+    if (local.busy) return;
     const server = getState()?.tools?.servers?.find(row => row.name === name);
     if (action === 'edit') { clearMcpConfirm(); renderMcp(getState()); editMcp(server); return; }
     if (action === 'remove') {
@@ -606,6 +607,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     const apiAction = action === 'remove-confirm' ? 'remove' : action;
     local.busy = true;
     showError('mcp-errors', '');
+    renderMcp(getState());
     try {
       const body = apiAction === 'test' ? { action: apiAction, name } : apiAction === 'toggle'
         ? { action: 'update', name, patch: { enabled: !server.enabled } } : { action: apiAction, name };

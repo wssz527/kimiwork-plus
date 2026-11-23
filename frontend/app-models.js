@@ -1119,6 +1119,7 @@ function openPicker() {
 }
 
 function closePicker() {
+  state.composing = false;
   state.picker.open = false;
   renderPicker();
 }
@@ -1214,6 +1215,7 @@ function closeEditor(force) {
     renderEditor();
     return;
   }
+  state.composing = false;
   state.editor = null;
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };

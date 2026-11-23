@@ -2940,6 +2940,7 @@ function makeIntegrationModeEnv() {
     'const onboardBusy = () => false;',
     'const renderOnboard = () => {};',
     'const renderOnboardOverview = () => {};',
+    'const clearDisconnectConfirm = () => {};',
     'const configReady = () => true;',
     'const ACTION_LABEL = {};',
     'const setText = (element, text) => { if (element) element.textContent = text; };',
@@ -3945,6 +3946,7 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
     const loadState = async () => {};
     const actionUUID = () => 'uuid-1';
     const clearKey = () => {};
+    const clearDisconnectConfirm = () => {};
     const stopPolling = () => {};
     const showGate = () => {};
     const setHidden = () => {};
@@ -4463,8 +4465,46 @@ test('growth.js replaces MCP window.confirm with inline confirm, opens https lin
     assert.equal(calls.some(c => c.path === '/api/tools'), false);
     const confirmBtn = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm');
     assert.ok(confirmBtn);
+    assert.match(confirmBtn.className, /btn--danger/);
     await elements.get('mcp-list').listeners.click[0]({ target: { closest: () => confirmBtn } });
     assert.equal(calls.some(c => c.path === '/api/tools' && c.opts?.body?.action === 'remove'), true);
+
+    // Re-entrant clicks while MCP request is in flight must be ignored and confirm bar must collapse immediately.
+    data.tools = { available: true, servers: [{ name: 'git', transport: 'stdio', enabled: true, command: 'npx' }] };
+    let resolveInFlight;
+    const prevToolsCount = calls.filter(c => c.path === '/api/tools').length;
+    let blockTools = true;
+    const guardedRender = mod.KimiWorkGrowth.mountGrowth({
+      request: (path, opts) => {
+        calls.push({ path, opts });
+        if (path === '/api/tools' && blockTools) {
+          return new Promise((resolve) => {
+            resolveInFlight = () => resolve({ tools: { available: true, servers: [] }, result: { state: 'removed' } });
+          });
+        }
+        return Promise.resolve({ ok: true });
+      },
+      getState: () => data,
+      getProviders: () => providers,
+      refresh: async () => {},
+      notify: (msg, tone) => toasts.push({ msg, tone }),
+      runAction: async () => {},
+    });
+    guardedRender(data);
+    const rmBtn2 = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove' && n.dataset?.mcpName === 'git');
+    assert.ok(rmBtn2);
+    await elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => rmBtn2 } });
+    const cfBtn2 = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm' && n.dataset?.mcpName === 'git');
+    assert.ok(cfBtn2);
+    const pendingPromise = elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => cfBtn2 } });
+    // Before request resolves, confirm bar must already be collapsed and duplicate clicks ignored.
+    assert.equal(findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm'), null);
+    assert.equal(findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove').disabled, true);
+    await elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => cfBtn2 } });
+    assert.equal(calls.filter(c => c.path === '/api/tools').length, prevToolsCount + 1);
+    blockTools = false;
+    resolveInFlight();
+    await pendingPromise;
 
     // External API key link calls POST /api/open-url instead of target="_blank".
     const docNote = elements.get('provider-document-ob-preset');
@@ -4491,4 +4531,204 @@ test('growth.js replaces MCP window.confirm with inline confirm, opens https lin
     globalThis.document = prevDoc;
     globalThis.window = prevWin;
   }
+});
+
+test('renderAll and setView render services on maintenance, onboard overview on overview, and pass view to plusPanel', () => {
+  const calls = [];
+  const state = { data: { revision: 'r1' }, view: 'overview', key: 'k', composing: true, onboard: {} };
+  const dom = { viewTitle: {}, viewLede: {} };
+  const VIEW_ALIASES = {};
+  const VIEW_COPY = {
+    overview: { title: '总览', lede: '' },
+    models: { title: '模型', lede: '' },
+    subagents: { title: '子代理', lede: '' },
+    usage: { title: '用量', lede: '' },
+    maintenance: { title: '设置', lede: '' },
+  };
+  const api = new Function('state', 'dom', 'calls', 'VIEW_ALIASES', 'VIEW_COPY', `
+    const VIEW_STORE = 'v';
+    const document = { body: { dataset: {} } };
+    const sessionStorage = { setItem() {} };
+    const $ = () => null;
+    const clearDisconnectConfirm = () => calls.push('clearDisconnect');
+    const renderShell = () => calls.push('shell');
+    const renderOperation = () => calls.push('op');
+    const renderActions = () => calls.push('actions');
+    const renderPreviewLifecycle = () => calls.push('lifecycle');
+    const renderOverview = (_d, opts) => calls.push('overview:' + opts?.view);
+    const renderOnboardOverview = () => calls.push('onboardOverview');
+    const renderWorkspaceSync = () => calls.push('workspaceSync');
+    const renderOnboard = () => calls.push('onboard');
+    const renderModels = () => calls.push('models');
+    const renderConnection = () => calls.push('connection');
+    const renderPicker = () => calls.push('picker');
+    const renderSubagents = () => calls.push('subagents');
+    const renderIntegrationMode = () => calls.push('integrationMode');
+    const renderServices = () => calls.push('services');
+    const renderGrowth = (_d, opts) => calls.push('growth:' + opts?.view);
+    const renderUpdates = () => calls.push('updates');
+    const usagePanel = { show() { calls.push('usageShow'); } };
+    const plusPanel = {
+      render(_d, opts) { calls.push('plus:' + opts?.view); },
+      refresh() { calls.push('plusRefresh'); },
+    };
+    ${sourceFunction('setView')}
+    ${sourceFunction('renderAll')}
+    return { setView, renderAll };
+  `)(state, dom, calls, VIEW_ALIASES, VIEW_COPY);
+
+  api.renderAll();
+  assert.ok(calls.includes('overview:overview'));
+  assert.ok(calls.includes('onboardOverview'));
+  assert.ok(calls.includes('plus:overview'));
+  assert.equal(calls.includes('services'), false);
+
+  calls.length = 0;
+  state.composing = true;
+  api.setView('maintenance', { persist: false });
+  assert.equal(state.composing, false, 'setView must reset state.composing');
+  assert.ok(calls.includes('services'), 'setView(maintenance) must render search services');
+  assert.ok(calls.includes('plus:maintenance'));
+
+  calls.length = 0;
+  api.renderAll();
+  assert.ok(calls.includes('services'), 'renderAll on maintenance must refresh search services');
+  assert.ok(calls.includes('plus:maintenance'));
+});
+
+test('openConnectionEditor forces field populate even when an input is focused or composing, and applyProviderPreset resets secretSet', () => {
+  const dom = {
+    connEditor: { hidden: true },
+    connEditorTitle: { textContent: '' },
+    ceName: { value: '残留旧名', focus() {} },
+    ceId: { value: 'old-id', disabled: false },
+    ceBase: { value: 'https://old.example.com/v1' },
+    ceKeyEnv: { value: 'OLD_ENV' },
+    ceKey: { value: 'sk-stale-secret', placeholder: '' },
+    ceChat: { checked: false },
+    ceResponses: { checked: false },
+    cePreset: { value: 'old', dataset: {} },
+    cePresetHint: { textContent: '' },
+    ceKeyHint: { textContent: '' },
+    connEditorTest: { disabled: false, hidden: false, textContent: '' },
+  };
+  const documentStub = { activeElement: dom.ceName };
+  const state = {
+    composing: true,
+    data: { revision: 'rev-1' },
+    providers: { presets: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'] }] },
+    conns: {
+      baseRevision: 'rev-1',
+      editing: null,
+      draft: [
+        { id: 'conn-a', name: '连接 A', baseURL: 'https://a.example.com/v1', apiKeySet: true, protocols: ['chat'] },
+        { id: 'conn-b', name: '连接 B', baseURL: 'https://b.example.com/v1', apiKeySet: false, protocols: ['responses'] },
+      ],
+    },
+  };
+  const api = new Function('state', 'dom', 'document', `
+    const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const CONNECTION_ID_HINT = 'bad id';
+    const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    const syncSelectOptions = (sel, _opts, val) => { sel.value = val; };
+    const renderConnections = () => renderConnectionEditor();
+    ${sourceFunction('isInputActive')}
+    ${sourceFunction('normalizeBaseURL')}
+    ${sourceFunction('connectionDraftRow')}
+    ${sourceFunction('providerPresets')}
+    ${sourceFunction('providerPreset')}
+    ${sourceFunction('providerPresetLabel')}
+    ${sourceFunction('providerPresetOptions')}
+    ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('validateConnectionDraft')}
+    ${sourceFunction('openConnectionEditor')}
+    ${sourceFunction('closeConnectionEditor')}
+    ${sourceFunction('readConnectionEditor')}
+    ${sourceFunction('applyProviderPreset')}
+    ${sourceFunction('renderConnectionEditor')}
+    return { openConnectionEditor, closeConnectionEditor, readConnectionEditor, applyProviderPreset, validateConnectionDraft };
+  `)(state, dom, documentStub);
+
+  // Switching to conn-b while ceName is focused and composing=true must overwrite stale values & clear ceKey.
+  api.openConnectionEditor(state.conns.draft[1]);
+  assert.equal(state.composing, false);
+  assert.equal(dom.ceName.value, '连接 B');
+  assert.equal(dom.ceId.value, 'conn-b');
+  assert.equal(dom.ceBase.value, 'https://b.example.com/v1');
+  assert.equal(dom.ceKey.value, '');
+
+  // New connection: typing a key sets secretSet=true; switching preset must reset secretSet=false so empty key fails validation.
+  api.openConnectionEditor(null);
+  dom.ceName.value = '新建连接';
+  dom.ceId.value = 'new-conn';
+  dom.ceBase.value = 'https://api.example.com/v1';
+  dom.ceKey.value = 'sk-typed-before-switch';
+  api.readConnectionEditor();
+  assert.equal(state.conns.editing.draft.secretSet, true);
+  api.applyProviderPreset('deepseek');
+  assert.equal(state.conns.editing.draft.apiKey, '');
+  assert.equal(state.conns.editing.draft.secretSet, false);
+  assert.equal(dom.ceKey.value, '');
+  const checkNew = api.validateConnectionDraft(state.conns.editing.draft, state.conns.draft, { originalId: null });
+  assert.ok(checkNew.errors.some(msg => msg.includes('API Key')), 'new connection must require API Key after preset switch');
+
+  // Existing connection with saved key keeps secretSet=true after switching preset.
+  api.openConnectionEditor(state.conns.draft[0]);
+  api.applyProviderPreset('deepseek');
+  assert.equal(state.conns.editing.draft.secretSet, true);
+
+  state.composing = true;
+  api.closeConnectionEditor();
+  assert.equal(state.composing, false);
+
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  assert.match(appText, /addEventListener\('focusout',\s*\(\)\s*=>\s*\{\s*state\.composing\s*=\s*false;\s*\}\)/);
+  assert.match(appText, /addEventListener\('blur',\s*\(\)\s*=>\s*\{\s*state\.composing\s*=\s*false;\s*\}\)/);
+});
+
+test('inline disconnect confirm is cleared by runAction, chooseIntegrationMode, and in-flight renderActions', async () => {
+  const cleared = [];
+  const state = {
+    data: { revision: 'rev-1', integrationMode: 'gateway', operation: null, configuration: { state: 'ready' } },
+    pendingAction: null, pendingOpId: null, modelsSaving: false, connsSaving: false, actionButtons: [], view: 'maintenance',
+  };
+  const api = new Function('state', 'cleared', `
+    let integrationModeSaving = false;
+    const INTEGRATION_MODES = ['gateway', 'direct'];
+    const API = { actions: '/api/actions', integrationMode: '/api/integration-mode' };
+    const ACTION_LABEL = {};
+    const dom = { conn: {}, connText: {} };
+    const clearDisconnectConfirm = () => cleared.push('cleared');
+    const onboardBusy = () => true;
+    const renderOnboard = () => {};
+    const renderOnboardOverview = () => {};
+    const configReady = () => true;
+    const savedIntegrationMode = (d) => d?.integrationMode || 'gateway';
+    const directRestartRequired = () => false;
+    const integrationModeBusy = () => integrationModeSaving;
+    const renderIntegrationMode = () => {};
+    const renderOperation = () => {};
+    const adoptState = (next) => { state.data = next; };
+    const loadState = async () => {};
+    const handleSaveFailure = async () => {};
+    const showToast = () => {};
+    const actionUUID = () => 'u1';
+    const request = async (_path, opts) => opts.body.mode ? { state: { ...state.data, integrationMode: opts.body.mode } } : { operation: { id: 'op1', action: opts.body.action, state: 'running' } };
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('renderActions')}
+    ${sourceFunction('chooseIntegrationMode')}
+    ${sourceFunction('runAction')}
+    return { renderActions, chooseIntegrationMode, runAction };
+  `)(state, cleared);
+
+  api.renderActions({ ...state.data, operation: { state: 'running' } });
+  assert.equal(cleared.length, 1, 'renderActions must clear confirm when operation is in flight');
+
+  await api.chooseIntegrationMode('direct');
+  assert.equal(cleared.length, 2, 'chooseIntegrationMode must clear confirm when mode changes');
+
+  await api.runAction('connect-kimi');
+  assert.ok(cleared.length >= 3, 'runAction must clear confirm at entry');
 });
