@@ -44,7 +44,6 @@ jobs:
             echo "No release tag found to sync." >&2
             exit 1
           fi
-          git fetch origin --tags
           IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
           if [ "$IS_DRAFT" = "true" ]; then
             echo "Refusing to sync draft release $TAG to CNB." >&2
