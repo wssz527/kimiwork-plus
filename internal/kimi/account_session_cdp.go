@@ -100,6 +100,32 @@ func accountCredentialPages(pages []accountPage) []accountPage {
 	return out
 }
 
+func (a *cdpActions) evaluateAccountPage(ctx context.Context, page accountPage, expression string) (any, error) {
+	value, err := a.evaluate(ctx, page.sessionID, expression)
+	if !errors.Is(err, ErrSessionInvalid) || page.targetID == "" {
+		return value, err
+	}
+	a.dropSession(page.targetID)
+	sessionID, attachErr := a.attach(ctx, page.targetID)
+	if attachErr != nil {
+		return nil, attachErr
+	}
+	return a.evaluate(ctx, sessionID, expression)
+}
+
+func (a *cdpActions) sendAccountRead(ctx context.Context, page accountPage, method string, params map[string]any) (Result, error) {
+	result, err := a.pipe.Send(ctx, method, params, page.sessionID, accountActionTimeout)
+	if !errors.Is(err, ErrSessionInvalid) || page.targetID == "" {
+		return result, err
+	}
+	a.dropSession(page.targetID)
+	sessionID, attachErr := a.attach(ctx, page.targetID)
+	if attachErr != nil {
+		return Result{}, attachErr
+	}
+	return a.pipe.Send(ctx, method, params, sessionID, accountActionTimeout)
+}
+
 // accountCookies reads the jar through one page's session and keeps only the
 // kimi.com login cookies. Measurement cookies on the same domain are dropped by
 // name.
@@ -107,7 +133,7 @@ func (a *cdpActions) accountCookies(ctx context.Context, page accountPage) ([]Ac
 	if page.sessionID == "" {
 		return nil, errors.New(AccountErrUnavailable)
 	}
-	result, err := a.pipe.Send(ctx, "Network.getAllCookies", map[string]any{}, page.sessionID, accountActionTimeout)
+	result, err := a.sendAccountRead(ctx, page, "Network.getAllCookies", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +257,7 @@ func (a *cdpActions) accountRemoveCookies(ctx context.Context, page accountPage,
 // accountStorage reads the page's own localStorage through the page. Only the
 // whitelisted keys leave the page.
 func (a *cdpActions) accountStorage(ctx context.Context, page accountPage) (map[string]string, error) {
-	value, err := a.evaluate(ctx, page.sessionID, accountStorageReadExpression)
+	value, err := a.evaluateAccountPage(ctx, page, accountStorageReadExpression)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +341,7 @@ func (a *cdpActions) accountReload(ctx context.Context, pages []accountPage) err
 // fall back to the page's own token store, and the fallback is flagged so a
 // caller can refuse to call a switch verified on it.
 func (a *cdpActions) accountIdentity(ctx context.Context, page accountPage) (accountPageIdentity, error) {
-	value, err := a.evaluate(ctx, page.sessionID, accountIdentityExpression)
+	value, err := a.evaluateAccountPage(ctx, page, accountIdentityExpression)
 	if err != nil {
 		return accountPageIdentity{}, err
 	}
@@ -535,7 +561,7 @@ func sortedAccountKeys(set map[string]string) []string {
 }
 
 func (a *cdpActions) accountWorkBusy(ctx context.Context, page accountPage) (bool, error) {
-	value, err := a.evaluate(ctx, page.sessionID, accountWorkBusyExpression)
+	value, err := a.evaluateAccountPage(ctx, page, accountWorkBusyExpression)
 	if err != nil {
 		return true, err
 	}

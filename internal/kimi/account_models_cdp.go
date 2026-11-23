@@ -27,7 +27,7 @@ func (a *cdpActions) accountModelConfig(ctx context.Context, page accountPage) (
 }
 
 func (a *cdpActions) legacyAccountModelConfig(ctx context.Context, page accountPage) (accountModelConfig, error) {
-	value, err := a.evaluate(ctx, page.sessionID, accountModelConfigExpression)
+	value, err := a.evaluateAccountPage(ctx, page, accountModelConfigExpression)
 	if err != nil {
 		return accountModelConfig{}, errors.New(AccountErrPageTimeout)
 	}
@@ -43,8 +43,8 @@ func (a *cdpActions) legacyAccountModelConfig(ctx context.Context, page accountP
 // target is a fallback for builds that expose the same list on clawBridgeAPI.
 func (a *cdpActions) accountModelConfigV3(ctx context.Context, page accountPage) (accountModelConfig, error) {
 	mode, directSourceID := a.integrationRoute()
-	for _, session := range a.modelSessions(ctx, page) {
-		value, err := a.evaluate(ctx, session, accountModelStoreV3Expression)
+	for _, candidate := range a.modelPages(ctx, page) {
+		value, err := a.evaluateAccountPage(ctx, candidate, accountModelStoreV3Expression)
 		if err != nil {
 			continue
 		}
@@ -59,10 +59,8 @@ func (a *cdpActions) accountModelConfigV3(ctx context.Context, page accountPage)
 	return accountModelConfig{}, errors.New(AccountErrUnavailable)
 }
 
-// modelSessions is the page the caller named and, after it, the claw page. Only
-// allowlisted desktop targets are ever attached to.
-func (a *cdpActions) modelSessions(ctx context.Context, page accountPage) []string {
-	out := []string{page.sessionID}
+func (a *cdpActions) modelPages(ctx context.Context, page accountPage) []accountPage {
+	out := []accountPage{page}
 	targets, err := a.targets(ctx)
 	if err != nil {
 		return out
@@ -71,7 +69,7 @@ func (a *cdpActions) modelSessions(ctx context.Context, page accountPage) []stri
 		if target.path != "/desktopclaw.html" || target.sessionID == "" || target.sessionID == page.sessionID {
 			continue
 		}
-		out = append(out, target.sessionID)
+		out = append(out, accountPage{targetID: target.targetID, sessionID: target.sessionID})
 	}
 	return out
 }

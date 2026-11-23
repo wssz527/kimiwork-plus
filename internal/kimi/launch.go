@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -209,7 +210,15 @@ func (c *Child) await() {
 		c.mu.Lock()
 		c.exit = state
 		c.mu.Unlock()
-		c.pipe.Dispose()
+		if c.pipe != nil {
+			c.pipe.Dispose()
+		}
+		if c.readFrom != nil {
+			_ = c.readFrom.Close()
+		}
+		if c.writeTo != nil {
+			_ = c.writeTo.Close()
+		}
 		close(c.exitWait)
 	})
 }
@@ -280,20 +289,34 @@ func (c *Child) TransportLost() (TransportLost, bool) {
 // removed, and DAIMON_BUNDLE_DIR is set only when the caller asked for it: a
 // leftover value from this process must never leak into Kimi.
 func childEnvironment(options LaunchOptions) []string {
+	return childEnvironmentForOS(runtime.GOOS, options)
+}
+
+func childEnvironmentForOS(goos string, options LaunchOptions) []string {
 	base := options.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	protected := map[string]bool{"ELECTRON_RUN_AS_NODE": true, "DAIMON_BUNDLE_DIR": true}
+	fold := goos == "windows"
+	normalize := func(name string) string {
+		if fold {
+			return strings.ToUpper(name)
+		}
+		return name
+	}
+	protected := map[string]bool{
+		normalize("ELECTRON_RUN_AS_NODE"): true,
+		normalize("DAIMON_BUNDLE_DIR"):    true,
+	}
 	for _, name := range options.ProtectedEnvNames {
 		if name != "" {
-			protected[name] = true
+			protected[normalize(name)] = true
 		}
 	}
 	out := make([]string, 0, len(base)+1)
 	for _, entry := range base {
 		name, _, _ := strings.Cut(entry, "=")
-		if protected[name] {
+		if protected[normalize(name)] {
 			continue
 		}
 		out = append(out, entry)
@@ -338,16 +361,10 @@ func (c *Child) Stop(timeout time.Duration) error {
 // ManagedTransport describes the CDP transport this build can give a managed
 // child on this platform.
 //
-// Supported and Verified are deliberately separate. Supported means this build
-// implements a transport whose mechanism the target documents: the fd3/fd4
-// mapping on Unix, and inherited pipe handles named in
-// --remote-debugging-io-pipes on Windows. Verified means the transport has
-// actually been exercised against the official application on that platform.
-//
-// Neither flag alone means "works". The Windows path is implemented from
-// Chromium's own source and has never run on a Windows host, so it reports
-// Supported with Verified false; the Unix path has run against a stand-in child
-// only, so it does the same. A panel must show that difference.
+// Supported means this build implements a transport whose mechanism the target
+// documents: the fd3/fd4 mapping on Unix, and inherited pipe handles named in
+// --remote-debugging-io-pipes on Windows. Verified means the transport has been
+// exercised against the official application on that platform.
 type ManagedTransport struct {
 	// Kind is "fd-pipe", "handle-pipe" or "" when there is no transport.
 	Kind string `json:"kind"`

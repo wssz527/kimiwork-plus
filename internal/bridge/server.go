@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -43,6 +44,7 @@ type Service struct {
 	Migration   *MigrationCoordinator
 	Updates     *appupdate.Manager
 	OpenURL     func(string) error
+	ExportDir   string
 	StateDir    string
 	Endpoint    Endpoint
 	Gateway     http.Handler
@@ -217,6 +219,10 @@ func message(code string) string {
 		return "当前进程未启用自动更新管理。"
 	case "release_url_unavailable":
 		return "当前没有可打开的发布页地址，请先检查更新。"
+	case "invalid_external_url":
+		return "外部链接地址无效，仅支持 HTTPS 链接。"
+	case "export_write_failed":
+		return "无法写入导出文件，请检查下载目录权限后重试。"
 	case "open_url_failed":
 		return "无法调起系统默认浏览器，请手动访问发布页。"
 	case "update_not_available":
@@ -355,6 +361,49 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 	}
 	if method == "POST" {
 		switch path {
+		case "/api/open-url":
+			rawURL, ok := in["url"].(string)
+			if !ok {
+				return nil, errors.New("invalid_external_url")
+			}
+			safeURL, err := platform.ValidateExternalHTTPURL(rawURL)
+			if err != nil || !strings.HasPrefix(safeURL, "https://") {
+				return nil, errors.New("invalid_external_url")
+			}
+			opener := s.OpenURL
+			if opener == nil {
+				opener = platform.OpenExternalURL
+			}
+			if err := opener(safeURL); err != nil {
+				return nil, errors.New("open_url_failed")
+			}
+			return core.Document{"ok": true, "url": safeURL}, nil
+		case "/api/diagnostics/export":
+			if s.Extra == nil {
+				return nil, errors.New("native_preview_unavailable")
+			}
+			report, err := s.Extra(ctx, path, nil)
+			if err != nil {
+				return nil, err
+			}
+			savedPath, err := s.writeExportJSON("kimi-work-plus-diagnostics", report)
+			if err != nil {
+				return nil, err
+			}
+			return core.Document{"ok": true, "path": savedPath, "report": report}, nil
+		case "/api/usage/export":
+			if s.Extra == nil {
+				return nil, errors.New("native_preview_unavailable")
+			}
+			exported, err := s.Extra(ctx, path, in)
+			if err != nil {
+				return nil, err
+			}
+			savedPath, err := s.writeExportJSON("kimi-work-plus-usage", exported)
+			if err != nil {
+				return nil, err
+			}
+			return core.Document{"ok": true, "path": savedPath}, nil
 		case "/api/updates/check":
 			if s.Updates == nil {
 				return nil, errors.New("updates_unavailable")
@@ -599,12 +648,106 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	state, e := s.State()
 	return core.Document{"ok": true, "state": state}, e
 }
+func (s *Service) writeExportJSON(prefix string, value any) (string, error) {
+	data, err := marshalExportJSON(value)
+	if err != nil {
+		return "", errors.New("export_write_failed")
+	}
+	name := prefix + "-" + time.Now().Format("20060102-150405") + ".json"
+
+	primaryDir := strings.TrimSpace(s.ExportDir)
+	if primaryDir == "" {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil && strings.TrimSpace(home) != "" {
+			primaryDir = filepath.Join(home, "Downloads")
+		}
+	}
+	if primaryDir != "" {
+		if info, statErr := os.Stat(primaryDir); statErr == nil && info.IsDir() {
+			if saved, writeErr := writePrivateExportFile(primaryDir, name, data); writeErr == nil {
+				return saved, nil
+			}
+		}
+	}
+	if strings.TrimSpace(s.StateDir) != "" {
+		fallbackDir := filepath.Join(s.StateDir, "exports")
+		if mkErr := os.MkdirAll(fallbackDir, 0o700); mkErr == nil {
+			if saved, writeErr := writePrivateExportFile(fallbackDir, name, data); writeErr == nil {
+				return saved, nil
+			}
+		}
+	}
+	return "", errors.New("export_write_failed")
+}
+
+func marshalExportJSON(value any) ([]byte, error) {
+	var raw []byte
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	}
+	if len(raw) > 0 {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "", "  "); err == nil {
+			buf.WriteByte('\n')
+			return buf.Bytes(), nil
+		}
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(encoded, '\n'), nil
+}
+
+func writePrivateExportFile(dir, name string, data []byte) (string, error) {
+	target := filepath.Join(dir, name)
+	tmp, err := os.CreateTemp(dir, ".export-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return "", err
+	}
+	cleanup = false
+	return target, nil
+}
+
 func (s *Service) State() (core.Document, error) {
 	d, rev, e := s.Store.Read()
 	if e != nil {
 		return nil, e
 	}
-	connections := connectionRows(d, s.Keys)
+	s.mu.RLock()
+	g := s.Gateway
+	s.mu.RUnlock()
+	var gatewayState core.Document
+	if source, ok := g.(interface{ State() core.Document }); ok {
+		gatewayState = source.State()
+	}
+	var connections []any
+	if _, hasConnections := gatewayState["connections"]; !hasConnections {
+		connections = connectionRows(d, s.Keys)
+	}
 	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
 	updatesDoc := core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"}
 	if s.Updates != nil {
@@ -624,13 +767,8 @@ func (s *Service) State() (core.Document, error) {
 		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{"operationLog": core.Document{"available": false, "retained": 0, "limit": diagnosticsEventLimit, "lastAt": int64(0), "reason": "diagnostics_unconfigured"}}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
 		"integrationMode": core.IntegrationMode(d), "directMode": directModeBase(d),
 	}
-	s.mu.RLock()
-	g := s.Gateway
-	s.mu.RUnlock()
-	if source, ok := g.(interface{ State() core.Document }); ok {
-		for k, v := range source.State() {
-			state[k] = v
-		}
+	for k, v := range gatewayState {
+		state[k] = v
 	}
 	settings, e := core.TranslationSettings(d["translation"])
 	if e != nil {

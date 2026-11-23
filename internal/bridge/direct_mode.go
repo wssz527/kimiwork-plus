@@ -442,15 +442,18 @@ func (n *Native) isDirectMode() bool {
 	return n.controller.Settings().IntegrationMode == kimi.IntegrationModeDirect
 }
 
+func (n *Native) darwinResolverPath() string {
+	if n.resolverPath != "" {
+		return n.resolverPath
+	}
+	return "/etc/resolver/" + byokdns.Domain
+}
+
 func (n *Native) directDNSCanStop() bool {
 	if runtime.GOOS != "darwin" || !byokdns.HasManagedHostsEntry(n.darwinHostsPath()) {
 		return false
 	}
-	resolverPath := n.resolverPath
-	if resolverPath == "" {
-		resolverPath = "/etc/resolver/" + byokdns.Domain
-	}
-	_, err := os.Lstat(resolverPath)
+	_, err := os.Lstat(n.darwinResolverPath())
 	return errors.Is(err, os.ErrNotExist)
 }
 
@@ -467,15 +470,33 @@ func (n *Native) darwinHostsPath() string {
 // product's DNS listener. Only macOS can answer that from a file; Windows always
 // uses its hosts file, so its answer needs the entry and a passing lookup.
 func (n *Native) staticHostsReady() bool {
-	return staticHostsAvailable(n.darwinHostsPath(), n.probe)
+	hostsPath := n.hostsPath
+	if hostsPath == "" {
+		if runtime.GOOS == "windows" {
+			hostsPath = byokdns.DefaultHostsPath(nil)
+		} else {
+			hostsPath = byokdns.DarwinHostsPath
+		}
+	}
+	return staticHostsAvailable(hostsPath, n.darwinResolverPath(), n.probe)
 }
 
-func staticHostsAvailable(hostsPath string, probe *byokdns.Probe) bool {
+func staticHostsAvailable(hostsPath, resolverPath string, probe *byokdns.Probe) bool {
 	switch runtime.GOOS {
 	case "darwin":
-		return byokdns.HasManagedHostsEntry(hostsPath)
+		if !byokdns.HasManagedHostsEntry(hostsPath) {
+			return false
+		}
+		if resolverPath == "" {
+			resolverPath = "/etc/resolver/" + byokdns.Domain
+		}
+		_, err := os.Lstat(resolverPath)
+		return errors.Is(err, os.ErrNotExist)
 	case "windows":
-		if !byokdns.HasManagedHostsEntry(byokdns.DefaultHostsPath(nil)) || probe == nil {
+		if hostsPath == "" {
+			hostsPath = byokdns.DefaultHostsPath(nil)
+		}
+		if !byokdns.HasManagedHostsEntry(hostsPath) || probe == nil {
 			return false
 		}
 		return probe.DNS(context.Background()).Passed

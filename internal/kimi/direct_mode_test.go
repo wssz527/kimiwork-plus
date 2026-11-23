@@ -1315,10 +1315,10 @@ func TestDirectSourceRemainsReturnsOnlyConnectedManagedSources(t *testing.T) {
 
 func TestDirectGatewayRemainsUsesOnlyTheCurrentAccountsOwnedLoopback(t *testing.T) {
 	fixture := newNativeFixture(t)
-	store := directStoreFixture("account")
-	account := store["accounts"].(map[string]any)["account"].(map[string]any)
-	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
 	scope := sha256Hex("account")
+	store := directStoreFixture(scope)
+	account := store["accounts"].(map[string]any)[scope].(map[string]any)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
 	gateway := "http://127.0.0.1:9100/v1"
 	if DirectGatewayRemains(fixture.dir, scope, gateway) {
 		t.Fatal("a direct-only source was mistaken for a gateway")

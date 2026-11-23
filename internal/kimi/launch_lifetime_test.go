@@ -143,9 +143,9 @@ func TestAttachWithTranslationOffStillPublishesTheBridge(t *testing.T) {
 	}
 }
 
-// A failed initialisation must not leave a child running with no handle, and it
-// must not touch any process it did not start.
-func TestFailedAttachStopsOnlyItsOwnChild(t *testing.T) {
+// A translation payload failure must never kill the managed Kimi child or block
+// the native import bridge; page enhancements fail independently.
+func TestFailedTranslationPayloadKeepsChildAndBridgeReady(t *testing.T) {
 	child, profile := startFakeChild(t)
 	controller, err := NewController(ControllerSettings{StateDir: filepath.Dir(profile),
 		UserDataDir: profile})
@@ -160,16 +160,46 @@ func TestFailedAttachStopsOnlyItsOwnChild(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := controller.attachChild(ctx, child, TranslationSettings{Enabled: false}); err == nil {
-		t.Fatal("attach succeeded without a payload")
+	if err := controller.attachChild(ctx, child, TranslationSettings{Enabled: true}); err != nil {
+		t.Fatalf("attachChild must isolate translation failure: %v", err)
+	}
+	t.Cleanup(func() { _ = controller.Stop(context.Background()) })
+
+	select {
+	case <-child.Exit():
+		t.Fatal("translation payload failure stopped the managed child")
+	default:
+	}
+	state := controller.PublicState(context.Background())
+	if state.State != StateReady {
+		t.Fatalf("state after translation payload failure: %+v", state)
+	}
+	if state.Bridge == nil || !state.Bridge.Published {
+		t.Fatalf("native bridge was not published when translation failed: %+v", state.Bridge)
+	}
+	if state.Translation == nil || state.Translation.State != "failed" || state.Translation.Reason != "injection_payload_unavailable" {
+		t.Fatalf("translation status: %+v", state.Translation)
+	}
+}
+
+// abortStart stops only its own child when a launch genuinely aborts.
+func TestAbortStartStopsOnlyItsOwnChild(t *testing.T) {
+	child, profile := startFakeChild(t)
+	controller, err := NewController(ControllerSettings{StateDir: filepath.Dir(profile),
+		UserDataDir: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.abortStart(child, "kimi_start_failed", os.ErrNotExist); err == nil {
+		t.Fatal("abortStart succeeded")
 	}
 	select {
 	case <-child.Exit():
 	case <-time.After(5 * time.Second):
-		t.Fatal("the failed launch left its child running")
+		t.Fatal("abortStart left its child running")
 	}
 	state := controller.Status(context.Background())
 	if state.State != StateFailed || state.ManagedPID != 0 {
-		t.Fatalf("state after a failed attach: %+v", state)
+		t.Fatalf("state after abortStart: %+v", state)
 	}
 }

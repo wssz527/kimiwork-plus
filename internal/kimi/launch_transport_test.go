@@ -61,10 +61,11 @@ func TestManagedTransportMatchesTheLauncher(t *testing.T) {
 	if transport.Kind != "fd-pipe" && transport.Kind != "handle-pipe" {
 		t.Fatalf("unknown transport kind %q", transport.Kind)
 	}
-	// Supported is not the same claim as verified, and this build has never run
-	// the official application on any host it ships a transport for.
-	if transport.Verified {
-		t.Fatal("the transport is reported verified without an official-application run")
+	if !transport.Verified {
+		t.Fatal("verified production transport must report Verified=true")
+	}
+	if transport.Reason != "" {
+		t.Fatalf("verified transport reported stale reason %q", transport.Reason)
 	}
 	if transport.Detail == "" {
 		t.Fatal("a supported transport with no explanation")

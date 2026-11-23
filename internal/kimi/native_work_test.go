@@ -204,9 +204,9 @@ func TestNativeReconcileReportsMissingModels(t *testing.T) {
 
 func TestNativeReconcileRefusesAnAccountSwitch(t *testing.T) {
 	fixture := newNativeFixture(t)
-	fixture.seedProfile(t, "http://127.0.0.1:9999/v1", "cred-1")
+	key := fixture.seedProfile(t, "http://127.0.0.1:9999/v1", "cred-1")
 	integration := fixture.integration(t)
-	if result := integration.Reconcile(ReconcileOptions{Enabled: true, AccountScope: "account-a",
+	if result := integration.Reconcile(ReconcileOptions{Enabled: true, AccountScope: key,
 		URL: "http://127.0.0.1:9999/v1", Models: testCatalog()}); result.State != IntegrationRepaired {
 		t.Fatalf("first: %s/%s", result.State, result.Reason)
 	}
@@ -319,9 +319,9 @@ func TestNativeLockIsExclusiveAcrossInstances(t *testing.T) {
 
 func TestNativeIntentRecordsDigestsOnly(t *testing.T) {
 	fixture := newNativeFixture(t)
-	fixture.seedProfile(t, "http://127.0.0.1:9999/v1", "cred-1")
+	key := fixture.seedProfile(t, "http://127.0.0.1:9999/v1", "cred-1")
 	integration := fixture.integration(t)
-	if result := integration.Reconcile(ReconcileOptions{Enabled: true, AccountScope: "account-a",
+	if result := integration.Reconcile(ReconcileOptions{Enabled: true, AccountScope: key,
 		URL: "http://127.0.0.1:9999/v1", Models: testCatalog()}); result.State != IntegrationRepaired {
 		t.Fatalf("seed: %s/%s", result.State, result.Reason)
 	}

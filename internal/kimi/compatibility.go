@@ -550,11 +550,7 @@ func SaveOfficialObservation(stateDir string, report CompatibilityReport) error 
 		return err
 	}
 	target := filepath.Join(stateDir, "official-compat.json")
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, append(encoded, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, target)
+	return writePrivateFile(target, append(encoded, '\n'), 0o600)
 }
 
 // ProbeAccountAPIsLive runs a strictly read-only check against the managed

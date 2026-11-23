@@ -375,6 +375,15 @@
     return `${state.settings.provider}|${state.settings.targetLanguage}|${text}`;
   }
 
+  function forgetCache(key) {
+    if (!state.cache.has(key)) return;
+    const previous = state.cache.get(key);
+    if (typeof previous === 'string') {
+      state.cacheChars = Math.max(0, state.cacheChars - previous.length);
+    }
+    state.cache.delete(key);
+  }
+
   function remember(key, text) {
     if (state.cache.has(key)) return;
     state.cache.set(key, text);
@@ -382,8 +391,7 @@
     while (state.cache.size > MAX_CACHE_ENTRIES || state.cacheChars > MAX_CACHE_CHARS) {
       const oldest = state.cache.keys().next();
       if (oldest.done) break;
-      state.cacheChars -= (state.cache.get(oldest.value) || '').length;
-      state.cache.delete(oldest.value);
+      forgetCache(oldest.value);
     }
   }
 
@@ -465,19 +473,34 @@
     return typeof node.textContent === 'string' ? node.textContent : '';
   }
 
+  function sourceFingerprint(node) {
+    if (!node || typeof node.textContent !== 'string') return null;
+    const childCount = node.childNodes && typeof node.childNodes.length === 'number' ? node.childNodes.length : '';
+    return `${childCount}:${node.textContent}`;
+  }
+
   // While the translation is shown, the engine's own hiding rule removes the
   // source from layout. In a real DOM innerText of a hidden subtree falls back
   // to textContent, which loses the block boundaries a rendered <p>/<pre>
   // contributes, so the next scan would read slightly different text and
-  // retranslate the same content. The class is removed for the duration of the
-  // read and restored immediately, so layout never paints in between.
-  function readSourceText(block, surface) {
+  // retranslate the same content. Compare a layout-free fingerprint first so
+  // unchanged hidden blocks skip toggling CLASS.hiding and reading innerText.
+  function readSourceText(block, surface, ctx) {
     const node = surface.source(block);
     if (!node) return '';
+    const fingerprint = sourceFingerprint(node);
+    if (ctx && ctx.source && fingerprint !== null && ctx.sourceNode === node && ctx.sourceFingerprint === fingerprint) {
+      return ctx.source;
+    }
     const hidden = block.classList.contains(CLASS.hiding);
     if (hidden) block.classList.remove(CLASS.hiding);
     try {
-      return visibleText(node).replace(/\r\n?/g, '\n').trim();
+      const text = visibleText(node).replace(/\r\n?/g, '\n').trim();
+      if (ctx) {
+        ctx.sourceNode = node;
+        ctx.sourceFingerprint = fingerprint;
+      }
+      return text;
     } finally {
       if (hidden) block.classList.add(CLASS.hiding);
     }
@@ -653,7 +676,8 @@
     const ctx = {
       block, bar, statusEl, buttons: [translatedBtn, originalBtn], retryBtn,
       surface: SURFACE_DEF,
-      source: '', translation: '', rendered: false, mirror: null,
+      source: '', sourceNode: null, sourceFingerprint: null,
+      translation: '', rendered: false, mirror: null,
       token: 0, timer: 0, pending: [], lastMutation: NaN,
     };
     state.ctxs.set(block, ctx);
@@ -661,32 +685,38 @@
 
     const stop = event => { if (event?.preventDefault) event.preventDefault(); if (event?.stopPropagation) event.stopPropagation(); };
     translatedBtn.addEventListener('click', (event) => {
-      stop(event);
-      if (state.settings.view === 'translated') return;
-      state.settings.view = 'translated';
-      applyView();
+      try {
+        stop(event);
+        if (state.settings.view === 'translated') return;
+        state.settings.view = 'translated';
+        applyView();
+      } catch {}
     });
     originalBtn.addEventListener('click', (event) => {
-      stop(event);
-      if (state.settings.view === 'original') return;
-      state.settings.view = 'original';
-      applyView();
+      try {
+        stop(event);
+        if (state.settings.view === 'original') return;
+        state.settings.view = 'original';
+        applyView();
+      } catch {}
     });
     // A retranslation is a new request: the cached value and any in-flight
     // reply become stale, so the current token is retired first.
     retryBtn.addEventListener('click', (event) => {
-      stop(event);
-      ctx.token += 1;
-      ctx.translation = '';
-      const key = cacheKey(ctx.source);
-      state.cache.delete(key);
-      state.failures.delete(key);
-      detach(ctx.mirror);
-      ctx.mirror = null;
-      block.classList.remove(CLASS.hiding);
-      state.settings.view = 'translated';
-      applyView();
-      schedule(ctx, 0);
+      try {
+        stop(event);
+        ctx.token += 1;
+        ctx.translation = '';
+        const key = cacheKey(ctx.source);
+        forgetCache(key);
+        state.failures.delete(key);
+        detach(ctx.mirror);
+        ctx.mirror = null;
+        block.classList.remove(CLASS.hiding);
+        state.settings.view = 'translated';
+        applyView();
+        schedule(ctx, 0);
+      } catch {}
     });
 
     return ctx;
@@ -721,9 +751,11 @@
     const epoch = state.epoch;
     clearTimeout(ctx.timer);
     ctx.timer = setTimeout(() => {
-      ctx.timer = 0;
-      if (state.epoch !== epoch || !state.active) return;
-      refresh(ctx);
+      try {
+        ctx.timer = 0;
+        if (state.epoch !== epoch || !state.active) return;
+        refresh(ctx);
+      } catch {}
     }, delay);
   }
 
@@ -731,7 +763,7 @@
     if (!state.active) return;
     if (!ctx.block.isConnected) { drop(ctx); return; }
     const surface = ctx.surface;
-    const text = readSourceText(ctx.block, surface);
+    const text = readSourceText(ctx.block, surface, ctx);
     // Collapsing Work removes .think-body (a v-if node), so a missing source
     // while the block is still present means "temporarily collapsed", not
     // "empty": the mirror is anchored to the block and must survive the
@@ -895,20 +927,42 @@
 
   // ---------------------------------------------------------------- observer
   function scan() {
-    if (!state.active) return;
-    if (!onSurface()) { leaveSurface(); return; }
-    const blocks = doc.querySelectorAll(SURFACE_DEF.root) || [];
-    for (const block of blocks) mount(block);
-    for (const ctx of [...state.live]) {
-      if (!ctx.block.isConnected) { drop(ctx); continue; }
-      refresh(ctx);
-    }
+    try {
+      if (!state.active) return;
+      if (!onSurface()) { leaveSurface(); return; }
+      const blocks = doc.querySelectorAll(SURFACE_DEF.root) || [];
+      for (const block of blocks) mount(block);
+      for (const ctx of [...state.live]) {
+        if (!ctx.block.isConnected) { drop(ctx); continue; }
+        refresh(ctx);
+      }
+    } catch {}
   }
 
   function scheduleScan(delay = SCAN_MS) {
     if (!state.active) return;
     clearTimeout(state.scanTimer);
-    state.scanTimer = setTimeout(() => { state.scanTimer = 0; scan(); }, delay);
+    state.scanTimer = setTimeout(() => {
+      try {
+        state.scanTimer = 0;
+        scan();
+      } catch {}
+    }, delay);
+  }
+
+  function elementOf(node) {
+    if (!node) return null;
+    if (typeof node.closest === 'function') return node;
+    if (node.parentElement && typeof node.parentElement.closest === 'function') return node.parentElement;
+    if (node.parentNode && typeof node.parentNode.closest === 'function') return node.parentNode;
+    return null;
+  }
+
+  function nodeHasSurfaceRoot(node) {
+    if (!node) return false;
+    if (typeof node.matches === 'function' && node.matches(SURFACE_DEF.root)) return true;
+    if (typeof node.querySelector === 'function' && node.querySelector(SURFACE_DEF.root)) return true;
+    return false;
   }
 
   // A mutation inside a tracked context marks its content as freshly mutated
@@ -920,28 +974,29 @@
   // (the conversation list itself) is also relevant: that is how new reasoning
   // blocks are appended, and the target is not inside any block.
   function trackedTarget(record) {
-    const target = record?.target;
-    if (!target || typeof target.closest !== 'function') return null;
+    const target = elementOf(record?.target);
+    if (!target) return null;
     if (target.closest(`[${ATTR}]`)) return null;
     const block = target.closest(SURFACE_DEF.root);
     if (block) return block;
     if (record.type === 'childList'
-      && [...record.addedNodes || [], ...record.removedNodes || []]
-        .some(node => node && typeof node.matches === 'function' && node.matches(SURFACE_DEF.root))) return target;
+      && [...(record.addedNodes || []), ...(record.removedNodes || [])].some(nodeHasSurfaceRoot)) return target;
     return null;
   }
 
   function onMutations(records) {
-    if (!state.active) return;
-    let relevant = false;
-    for (const record of records) {
-      const block = trackedTarget(record);
-      if (!block) continue;
-      relevant = true;
-      const ctx = state.ctxs.get(block);
-      if (ctx && record.type !== 'attributes') ctx.lastMutation = Date.now();
-    }
-    if (relevant) scheduleScan();
+    try {
+      if (!state.active) return;
+      let relevant = false;
+      for (const record of records) {
+        const block = trackedTarget(record);
+        if (!block) continue;
+        relevant = true;
+        const ctx = state.ctxs.get(block);
+        if (ctx && record.type !== 'attributes') ctx.lastMutation = Date.now();
+      }
+      if (relevant) scheduleScan();
+    } catch {}
   }
 
   function start() {
@@ -964,8 +1019,10 @@
     clearTimeout(state.startupTimer);
     const epoch = state.epoch;
     state.startupTimer = setTimeout(() => {
-      state.startupTimer = 0;
-      if (state.epoch === epoch && state.active) scan();
+      try {
+        state.startupTimer = 0;
+        if (state.epoch === epoch && state.active) scan();
+      } catch {}
     }, 1200);
   }
 
@@ -1038,7 +1095,7 @@
   if (!state.settings.enabled) return statusReport('inactive');
   if (doc.body) start();
   else {
-    state.bootHandler = () => { state.bootHandler = null; start(); };
+    state.bootHandler = () => { try { state.bootHandler = null; start(); } catch {} };
     doc.addEventListener?.('DOMContentLoaded', state.bootHandler, { once: true });
   }
   return statusReport(state.active ? 'active' : 'inactive');

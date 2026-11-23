@@ -557,6 +557,7 @@ func selectDirectAccount(candidates []directAccount, scopeDigest string, intent 
 				return candidate, false
 			}
 		}
+		return directAccount{}, false
 	}
 	if intent != nil && intent.ProfileKeyDigest != "" {
 		for _, candidate := range candidates {
@@ -915,6 +916,9 @@ func (n *NativeIntegration) verifyDirectAccount(options ReconcileOptions) Integr
 		return IntegrationResult{State: IntegrationAccountUnknown, Reason: "account_ambiguous", Mode: mode}
 	}
 	if chosen.account == nil {
+		if intent != nil && intent.AccountDigest != "" && scopeDigest != "" && intent.AccountDigest != scopeDigest && !options.AllowAccountRebind {
+			return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed", Mode: mode}
+		}
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "profile_missing", Mode: mode}
 	}
 	rebind := false
@@ -998,7 +1002,7 @@ func (n *NativeIntegration) directCatalog(settings ControllerSettings, scope str
 		return nil, "direct_mode_unsupported", true
 	}
 	intent, _ := n.readIntent()
-	chosen, ambiguous := selectDirectAccount(directAccountCandidates(store), scope, intent)
+	chosen, ambiguous := selectDirectAccount(directAccountCandidates(store), sha256If(scope), intent)
 	if ambiguous {
 		return nil, "account_ambiguous", false
 	}

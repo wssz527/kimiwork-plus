@@ -88,8 +88,14 @@ func (n *NativeIntegration) Readback(account string) ImportReadback {
 		out.ConfigPresent = true
 	}
 
+	scopeDigest := ""
+	if out.AccountDigest != "" {
+		scopeDigest = sha256Hex(out.AccountDigest)
+	}
 	intent, intentErr := n.readIntent()
-	if intentErr == nil && intent != nil {
+	intentMatchesAccount := intentErr == nil && intent != nil &&
+		(scopeDigest == "" || intent.AccountDigest == "" || intent.AccountDigest == scopeDigest)
+	if intentMatchesAccount {
 		out.Generation = intent.Generation
 		out.Active = intent.Active
 		if out.URL == "" {
@@ -105,15 +111,14 @@ func (n *NativeIntegration) Readback(account string) ImportReadback {
 	if out.StorePresent {
 		store, err := readJSONFile(filepath.Join(n.kimiDir, NativeWorkStore), maxStoreBytes)
 		if err == "" {
-			// `account` is the scope, and the store keys profiles one hash below
-			// it: the selector wants the same level `Reconcile` computes, or it
-			// can never match the caller's own profile.
-			scopeDigest := ""
-			if out.AccountDigest != "" {
-				scopeDigest = sha256Hex(out.AccountDigest)
-			}
 			selected, ambiguous := selectProfile(kthProfiles(store), scopeDigest, intent)
-			if !ambiguous && selected.profile != nil {
+			if ambiguous {
+				out.Reason = firstNonEmpty(out.Reason, "account_ambiguous")
+			} else if selected.profile == nil {
+				if scopeDigest != "" {
+					out.Reason = firstNonEmpty(out.Reason, "profile_missing")
+				}
+			} else {
 				if value := normalizeNativeURL(stringField(selected.profile, "baseUrl")); value != "" {
 					out.URL = value
 				}
@@ -157,8 +162,14 @@ func (n *NativeIntegration) ReadbackMode(account, mode, directSourceID string) I
 	if configErr == "" && config != nil {
 		out.ConfigPresent = true
 	}
+	scopeDigest := ""
+	if account != "" {
+		scopeDigest = sha256Hex(account)
+	}
 	intent, intentErr := n.readIntent()
-	if intentErr == nil && intent != nil {
+	intentMatchesAccount := intentErr == nil && intent != nil &&
+		(scopeDigest == "" || intent.AccountDigest == "" || intent.AccountDigest == scopeDigest)
+	if intentMatchesAccount {
 		out.Generation = intent.Generation
 		out.Active = intent.Active
 		if directSourceID == "" {
@@ -178,10 +189,6 @@ func (n *NativeIntegration) ReadbackMode(account, mode, directSourceID string) I
 		out.Reason = firstNonEmpty(out.Reason, "direct_mode_unsupported")
 		return out
 	}
-	scopeDigest := ""
-	if account != "" {
-		scopeDigest = sha256Hex(account)
-	}
 	chosen, ambiguous := selectDirectAccount(directAccountCandidates(store), scopeDigest, intent)
 	if ambiguous {
 		out.Reason = firstNonEmpty(out.Reason, "account_ambiguous")
@@ -191,7 +198,11 @@ func (n *NativeIntegration) ReadbackMode(account, mode, directSourceID string) I
 		out.Reason = firstNonEmpty(out.Reason, "profile_missing")
 		return out
 	}
-	source, found := directSourceOf(chosen.sources, firstNonEmpty(directSourceID, intentDirectSource(intent)))
+	preferredSource := directSourceID
+	if preferredSource == "" && intentMatchesAccount {
+		preferredSource = intentDirectSource(intent)
+	}
+	source, found := directSourceOf(chosen.sources, preferredSource)
 	if !found {
 		out.Reason = firstNonEmpty(out.Reason, "profile_missing")
 		return out
@@ -213,7 +224,7 @@ func (n *NativeIntegration) ReadbackMode(account, mode, directSourceID string) I
 			if credentialRef == "" {
 				credentialRef = provider.credential
 			}
-			if intent != nil && intent.Mode == IntegrationModeDirect {
+			if intentMatchesAccount && intent.Mode == IntegrationModeDirect {
 				for logical, recorded := range intent.Aliases {
 					if recorded == alias {
 						modelAliases[logical] = alias

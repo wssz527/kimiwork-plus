@@ -610,7 +610,11 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 		if fresh, err := c.accountSurface(); err == nil {
 			surface = fresh
 			pageReadable = true
-			pageOK = waitAccountIdentity(ctx, surface, session.UserID)
+			restartRetries := accountRuntimeRetries
+			if restartRetries < accountVerifyRetries {
+				restartRetries = accountVerifyRetries
+			}
+			pageOK = waitAccountIdentityRetries(ctx, surface, session.UserID, restartRetries)
 			if probe, page, ok := accountRuntimeTarget(ctx, surface); ok {
 				defer probe.accountStopRuntimeWatch(context.WithoutCancel(ctx), page)
 				pageOK = waitAccountRuntime(ctx, surface, probe, page, home, session.UserID, false)
@@ -640,13 +644,16 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 		reason = AccountErrRestartFailed
 	}
 
+	rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancelRollback()
+
 	rolledBack := false
 	if originalErr == nil {
 		if fresh, err := c.accountSurface(); err == nil {
 			surface = fresh
 			pageReadable = true
 		}
-		pageRestored := c.applyPageState(ctx, surface, original) == nil
+		pageRestored := c.applyPageState(rollbackCtx, surface, original) == nil
 		configRestored := c.applyAccountConfig(home, original) == nil &&
 			accountConfigMatches(home, original.UserID)
 		rolledBack = pageRestored && configRestored
@@ -666,14 +673,14 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	// A page that is readable and reports nobody is the one case where only the
 	// target account signing in again can help. An unreadable page (no restart,
 	// or the app came back without a bridge) is a plain failure.
-	if pageReadable && accountPageSignedOut(ctx, surface) {
+	if pageReadable && accountPageSignedOut(rollbackCtx, surface) {
 		result.State, result.RequiresLogin = AccountStateNeedsLogin, true
 		return result, nil
 	}
 	// A build whose page does not answer the official profile read cannot verify
 	// either direction. That is a capability gap, and reporting it as a failed
 	// rollback would send the user after the wrong problem.
-	if restarted && !accountOfficialReadable(ctx, surface) {
+	if restarted && !accountOfficialReadable(rollbackCtx, surface) {
 		result.State, result.Reason = AccountStateFailed, AccountErrUnsupported
 		return result, errors.New(AccountErrUnsupported)
 	}
@@ -1203,10 +1210,17 @@ func waitAccountRuntime(ctx context.Context, surface accountSurface, runtime acc
 // only a verified read: the token store alone is a copy of what this process
 // wrote, not evidence the page bound that account.
 func waitAccountIdentity(ctx context.Context, surface accountSurface, want string) bool {
+	return waitAccountIdentityRetries(ctx, surface, want, accountVerifyRetries)
+}
+
+func waitAccountIdentityRetries(ctx context.Context, surface accountSurface, want string, retries int) bool {
 	if want == "" {
 		return false
 	}
-	for attempt := 0; attempt < accountVerifyRetries; attempt++ {
+	if retries <= 0 {
+		retries = 1
+	}
+	for attempt := 0; attempt < retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():

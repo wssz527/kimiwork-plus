@@ -138,9 +138,10 @@ type Host struct {
 	optionsMu sync.RWMutex
 	options   InjectionOptions
 
-	mu       sync.Mutex
-	sessions map[string]*SurfaceSession // keyed by target id
-	stopped  bool
+	mu         sync.Mutex
+	sessions   map[string]*SurfaceSession // keyed by target id
+	stopped    bool
+	replySlots chan struct{}
 
 	// contextWaiters are released when a session's main world is reported.
 	contextWaiters map[*SurfaceSession][]chan int
@@ -152,7 +153,7 @@ func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 		options.CallTimeout = DefaultCallTimeout
 	}
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
-		contextWaiters: map[*SurfaceSession][]chan int{}}
+		replySlots: make(chan struct{}, 8), contextWaiters: map[*SurfaceSession][]chan int{}}
 	// One permanent reader for unsolicited events. Without it, navigation and
 	// binding messages would only be seen while a context wait happened to be
 	// running, which is exactly the window where they matter least.
@@ -321,6 +322,12 @@ func (h *Host) Targets(ctx context.Context) ([]map[string]any, error) {
 // Sync attaches to every eligible target, re-injects what changed and retires
 // what left the surface. It returns the sessions it now holds.
 func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
+	h.mu.Lock()
+	stopped := h.stopped
+	h.mu.Unlock()
+	if stopped {
+		return nil, ErrPipeClosed
+	}
 	targets, err := h.Targets(ctx)
 	if err != nil {
 		return nil, err
@@ -366,6 +373,11 @@ func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
 			}
 			session = attached
 			h.mu.Lock()
+			if h.stopped {
+				h.mu.Unlock()
+				_ = h.detach(ctx, attached)
+				return nil, ErrPipeClosed
+			}
 			h.sessions[targetID] = session
 			h.mu.Unlock()
 		}
@@ -657,7 +669,10 @@ func (h *Host) handleEvent(session *SurfaceSession, event Event) {
 		if _, hasParent := frame["parentId"]; hasParent {
 			return
 		}
-		if session.mainFrameID != "" && stringField(frame, "id") != session.mainFrameID {
+		session.mu.Lock()
+		mainFrameID := session.mainFrameID
+		session.mu.Unlock()
+		if mainFrameID != "" && stringField(frame, "id") != mainFrameID {
 			return
 		}
 		h.dropWorld(session)
@@ -750,13 +765,23 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 	if json.Unmarshal([]byte(payload), &message) != nil {
 		return
 	}
-	if h.onReplyHandler() == nil {
+	handler := h.onReplyHandler()
+	if handler == nil {
 		return
 	}
 	id := fmt.Sprint(message.ID)
-	ctx, cancel := context.WithTimeout(context.Background(), h.callTimeout())
-	defer cancel()
-	h.onReplyHandler()(ctx, session, generation, id, message.Value)
+	value := message.Value
+	timeout := h.callTimeout()
+	select {
+	case h.replySlots <- struct{}{}:
+		go func() {
+			defer func() { <-h.replySlots }()
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			handler(ctx, session, generation, id, value)
+		}()
+	default:
+	}
 }
 
 // Reply delivers an answer to the renderer. It is a no-op when the session is
@@ -782,17 +807,23 @@ func (h *Host) Reply(ctx context.Context, session *SurfaceSession, generation in
 	return err
 }
 
-// DetachAll withdraws translation from every attached view: the injected script
-// is replaced by one that reports disabled, and the new-document script is
-// withdrawn so a reload cannot bring the old behaviour back.
-func (h *Host) DetachAll(ctx context.Context) {
+// HasSessions reports whether any translation target is currently attached.
+func (h *Host) HasSessions() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.sessions) > 0
+}
+
+func (h *Host) withdraw(ctx context.Context, stop bool) {
 	h.mu.Lock()
 	sessions := make([]*SurfaceSession, 0, len(h.sessions))
 	for _, session := range h.sessions {
 		sessions = append(sessions, session)
 	}
 	h.sessions = map[string]*SurfaceSession{}
-	h.stopped = true
+	if stop {
+		h.stopped = true
+	}
 	h.mu.Unlock()
 
 	disabled := map[string]any{"enabled": false}
@@ -812,6 +843,18 @@ func (h *Host) DetachAll(ctx context.Context) {
 			"globalThis.__kwgTranslation?.configure("+string(encoded)+")", contextID)
 		_ = h.detach(ctx, session)
 	}
+}
+
+// WithdrawAll disables and removes translation scripts from every attached view
+// without stopping the host, so re-enabling translation later can re-attach.
+func (h *Host) WithdrawAll(ctx context.Context) {
+	h.withdraw(ctx, false)
+}
+
+// DetachAll withdraws translation from every attached view and marks the host
+// stopped so no later replies or syncs run against a retired child.
+func (h *Host) DetachAll(ctx context.Context) {
+	h.withdraw(ctx, true)
 }
 
 // ---------------------------------------------------------------------------

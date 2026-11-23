@@ -168,11 +168,7 @@ func ensureWithin(profile, candidate string) (string, error) {
 	if err != nil {
 		return "", ErrKimiHomeUnresolved
 	}
-	if resolved == profile {
-		return resolved, nil
-	}
-	prefix := profile + string(filepath.Separator)
-	if !strings.HasPrefix(resolved, prefix) {
+	if !pathWithinDir(resolved, profile) {
 		return "", ErrKimiHomeOutsideProfile
 	}
 	return resolved, nil

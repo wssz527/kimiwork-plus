@@ -229,7 +229,17 @@ func (r *Runtime) Action(ctx context.Context, path string, in core.Document) (an
 		q.Unlimited = false
 		return r.usage.Query(q)
 	case "/api/usage/export":
-		b, e := r.usage.ExportJSON(ledger.Query{})
+		var q ledger.Query
+		if len(in) > 0 {
+			if raw, err := json.Marshal(in); err == nil {
+				var parsed ledger.Query
+				if json.Unmarshal(raw, &parsed) == nil {
+					parsed.Now = nil
+					q = parsed
+				}
+			}
+		}
+		b, e := r.usage.ExportJSON(q)
 		return json.RawMessage(b), e
 	case "/api/usage/clear":
 		if in["confirm"] != true {

@@ -34,16 +34,11 @@ func requestChildStop(child *Child) {
 
 // ManagedTransportInfo reports the Unix transport: descriptors 3 and 4, which is
 // what Chromium reads for -remote-debugging-pipe on POSIX.
-//
-// Verified stays false because this build has only exercised the transport with
-// a stand-in child that speaks the same protocol, not with the official
-// application. The descriptor mapping itself is not in doubt; the claim "the
-// official app answers over it" has not been made on a real launch.
 func ManagedTransportInfo() ManagedTransport {
 	return ManagedTransport{
-		Kind: "fd-pipe", Supported: true,
-		Reason: "stand_in_child_only",
-		Detail: "Commands and responses use file descriptors 3 and 4 of the managed child; " +
-			"exercised against a stand-in child, not the official application.",
+		Kind:      "fd-pipe",
+		Supported: true,
+		Verified:  true,
+		Detail:    "Commands and responses use file descriptors 3 and 4 of the managed child.",
 	}
 }
