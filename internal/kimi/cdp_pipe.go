@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,12 +30,30 @@ const (
 )
 
 var (
-	ErrPipeClosed      = errors.New("cdp_pipe_closed")
-	ErrPipeBusy        = errors.New("cdp_pipe_busy")
-	ErrPipeTimeout     = errors.New("cdp_pipe_timeout")
-	ErrProtocolError   = errors.New("cdp_protocol_error")
+	ErrPipeClosed    = errors.New("cdp_pipe_closed")
+	ErrPipeBusy      = errors.New("cdp_pipe_busy")
+	ErrPipeTimeout   = errors.New("cdp_pipe_timeout")
+	ErrProtocolError = errors.New("cdp_protocol_error")
+	// ErrSessionInvalid is the protocol answer for a session or target that no
+	// longer exists: the page was reloaded, replaced or closed. It is a transport
+	// fact, not a changed page contract.
+	ErrSessionInvalid  = errors.New("cdp_session_invalid")
 	ErrMessageTooLarge = errors.New("cdp_pipe_message_too_large")
 )
+
+// sessionInvalidMarkers are the Chromium messages that mean the session or its
+// target is gone. They are matched on the protocol error text because CDP does
+// not give these cases their own code.
+var sessionInvalidMarkers = []string{
+	"session with given id not found",
+	"no target with given id found",
+	"target closed",
+	"inspected target navigated or closed",
+	"cannot find context with specified id",
+	"execution context was destroyed",
+	"session closed",
+	"not attached to an active page",
+}
 
 // Pipe is a CDP transport over a pair of byte streams. In production these are
 // the child's fd4 (read) and fd3 (write); in tests they are pipes.
@@ -246,7 +265,7 @@ func (p *Pipe) Send(ctx context.Context, method string, params map[string]any, s
 			return Result{}, fmt.Errorf("%w: %s", ErrPipeClosed, p.closeReason())
 		}
 		if result.Error != nil {
-			return result, ErrProtocolError
+			return result, protocolError(result.Error)
 		}
 		return result, nil
 	case <-timer.C:
@@ -264,6 +283,24 @@ func (p *Pipe) drop(id int) {
 	p.mu.Lock()
 	delete(p.pending, id)
 	p.mu.Unlock()
+}
+
+// protocolError classifies a CDP error object. A session or target that no
+// longer exists is its own fact: the page is gone, which a caller may repair by
+// re-attaching, and which must never be reported as a changed contract.
+func protocolError(detail map[string]any) error {
+	message, _ := detail["message"].(string)
+	lowered := strings.ToLower(message)
+	for _, marker := range sessionInvalidMarkers {
+		if strings.Contains(lowered, marker) {
+			return fmt.Errorf("%w: %s", ErrSessionInvalid, message)
+		}
+	}
+	if code, ok := detail["code"].(float64); ok && code == -32001 {
+		// -32001 is "session not found" in the CDP protocol.
+		return fmt.Errorf("%w: %s", ErrSessionInvalid, message)
+	}
+	return fmt.Errorf("%w: %s", ErrProtocolError, message)
 }
 
 // dispose ends the transport once, rejecting every waiter.

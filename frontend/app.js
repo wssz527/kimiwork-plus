@@ -1,7 +1,7 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
-import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { chooseIntegrationMode, dismissQuickstartGuide, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, routeIdPreservingProtocol, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
+import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 
 let renderGrowth = () => {};
@@ -80,7 +80,6 @@ function setView(view, { persist = true } = {}) {
 function adoptState(next, { initial = false, external = false } = {}) {
   /* A save's returned state is newer than any poll that started before it.
      Otherwise a late response could roll the view back to the pre-save revision. */
-  if (external) state.stateReadSeq++;
   state.data = next;
 
   /* 子代理草稿同一规则：默认继承只用于展示，绝不自动提交；轮询不覆盖
@@ -129,6 +128,14 @@ function onboardTouched() {
   return state.onboard?.touched === true;
 }
 
+/* 向导的保存错误由 handleSaveFailure 写进会话状态，用户改过输入就清掉：
+   同一条后端拒绝在改完字段后继续挂着，会被读成「刚才那次修改也没用」。 */
+function clearOnboardSaveErrors() {
+  if (!state.onboard || !Array.isArray(state.onboard.saveErrors) || !state.onboard.saveErrors.length) return;
+  state.onboard.saveErrors = [];
+  renderErrorList(dom.onboardSaveErrors, []);
+}
+
 function settlePending(next) {
   const op = next && next.operation;
   if (!state.pendingOpId || !op || op.id !== state.pendingOpId || isInFlight(op)) return;
@@ -172,7 +179,7 @@ async function loadState({ silent = false } = {}) {
     const next = await request(API.state);
     if (!current()) return false;
     if (!next || next.schemaVersion !== 1) throw new ApiError('面板返回了无法识别的状态格式', 'SCHEMA', 200);
-    adoptState(next, { initial: !state.data });
+    if (current()) adoptState(next, { initial: !state.data });
     state.reachable = true;
     state.lastSync = Date.now();
     setHidden(dom.conn, true);
@@ -239,9 +246,17 @@ function startPolling() {
   stopPolling();
   state.timer = window.setInterval(() => {
     if (document.hidden) return;
-    if (state.modelsSaving || state.connsSaving || state.services.saving || state.subagentSaving) return;
+    if (editingBusy()) return;
     loadState({ silent: true });
   }, POLL_MS);
+}
+
+/* 任何正在进行的保存或向导请求都拥有输入焦点：状态轮询只该刷新快照，
+   不能让一次 2 秒后的读取覆盖用户刚敲进去的连接或模型。 */
+function editingBusy() {
+  return Boolean(state.modelsSaving || state.connsSaving || state.services.saving || state.subagentSaving
+    || (state.onboard && (state.onboard.saving || state.onboard.busy)) || onboardEditingText()
+    || (state.conns && state.conns.editing && state.conns.editing.discovering));
 }
 
 function stopPolling() {
@@ -414,6 +429,23 @@ async function handleSaveFailure(error, context) {
       renderEditor();
       return;
     }
+    if (context === 'connections' && dom.connsErrors) {
+      /* 后端拒绝（连接标识冲突、Key 缺失等）要留在连接页，草稿与已填的 Key
+         都不能因为一次 400 被清掉。 */
+      setConnErrors([error.message]);
+      renderConnections();
+      showToast(error.message, 'error');
+      return;
+    }
+    if (context === 'onboard') {
+      /* 向导同理：错误显示在向导自己的保存错误区，连接草稿与勾选保持原样，
+         用户改完还能直接重试。renderOnboard 会重画 ob-errors，所以保存类的
+         错误必须放在它不会覆盖的位置，并存进会话状态活过状态轮询。 */
+      state.onboard.saveErrors = [error.message];
+      renderErrorList(dom.onboardSaveErrors, state.onboard.saveErrors);
+      showToast(error.message, 'error');
+      return;
+    }
     if (context === 'connection' && dom.connErrors) {
       setHidden(dom.connErrors, false);
       dom.connErrors.replaceChildren(...[error.message].map((message) => {
@@ -463,6 +495,7 @@ function bindEvents() {
     setView('maintenance');
     setSubtab('maintenance', 'connection');
   });
+  $('diagnostics-export')?.addEventListener('click', () => { void exportDiagnostics(); });
   $('compat-details-link')?.addEventListener('click', () => {
     setView('maintenance');
     revealWorkspaceSection('compat-diagnostics-panel');
@@ -938,8 +971,12 @@ function bindEvents() {
     if (!editor) return;
     editor.draft.connectionId = dom.mConnection.value;
     editor.draft.metadataSource = null;
+    /* 旧连接的上限不属于新连接：留着会让预算预设按错误的上限禁用或放行。 */
+    editor.draft.contextLimit = '';
+    editor.budgetNote = null;
     if (editor.draft.upstreamModelId) {
-      editor.draft.id = routeIdFor(editor.draft.connectionId, editor.draft.upstreamModelId);
+      /* 路由 ID 的协议段是用户已经确认的语义：换连接只换前缀，不改 Chat/Responses。 */
+      editor.draft.id = routeIdPreservingProtocol(editor.draft.connectionId, editor.draft.upstreamModelId, editor.draft.id);
       if (dom.mId) dom.mId.value = editor.draft.id;
     }
     state.picker.models = null;
@@ -959,7 +996,10 @@ function bindEvents() {
     if (!editor) return;
     editor.draft.upstreamModelId = dom.mUpstream.value;
     editor.draft.metadataSource = null;
-    const suggested = routeIdFor(editor.draft.connectionId, editor.draft.upstreamModelId);
+    /* 换了上游模型，旧模型声明的上限就不再成立。 */
+    editor.draft.contextLimit = '';
+    editor.budgetNote = null;
+    const suggested = routeIdPreservingProtocol(editor.draft.connectionId, editor.draft.upstreamModelId, editor.draft.id);
     if (suggested && !editor.draft.touched.has('id')) {
       editor.draft.id = suggested;
       if (dom.mId) dom.mId.value = suggested;
@@ -995,6 +1035,7 @@ function bindEvents() {
     if (!field) return;
     field.addEventListener('input', () => {
       state.onboard.touched = true;
+      clearOnboardSaveErrors();
       setHidden(dom.onboardErrors, true);
       renderOnboard();
     });
@@ -1005,6 +1046,7 @@ function bindEvents() {
       const saved = savedOnboardTarget();
       if (saved && saved.id) dom.onboardId.value = saved.id;
     }
+    clearOnboardSaveErrors();
     setHidden(dom.onboardErrors, true);
     renderOnboard();
   });
@@ -1061,12 +1103,12 @@ function bindEvents() {
   if (dom.svcSave) dom.svcSave.addEventListener('click', saveSearchServices);
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.key && !state.modelsSaving && !state.connsSaving && !state.services.saving) {
+    if (!document.hidden && state.key && !editingBusy()) {
       loadState({ silent: true });
     }
   });
   window.addEventListener('online', () => {
-    if (state.key) loadState({ silent: true });
+    if (state.key && !editingBusy()) loadState({ silent: true });
   });
 }
 
@@ -1116,11 +1158,13 @@ function adoptLocationKey() {
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
-  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '' };
+  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '', saveErrors: [] };
   if (dom.onboardKey) dom.onboardKey.value = '';
   if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
   state.applyUnsupported = false;
   state.applyRefusal = null;
+  state.diagnosticsExporting = false;
+  state.diagnosticsExportError = '';
   state.providers = null;
   state.overviewToday = { key: null, requests: null, totalTokens: null, loading: false, fetchedAt: 0, requestCount: -1 };
   state.overviewIssueAction = null;
@@ -1216,6 +1260,7 @@ boot();
 
 export {
   adoptState,
+  clearOnboardSaveErrors,
   handleSaveFailure,
   loadState,
   renderAll,

@@ -13,7 +13,7 @@
 go vet ./...
 go test -count=1 ./...
 go test -race -count=1 ./...
-node --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs
+node --experimental-vm-modules --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs frontend/app-editor-regression.test.mjs frontend/module-link.test.mjs
 
 # 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
 VERSION=1.1.5 BUILD_ID=1.1.5-local bash build/macos-dmg.sh
@@ -43,6 +43,8 @@ python3 scripts/sync_cnb_release.py --tag v1.1.5 --notes-file /path/to/notes.txt
 守护进程日志默认写在状态目录下的 `launchd-daemon.log`；没有状态目录时落到 `~/Library/Logs/KimiWorkPlus/`。旧版本把日志放在 `~/Library/LaunchAgents` 与 plist 并列，卸载时会一并删除那些遗留文件。排障时先看状态目录里的日志与 `service-operations/<operationId>.helper.log`，不要假设 `LaunchAgents` 里还有当前日志。
 
 维护页可以显式注册、启停、允许登录启动和卸载本产品注册的用户级服务。注册不等于允许登录启动，关闭窗口也不等于服务恢复。默认不注册开机启动。macOS 的连接、翻译、Tavily 与账号凭据使用应用目录内的 AES-GCM 加密文件，Windows 使用 DPAPI；配置只保存引用，写入后读回再提交，不解密旧版 safeStorage。v1.1.2 之前的 macOS 钥匙串条目会在本地缺失时迁移，新值写入并读回一致后才清理旧条目；只有旧条目需要系统确认时，显式重授权操作才可能显示一次系统提示。
+
+设置页的「导出诊断日志」通过 `GET /api/diagnostics/export` 下载脱敏 JSON。后台在 `StateDir/diagnostics/operations.json` 保留最近 200 条操作事件，目录权限为 0700、文件为 0600，采用原子写入。历史文件读取失败时只在内存暂存新事件，不覆盖未知内容；成功读回后再合并。事件只包含固定操作名、阶段、耗时、状态代码、构建标识及白名单导入结果。导出摘要由命名字段构造，不序列化完整状态，不包含 API Key、令牌、Cookie、账号明细、地址、路径、模型来源标识或别名。该功能只保存和导出本地文件，不联网上传反馈。
 
 ### 生命周期操作由独立执行者完成
 

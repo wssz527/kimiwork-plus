@@ -13,6 +13,7 @@ const API = {
   context: '/api/context',
   tools: '/api/tools',
   integrationMode: '/api/integration-mode',
+  diagnosticsExport: '/api/diagnostics/export',
 };
 
 const POLL_MS = 2000;
@@ -526,6 +527,7 @@ const dom = {
   mUpstreamProtocolField: $('m-upstream-protocol-field'),
   mUpstreamProtocolGroup: $('m-upstream-protocol-group'),
   mDefault: $('m-default'),
+  mDefaultField: $('m-default-field'),
   mPriceInput: $('m-price-input'),
   mPriceOutput: $('m-price-output'),
   mPriceCached: $('m-price-cached'),
@@ -570,6 +572,7 @@ const dom = {
   onboardBatchContext: $('ob-batch-context'),
   onboardBatchContextApply: $('ob-batch-context-apply'),
   onboardErrors: $('ob-errors'),
+  onboardSaveErrors: $('ob-save-errors'),
   onboardDraft: $('ob-draft'),
   onboardSave: $('ob-save'),
   onboardSteps: $('onboard-steps'),
@@ -733,7 +736,7 @@ const state = {
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '' },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [] },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,
@@ -753,6 +756,8 @@ const state = {
   pendingAction: null,
   pendingOpId: null,
   lastSync: null,
+  diagnosticsExporting: false,
+  diagnosticsExportError: '',
   timer: null,
   stateReadSeq: 0,
   stateReadEpoch: 0,

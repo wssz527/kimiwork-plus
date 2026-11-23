@@ -1041,6 +1041,7 @@ func (c *Controller) gradeDirectImport(result ImportResult, expectedAccount stri
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted
 	if integration.Reason == "account_changed" {
+		result.OK = false
 		result.State, result.Reason = ImportStateAccountChanged, NativeAccountChanged
 		result.Applied, result.Adopted = false, false
 		return result

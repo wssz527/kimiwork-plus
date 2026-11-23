@@ -349,6 +349,31 @@ func TestImportWithoutConsentReportsWaitingSettings(t *testing.T) {
 	}
 }
 
+func TestImportWaitsForSettingsPageReadiness(t *testing.T) {
+	dir := t.TempDir()
+	encoded, _ := json.Marshal(map[string]any{"model": map[string]any{},
+		"credentials": map[string]any{"kimiWeb": map[string]any{"userId": "user-1"}}})
+	if err := os.WriteFile(filepath.Join(dir, NativeWorkConfig), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	page := &fakePage{surface: "work", actions: true, importAPI: true, hideSettings: true, settingsAvailableAfter: 8}
+	harness := newHarness(t, page)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := NewCDPActions(harness.pipe, dir, dir).ImportModels(ctx, ImportRequest{
+		URL: "http://127.0.0.1:9999/v1", Token: "gateway-token",
+		ExpectedAccountKey: sha256Hex("user-1"), OpenSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("a slow settings page was rejected instead of awaited: %+v", result)
+	}
+	if page.settingsProbeReads != 8 {
+		t.Fatalf("settings probe reads = %d, want 8", page.settingsProbeReads)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // readback
 

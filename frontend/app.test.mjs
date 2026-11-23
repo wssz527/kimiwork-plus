@@ -144,10 +144,15 @@ function makeProblems() {
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
     'const onboardConnectionValues = () => ({ id: "myconn", name: "我的供应商", baseURL: "https://api.example.com/v1", apiKey: "sk-test", providerPresetId: "" });',
     'const savedOnboardRow = () => null;',
-    ...['modelFamilyFor', 'routeIdFor', 'protocolList', 'connectionProtocolLimits', 'preferredProtocol', 'buildOnboardRow', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
+    'const currentConnectionLimit = () => undefined;',
+    'const existingOnboardRouteIds = () => new Set();',
+    ...['modelFamilyFor', 'routeIdFor', 'protocolList', 'connectionProtocolLimits', 'preferredProtocol',
+      'positiveInteger', 'buildOnboardRow', 'onboardConnectionProtocols', 'normalizeBaseURL',
+      'protocolLabel', 'onboardProblems'].map(sourceFunction),
+    'const providerPreset = () => null;',
     'return onboardProblems;',
   ].join('\n');
-  return new Function(code)();
+  return new Function('state', code)({ data: { models: [] } });
 }
 
 function makeRow(id, extra = {}) {
@@ -244,6 +249,47 @@ test('saved form backfill no longer clears a key', () => {
   assert.equal(env.dom.onboardKey.value, 'sk-user-just-typed');
 });
 
+test('onboard discovery inherits missing metadata from the selected preset', async () => {
+  const state = {
+    data: { revision: 'rev', models: [], connections: { saved: [] } },
+    onboard: { busy: false, seq: 0, discovery: null },
+    providers: { presets: [{ id: 'preset', name: 'Preset', models: [{ id: 'model-a', name: 'Preset A', contextWindow: 262144, maxOutputTokens: 8192, reasoning: true, reasoningEfforts: ['low', 'high'], inputModalities: ['text', 'image'], source: { kind: 'preset', checkedAt: '2026-11-23' } }] }] },
+  };
+  const dom = {
+    onboardId: { value: 'conn' }, onboardName: { value: 'Connection' },
+    onboardBase: { value: 'https://api.example.com/v1' }, onboardKey: { value: 'synthetic' },
+    onboardPreset: { value: 'preset' }, onboardErrors: {}, onboardDiscoverState: {},
+  };
+  const sourceHelpers = (() => {
+    const start = source.indexOf('const SOURCE_STAMP_PATTERN');
+    const end = source.indexOf('/* 预设目录在 providers.json', start);
+    return source.slice(start, end);
+  })();
+  const code = [
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    'const PROTOCOL_CHOICES = ["chat", "responses"];',
+    sourceHelpers,
+    ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow', 'discoveryBody',
+      'onboardEndpointKey', 'syncOnboardEndpoint', 'protocolList', 'preferredProtocol', 'connectionProtocolLimits',
+      'protocolChoicesFor', 'providerPresets', 'providerPreset', 'presetOnboardModels', 'mergeOnboardPresetMetadata',
+      'onboardRowSource', 'onboardRowFrom', 'preserveOnboardModelNames', 'discoverOnboardModels'].map(sourceFunction),
+    'return discoverOnboardModels;',
+  ].join('\n');
+  const discover = new Function('state', 'dom', 'API', 'request', 'setHidden', 'setText', 'showToast', 'fmtCount', 'discoveryReasonText', 'renderOnboard', 'clearOnboardSaveErrors', code)(
+    state, dom, { discovery: '/api/discovery' }, async () => ({ discovery: {
+      state: 'passed', modelCount: 1, checkedAt: '2026-11-23T01:00:00Z',
+      models: [{ id: 'model-a', protocols: ['chat'], source: { checkedAt: '2026-11-23' } }],
+    } }), () => {}, () => {}, () => {}, String, () => '', () => {}, () => {},
+  );
+  await discover();
+  const row = state.onboard.discovery.models[0];
+  assert.equal(row.contextWindow, 262144);
+  assert.equal(row.maxOutputTokens, 8192);
+  assert.equal(row.reasoning, true);
+  assert.deepEqual(row.efforts, ['low', 'high']);
+  assert.equal(row.vision, true);
+});
+
 test('onboard save merges selected models and retains unselected saved models', () => {
   const mergeOnboardModels = new Function(sourceFunction('mergeOnboardModels') + '\nreturn mergeOnboardModels;')();
   const existing = [
@@ -271,6 +317,504 @@ test('discovery retains custom names for saved models on the same connection', (
     { upstreamModelId: 'model-a', name: 'My custom A' },
     { upstreamModelId: 'model-b', name: 'Upstream B' },
   ]);
+  const dual = [
+    { connectionId: 'myconn', upstreamModelId: 'model-a', protocol: 'chat', name: 'Chat name', defaultEffort: 'low' },
+    { connectionId: 'myconn', upstreamModelId: 'model-a', protocol: 'responses', name: 'Responses name', defaultEffort: 'high' },
+  ];
+  const separated = preserve([
+    { upstreamModelId: 'model-a', protocol: 'responses', name: 'Upstream', efforts: ['low', 'high'] },
+    { upstreamModelId: 'model-a', protocol: 'chat', name: 'Upstream', efforts: ['low', 'high'] },
+  ], dual, 'myconn');
+  assert.equal(separated[0].name, 'Responses name');
+  assert.equal(separated[0].defaultEffort, 'high');
+  assert.equal(separated[1].name, 'Chat name');
+  assert.equal(separated[1].defaultEffort, 'low');
+});
+
+test('saved onboarding rows keep the default effort for edit and resave', () => {
+  const code = [
+    'const PROTOCOL_CHOICES = ["chat", "responses"];',
+    ...['positiveInteger', 'protocolList', 'preferredProtocol', 'protocolChoicesFor', 'providerPresets',
+      'presetProtocolsFor', 'declaredProtocolsFor', 'savedOnboardModelRow'].map(sourceFunction),
+    'return savedOnboardModelRow;',
+  ].join('\n');
+  const build = new Function('state', code)({ providers: { presets: [] } });
+  const row = build({
+    id: 'conn/resp/model-a', upstreamModelId: 'model-a', name: 'Model A', protocol: 'responses',
+    contextWindow: 100000, contextLimit: 200000, reasoning: true, reasoningEfforts: ['low', 'high'],
+    defaultEffort: 'high', inputModalities: ['text'], metadataSource: { kind: 'manual' },
+  }, null, null);
+  assert.equal(row.efforts.includes('high'), true);
+  assert.equal(row.defaultEffort, 'high');
+  assert.equal(row.name, 'Model A');
+  /* 已保存的上下文上限必须回到草稿，重新保存时不会被当成「清空」。 */
+  assert.equal(row.contextLimit, 200000);
+});
+
+test('rediscovery keeps a saved default effort only while the catalogue declares it', () => {
+  const preserve = new Function(sourceFunction('preserveOnboardModelNames') + '\nreturn preserveOnboardModelNames;')();
+  const saved = [{ connectionId: 'myconn', upstreamModelId: 'model-a', defaultEffort: 'high' }];
+  const rows = preserve([
+    { upstreamModelId: 'model-a', efforts: ['low', 'high'] },
+    { upstreamModelId: 'model-b', efforts: ['low'] },
+  ], saved, 'myconn');
+  assert.equal(rows[0].defaultEffort, 'high');
+  assert.equal(rows[1].defaultEffort, undefined);
+  const dropped = preserve([{ upstreamModelId: 'model-a', efforts: ['low'] }], saved, 'myconn');
+  assert.equal(dropped[0].defaultEffort, undefined);
+});
+
+test('onboard model drafts preserve selected thinking efforts and the default effort', () => {
+  const code = [
+    'const currentConnectionLimit = () => undefined;',
+    ...['routeIdFor', 'positiveInteger', 'buildOnboardRow'].map(sourceFunction),
+    'return buildOnboardRow;',
+  ].join('\n');
+  const build = new Function(code)();
+  const model = build({
+    connectionId: 'conn', upstreamModelId: 'model-a', protocol: 'responses', contextWindow: 262144,
+    reasoning: true, efforts: ['low', 'high'], defaultEffort: 'high', vision: false,
+  });
+  assert.deepEqual(model.reasoningEfforts, ['low', 'high']);
+  assert.equal(model.defaultEffort, 'high');
+});
+
+test('provider preset models normalize both preset and detail shapes', () => {
+  const code = [
+    sourceFunction('providerPresets'),
+    sourceFunction('providerPreset'),
+    sourceFunction('presetOnboardModels'),
+    'return presetOnboardModels;',
+  ].join('\n');
+  const state = { providers: { presets: [], details: { p: { source: { url: 'https://example.invalid/models', checkedAt: '2026-11-23' }, models: [
+    { upstreamModelId: 'model-a', label: 'Model A', contextWindow: 1000 },
+  ] } } } };
+  const models = new Function('state', code)(state)('p');
+  assert.equal(models[0].id, 'model-a');
+  assert.equal(models[0].upstreamModelId, 'model-a');
+  assert.equal(models[0].name, 'Model A');
+  assert.deepEqual(models[0].source, state.providers.details.p.source);
+});
+
+test('recommended preset models keep names, context, output, capabilities and efforts', () => {
+  const state = {
+    data: { models: [], connections: { saved: [] } },
+    onboard: {},
+    providers: { details: { p: { models: [{
+      upstreamModelId: 'model-a', label: 'Model A', contextWindow: 1000, maxOutputTokens: 500,
+      tools: true, reasoning: true, inputModalities: ['text', 'image'],
+      reasoningEfforts: ['low', 'high'], source: { url: 'https://example.invalid/docs', checkedAt: '2026-11-23' },
+    }] } } },
+  };
+  const dom = {
+    onboardId: { value: '' }, onboardName: { value: '' }, onboardBase: { value: '' },
+    onboardKey: { value: '' }, onboardPreset: { value: 'p' },
+  };
+  const sourceHelpers = (() => {
+    const start = source.indexOf('const SOURCE_STAMP_PATTERN');
+    const end = source.indexOf('/* 预设目录在 providers.json', start);
+    return source.slice(start, end);
+  })();
+  const code = [
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    'const PROTOCOL_CHOICES = ["chat", "responses"];',
+    sourceHelpers,
+    ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow',
+      'onboardEndpointKey', 'protocolList', 'preferredProtocol', 'connectionProtocolLimits',
+      'protocolChoicesFor', 'providerPresets', 'providerPreset', 'presetOnboardModels', 'presetMetadataSource',
+      'onboardRowSource', 'onboardRowFrom', 'useRecommendedOnboardModels'].map(sourceFunction),
+    'const renderOnboard = () => {};',
+    'const clearOnboardSaveErrors = () => {};',
+    'return useRecommendedOnboardModels;',
+  ].join('\n');
+  const use = new Function('state', 'dom', 'showToast', code)(state, dom, () => {});
+  const models = use();
+  assert.equal(models.length, 1);
+  const row = state.onboard.discovery.models[0];
+  assert.equal(row.id, 'model-a');
+  assert.equal(row.name, 'Model A');
+  assert.equal(row.contextWindow, 1000);
+  assert.equal(row.maxOutputTokens, 500);
+  assert.equal(row.tools, true);
+  assert.equal(row.reasoning, true);
+  assert.equal(row.vision, true);
+  assert.deepEqual(row.efforts, ['low', 'high']);
+  assert.equal(row.metadataKind, 'preset');
+  assert.equal(row.sourceURL, 'https://example.invalid/docs');
+  assert.equal(row.checkedAt, '2026-11-23');
+});
+
+test('upstream discovery values win over preset metadata and unknown efforts are not invented', () => {
+  const SOURCE_SOURCE = (() => {
+    const start = source.indexOf('const SOURCE_STAMP_PATTERN');
+    assert.notEqual(start, -1, 'missing SOURCE_STAMP_PATTERN');
+    const end = source.indexOf('/* 预设目录在 providers.json', start);
+    assert.notEqual(end, -1, 'unterminated source helpers');
+    return source.slice(start, end);
+  })();
+  const merge = new Function([SOURCE_SOURCE, sourceFunction('mergeOnboardPresetMetadata'), 'return mergeOnboardPresetMetadata;'].join('\n'))();
+  const preset = {
+    name: 'Preset A', contextWindow: 262144, maxOutputTokens: 512, tools: true, reasoning: true,
+    inputModalities: ['text', 'image'], reasoningEfforts: ['low', 'high'], description: 'preset note',
+    /* 真实 providers.json 的 preset.source 没有 kind。 */
+    source: { url: 'https://api-docs.example.invalid/list-models', checkedAt: '2026-11-23' },
+  };
+  const live = merge({
+    id: 'model-a', name: 'Live A', contextWindow: 1000, tools: false, reasoningEfforts: [],
+    inputModalities: ['text'], source: { url: 'https://upstream.example.invalid/v1/models', checkedAt: '2026-11-24' },
+  }, preset);
+  assert.equal(live.name, 'Live A');
+  assert.equal(live.contextWindow, 1000);
+  assert.equal(live.maxOutputTokens, 512);
+  assert.equal(live.tools, false);
+  assert.equal(live.reasoning, true);
+  assert.deepEqual(live.inputModalities, ['text']);
+  assert.deepEqual(live.reasoningEfforts, []);
+  /* 被补全字段的来源只能是预设文档：kind=preset，URL 不能是上游 /models。 */
+  assert.equal(live.metadataSource.kind, 'preset');
+  assert.equal(live.metadataSource.url, 'https://api-docs.example.invalid/list-models');
+  assert.equal(live.metadataSource.checkedAt, '2026-11-23');
+  const unknown = merge({ id: 'model-b' }, { ...preset, reasoningEfforts: 'unknown' });
+  assert.equal(unknown.reasoningEfforts, undefined);
+  const oversized = merge({ id: 'model-c', contextWindow: 1000 }, { ...preset, maxOutputTokens: 8192 });
+  assert.equal(oversized.maxOutputTokens, undefined);
+});
+
+test('onboard draft names and effort choices are editable without leaving a stale default', () => {
+  const helpers = new Function([
+    sourceFunction('setOnboardModelName'),
+    sourceFunction('toggleOnboardModelEffort'),
+    sourceFunction('setOnboardModelDefaultEffort'),
+    'return { setOnboardModelName, toggleOnboardModelEffort, setOnboardModelDefaultEffort };',
+  ].join('\n'))();
+  const row = { reasoning: true, efforts: ['low', 'high'], defaultEffort: 'high', name: '' };
+  /* 输入过程中保留原样空白，提交构建时才 trim，避免打断 IME 组合。 */
+  assert.equal(helpers.setOnboardModelName(row, '  My A  '), true);
+  assert.equal(row.name, '  My A  ');
+  helpers.toggleOnboardModelEffort(row, 'high');
+  assert.deepEqual(row.efforts, ['low']);
+  assert.equal(row.defaultEffort, undefined);
+  helpers.toggleOnboardModelEffort(row, 'xhigh');
+  assert.deepEqual(row.efforts, ['low', 'xhigh']);
+  helpers.setOnboardModelDefaultEffort(row, 'xhigh');
+  assert.equal(row.defaultEffort, 'xhigh');
+  const build = new Function([
+    'const currentConnectionLimit = () => undefined;',
+    ...['routeIdFor', 'positiveInteger', 'buildOnboardRow'].map(sourceFunction), 'return buildOnboardRow;',
+  ].join('\n'))();
+  const saved = build({
+    connectionId: 'conn', upstreamModelId: 'model-a', name: row.name, protocol: 'chat',
+    contextWindow: 1000, reasoning: true, efforts: row.efforts, defaultEffort: row.defaultEffort,
+  });
+  assert.equal(saved.name, 'My A');
+  assert.deepEqual(saved.reasoningEfforts, ['low', 'xhigh']);
+  assert.equal(saved.defaultEffort, 'xhigh');
+  helpers.setOnboardModelDefaultEffort(row, 'max');
+  assert.equal(row.defaultEffort, undefined);
+  row.reasoning = false;
+  assert.equal(helpers.toggleOnboardModelEffort(row, 'low'), false);
+});
+
+test('diagnostics export note allows a missing operation log and reports what is known', () => {
+  const note = new Function('fmtCount', 'fmtTime', 'reasonText',
+    sourceFunction('diagnosticsOperationLogNote') + '\nreturn diagnosticsOperationLogNote;')(
+    (value) => String(value), () => '12:00:00', (code) => code);
+  assert.match(note({}), /导出仍可用/);
+  assert.match(note({ diagnostics: { operationLog: { available: true, retained: 12, limit: 500 } } }), /12 条/);
+  assert.match(note({ diagnostics: { operationLog: { available: false, reason: 'not_retained' } } }), /不可用/);
+});
+
+test('resaving an existing route sends explicit nulls for cleared optional fields', () => {
+  const code = [
+    'const currentConnectionLimit = () => undefined;',
+    ...['routeIdFor', 'positiveInteger', 'buildOnboardRow'].map(sourceFunction),
+    'return buildOnboardRow;',
+  ].join('\n');
+  const build = new Function(code)();
+  const base = {
+    connectionId: 'conn', upstreamModelId: 'model-a', protocol: 'responses', contextWindow: 262144,
+    reasoning: true, efforts: [], vision: false,
+  };
+  /* 已有路由：取消推理、清空名称与输出必须显式 null，否则 MergeModels 保留旧值。 */
+  const cleared = build({ ...base, name: '', maxOutputTokens: undefined }, { existing: true });
+  assert.equal(cleared.name, null);
+  assert.equal(cleared.maxOutputTokens, null);
+  assert.equal(cleared.reasoningEfforts, null);
+  assert.equal(cleared.defaultEffort, null);
+  /* 原模型没有上限时不应凭空写 null；只有确实存在旧上限才清。 */
+  assert.equal('contextLimit' in cleared, false);
+  const limited = build({ ...base, contextLimit: 262144, contextWindow: 300000 }, { existing: true });
+  assert.equal(limited.contextLimit, null);
+  const rediscovered = build({ ...base, contextWindow: 300000 }, { existing: true, previousLimit: 262144 });
+  assert.equal(rediscovered.contextLimit, null);
+  const reasoningUnknown = build({ ...base, reasoning: undefined }, { existing: true });
+  assert.equal(reasoningUnknown.reasoning, null);
+  /* 新路由仍按契约省略未知字段。 */
+  const fresh = build({ ...base, name: '', maxOutputTokens: undefined });
+  assert.equal('name' in fresh, false);
+  assert.equal('maxOutputTokens' in fresh, false);
+  assert.equal('reasoningEfforts' in fresh, false);
+  assert.equal('defaultEffort' in fresh, false);
+  assert.equal('contextLimit' in fresh, false);
+});
+
+test('non-integer context or output blocks saving instead of reaching the gateway', () => {
+  const onboardProblems = makeProblems();
+  const bad = onboardProblems({ models: [makeRow('model-a', {
+    protocol: 'chat', contextWindow: 128000.5, maxOutputTokens: -1,
+  })] });
+  assert.equal(bad.problems.some((text) => text.includes('上下文窗口必须是正整数')), true);
+  assert.equal(bad.problems.some((text) => text.includes('最大输出必须是正整数')), true);
+  const zero = onboardProblems({ models: [makeRow('model-a', { protocol: 'chat', contextWindow: 0 })] });
+  assert.equal(zero.problems.some((text) => text.includes('请为这些模型填写上下文窗口')), true);
+  const good = onboardProblems({ models: [makeRow('model-a', { protocol: 'chat', contextWindow: 128000 })] });
+  assert.deepEqual(good.problems, []);
+});
+
+test('a known context limit is saved with the window and an unknown one is not invented', () => {
+  const code = [
+    ...['routeIdFor', 'positiveInteger'].map(sourceFunction),
+    'let limit = null;',
+    'const currentConnectionLimit = () => limit;',
+    sourceFunction('buildOnboardRow'),
+    'return { build: buildOnboardRow, setLimit: (value) => { limit = value; } };',
+  ].join('\n');
+  const helpers = new Function(code)();
+  const row = { connectionId: 'conn', upstreamModelId: 'model-a', protocol: 'chat', contextWindow: 100000, reasoning: false };
+  const unknown = helpers.build({ ...row });
+  assert.equal('contextLimit' in unknown, false);
+  helpers.setLimit(200000);
+  const known = helpers.build({ ...row });
+  assert.equal(known.contextLimit, 200000);
+  const tighter = helpers.build({ ...row, contextWindow: 300000 });
+  assert.equal('contextLimit' in tighter, false);
+});
+
+test('switching presets replaces stale suggested ids but keeps a hand-edited one', () => {
+  const code = [
+    sourceFunction('presetsSuggestedId'),
+    sourceFunction('providerPresets'),
+    sourceFunction('providerPreset'),
+    sourceFunction('connectionRowsOf'),
+    sourceFunction('savedOnboardTarget'),
+    sourceFunction('onboardSuggestedId'),
+    sourceFunction('onboardSuggestedName'),
+    sourceFunction('staleSuggested'),
+    sourceFunction('applyOnboardPreset'),
+    'const setText = () => {};',
+    'const renderOnboard = () => {};',
+    'const clearOnboardSaveErrors = () => {};',
+    'return applyOnboardPreset;',
+  ].join('\n');
+  const makeEnv = ({ id, name, saved = null }) => {
+    const state = {
+      providers: { presets: [
+        { id: 'a', name: 'Alpha', baseURL: 'https://a.example.com/v1' },
+        { id: 'b', name: 'Beta', baseURL: 'https://b.example.com/v1' },
+      ] },
+      data: { connections: { saved: saved ? [saved] : [] } },
+      onboard: { touched: false },
+    };
+    const dom = {
+      onboardBase: { value: '' }, onboardId: { value: id }, onboardName: { value: name },
+      onboardKey: { value: 'sk' }, onboardPreset: { value: 'a', dataset: {} },
+      onboardPresetHint: { textContent: '' },
+    };
+    dom.onboardPreset.dataset.presetId = 'a';
+    return { state, dom, apply: new Function('state', 'dom', code)(state, dom) };
+  };
+  /* 仍等于上一预设的建议值：换成新预设的建议值。 */
+  const stale = makeEnv({ id: 'a', name: 'Alpha' });
+  stale.apply('b');
+  assert.equal(stale.dom.onboardId.value, 'b');
+  assert.equal(stale.dom.onboardName.value, 'Beta');
+  /* 仍等于已保存连接的自动回填值：同样更新。 */
+  const backfilled = makeEnv({ id: 'alpha', name: 'Alpha saved', saved: { id: 'alpha', name: 'Alpha saved' } });
+  backfilled.apply('b');
+  assert.equal(backfilled.dom.onboardId.value, 'b');
+  assert.equal(backfilled.dom.onboardName.value, 'Beta');
+  /* 首次空白或用户清空后，预设建议值仍然正常填入。 */
+  const empty = makeEnv({ id: '', name: '' });
+  empty.apply('b');
+  assert.equal(empty.dom.onboardId.value, 'b');
+  assert.equal(empty.dom.onboardName.value, 'Beta');
+  /* 用户手改过：保留原值，避免覆盖另一条连接。 */
+  const custom = makeEnv({ id: 'my-second', name: 'My Second' });
+  custom.apply('b');
+  assert.equal(custom.dom.onboardId.value, 'my-second');
+  assert.equal(custom.dom.onboardName.value, 'My Second');
+});
+
+test('onboarding keeps the saved apiKeyEnv and brings the preset protocols', () => {
+  const state = { providers: { presets: [{ id: 'p', protocols: ['chat', 'responses'] }] } };
+  const code = [
+    sourceFunction('providerPresets'),
+    sourceFunction('providerPreset'),
+    sourceFunction('onboardConnectionProtocols'),
+    sourceFunction('onboardConnectionPayload'),
+    'return onboardConnectionPayload;',
+  ].join('\n');
+  const build = new Function('state', code)(state);
+  const values = { id: 'conn', name: 'Conn', providerPresetId: 'p', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new' };
+  const withSaved = build(values, { id: 'conn', apiKeyEnv: 'CONN_API_KEY', protocols: ['chat'] });
+  assert.equal(withSaved.apiKeyEnv, 'CONN_API_KEY');
+  assert.deepEqual(withSaved.protocols, ['chat', 'responses']);
+  const narrowed = build(values, { id: 'conn', providerPresetId: 'p', protocols: ['chat'] });
+  assert.deepEqual(narrowed.protocols, ['chat']);
+  const withoutSaved = build({ ...values, providerPresetId: '' }, null);
+  assert.equal('apiKeyEnv' in withoutSaved, false);
+  assert.equal('protocols' in withoutSaved, false);
+  assert.equal(withoutSaved.apiKey, 'sk-new');
+  const savedOnly = build({ ...values, providerPresetId: '' }, { id: 'conn', apiKeyEnv: 'CONN_API_KEY', protocols: ['responses'] });
+  assert.deepEqual(savedOnly.protocols, ['responses']);
+});
+
+test('a successful onboarding save resets the connection draft baseline and the old catalogue', async () => {
+  const savedState = {
+    revision: 'rev-2',
+    models: [{ id: 'conn/resp/model-a', connectionId: 'conn' }],
+    connections: { saved: [{ id: 'conn', name: 'Connection' }] },
+  };
+  const state = {
+    data: { revision: 'rev-1', models: [], connections: { saved: [] } },
+    onboard: { saving: false, touched: true, discovery: { models: [] }, discoveryFor: 'old' },
+    conns: { editing: null, draft: [], dirty: true, base: 'old' },
+    stateReadEpoch: 0, key: 'session',
+  };
+  const dom = { onboardKey: { value: 'sk' }, onboardDisclosure: { open: true } };
+  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'return saveOnboard;'].join('\n');
+  const save = new Function(
+    'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
+    'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
+    'handleSaveFailure', 'setSubtab', 'ApiError', 'fmtCount',
+    'savedOnboardRow', 'onboardConnectionPayload', 'savedConnectionsSignature', 'connectionDraftFrom',
+    'fillOnboardForm', 'onboardEndpointKey', code,
+  )(
+    state, dom, { workspace: '/api/workspace' }, () => [{}], () => ({
+      problems: [], built: [{ id: 'conn/resp/model-a' }],
+      values: { id: 'conn', name: 'Connection', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk' },
+    }), () => [], () => [], (_existing, built) => built,
+    async () => ({ state: savedState }), next => { state.data = next; }, () => {}, () => {}, () => {}, () => {}, async () => {},
+    () => {}, class ApiError extends Error {}, String,
+    () => null, () => ({ id: 'conn' }), () => 'fresh', () => [], () => {}, () => 'fresh-endpoint',
+  );
+  assert.equal(await save(), true);
+  assert.equal(state.conns.base, 'fresh');
+  assert.equal(state.conns.dirty, false);
+  assert.equal(state.conns.baseRevision, 'rev-2');
+  assert.equal(state.onboard.discovery, null);
+  assert.equal(state.onboard.discoveryFor, null);
+});
+
+test('preset provenance keeps only its own https url and a legal checked timestamp', () => {
+  const sourceHelpers = (() => {
+    const start = source.indexOf('const SOURCE_STAMP_PATTERN');
+    const end = source.indexOf('/* 预设目录在 providers.json', start);
+    return source.slice(start, end);
+  })();
+  const helpers = new Function([sourceHelpers, sourceFunction('presetMetadataSource'), 'return presetMetadataSource;'].join('\n'))();
+  const clean = helpers({ source: { url: 'https://docs.example.invalid/models', checkedAt: '2026-11-02' } });
+  assert.deepEqual(clean, { kind: 'preset', url: 'https://docs.example.invalid/models', checkedAt: '2026-11-02' });
+  /* 上游 /models 是 http、带查询参数或根本不是预设地址时都不能被写成预设来源。 */
+  const unsafe = helpers({ source: { url: 'http://upstream.example.invalid/v1/models?key=1', checkedAt: 'yesterday' } });
+  assert.deepEqual(unsafe, { kind: 'preset' });
+  const missing = helpers({});
+  assert.deepEqual(missing, { kind: 'preset' });
+});
+
+test('a row without its own metadata source is not attributed to the upstream catalogue', () => {
+  const sourceHelpers = (() => {
+    const start = source.indexOf('const SOURCE_STAMP_PATTERN');
+    const end = source.indexOf('/* 预设目录在 providers.json', start);
+    return source.slice(start, end);
+  })();
+  const rowSource = new Function([sourceHelpers, sourceFunction('onboardRowSource'), 'return onboardRowSource;'].join('\n'))();
+  /* 预设补全过：只有 metadataSource 决定来源，不能回落到上游 URL。 */
+  const preset = rowSource({
+    metadataSource: { kind: 'preset', url: 'https://docs.example.invalid/models', checkedAt: '2026-11-02' },
+    source: { url: 'https://api.example.invalid/v1/models', checkedAt: '2026-11-03' },
+  });
+  assert.deepEqual(preset, {
+    checkedAt: '2026-11-02', sourceURL: 'https://docs.example.invalid/models', metadataKind: 'preset',
+  });
+  /* 没有 metadataSource 的正常目录行才用上游 source，并标成 discovery。 */
+  const discovery = rowSource({ source: { url: 'https://api.example.invalid/v1/models', checkedAt: '2026-11-03' } });
+  assert.equal(discovery.metadataKind, 'discovery');
+  assert.equal(discovery.sourceURL, 'https://api.example.invalid/v1/models');
+});
+
+test('the default protocol comes from the options the connection actually allows', () => {
+  const code = [
+    'const PROTOCOL_CHOICES = ["chat", "responses"];',
+    ...['protocolList', 'preferredProtocol', 'connectionProtocolLimits', 'protocolChoicesFor', 'onboardRowSource'].map(sourceFunction),
+    sourceFunction('onboardRowFrom'),
+    'return onboardRowFrom;',
+  ].join('\n');
+  const build = new Function('document', code)(undefined);
+  /* 上游声明两个协议、连接只允许 chat：默认值必须是可选的 chat。 */
+  const limited = build({ id: 'model-a', protocols: ['chat', 'responses'] }, { connection: { protocols: ['chat'] } });
+  assert.deepEqual(limited.protocolOptions, ['chat']);
+  assert.equal(limited.protocol, 'chat');
+  /* 没有连接限制时仍按既有偏好选 responses。 */
+  const open = build({ id: 'model-b', protocols: ['chat', 'responses'] }, { connection: null });
+  assert.equal(open.protocol, 'responses');
+});
+
+test('a hand-typed name keeps its raw value until save trims it', () => {
+  const build = new Function([
+    'const currentConnectionLimit = () => undefined;',
+    ...['routeIdFor', 'positiveInteger', 'buildOnboardRow'].map(sourceFunction),
+    'return buildOnboardRow;',
+  ].join('\n'))();
+  const row = { connectionId: 'conn', upstreamModelId: 'model-a', protocol: 'chat', contextWindow: 1000, name: '  My A  ' };
+  assert.equal(build(row).name, 'My A');
+  /* 名称与上游 ID 相同时仍不写 name，避免无意义字段。 */
+  assert.equal('name' in build({ ...row, name: 'model-a' }), false);
+});
+
+test('same upstream id with two protocols keeps independent editable rows', () => {
+  const code = [
+    sourceFunction('onboardRowKey'),
+    sourceFunction('onboardRowByKey'),
+    'const onboardModelRows = () => state.onboard.discovery.models;',
+    'return { onboardRowKey, onboardRowByKey };',
+  ].join('\n');
+  const state = { onboard: { discovery: { models: [
+    { key: 'conn/chat/model-a', id: 'model-a', upstreamModelId: 'model-a', protocol: 'chat', name: 'A chat' },
+    { key: 'conn/resp/model-a', id: 'model-a', upstreamModelId: 'model-a', protocol: 'responses', name: 'A resp' },
+  ] } } };
+  const helpers = new Function('state', code)(state);
+  assert.equal(helpers.onboardRowKey(state.onboard.discovery.models[0]), 'conn/chat/model-a');
+  assert.equal(helpers.onboardRowKey(state.onboard.discovery.models[1]), 'conn/resp/model-a');
+  /* 按 key 查到的是各自那一行，不会落到同 ID 的兄弟行。 */
+  assert.equal(helpers.onboardRowByKey('conn/resp/model-a').name, 'A resp');
+  assert.equal(helpers.onboardRowByKey('conn/chat/model-a').name, 'A chat');
+});
+
+test('resaving an unchanged saved model keeps its real context limit', () => {
+  const code = [
+    'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+    "const CONNECTION_ID_HINT = 'hint';",
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    'const state = { data: { models: [{ id: "conn/resp-model-a", connectionId: "conn", contextLimit: 200000 }] } };',
+    "const dom = {};",
+    "const onboardConnectionValues = () => ({ id: 'conn', name: 'C', baseURL: 'https://api.example.com/v1', apiKey: 'sk' });",
+    "const savedOnboardRow = () => ({ id: 'conn', apiKeySet: true, baseURL: 'https://api.example.com/v1' });",
+    ...['positiveInteger', 'currentConnectionLimit', 'existingOnboardRouteIds', 'modelFamilyFor', 'routeIdFor',
+      'protocolList', 'connectionProtocolLimits', 'protocolChoicesFor', 'preferredProtocol', 'buildOnboardRow',
+      'onboardConnectionProtocols', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
+    'const providerPreset = () => null;',
+    'return onboardProblems;',
+  ].join('\n');
+  const onboardProblems = new Function(code)();
+  const built = onboardProblems({ models: [makeRow('model-a', {
+    protocol: 'responses', contextWindow: 100000, contextLimit: 200000, efforts: ['low'], selected: true,
+  })] }).built[0];
+  assert.equal(built.contextLimit, 200000);
+  const rediscovered = onboardProblems({ models: [makeRow('model-a', {
+    protocol: 'responses', contextWindow: 300000, selected: true,
+  })] }).built[0];
+  assert.equal(rediscovered.contextLimit, null);
 });
 
 test('onboard search matches upstream ID, name and description', () => {
@@ -288,6 +832,7 @@ test('select all applies only to the current search results and toggles them off
   const state = { onboard: { query: 'match', touched: false, discovery: { models: [makeRow('match-a', { selected: false }), makeRow('match-b', { selected: false }), makeRow('other', { selected: false })] } } };
   const code = [
     ...['onboardModelRows', 'filteredOnboardModels', 'toggleFilteredOnboardModels'].map(sourceFunction),
+    'const markOnboardEdited = () => { state.onboard.touched = true; };',
     'const renderOnboard = () => {};',
     'return toggleFilteredOnboardModels;',
   ].join('\n');
@@ -308,6 +853,7 @@ test('batch protocol is explicit and respects declarations and unselected rows',
   const code = [
     'const PROTOCOL_CHOICES = ["chat", "responses"];',
     ...['onboardModelRows', 'selectedOnboardModels', 'assignOnboardProtocol', 'applyOnboardBatchProtocol', 'protocolLabel'].map(sourceFunction),
+    'const markOnboardEdited = () => { state.onboard.touched = true; };',
     'const fmtCount = (value) => String(value);',
     'const renderOnboard = () => {};',
     'const showToast = (message) => messages.push(message);',
@@ -327,7 +873,8 @@ test('batch context changes only selected rows and rejects unknown values', () =
   const dom = { onboardBatchContext: { value: '128000' } };
   const messages = [];
   const code = [
-    ...['onboardModelRows', 'selectedOnboardModels', 'applyOnboardBatchContext'].map(sourceFunction),
+    ...['positiveInteger', 'onboardModelRows', 'selectedOnboardModels', 'applyOnboardBatchContext'].map(sourceFunction),
+    'const markOnboardEdited = () => { state.onboard.touched = true; };',
     'const fmtCount = (value) => String(value);',
     'const fmtTokens = (value) => String(value);',
     'const renderOnboard = () => {};',
@@ -424,6 +971,73 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   state.editor = { dirty: true };
   open();
   assert.deepEqual(calls, ['models', 'models:connections', '请先保存或取消正在编辑的模型，再打开添加向导。']);
+});
+
+test('a successful onboarding save closes the form and shows the saved model catalogue', async () => {
+  const savedState = { revision: 'rev-2', models: [{ id: 'conn/resp/model-a' }], connections: { saved: [{ id: 'conn' }] } };
+  const state = {
+    data: { revision: 'rev-1', models: [], connections: { saved: [] } },
+    onboard: { saving: false, touched: true },
+    conns: { editing: null, draft: [] },
+    stateReadEpoch: 0, key: 'session',
+  };
+  const dom = { onboardKey: { value: 'synthetic' }, onboardDisclosure: { open: true } };
+  const tabs = [];
+  const code = [
+    sourceFunction('saveOnboard'),
+    'const clearOnboardSaveErrors = () => {};',
+    'return saveOnboard;',
+  ].join('\n');
+  const save = new Function(
+    'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
+    'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
+    'handleSaveFailure', 'setSubtab', 'ApiError', 'fmtCount',
+    'savedOnboardRow', 'onboardConnectionPayload', 'savedConnectionsSignature', 'connectionDraftFrom',
+    'fillOnboardForm', 'onboardEndpointKey', code,
+  )(
+    state, dom, { workspace: '/api/workspace' }, () => [{}], () => ({
+      problems: [], built: [{ id: 'conn/resp/model-a' }],
+      values: { id: 'conn', name: 'Connection', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'synthetic' },
+    }), () => [], () => [], (_existing, built) => built,
+    async () => ({ state: savedState }), next => { state.data = next; }, () => {}, () => {}, () => {}, () => {}, async () => {},
+    (group, tab) => tabs.push([group, tab]), class ApiError extends Error {}, String,
+    () => null, () => ({ id: 'conn' }), () => 'sig', () => [], () => {}, () => 'endpoint',
+  );
+  assert.equal(await save(), true);
+  assert.equal(dom.onboardDisclosure.open, false);
+  assert.deepEqual(tabs, [['models', 'catalog']]);
+  assert.equal(dom.onboardKey.value, '');
+});
+
+test('a failed onboarding save keeps the form, the key and the current subtab', async () => {
+  const state = {
+    data: { revision: 'rev-1', models: [], connections: { saved: [] } },
+    onboard: { saving: false, touched: true },
+    conns: { editing: null, draft: [] },
+    stateReadEpoch: 0, key: 'session',
+  };
+  const dom = { onboardKey: { value: 'sk-typed' }, onboardDisclosure: { open: true } };
+  const tabs = [];
+  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'return saveOnboard;'].join('\n');
+  const save = new Function(
+    'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
+    'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
+    'handleSaveFailure', 'setSubtab', 'ApiError', 'fmtCount',
+    'savedOnboardRow', 'onboardConnectionPayload', 'savedConnectionsSignature', 'connectionDraftFrom',
+    'fillOnboardForm', 'onboardEndpointKey', code,
+  )(
+    state, dom, { workspace: '/api/workspace' }, () => [{}], () => ({
+      problems: [], built: [{ id: 'conn/resp/model-a' }],
+      values: { id: 'conn', name: 'Connection', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-typed' },
+    }), () => [], () => [], (_existing, built) => built,
+    async () => { throw new Error('offline'); }, next => { state.data = next; }, () => {}, () => {}, () => {}, () => {},
+    async () => {}, (group, tab) => tabs.push([group, tab]), class ApiError extends Error {}, String,
+    () => null, () => ({ id: 'conn' }), () => 'sig', () => [], () => {}, () => 'endpoint',
+  );
+  assert.equal(await save(), false);
+  assert.equal(dom.onboardKey.value, 'sk-typed');
+  assert.equal(dom.onboardDisclosure.open, true);
+  assert.deepEqual(tabs, []);
 });
 
 test('catalogue reads require only address and key and never borrow a key for a changed endpoint', () => {
@@ -666,6 +1280,45 @@ test('mountUsageRequests is idempotent and keeps one recent-requests table', () 
   mount();
   assert.deepEqual(usagePane.children.map(node => node.id), ['recent-section']);
   assert.equal(records.children.length, 0);
+});
+
+test('diagnostics export uses GET, downloads the exact filename, and surfaces failures', async () => {
+  const calls = [];
+  const downloads = [];
+  const state = { diagnosticsExporting: false, diagnosticsExportError: '', data: {} };
+  const documentStub = {
+    createElement: (tag) => ({
+      tag, href: '', download: '',
+      click() { downloads.push({ href: this.href, download: this.download }); },
+    }),
+  };
+  const URLStub = { createObjectURL: () => 'blob:diagnostics', revokeObjectURL: () => {} };
+  const code = [sourceFunction('exportDiagnostics'), 'return exportDiagnostics;'].join('\n');
+  const make = (requestImpl) => new Function(
+    'state', 'API', 'request', 'showToast', 'renderDiagnosticsExport', 'document', 'URL', 'Blob', 'setTimeout', code,
+  )(
+    state, { diagnosticsExport: '/api/diagnostics/export' }, requestImpl, () => {}, () => {},
+    documentStub, URLStub, Blob, () => {},
+  );
+  const ok = make(async (path, options) => { calls.push([path, options]); return { schemaVersion: 1 }; });
+  assert.equal(await ok(), true);
+  assert.deepEqual(calls, [['/api/diagnostics/export', undefined]]);
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].download, 'kimi-work-plus-diagnostics.json');
+  const failing = make(async () => { throw new Error('boom'); });
+  assert.equal(await failing(), false);
+  assert.match(state.diagnosticsExportError, /^导出失败：boom/);
+  assert.equal(state.diagnosticsExporting, false);
+});
+
+test('custom model context shortcuts and thinking efforts are visible outside advanced settings', () => {
+  const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
+  const advanced = form.indexOf('id="m-advanced"');
+  for (const id of ['m-budget-group', 'm-context', 'm-output', 'm-effort-field', 'm-default']) {
+    const position = form.indexOf(`id="${id}"`);
+    assert.ok(position >= 0, 'missing ' + id);
+    assert.ok(position < advanced, id + ' must be in the main form, not inside advanced settings');
+  }
 });
 
 test('index.html lays out five flat tabs, subtabs, and static views without scrollIntoView or overflow:clip', () => {

@@ -81,8 +81,8 @@ function canonicalModel(model) {
        「明确不支持」会被判成同一个值。 */
     model.tools === true ? 'true' : model.tools === false ? 'false' : 'unknown',
     model.reasoning === true,
-    (model.inputModalities || ['text']).join(','),
-    (model.reasoningEfforts || []).join(','),
+    (Array.isArray(model.inputModalities) ? model.inputModalities : ['text']).join(','),
+    (Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : []).join(','),
     model.defaultEffort || '',
     model.connectionId || '',
     model.upstreamModelId || '',
@@ -378,6 +378,12 @@ function routeIdFor(connectionId, upstreamModelId, protocol) {
   return connection + '/' + prefix + encodeURIComponent(upstream);
 }
 
+/* 换连接或手改上游 ID 时只该改前缀与末段：协议家族沿用当前路由 ID，
+   否则用户已经确认的 Chat/Responses 选择会被「按上游名猜一次」改掉。 */
+function routeIdPreservingProtocol(connectionId, upstreamModelId, currentId) {
+  return routeIdFor(connectionId, upstreamModelId, modelFamilyFor(currentId));
+}
+
 function connectionRowsOf(data) {
   const connections = data && data.connections;
   if (!connections) return null;
@@ -422,7 +428,8 @@ function routingOf(model) {
 
 function matchesQuery(model, needle) {
   if (!needle) return true;
-  const fields = [model.id, displayModelId(model.id), model.name, model.protocol, ...(model.reasoningEfforts || [])]
+  const fields = [model.id, displayModelId(model.id), model.name, model.protocol,
+    ...(Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : [])]
     .filter((value) => typeof value === 'string');
   return fields.some((value) => value.toLowerCase().includes(needle));
 }
@@ -816,17 +823,33 @@ function pickCandidate(upstreamId) {
   const model = (state.picker.models || []).find((row) => row && row.id === upstreamId) || null;
   const draft = editor.draft;
   const protocolState = candidateProtocolState(model);
+  /* 用户点过协议按钮就是显式选择：新候选仍声明该协议（或根本没声明）时沿用，
+     不因为换了一条模型就把 Chat 悄悄改回 Responses。显式空数组是权威的
+     「不支持」，那种情况下无法保留。 */
+  const manualFamily = draft.protocolSource === 'manual' && draft.protocolConfirmed === true
+    ? modelFamilyFor(draft.id) : null;
   draft.upstreamModelId = upstreamId;
-  draft.name = model && model.name ? model.name : draft.name;
+
+  /* 换候选后，上一候选带进来的名称、预算与能力都不再适用。先全部清空，
+     只保留新候选自己声明的值，避免把 A 模型的档位、上限或名称保存到 B 上。 */
+  draft.name = '';
+  draft.context = '';
+  draft.contextLimit = '';
+  draft.output = '';
+  draft.tools = undefined;
+  draft.reasoning = false;
+  draft.vision = false;
+  draft.efforts = [];
+  draft.defaultEffort = '';
 
   const preset = providerPreset(draft.providerPresetId) || providerPreset(
     (findConnection(state.data, draft.connectionId) || {}).providerPresetId);
   const presetProtocols = preset && Array.isArray(preset.protocols) && preset.protocols.length ? preset.protocols : null;
   /* 只有「字段缺失」才允许沿用 preset；显式空数组是权威的「不支持」，不 fallback。 */
   const chosen = protocolState.kind === 'declared'
-    ? preferredProtocol(protocolState.list)
+    ? (manualFamily && protocolState.list.includes(manualFamily) ? manualFamily : preferredProtocol(protocolState.list))
     : protocolState.kind === 'absent'
-      ? preferredProtocol(presetProtocols)
+      ? (manualFamily || preferredProtocol(presetProtocols))
       : null;
   draft.protocolExplicitEmpty = protocolState.kind === 'explicit-empty';
 
@@ -834,16 +857,19 @@ function pickCandidate(upstreamId) {
     /* 声明过协议（一个或多个）就自动生成路由；多协议按偏好选一个，
        用户可通过协议按钮或直接改路由 ID 覆盖。 */
     const declared = protocolState.kind === 'declared';
+    const keptManual = chosen === manualFamily;
     draft.id = routeIdFor(draft.connectionId, upstreamId, chosen);
     draft.protocolConfirmed = true;
-    draft.protocolSource = declared ? 'discovery' : 'preset';
+    draft.protocolSource = keptManual ? 'manual' : declared ? 'discovery' : 'preset';
     draft.protocolOptions = declared ? protocolState.list : presetProtocols;
-    draft.protocolHint = declared && protocolState.list.length > 1
-      ? '上游声明 ' + protocolState.list.map(protocolLabel).join(' 与 ') + '，已按 ' + protocolLabel(chosen)
-        + ' 生成路由；可切换协议。'
-      : declared ? null
-        : '上游目录没有声明协议，当前按预设「' + (preset ? preset.name || preset.id : '') + '」的 '
-          + protocolLabel(chosen) + ' 填写；请确认后再保存。';
+    draft.protocolHint = keptManual
+      ? '已沿用你选择的 ' + protocolLabel(chosen) + ' 生成路由；上游模型 ID 保持不变。'
+      : declared && protocolState.list.length > 1
+        ? '上游声明 ' + protocolState.list.map(protocolLabel).join(' 与 ') + '，已按 ' + protocolLabel(chosen)
+          + ' 生成路由；可切换协议。'
+        : declared ? null
+          : '上游目录没有声明协议，当前按预设「' + (preset ? preset.name || preset.id : '') + '」的 '
+            + protocolLabel(chosen) + ' 填写；请确认后再保存。';
   } else {
     draft.id = '';
     draft.protocolConfirmed = false;
@@ -857,14 +883,17 @@ function pickCandidate(upstreamId) {
         + '请选择协议或手动填写路由 ID；协议决定调用 Chat 还是 Responses 接口。';
   }
   if (model) {
+    if (model.name) draft.name = model.name;
     if (model.contextWindow) draft.context = String(model.contextWindow);
     draft.contextLimit = model.contextWindow ? String(model.contextWindow) : '';
     if (typeof model.tools === 'boolean') draft.tools = model.tools;
     if (typeof model.reasoning === 'boolean') draft.reasoning = model.reasoning;
     if (Array.isArray(model.inputModalities)) draft.vision = model.inputModalities.includes('image');
     if (model.maxOutputTokens) draft.output = String(model.maxOutputTokens);
+    /* efforts 在草稿里始终是数组：fillEditorFields 与 toggleEffortChoice 都直接
+       对它调用 join/slice，写入字符串会让整个编辑器在下次渲染时抛错。 */
     if (Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length) {
-      draft.efforts = model.reasoningEfforts.join(', ');
+      draft.efforts = parseEfforts(model.reasoningEfforts).list;
     }
     /* 来源必须是这条候选自己的，不能一律写成 discovery：model-search 会把
        静态 preset 与最近一次成功 discovery 合并，两者的来源不同。优先用后端
@@ -1122,7 +1151,9 @@ function modelDraftFrom(model) {
     tools: typeof model.tools === 'boolean' ? model.tools : undefined,
     reasoning: model.reasoning === true,
     vision: hasVision(model),
-    efforts: (model.reasoningEfforts || []).slice(),
+    /* 旧档位可能是字符串（历史草稿或手改配置）：统一走 parseEfforts，
+       保证草稿里的 efforts 永远是数组，fillEditorFields 的 join 不会崩。 */
+    efforts: parseEfforts(model.reasoningEfforts).list,
     defaultEffort: model.defaultEffort || '',
     connectionId: model.connectionId || '',
     upstreamModelId: model.upstreamModelId || '',
@@ -1532,6 +1563,9 @@ function toggleEffortChoice(value) {
     if (editor.draft.defaultEffort && !list.includes(editor.draft.defaultEffort)) editor.draft.defaultEffort = '';
   }
   if (dom.mEfforts) dom.mEfforts.value = editor.draft.efforts.join(', ');
+  /* 默认档位的 select 要在这里同步成草稿值：readEditorFields 会把它读回草稿，
+     而被移除的那一档仍停在 select 里，于是刚清掉的默认档位又写回去了。 */
+  if (dom.mDefault) dom.mDefault.value = editor.draft.defaultEffort;
   readEditorFields();
   renderEditor();
 }
@@ -1613,6 +1647,9 @@ function renderEditor() {
   if (dom.mEffortGroup) dom.mEffortGroup.disabled = !reasoning;
   if (dom.mDefault) dom.mDefault.disabled = !reasoning || !parsed.list.length;
   setHidden(dom.mEffortField, !reasoning);
+  /* 默认档位是思考能力的一部分：隐藏整块 label，否则「默认档位」四个字会
+     留在表单里，指向一个被隐藏的下拉框。 */
+  setHidden(dom.mDefaultField || dom.mDefault, !reasoning);
 
   const { errors } = validateEditor(editor);
   const ready = configReady(state.data);
@@ -1623,6 +1660,9 @@ function renderEditor() {
 
   if (dom.modelErrors) {
     const messages = (editor.serverErrors || []).concat(errors);
+    /* 预算提示与保存错误共用这一个列表：它在 renderBudgetControls 里生成，
+       但必须由这里统一渲染，否则会被随后的 replaceChildren 吞掉。 */
+    if (editor.budgetNote) messages.unshift(editor.budgetNote);
     if (protocolPending) {
       messages.unshift(editor.draft.protocolHint
         || '上游没有声明协议，请手动填写路由 ID 确认协议后再保存。');
@@ -1764,13 +1804,8 @@ function renderBudgetControls(editor) {
       setText(dom.mContextHint, '上游上限未知：预设只是起点，保存后请按套餐实际能力确认。');
     }
   }
-  if (editor.budgetNote && dom.modelErrors && dom.modelErrors.hidden) {
-    /* 预设被拒的说明单独呈现，不与保存错误混在一起。 */
-    setHidden(dom.modelErrors, false);
-    const p = document.createElement('p');
-    p.textContent = editor.budgetNote;
-    dom.modelErrors.replaceChildren(p);
-  }
+  /* 预设被拒的说明只记在 editor.budgetNote 上，由 renderEditor 统一并入
+     model-errors：在这里直接写 DOM 会被随后那次 replaceChildren 覆盖。 */
 }
 
 
@@ -1899,6 +1934,7 @@ export {
   resetModelSignature,
   resolveAlias,
   routeIdFor,
+  routeIdPreservingProtocol,
   runConnectionCheck,
   runDiscovery,
   saveCatalogue,

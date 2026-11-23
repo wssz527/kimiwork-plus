@@ -136,6 +136,9 @@ func fakeEvaluate(expression, sessionID string) any {
 		return map[string]any{"asked": []any{"overlay"}, "failed": []any{}}
 	case strings.Contains(expression, "openKimiWorkTab"):
 		return map[string]any{"asked": true, "failed": false}
+	case expression == openSettingsProbeExpression:
+		// The read-only presence probe opens nothing.
+		return true
 	case strings.Contains(expression, "openSettings"):
 		return true
 	case strings.Contains(expression, "status()"):

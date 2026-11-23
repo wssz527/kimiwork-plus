@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -132,9 +133,16 @@ func (a *cdpActions) integrationRoute() (string, string) {
 }
 
 const (
-	actionCallTimeout   = 30 * time.Second
-	settingsOpenReads   = 6
-	settingsOpenStep    = 250 * time.Millisecond
+	actionCallTimeout = 30 * time.Second
+	// settingsReadyWindow bounds how long an import that opened the settings
+	// overlay waits for its preload API. The page target appears before the API
+	// mounts, and a slow start can take seconds; a fixed handful of reads
+	// rejected exactly that case.
+	settingsReadyWindow = 10 * time.Second
+	settingsReadyStep   = 250 * time.Millisecond
+	// overlayCloseTimeout bounds the close this call still owes after its own
+	// context ended.
+	overlayCloseTimeout = 5 * time.Second
 	maxActionExpression = 32 * 1024
 	// maxDirectExpression is bounded by the pipe's own frame limit: a direct
 	// import carries a whole catalog and its keys.
@@ -166,7 +174,7 @@ func (a *cdpActions) evaluateBounded(ctx context.Context, sessionID, expression 
 	}
 	value, err := result.evaluatedValue()
 	if err != nil {
-		return nil, errors.New("native_bridge_contract_changed")
+		return nil, fmt.Errorf("%w: %s", ErrRendererUnconfirmed, NativeContractChanged)
 	}
 	return value, nil
 }
@@ -174,7 +182,9 @@ func (a *cdpActions) evaluateBounded(ctx context.Context, sessionID, expression 
 // targets returns the allowlisted page targets with a session each.
 //
 // The allowlist is the released build's: the desktop's own pages, by pathname,
-// on app://localhost. A target outside it is never attached to.
+// on app://localhost. A target outside it is never attached to, and only a
+// `type: "page"` entry is a page: a worker or iframe that happens to carry the
+// same URL is not one.
 func (a *cdpActions) targets(ctx context.Context) ([]actionTarget, error) {
 	result, err := a.pipe.Send(ctx, "Target.getTargets", map[string]any{}, "", actionCallTimeout)
 	if err != nil {
@@ -182,15 +192,21 @@ func (a *cdpActions) targets(ctx context.Context) ([]actionTarget, error) {
 	}
 	rows, _ := result.Result["targetInfos"].([]any)
 	var out []actionTarget
+	present := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		target, ok := row.(map[string]any)
 		if !ok {
 			continue
 		}
 		targetID, _ := target["targetId"].(string)
+		kind, _ := target["type"].(string)
+		if targetID == "" || kind != "page" {
+			continue
+		}
+		present[targetID] = true
 		raw, _ := target["url"].(string)
 		path, ok := desktopPath(raw)
-		if targetID == "" || !ok {
+		if !ok {
 			continue
 		}
 		sessionID, err := a.session(ctx, targetID)
@@ -199,7 +215,77 @@ func (a *cdpActions) targets(ctx context.Context) ([]actionTarget, error) {
 		}
 		out = append(out, actionTarget{targetID: targetID, sessionID: sessionID, path: path, url: raw})
 	}
+	// A closed target's session id is dead. Keeping it would make every later
+	// call to that page answer "session not found" forever.
+	a.forgetSessionsExcept(present)
 	return out, nil
+}
+
+// forgetSessionsExcept drops cached sessions for targets that are gone.
+func (a *cdpActions) forgetSessionsExcept(present map[string]bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for targetID := range a.sessions {
+		if !present[targetID] {
+			delete(a.sessions, targetID)
+		}
+	}
+}
+
+func (a *cdpActions) session(ctx context.Context, targetID string) (string, error) {
+	a.mu.Lock()
+	existing := a.sessions[targetID]
+	a.mu.Unlock()
+	if existing != "" {
+		return existing, nil
+	}
+	return a.attach(ctx, targetID)
+}
+
+// attach issues one Target.attachToTarget and records the session.
+func (a *cdpActions) attach(ctx context.Context, targetID string) (string, error) {
+	result, err := a.pipe.Send(ctx, "Target.attachToTarget",
+		map[string]any{"targetId": targetID, "flatten": true}, "", actionCallTimeout)
+	if err != nil {
+		return "", err
+	}
+	sessionID, _ := result.Result["sessionId"].(string)
+	if sessionID == "" {
+		return "", ErrRendererUnconfirmed
+	}
+	a.mu.Lock()
+	a.sessions[targetID] = sessionID
+	a.mu.Unlock()
+	return sessionID, nil
+}
+
+// dropSession forgets one cached session so the next call re-attaches.
+func (a *cdpActions) dropSession(targetID string) {
+	a.mu.Lock()
+	delete(a.sessions, targetID)
+	a.mu.Unlock()
+}
+
+// evaluateTarget runs one read-only evaluation, re-attaching once when the
+// cached session turns out to be dead. A page that was reloaded takes its
+// session with it; that is a page to re-read, not a changed contract. The
+// refreshed session is written back into `target`, so the caller's later calls
+// use the live one.
+//
+// Only read-only probes go through here. A write is never replayed: a caller
+// that must confirm the effect re-reads the page instead.
+func (a *cdpActions) evaluateTarget(ctx context.Context, target *actionTarget, expression string) (any, error) {
+	value, err := a.evaluate(ctx, target.sessionID, expression)
+	if !errors.Is(err, ErrSessionInvalid) {
+		return value, err
+	}
+	a.dropSession(target.targetID)
+	sessionID, attachErr := a.attach(ctx, target.targetID)
+	if attachErr != nil {
+		return nil, attachErr
+	}
+	target.sessionID = sessionID
+	return a.evaluate(ctx, sessionID, expression)
 }
 
 type actionTarget struct {
@@ -222,28 +308,6 @@ func desktopPath(raw string) (string, bool) {
 		return parsed.Path, true
 	}
 	return "", false
-}
-
-func (a *cdpActions) session(ctx context.Context, targetID string) (string, error) {
-	a.mu.Lock()
-	existing := a.sessions[targetID]
-	a.mu.Unlock()
-	if existing != "" {
-		return existing, nil
-	}
-	result, err := a.pipe.Send(ctx, "Target.attachToTarget",
-		map[string]any{"targetId": targetID, "flatten": true}, "", actionCallTimeout)
-	if err != nil {
-		return "", err
-	}
-	sessionID, _ := result.Result["sessionId"].(string)
-	if sessionID == "" {
-		return "", ErrRendererUnconfirmed
-	}
-	a.mu.Lock()
-	a.sessions[targetID] = sessionID
-	a.mu.Unlock()
-	return sessionID, nil
 }
 
 // WorkSurface reads what each allowlisted page reports about itself.
@@ -362,9 +426,13 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	expression := importExpression(request.Token, request.URL, request.DisconnectDirectSourceID)
 	value, err := a.evaluate(ctx, settings.sessionID, expression)
 	if err != nil {
-		result := ImportResult{State: ImportStateContractChanged, Reason: NativeContractChanged, Opened: opened}
+		if errors.Is(err, ErrSessionInvalid) {
+			a.dropSession(settings.targetID)
+		}
+		state, reason, surfaced := classifyActionError(err)
+		result := ImportResult{State: state, Reason: reason, Opened: opened}
 		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, nil
+		return result, surfaced
 	}
 	answer, _ := value.(map[string]any)
 	result := ImportResult{Opened: opened}
@@ -439,12 +507,17 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 	}
 	value, err := a.evaluateBounded(ctx, settings.sessionID, expression, maxDirectExpression)
 	if err != nil {
-		result := ImportResult{State: ImportStateContractChanged, Reason: NativeContractChanged, Opened: opened}
+		if errors.Is(err, ErrSessionInvalid) {
+			a.dropSession(settings.targetID)
+		}
+		state, reason, surfaced := classifyActionError(err)
+		result := ImportResult{State: state, Reason: reason, Opened: opened}
 		if err.Error() == "native_bridge_expression_too_large" || errors.Is(err, ErrMessageTooLarge) {
 			result.State, result.Reason = ImportStateFailed, "direct_catalog_too_large"
+			surfaced = nil
 		}
 		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, nil
+		return result, surfaced
 	}
 	answer, _ := value.(map[string]any)
 	result := ImportResult{Opened: opened}
@@ -487,7 +560,13 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 // than an error when the page simply is not there; a transport error is
 // returned as an error. `opened` says whether this call opened the overlay, so
 // every early return can close it.
+//
+// A slow start is the normal case this has to survive: the Work page may still
+// be mounting when the import arrives, and the settings overlay exists as a
+// target before its preload API does. Both waits are bounded by one deadline and
+// are abandoned the moment the context or the pipe ends.
 func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool) (actionTarget, bool, *ImportResult, error) {
+	deadline := time.Now().Add(settingsReadyWindow)
 	targets, err := a.targets(ctx)
 	if err != nil {
 		return actionTarget{}, false, nil, err
@@ -500,27 +579,49 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 		}
 		work, ok := findPath(targets, "/kimi-agent.html")
 		if !ok {
-			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
+			// The Work page itself may still be mounting. It is waited for on the
+			// same deadline as the overlay, and never opened twice.
+			work, ok = a.waitForWorkTarget(ctx, &targets, deadline)
+			if !ok {
+				if err := a.transportEnded(ctx); err != nil {
+					return actionTarget{}, false, nil, err
+				}
+				return actionTarget{}, false, &ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
+			}
 		}
-		asked, err := a.evaluate(ctx, work.sessionID, openSettingsExpression)
-		if err != nil || asked != true {
-			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: "native_bridge_settings_open_refused"}, nil
+		asked, mounted, err := a.openSettingsWhenReady(ctx, work, deadline)
+		if err != nil {
+			return actionTarget{}, false, nil, err
+		}
+		if !asked {
+			reason := NativeWaitingSettings
+			if mounted {
+				reason = "native_bridge_settings_open_refused"
+			}
+			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: reason}, nil
 		}
 		opened = true
-		for attempt := 0; attempt < settingsOpenReads && !found; attempt++ {
-			if attempt > 0 {
-				select {
-				case <-time.After(settingsOpenStep):
-				case <-ctx.Done():
-					a.closeIfOpened(ctx, opened)
-					return actionTarget{}, opened, nil, ctx.Err()
-				}
+		for !found {
+			fresh, err := a.targets(ctx)
+			if err != nil {
+				a.closeIfOpened(ctx, opened)
+				return actionTarget{}, opened, nil, err
 			}
-			if fresh, err := a.targets(ctx); err == nil {
-				targets = fresh
-			}
+			targets = fresh
 			if candidate, ok := a.findImportTarget(ctx, targets); ok {
 				settings, found = candidate, true
+				break
+			}
+			if err := a.transportEnded(ctx); err != nil {
+				a.closeIfOpened(ctx, opened)
+				return actionTarget{}, opened, nil, err
+			}
+			if !time.Now().Before(deadline) {
+				break
+			}
+			if err := a.waitStep(ctx); err != nil {
+				a.closeIfOpened(ctx, opened)
+				return actionTarget{}, opened, nil, err
 			}
 		}
 	}
@@ -534,12 +635,117 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 	return settings, opened, nil, nil
 }
 
-// closeIfOpened closes the overlay this call opened and records the outcome.
+// waitForWorkTarget polls the allowlist until the Work page appears or the
+// deadline passes. It answers whether the page was found.
+func (a *cdpActions) waitForWorkTarget(ctx context.Context, targets *[]actionTarget, deadline time.Time) (actionTarget, bool) {
+	for {
+		if work, ok := findPath(*targets, "/kimi-agent.html"); ok {
+			return work, true
+		}
+		if !time.Now().Before(deadline) {
+			return actionTarget{}, false
+		}
+		if err := a.waitStep(ctx); err != nil {
+			return actionTarget{}, false
+		}
+		fresh, err := a.targets(ctx)
+		if err != nil {
+			if a.transportEnded(ctx) != nil {
+				return actionTarget{}, false
+			}
+			continue
+		}
+		*targets = fresh
+	}
+}
+
+// openSettingsWhenReady waits for the Work page's preload API to mount, then asks
+// it once. Mounting is waited for; a page that answers `false` refused, and a
+// refusal is never retried. A read-only presence probe is used for the wait so
+// the official call runs exactly once.
+func (a *cdpActions) openSettingsWhenReady(ctx context.Context, work actionTarget, deadline time.Time) (asked, mounted bool, err error) {
+	for {
+		value, err := a.evaluateTarget(ctx, &work, openSettingsProbeExpression)
+		if err != nil {
+			if errors.Is(err, ErrSessionInvalid) {
+				a.dropSession(work.targetID)
+				targets, refreshErr := a.targets(ctx)
+				if refreshErr != nil {
+					return false, false, refreshErr
+				}
+				replacement, ok := findPath(targets, "/kimi-agent.html")
+				if !ok || !time.Now().Before(deadline) {
+					return false, false, nil
+				}
+				work = replacement
+				if waitErr := a.waitStep(ctx); waitErr != nil {
+					return false, false, waitErr
+				}
+				continue
+			}
+			return false, false, err
+		}
+		if present, _ := value.(bool); present {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			// The API never mounted. That is not the page refusing.
+			return false, false, nil
+		}
+		if err := a.waitStep(ctx); err != nil {
+			return false, false, err
+		}
+	}
+	answer, err := a.evaluateTarget(ctx, &work, openSettingsExpression)
+	if err != nil {
+		return false, true, err
+	}
+	return answer == true, true, nil
+}
+
+// waitStep sleeps one poll interval, and ends early when the context or the pipe
+// is finished. A closed pipe must not be polled until a deadline: nothing will
+// ever answer it.
+func (a *cdpActions) waitStep(ctx context.Context) error {
+	timer := time.NewTimer(settingsReadyStep)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return a.transportEnded(ctx)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.pipe.Done():
+		return fmt.Errorf("%w: %s", ErrPipeClosed, a.pipe.closeReason())
+	}
+}
+
+// transportEnded answers the reason no further poll can succeed, or nil.
+func (a *cdpActions) transportEnded(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if closed, reason := a.pipe.Closed(); closed {
+		return fmt.Errorf("%w: %s", ErrPipeClosed, reason)
+	}
+	return nil
+}
+
+// closeIfOpened closes the overlay this call opened.
 func (a *cdpActions) closeIfOpened(ctx context.Context, opened bool) {
 	if !opened {
 		return
 	}
-	_, _ = a.CloseWorkSettings(ctx)
+	closeCtx, cancel := closeContext(ctx)
+	defer cancel()
+	_, _ = a.CloseWorkSettings(closeCtx)
+}
+
+// closeContext keeps a close going after the caller's context ended: leaving an
+// overlay up because the import was cancelled would strand a window the user did
+// not ask for. Cancellation is dropped (values are kept) and the close gets its
+// own short budget; it still only touches this call's own overlay.
+func closeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), overlayCloseTimeout)
 }
 
 // closeIfOpenedInto is closeIfOpened with the answer written into the result, so
@@ -548,15 +754,49 @@ func (a *cdpActions) closeIfOpenedInto(ctx context.Context, opened bool, result 
 	if !opened || result == nil {
 		return
 	}
-	closed, err := a.CloseWorkSettings(ctx)
+	closeCtx, cancel := closeContext(ctx)
+	defer cancel()
+	closed, err := a.CloseWorkSettings(closeCtx)
 	value := err == nil && closed.OK
 	result.Closed = &value
 }
 
+// classifyActionError turns one failed page call into the answer a caller can
+// act on. Only a real protocol/contract mismatch is `contract-changed`: a
+// deadline, a cancellation, a reloaded page and a dead transport are different
+// facts and are reported as such.
+//
+// `surfaced` is the error the caller must still see. A transport or budget
+// failure is never swallowed into a nil error; a page state that is described
+// completely by the result (a reload) is.
+func classifyActionError(err error) (state, reason string, surfaced error) {
+	switch {
+	case err == nil:
+		return ImportStateFailed, "native_bridge_failed", nil
+	case errors.Is(err, context.Canceled):
+		return ImportStateFailed, "native_bridge_cancelled", err
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, ErrPipeTimeout):
+		return ImportStateFailed, ErrBridgeTimeout.Error(), err
+	case errors.Is(err, ErrPipeClosed):
+		return ImportStateFailed, ErrBridgeUnavailable.Error(), err
+	case errors.Is(err, ErrSessionInvalid):
+		// The page reloaded under the call. The write may or may not have landed,
+		// so this is reported, never retried here and never called applied.
+		return ImportStateFailed, "native_import_page_reloaded", nil
+	case errors.Is(err, ErrProtocolError), errors.Is(err, ErrRendererUnconfirmed):
+		return ImportStateContractChanged, NativeContractChanged, nil
+	}
+	return ImportStateFailed, safeReason(err), err
+}
+
 // findImportTarget looks for the page that carries the import API.
+//
+// The probe is read-only, so a dead session is re-attached once and the same
+// question is asked again: a page that reloaded while mounting is a page to
+// re-read, not a page that lost its API.
 func (a *cdpActions) findImportTarget(ctx context.Context, targets []actionTarget) (actionTarget, bool) {
 	for _, target := range targets {
-		value, err := a.evaluate(ctx, target.sessionID, importProbeExpression)
+		value, err := a.evaluateTarget(ctx, &target, importProbeExpression)
 		if err != nil {
 			// A page still mounting answers nothing yet; it is not evidence of
 			// absence.
@@ -710,6 +950,13 @@ return typeof api?.importByokModels === "function" || (typeof sources?.list === 
 var api = globalThis.kimiAgentAPI;
 if (!api || typeof api.openSettings !== "function") return false;
 try { api.openSettings("general"); return true; } catch (error) { return false; }
+})()`
+
+	// openSettingsProbeExpression only reports whether the call exists. It is the
+	// wait condition before the real call runs exactly once.
+	openSettingsProbeExpression = `(function(){
+var api = globalThis.kimiAgentAPI;
+return typeof api?.openSettings === "function";
 })()`
 
 	closeExpression = `(function(){

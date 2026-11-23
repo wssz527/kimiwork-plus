@@ -53,7 +53,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	} else if normalizeNativeURL(intent.URL) != normalizeNativeURL(settings.GatewayURL) {
 		return "", ""
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
 	scope := sha256Hex(user)
 	imported := false
@@ -69,7 +69,13 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 		if ctx.Err() != nil {
 			return "pending", reason
 		}
-		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
+		if ok, retry := accountStillTheirs(ctx, surface, home, user); !ok {
+			if retry {
+				if ctx.Err() != nil {
+					return "pending", reason
+				}
+				continue
+			}
 			return "failed", NativeAccountChanged
 		}
 		catalog, pending, needsImport := native.accountCatalog(settings, scope)
@@ -109,7 +115,13 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 		if !accountPageHasModels(ctx, surface, catalog) {
 			continue
 		}
-		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
+		if ok, retry := accountStillTheirs(ctx, surface, home, user); !ok {
+			if retry {
+				if ctx.Err() != nil {
+					return "pending", reason
+				}
+				continue
+			}
 			return "failed", NativeAccountChanged
 		}
 		integration := c.reconcile(true, scope)
@@ -117,7 +129,13 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			reason = firstNonEmpty(integration.Reason, "account_models_not_verified")
 			continue
 		}
-		if current, verified := accountPageUser(ctx, surface); !verified || current != user || !accountConfigMatches(home, user) {
+		if ok, retry := accountStillTheirs(ctx, surface, home, user); !ok {
+			if retry {
+				if ctx.Err() != nil {
+					return "pending", reason
+				}
+				continue
+			}
 			return "failed", NativeAccountChanged
 		}
 		c.mu.Lock()
@@ -161,7 +179,7 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 		return result
 	}
 	ready, err := runtime.accountRuntimeReady(ctx, page, false)
-	_ = runtime.accountStopRuntimeWatch(ctx, page)
+	_ = runtime.accountStopRuntimeWatch(context.WithoutCancel(ctx), page)
 	if err != nil || !ready {
 		return result
 	}
@@ -183,6 +201,38 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 	result.Adopted = true
 	c.integration = &result
 	return result
+}
+
+// accountStillTheirs reports whether the page and the profile still belong to
+// the account this sync was started for.
+//
+//	true,  _      the page reports this account and the config holds it
+//	false, true   nothing disproved the account, but nothing confirmed it: the
+//	              page could not be read, or the config was being rewritten by
+//	              the official generator at that moment. Retry.
+//	false, false  the page reports a different account
+//
+// `account_changed` is only answered from the last case. A timeout, a reloaded
+// page or a config that is momentarily absent is a state to retry, not a switch
+// the user never made.
+func accountStillTheirs(ctx context.Context, surface accountSurface, home, user string) (ok bool, retry bool) {
+	current, verified := accountPageUser(ctx, surface)
+	if !verified || current == "" {
+		return false, true
+	}
+	if current != user {
+		return false, false
+	}
+	matches, readable := accountConfigState(home, user)
+	if !readable {
+		// The generated config is being rewritten; the identity the page reports
+		// is still this account, so this is a retry and not a mismatch.
+		return false, true
+	}
+	if !matches {
+		return false, false
+	}
+	return true, false
 }
 
 func accountPageHasModels(ctx context.Context, surface accountSurface, want []accountCatalogEntry) bool {

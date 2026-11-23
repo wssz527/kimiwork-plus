@@ -503,6 +503,7 @@ function renderOverview(data) {
   renderRecent(Array.isArray(metrics.recent) ? metrics.recent : []);
   renderRoutingFacts(data);
   renderCompatibility(data);
+  renderDiagnosticsExport(data);
   renderOverviewSubagents(data);
   renderOverviewIssue(data);
   renderOverviewToday();
@@ -746,6 +747,61 @@ function renderCompatibility(data) {
   if (guards.modelSyncWriteBlocked) blocked.push('已停止模型同步写入');
   if (guards.accountSwitchWriteBlocked) blocked.push('已停止账号切换写入');
   setText($('diag-compat-guards'), blocked.length ? blocked.join('；') + '，其余功能照常运行。' : '所有功能正常，无需停止写入。');
+}
+
+/* operationLog 是可选诊断：缺失或不可用时，导出仍然可用，只说明没有数量。 */
+function diagnosticsOperationLogNote(data) {
+  const log = data?.diagnostics?.operationLog;
+  if (!log || typeof log !== 'object') return '导出仍可用；当前状态未提供运行记录数量。';
+  if (log.available === false) {
+    const reason = typeof log.reason === 'string' && log.reason ? '（' + reasonText(log.reason) + '）' : '';
+    return '运行记录当前不可用' + reason + '；导出仍会生成版本与配置信息。';
+  }
+  const parts = [];
+  if (Number.isFinite(log.retained)) parts.push('已留存 ' + fmtCount(log.retained) + ' 条运行记录');
+  if (Number.isFinite(log.limit) && log.limit > 0) parts.push('上限 ' + fmtCount(log.limit) + ' 条');
+  if (typeof log.lastAt === 'string' && log.lastAt) parts.push('最近记录 ' + fmtTime(log.lastAt));
+  else if (typeof log.lastAt === 'number' && log.lastAt > 0) parts.push('最近记录 ' + fmtTime(log.lastAt));
+  return parts.length ? parts.join(' · ') : '导出仍可用；当前状态未提供运行记录数量。';
+}
+
+function renderDiagnosticsExport(data) {
+  const button = $('diagnostics-export');
+  const note = $('diagnostics-export-note');
+  const errors = $('diagnostics-export-errors');
+  if (!button) return;
+  setText(note, diagnosticsOperationLogNote(data));
+  setText(errors, state.diagnosticsExportError || '');
+  setHidden(errors, !state.diagnosticsExportError);
+  button.disabled = state.diagnosticsExporting === true;
+  setText(button, state.diagnosticsExporting ? '正在导出…' : '导出诊断日志');
+}
+
+/* 导出只做一次只读请求；服务端已脱敏的对象原样落成 JSON 文件。 */
+async function exportDiagnostics() {
+  if (state.diagnosticsExporting) return false;
+  state.diagnosticsExporting = true;
+  state.diagnosticsExportError = '';
+  renderDiagnosticsExport(state.data);
+  try {
+    const payload = await request(API.diagnosticsExport);
+    const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'kimi-work-plus-diagnostics.json';
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('已导出脱敏诊断日志；不含 API Key、令牌或对话正文。', 'ok');
+    return true;
+  } catch (error) {
+    state.diagnosticsExportError = '导出失败：' + (error?.message || '请稍后重试。');
+    showToast(state.diagnosticsExportError, 'error');
+    return false;
+  } finally {
+    state.diagnosticsExporting = false;
+    renderDiagnosticsExport(state.data);
+  }
 }
 
 function renderOverviewToday() {
@@ -1837,6 +1893,7 @@ function resetRecentSignature() { recentSignature = ''; }
 
 export {
   chooseIntegrationMode,
+  exportDiagnostics,
   directImportComplete,
   directModeState,
   directRestartRequired,

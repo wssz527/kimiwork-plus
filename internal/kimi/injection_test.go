@@ -24,12 +24,35 @@ type fakePage struct {
 
 	// actions models the official preload API the CDP actions call. It is off by
 	// default so every existing test keeps the behaviour it was written for.
-	actions      bool
-	importAPI    bool
-	hideSettings bool
-	settingsOpen bool
-	importReply  map[string]any
-	closeFails   bool
+	actions                bool
+	importAPI              bool
+	hideSettings           bool
+	settingsOpen           bool
+	settingsAvailableAfter int
+	settingsProbeReads     int
+	// workAvailableAfter hides every desktop target for the first N target
+	// reads, so the Work page can be modelled as still mounting.
+	workAvailableAfter int
+	targetReads        int
+	// openAPIAvailableAfter withholds kimiAgentAPI.openSettings for the first N
+	// probes, so the Work page's preload can be modelled as still mounting.
+	openAPIAvailableAfter int
+	openAPIProbes         int
+	// workerWorkURL adds a non-page target that carries the Work URL.
+	workerWorkURL bool
+	// replaceWorkTarget models WebContents being recreated while the page mounts.
+	replaceWorkTarget bool
+	// expireFirstProbe answers the settings page's first import probe with a
+	// session-invalid protocol error, as a page that reloaded would.
+	expireFirstProbe bool
+	probeExpired     bool
+	attachCalls      int
+	// noShellAPI makes the Work page report no kimiAgentAPI at all.
+	noShellAPI bool
+	// importBlockFor holds the import call for that long before answering.
+	importBlockFor time.Duration
+	importReply    map[string]any
+	closeFails     bool
 
 	// observations
 	methods      []string
@@ -70,12 +93,27 @@ func (p *fakePage) handle(write func(string)) func(string) {
 		case "Target.getTargets":
 			p.mu.Lock()
 			settingsOpen := p.settingsOpen
+			p.targetReads++
+			reads := p.targetReads
+			hideWork := p.workAvailableAfter > 0 && reads <= p.workAvailableAfter
+			workerWork := p.workerWorkURL
+			workTarget := "work-1"
+			if p.replaceWorkTarget {
+				workTarget = "work-2"
+			}
 			p.mu.Unlock()
 			targets := []any{
-				map[string]any{"targetId": "work-1", "type": "page", "url": "app://localhost/kimi-agent.html"},
 				map[string]any{"targetId": "chat-1", "type": "page", "url": "https://www.kimi.com/chat/abc-123"},
 				map[string]any{"targetId": "evil", "type": "page", "url": "https://www.kimi.com.evil.test/chat/abc"},
 				map[string]any{"targetId": "worker", "type": "worker", "url": "https://www.kimi.com/chat/abc"},
+			}
+			if !hideWork {
+				targets = append([]any{map[string]any{"targetId": workTarget, "type": "page",
+					"url": "app://localhost/kimi-agent.html"}}, targets...)
+			}
+			if workerWork {
+				targets = append(targets, map[string]any{"targetId": "worker-work", "type": "worker",
+					"url": "app://localhost/kimi-agent.html"})
 			}
 			// The settings overlay only exists as a target once it is open, which
 			// is what a real desktop does: the page is created by openSettings.
@@ -85,7 +123,11 @@ func (p *fakePage) handle(write func(string)) func(string) {
 			}
 			result["targetInfos"] = targets
 		case "Target.attachToTarget":
-			if p.attachFailure {
+			p.mu.Lock()
+			p.attachCalls++
+			failure := p.attachFailure
+			p.mu.Unlock()
+			if failure {
 				result = nil
 			} else {
 				result["sessionId"] = "session-" + request.Params["targetId"].(string)
@@ -138,7 +180,18 @@ func (p *fakePage) handle(write func(string)) func(string) {
 				}
 				result["result"] = reply
 			case p.actions:
-				result["result"] = p.actionReply(request.SessionID, expression)
+				value := p.actionReply(request.SessionID, expression)
+				if _, invalid := value.(sessionInvalidReply); invalid {
+					// A CDP error object, not a value: the session is gone. The
+					// caller must classify this as a dead session, not as a page
+					// that answered something unexpected.
+					response, _ := json.Marshal(map[string]any{"id": request.ID,
+						"error":     map[string]any{"code": -32001, "message": "Session with given id not found."},
+						"sessionId": request.SessionID})
+					write(string(response))
+					return
+				}
+				result["result"] = value
 			default:
 				result["result"] = nil
 			}
@@ -165,12 +218,33 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 		// Only the settings overlay carries the import API. The Work view has the
 		// settings *open* call; a fake that answered both from every page would
 		// hide the ordering the actions depend on.
-		return p.importAPI && sessionID == "session-settings"
+		p.mu.Lock()
+		expire := p.expireFirstProbe && !p.probeExpired && sessionID == "session-settings"
+		if expire {
+			p.probeExpired = true
+		}
+		p.mu.Unlock()
+		if expire {
+			// A page that reloaded under the probe: the protocol answers that the
+			// session is gone, which the actions must recover from by re-attaching.
+			return sessionInvalidReply{}
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if sessionID == "session-settings" {
+			p.settingsProbeReads++
+		}
+		return p.importAPI && sessionID == "session-settings" &&
+			(p.settingsAvailableAfter == 0 || p.settingsProbeReads >= p.settingsAvailableAfter)
 	case strings.Contains(expression, "importByokModels"):
 		p.mu.Lock()
 		p.importCalls++
 		reply := p.importReply
+		hold := p.importBlockFor
 		p.mu.Unlock()
+		if hold > 0 {
+			time.Sleep(hold)
+		}
 		if reply == nil {
 			reply = map[string]any{"ok": true, "models": float64(2), "requiresRestart": false}
 		}
@@ -189,6 +263,21 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 		return map[string]any{"asked": []any{"overlay"}, "failed": []any{}}
 	case strings.Contains(expression, "openKimiWorkTab"):
 		return map[string]any{"asked": true, "failed": false}
+	case expression == openSettingsProbeExpression:
+		// The read-only presence probe opens nothing and must not be counted as
+		// an open call.
+		if p.replaceWorkTarget && sessionID == "session-work-1" {
+			return sessionInvalidReply{}
+		}
+		p.mu.Lock()
+		p.openAPIProbes++
+		probes := p.openAPIProbes
+		noShell := p.noShellAPI
+		p.mu.Unlock()
+		if noShell {
+			return false
+		}
+		return p.openAPIAvailableAfter == 0 || probes >= p.openAPIAvailableAfter
 	case strings.Contains(expression, "openSettings"):
 		p.mu.Lock()
 		p.openCalls++
@@ -197,9 +286,27 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 		return true
 	case strings.Contains(expression, "visibilityState"):
 		return map[string]any{"visible": true, "painted": true, "text": 10, "open": false}
+	case expression == liveAccountAPIProbeExpression || expression == liveClawAPIProbeExpression:
+		p.mu.Lock()
+		noShell := p.noShellAPI
+		importAPI := p.importAPI
+		p.mu.Unlock()
+		if expression == liveAccountAPIProbeExpression {
+			// The Work shell answers identity. `mounted` is what separates a page
+			// whose preload has not loaded yet from a build without the API.
+			return map[string]any{"mounted": !noShell,
+				"getUserProfile": !noShell, "getByokProfile": !noShell,
+				"byokSourcesList": !noShell, "modelImportApi": !noShell && importAPI}
+		}
+		return map[string]any{"mounted": !noShell, "byokSourcesList": !noShell,
+			"modelImportApi": !noShell && importAPI}
 	}
 	return nil
 }
+
+// sessionInvalidReply is returned by the fake's page when the expression must be
+// answered with a CDP protocol error rather than a value.
+type sessionInvalidReply struct{}
 
 // harness wires a Pipe to a fake page through two pipes.
 type harness struct {

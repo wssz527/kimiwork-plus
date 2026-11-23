@@ -207,10 +207,16 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 
 	// Account changes require a confirmed import or a verified switch. Both
 	// require the caller's exact profile and preserve every ownership gate.
+	//
+	// The gate is the account, not the address: a confirmed import arrives after
+	// the gateway moved (a new port is the usual case), so requiring the old
+	// intent to already name the new URL would refuse exactly the import that
+	// proves the new address works. The profile's own URL is still checked
+	// against the target below, and every credential/store gate still applies.
 	rebind := false
 	if intent != nil && intent.AccountDigest != "" && scopeDigest != "" && intent.AccountDigest != scopeDigest {
 		rebind = options.AllowAccountRebind && selectedKey != "" && sha256Hex(selectedKey) == scopeDigest &&
-			intent.Active && normalizeNativeURL(intent.URL) == target
+			intent.Active
 		if !rebind {
 			return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed"}
 		}

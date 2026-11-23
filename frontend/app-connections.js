@@ -1,7 +1,7 @@
 import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, syncState } from './app-overview.js';
-import { adoptState, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
+import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
 
 /* ---------- connection helpers ---------- */
 
@@ -533,6 +533,109 @@ function providerPreset(id) {
   return providerPresets().find((preset) => preset && preset.id === id) || null;
 }
 
+/* 后端只接受 `^\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?$` 的检查时间与 https 地址；
+   预设资料里的值先按同一规则筛一遍，避免把不合法的来源写进保存请求。 */
+const SOURCE_STAMP_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?$/;
+
+function sourceURLOf(value) {
+  if (typeof value !== 'string' || !value) return '';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function sourceStampOf(value) {
+  return typeof value === 'string' && SOURCE_STAMP_PATTERN.test(value) ? value : '';
+}
+
+/* 预设模型自身的 source 没有 kind；这里只取预设资料自己的地址与检查时间，
+   绝不把上游 /models 的 URL 当成预设来源。预设没写地址时只保留 kind。 */
+function presetMetadataSource(row) {
+  const source = row && typeof row === 'object' && row.source && typeof row.source === 'object' ? row.source : {};
+  const url = sourceURLOf(source.url);
+  const checkedAt = sourceStampOf(source.checkedAt);
+  return { kind: 'preset', ...(url ? { url } : {}), ...(checkedAt ? { checkedAt } : {}) };
+}
+
+/* 预设目录在 providers.json 里有两种形状：presets[].models 用 id/name，
+   details[presetId].models 用 upstreamModelId/label。向导只按同一条上游 ID
+   对应，这里统一成 id/upstreamModelId/name，避免两处比较规则各写一遍。 */
+function presetOnboardModels(presetId) {
+  if (!presetId) return [];
+  const preset = providerPreset(presetId);
+  const detail = state.providers && state.providers.details ? state.providers.details[presetId] : null;
+  const rows = preset && Array.isArray(preset.models) && preset.models.length
+    ? preset.models
+    : (detail && Array.isArray(detail.models) ? detail.models : []);
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return null;
+    const upstreamModelId = typeof row.upstreamModelId === 'string' && row.upstreamModelId
+      ? row.upstreamModelId
+      : typeof row.id === 'string' && row.id ? row.id : '';
+    if (!upstreamModelId) return null;
+    return {
+      ...row,
+      id: typeof row.id === 'string' && row.id ? row.id : upstreamModelId,
+      upstreamModelId,
+      source: row.source || preset?.source || detail?.source,
+      name: typeof row.name === 'string' && row.name
+        ? row.name
+        : (typeof row.label === 'string' ? row.label : ''),
+    };
+  }).filter(Boolean);
+}
+
+/* 上游 /models 只回答它自己声明的字段；缺的字段回退到当前预设里同一条上游
+   ID 的已知资料。上游已有的值（包括 false 与空数组）一律优先，预设里的
+   "unknown" 不是数组，因此不会被当成档位。 */
+function mergeOnboardPresetMetadata(candidate, preset) {
+  if (!candidate || !preset) return candidate;
+  const merged = { ...candidate };
+  const blank = (value) => typeof value !== 'string' || !value.trim();
+  const positive = (value) => Number(value) > 0;
+  let used = false;
+  const fill = (key, value) => {
+    if (value === undefined) return;
+    merged[key] = value;
+    used = true;
+  };
+  if (blank(merged.name) && !blank(preset.name)) merged.name = preset.name;
+  if (!positive(merged.contextWindow) && positive(preset.contextWindow)) fill('contextWindow', Number(preset.contextWindow));
+  const knownContext = positive(merged.contextWindow) ? Number(merged.contextWindow) : 0;
+  if (!positive(merged.maxOutputTokens) && positive(preset.maxOutputTokens)
+    && (!knownContext || Number(preset.maxOutputTokens) <= knownContext)) {
+    fill('maxOutputTokens', Number(preset.maxOutputTokens));
+  }
+  if (typeof merged.tools !== 'boolean' && typeof preset.tools === 'boolean') fill('tools', preset.tools);
+  if (typeof merged.reasoning !== 'boolean' && typeof preset.reasoning === 'boolean') fill('reasoning', preset.reasoning);
+  if (!Array.isArray(merged.inputModalities) && Array.isArray(preset.inputModalities) && preset.inputModalities.length) {
+    fill('inputModalities', preset.inputModalities.slice());
+  }
+  /* 上游明确说不支持思考时，不把预设档位带进一条 reasoning:false 的行。 */
+  if (merged.reasoning !== false && !Array.isArray(merged.reasoningEfforts)
+    && Array.isArray(preset.reasoningEfforts) && preset.reasoningEfforts.length) {
+    fill('reasoningEfforts', preset.reasoningEfforts.slice());
+  }
+  if (blank(merged.description) && !blank(preset.description)) merged.description = preset.description;
+  if (used) {
+    /* 预设资料自己的来源没有 kind，也绝不能用上游 /models 的地址顶替：
+       被补全的字段只能标成 preset，并用预设文档自己的 url/checkedAt。 */
+    merged.metadataSource = presetMetadataSource(preset);
+    if (!merged.source) {
+      const ownURL = sourceURLOf(preset.source?.url);
+      const ownStamp = sourceStampOf(preset.source?.checkedAt);
+      if (ownURL || ownStamp) {
+        merged.source = { ...(ownURL ? { url: ownURL } : {}), ...(ownStamp ? { checkedAt: ownStamp } : {}) };
+      }
+    }
+  }
+  return merged;
+}
+
 /* 已知原因有中文说明；未知错误码也给一句可读的话，不把内部标识直接甩给用户。 */
 function discoveryReasonText(code) {
   if (typeof code !== 'string' || !code) return '';
@@ -670,38 +773,43 @@ function fillOnboardForm() {
         checkedAt: null,
         modelCount: models.length,
         saved: true,
-        models: models.map((model) => {
-          const upstreamModelId = model.upstreamModelId || model.id;
-          /* 已保存行自己的协议声明优先；后端裁剪掉时（保存契约只保留单选
-             protocol）按同一个上游 ID 从供应商预设恢复真实声明，绝不再缩成
-             「保存时选的那一个协议」。 */
-          const declared = declaredProtocolsFor(model, target, upstreamModelId);
-          const savedProtocol = protocolList([model.protocol])[0] || null;
-          return {
-            id: upstreamModelId,
-            name: model.name || '',
-            upstreamModelId,
-            protocols: declared,
-            protocolOptions: protocolChoicesFor(declared, limits),
-            protocol: savedProtocol || (declared.length ? preferredProtocol(declared) : null),
-            contextWindow: model.contextWindow,
-            maxOutputTokens: model.maxOutputTokens,
-            /* 已保存行自己的声明照原样带入：没写过就仍是未知，不补 false。 */
-            tools: typeof model.tools === 'boolean' ? model.tools : undefined,
-            reasoning: typeof model.reasoning === 'boolean' ? model.reasoning : undefined,
-            vision: Array.isArray(model.inputModalities) ? model.inputModalities.includes('image') : undefined,
-            efforts: Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : [],
-            checkedAt: model.metadataSource && model.metadataSource.checkedAt ? model.metadataSource.checkedAt : null,
-            sourceURL: model.metadataSource && model.metadataSource.url ? model.metadataSource.url : null,
-            metadataKind: model.metadataSource?.kind || 'manual',
-            selected: true,
-          };
-        }),
+        models: models.map((model) => savedOnboardModelRow(model, target, limits)),
       };
       if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, '已从保存的目录载入 ' + fmtCount(models.length) + ' 个模型。');
     }
   }
   fillOnboardPresets();
+}
+
+/* 已保存模型回到向导时保留名称、能力、档位、默认档位与来源；协议声明按
+   同一个上游 ID 恢复，绝不再缩成「保存时选的那一个协议」。 */
+function savedOnboardModelRow(model, target, limits) {
+  const upstreamModelId = model.upstreamModelId || model.id;
+  const declared = declaredProtocolsFor(model, target, upstreamModelId);
+  const savedProtocol = protocolList([model.protocol])[0] || null;
+  return {
+    key: model.id || upstreamModelId,
+    id: upstreamModelId,
+    name: model.name || '',
+    upstreamModelId,
+    protocols: declared,
+    protocolOptions: protocolChoicesFor(declared, limits),
+    protocol: savedProtocol || (declared.length ? preferredProtocol(declared) : null),
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxOutputTokens,
+    /* 已保存行自己的声明照原样带入：没写过就仍是未知，不补 false。 */
+    tools: typeof model.tools === 'boolean' ? model.tools : undefined,
+    reasoning: typeof model.reasoning === 'boolean' ? model.reasoning : undefined,
+    vision: Array.isArray(model.inputModalities) ? model.inputModalities.includes('image') : undefined,
+    efforts: Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : [],
+    defaultEffort: typeof model.defaultEffort === 'string' && model.defaultEffort ? model.defaultEffort : undefined,
+    /* 已保存行自己的上限必须带回：没有它，重新保存会把它当成「清空」写 null。 */
+    contextLimit: positiveInteger(model.contextLimit),
+    checkedAt: model.metadataSource && model.metadataSource.checkedAt ? model.metadataSource.checkedAt : null,
+    sourceURL: model.metadataSource && model.metadataSource.url ? model.metadataSource.url : null,
+    metadataKind: model.metadataSource?.kind || 'manual',
+    selected: true,
+  };
 }
 
 function onboardModelRows() {
@@ -722,6 +830,8 @@ function filteredOnboardModels() {
 
 /* 两个协议是本产品唯一支持的两种接口；可选集合按这个顺序展示，与首设页一致。 */
 const PROTOCOL_CHOICES = ['chat', 'responses'];
+
+const STANDARD_ONBOARD_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function protocolList(value) {
   return Array.isArray(value)
@@ -779,10 +889,10 @@ function assignOnboardProtocol(target, protocol) {
   return true;
 }
 
-function chooseOnboardProtocol(id, protocol) {
-  const target = onboardModelRows().find((entry) => entry.id === id);
+function chooseOnboardProtocol(key, protocol) {
+  const target = onboardRowByKey(key);
   if (!assignOnboardProtocol(target, protocol)) return;
-  state.onboard.touched = true;
+  markOnboardEdited();
   renderOnboard();
 }
 
@@ -791,7 +901,7 @@ function toggleFilteredOnboardModels() {
   if (!rows.length) return;
   const selected = !rows.every((row) => row.selected === true);
   rows.forEach((row) => { row.selected = selected; });
-  state.onboard.touched = true;
+  markOnboardEdited();
   renderOnboard();
 }
 
@@ -799,13 +909,16 @@ function applyOnboardBatchProtocol(protocol) {
   const rows = selectedOnboardModels();
   let changed = 0;
   rows.forEach((row) => {
-    if (assignOnboardProtocol(row, protocol)) changed++;
+    if (assignOnboardProtocol(row, protocol)) {
+      row.metadataKind = 'manual';
+      changed++;
+    }
   });
   if (!changed) {
     showToast('已选模型都不允许这个接口协议；请按各行声明调整。', 'error');
     return;
   }
-  state.onboard.touched = true;
+  markOnboardEdited();
   renderOnboard();
   const skipped = rows.length - changed;
   showToast('已为 ' + fmtCount(changed) + ' 个已选模型选择 ' + protocolLabel(protocol)
@@ -813,8 +926,8 @@ function applyOnboardBatchProtocol(protocol) {
 }
 
 function applyOnboardBatchContext() {
-  const value = Number(dom.onboardBatchContext?.value || '');
-  if (!Number.isSafeInteger(value) || value <= 0) {
+  const value = positiveInteger(dom.onboardBatchContext?.value);
+  if (!value) {
     showToast('请输入正整数的上下文窗口；不知道时请留空并向上游确认。', 'error');
     return;
   }
@@ -824,7 +937,7 @@ function applyOnboardBatchContext() {
     row.contextWindow = value;
     row.metadataKind = 'manual';
   });
-  state.onboard.touched = true;
+  markOnboardEdited();
   renderOnboard();
   showToast('已将 ' + fmtCount(rows.length) + ' 个已选模型的上下文窗口设为 ' + fmtTokens(value) + '。', 'ok');
 }
@@ -858,16 +971,52 @@ function savedOnboardRow(id) {
   return rows.find((row) => row && !row.legacy && row.id === id) || null;
 }
 
+/* 同一上游模型可以同时有 Chat 与 Responses 两条已保存路由；DOM 属性与草稿
+   查找不能用上游 ID 当键，否则编辑一行会写到另一行。key 在行创建时固定，
+   之后不再随编辑变化。 */
+function onboardRowKey(row) {
+  if (!row) return '';
+  return row.key || row.id || row.upstreamModelId || '';
+}
+
+function onboardRowByKey(key) {
+  return onboardModelRows().find((entry) => onboardRowKey(entry) === key) || null;
+}
+
+function onboardRowSource(candidate) {
+  const meta = candidate && candidate.metadataSource && typeof candidate.metadataSource === 'object'
+    ? candidate.metadataSource : null;
+  if (meta) {
+    return {
+      checkedAt: sourceStampOf(meta.checkedAt) || null,
+      sourceURL: sourceURLOf(meta.url) || null,
+      metadataKind: meta.kind === 'preset' || meta.kind === 'manual' ? meta.kind : 'discovery',
+    };
+  }
+  const source = candidate && candidate.source && typeof candidate.source === 'object' ? candidate.source : null;
+  return {
+    checkedAt: source ? (sourceStampOf(source.checkedAt) || null) : null,
+    sourceURL: source ? (sourceURLOf(source.url) || null) : null,
+    metadataKind: 'discovery',
+  };
+}
+
 function onboardRowFrom(candidate, { connection = null } = {}) {
   const protocols = protocolList(candidate && candidate.protocols);
-  const protocol = protocols.length ? preferredProtocol(protocols) : null;
+  const protocolOptions = protocolChoicesFor(protocols, connectionProtocolLimits(connection));
+  /* 默认协议必须落在用户实际可选项里：连接限制了协议时，上游声明的首选
+     协议可能不可用。 */
+  const protocol = protocolOptions.length
+    ? (protocolOptions.includes(preferredProtocol(protocols)) ? preferredProtocol(protocols) : protocolOptions[0])
+    : null;
   return {
+    key: candidate.id,
     id: candidate.id,
     name: candidate.name || '',
     description: candidate.description || '',
     upstreamModelId: candidate.id,
     protocols,
-    protocolOptions: protocolChoicesFor(protocols, connectionProtocolLimits(connection)),
+    protocolOptions,
     protocol,
     contextWindow: candidate.contextWindow,
     maxOutputTokens: candidate.maxOutputTokens,
@@ -875,45 +1024,130 @@ function onboardRowFrom(candidate, { connection = null } = {}) {
     reasoning: typeof candidate.reasoning === 'boolean' ? candidate.reasoning : undefined,
     vision: Array.isArray(candidate.inputModalities) ? candidate.inputModalities.includes('image') : undefined,
     efforts: Array.isArray(candidate.reasoningEfforts) ? candidate.reasoningEfforts : [],
-    checkedAt: candidate.source && candidate.source.checkedAt ? candidate.source.checkedAt : null,
-    sourceURL: candidate.source && candidate.source.url ? candidate.source.url : null,
-    metadataKind: candidate.metadataSource?.kind || candidate.source?.kind || 'discovery',
+    /* 有 metadataSource 时来源只认它：否则预设补全的字段会被写成上游
+       /models 的地址，看起来像上游亲自声明了这些值。 */
+    ...onboardRowSource(candidate),
     selected: false,
   };
 }
 
+/* 重新读取上游时保留用户自己改过的显示名称与默认档位；默认档位只有在
+   新一轮目录仍声明同一档位时才带回来，避免保存一个上游已不支持的值。 */
 function preserveOnboardModelNames(models, savedModels, connectionId) {
-  const names = new Map((Array.isArray(savedModels) ? savedModels : [])
-    .filter((model) => model && model.connectionId === connectionId && model.name)
-    .map((model) => [model.upstreamModelId, model.name]));
-  return models.map((row) => names.has(row.upstreamModelId)
-    ? { ...row, name: names.get(row.upstreamModelId) }
-    : row);
+  const saved = new Map();
+  for (const model of Array.isArray(savedModels) ? savedModels : []) {
+    if (!model || model.connectionId !== connectionId || !(model.name || model.defaultEffort)) continue;
+    const upstream = model.upstreamModelId || model.id;
+    const keys = [JSON.stringify([upstream, model.protocol || ''])];
+    if (model.protocol) keys.push(JSON.stringify([upstream, '']));
+    for (const key of keys) {
+      const rows = saved.get(key) || [];
+      rows.push(model);
+      saved.set(key, rows);
+    }
+  }
+  return models.map((row) => {
+    const candidates = saved.get(JSON.stringify([row.upstreamModelId, row.protocol || ''])) || [];
+    if (candidates.length !== 1) return row;
+    const previous = candidates[0];
+    const next = { ...row };
+    if (previous.name) next.name = previous.name;
+    if (previous.defaultEffort && Array.isArray(next.efforts) && next.efforts.includes(previous.defaultEffort)) {
+      next.defaultEffort = previous.defaultEffort;
+    }
+    return next;
+  });
 }
 
-function buildOnboardRow(row) {
-  const context = Number(row.contextWindow) > 0 ? Number(row.contextWindow) : undefined;
+/* 显示名称只用于本机展示，改它不改上游能力的来源标记；输入过程中的空白
+   原样留在草稿里，提交构建时再 trim，避免打断中文输入法。 */
+function setOnboardModelName(row, value) {
+  if (!row) return false;
+  const name = typeof value === 'string' ? value.slice(0, 200) : '';
+  if ((row.name || '') === name) return false;
+  row.name = name;
+  return true;
+}
+
+/* 档位只改这条本地草稿；移除当前默认档位时一并清空，避免保存出不在列表里的值。 */
+function toggleOnboardModelEffort(row, value) {
+  if (!row || row.reasoning !== true || typeof value !== 'string' || !value) return false;
+  const list = Array.isArray(row.efforts) ? row.efforts.slice() : [];
+  const index = list.indexOf(value);
+  if (index >= 0) list.splice(index, 1);
+  else list.push(value);
+  row.efforts = list;
+  if (row.defaultEffort && !list.includes(row.defaultEffort)) delete row.defaultEffort;
+  row.metadataKind = 'manual';
+  return true;
+}
+
+function setOnboardModelDefaultEffort(row, value) {
+  if (!row || row.reasoning !== true) return false;
+  const list = Array.isArray(row.efforts) ? row.efforts : [];
+  const next = list.includes(value) ? value : undefined;
+  if (row.defaultEffort === next) return false;
+  if (next === undefined) delete row.defaultEffort;
+  else row.defaultEffort = next;
+  return true;
+}
+
+function positiveInteger(value) {
+  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+function currentConnectionLimit(connectionId) {
+  const row = savedOnboardRow(connectionId);
+  return positiveInteger(row && row.contextLimit);
+}
+
+/* 新模型只写已知字段；保存已存在的路由（existing）时对清空项显式写 null：
+   后端 MergeModels 只把 null 当作删除，省略会保留旧值，取消推理或默认档位
+   后就会因为旧档位对不上而 400，或把旧值带回界面。 */
+function buildOnboardRow(row, { existing = false, previousLimit = undefined } = {}) {
+  const context = positiveInteger(row.contextWindow);
   /* 协议只来自上游声明或用户显式确认；两者都没有时保持为空，由调用方拒绝，
      绝不按末段规则补一个猜测值。 */
   const protocol = row.protocol === 'chat' || row.protocol === 'responses'
     ? row.protocol
     : (Array.isArray(row.protocols) && row.protocols.length ? preferredProtocol(row.protocols) : null);
+  /* 上下文上限只取真实已知值：目录声明的上限或连接上记录的上限，未知不编造；
+     上限小于本次上下文时不能写入，否则后端会因为窗口超过上限而拒绝保存。 */
+  const knownLimit = positiveInteger(row.contextLimit) ?? currentConnectionLimit(row.connectionId);
+  const contextLimit = context && knownLimit && knownLimit >= context ? knownLimit : undefined;
+  const hadLimit = positiveInteger(row.contextLimit) !== undefined || positiveInteger(previousLimit) !== undefined;
+  const efforts = row.reasoning === true && Array.isArray(row.efforts) ? row.efforts.slice() : [];
+  const defaultEffort = efforts.includes(row.defaultEffort) ? row.defaultEffort : '';
+  const name = (typeof row.name === 'string' ? row.name.trim() : '') || '';
+  const output = positiveInteger(row.maxOutputTokens);
+  const optional = (key, value) => (value !== undefined ? { [key]: value } : (existing ? { [key]: null } : {}));
   return {
     id: protocol ? routeIdFor(row.connectionId, row.upstreamModelId, protocol) : '',
     upstreamModelId: row.upstreamModelId,
-    ...(row.name && row.name !== row.upstreamModelId ? { name: row.name } : {}),
+    ...optional('name', name && name !== row.upstreamModelId ? name : undefined),
     protocol,
     contextWindow: context,
-    ...(Number(row.maxOutputTokens) > 0 ? { maxOutputTokens: Number(row.maxOutputTokens) } : {}),
-    ...(row.tools === true ? { tools: true } : row.tools === false ? { tools: false } : {}),
-    ...(typeof row.reasoning === 'boolean' ? { reasoning: row.reasoning } : {}),
+    /* 只有用户原本确实有上限时才把「清空」写成 null；没有上限的模型不加这个字段。 */
+    ...(contextLimit !== undefined ? { contextLimit } : (existing && hadLimit ? { contextLimit: null } : {})),
+    ...optional('maxOutputTokens', output),
+    ...(row.tools === true ? { tools: true } : row.tools === false ? { tools: false } : (existing ? { tools: null } : {})),
+    ...(typeof row.reasoning === 'boolean' ? { reasoning: row.reasoning } : (existing ? { reasoning: null } : {})),
     inputModalities: row.vision === true ? ['text', 'image'] : ['text'],
-    ...(row.reasoning === true && Array.isArray(row.efforts) && row.efforts.length ? { reasoningEfforts: row.efforts } : {}),
+    ...optional('reasoningEfforts', efforts.length ? efforts : undefined),
+    ...optional('defaultEffort', defaultEffort || undefined),
     connectionId: row.connectionId,
     ...(row.metadataKind !== 'manual' && row.checkedAt
       ? { metadataSource: { kind: row.metadataKind || 'discovery', ...(row.sourceURL ? { url: row.sourceURL } : {}), checkedAt: row.checkedAt } }
       : { metadataSource: { kind: 'manual' } }),
   };
+}
+
+/* 向导只会重存这些已存在路由；据此决定是否需要对清空项写 null。 */
+function existingOnboardRouteIds(connectionId) {
+  return new Set((Array.isArray(state.data?.models) ? state.data.models : [])
+    .filter((model) => model && model.connectionId === connectionId)
+    .map((model) => model.id));
 }
 
 function onboardProblems({ models = [] } = {}) {
@@ -938,18 +1172,32 @@ function onboardProblems({ models = [] } = {}) {
     problems.push('这些模型的上游没有声明协议，请为它们各选一个接口协议：'
       + blocked.map((row) => row.upstreamModelId).join('、') + '。');
   }
-  const missingContext = models.filter(row => !(Number(row.contextWindow) > 0));
+  /* 正整数校验与 buildOnboardRow 用同一个函数：能通过校验的值一定能被
+     安全地写进 contextWindow，不会出现界面可保存、后端 400 的组合。 */
+  const invalidContext = models.filter(row => row.contextWindow !== undefined
+    && row.contextWindow !== null && row.contextWindow !== '' && !positiveInteger(row.contextWindow));
+  if (invalidContext.length) {
+    problems.push('上下文窗口必须是正整数：' + invalidContext.map(row => row.upstreamModelId).join('、') + '。');
+  }
+  const invalidOutput = models.filter(row => row.maxOutputTokens !== undefined
+    && row.maxOutputTokens !== null && row.maxOutputTokens !== '' && !positiveInteger(row.maxOutputTokens));
+  if (invalidOutput.length) {
+    problems.push('最大输出必须是正整数或留空：' + invalidOutput.map(row => row.upstreamModelId).join('、') + '。');
+  }
+  const missingContext = models.filter(row => !positiveInteger(row.contextWindow));
   if (missingContext.length) {
     problems.push('请为这些模型填写上下文窗口；接口没有返回时不能用猜测值：'
       + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
   /* 连接限制是保存前已知的真实约束：路由会按所选协议生成，但请求最终会被
      连接拒绝，所以这里先按同一个限制拦下，不等到保存后才发现。 */
-  const limits = connectionProtocolLimits(saved);
+  const effectiveConnection = saved && (saved.providerPresetId || '') === (values.providerPresetId || '')
+    ? saved : providerPreset(values.providerPresetId);
+  const limits = connectionProtocolLimits({ protocols: onboardConnectionProtocols(values, saved) });
   if (limits) {
     const conflicts = models.filter((row) => row.protocol && !limits.includes(row.protocol));
     if (conflicts.length) {
-      problems.push('连接「' + (saved.name || saved.id) + '」只允许 ' + limits.map(protocolLabel).join('/')
+      problems.push('连接「' + (effectiveConnection?.name || effectiveConnection?.id || values.name || values.id) + '」只允许 ' + limits.map(protocolLabel).join('/')
         + '；' + conflicts.map((row) => row.upstreamModelId
           + ' 当前为 ' + protocolLabel(row.protocol)).join('、')
         + ' 不在允许范围内。');
@@ -957,8 +1205,15 @@ function onboardProblems({ models = [] } = {}) {
   }
   const ids = new Set();
   const built = [];
+  /* 已存在的路由才需要 null 补丁：新路由没有旧值需要清，省略未知字段即可。 */
+  const previous = existingOnboardRouteIds(values.id);
   for (const row of models) {
-    const model = buildOnboardRow({ ...row, connectionId: values.id });
+    const draft = { ...row, connectionId: values.id };
+    const initial = buildOnboardRow(draft);
+    const previousRow = (Array.isArray(state.data?.models) ? state.data.models : [])
+      .find((saved) => saved && saved.id === initial.id && saved.connectionId === values.id);
+    const model = initial.id && previous.has(initial.id)
+      ? buildOnboardRow(draft, { existing: true, previousLimit: previousRow?.contextLimit }) : initial;
     if (model.id && ids.has(model.id)) problems.push('模型路由 ID 重复：' + model.id + '。');
     if (model.id) ids.add(model.id);
     built.push(model);
@@ -982,35 +1237,51 @@ function mergeOnboardModels(existing, built, connectionId) {
   return [...retained, ...merged];
 }
 
+/* 行内改动的统一入口：只标 touched，不重建 DOM。输入框在输入过程中重建会
+   打断中文输入法的候选与选择区。 */
+function markOnboardEdited() {
+  state.onboard.touched = true;
+  clearOnboardSaveErrors();
+}
+
+function onboardEditingText() {
+  const active = document.activeElement;
+  return Boolean(active && dom.onboardModels?.contains?.(active)
+    && (active.dataset?.onboardName || active.dataset?.onboardBudget));
+}
+
 function renderOnboardModels(rows, { connectionId = '' } = {}) {
-  if (!dom.onboardModels) return;
+  if (!dom.onboardModels || onboardEditingText()) return;
   const attachedIds = new Set((Array.isArray(state.data?.models) ? state.data.models : [])
     .filter((model) => model && model.connectionId === connectionId)
     .map((model) => model.upstreamModelId || model.id));
   const signature = JSON.stringify([rows, connectionId, [...attachedIds]]);
   if (dom.onboardModels.dataset.signature === signature) return;
   const active = document.activeElement;
-  const focusModel = active?.dataset?.onboardModel || '';
-  const focusControl = active?.dataset?.onboardFocus || '';
+  const focusedInside = Boolean(active && dom.onboardModels.contains && dom.onboardModels.contains(active));
+  const focusKey = focusedInside ? (active.dataset?.onboardModel || '') : '';
+  const focusControl = focusedInside ? (active.dataset?.onboardFocus || '') : '';
   dom.onboardModels.dataset.signature = signature;
   if (!rows.length) {
     dom.onboardModels.replaceChildren();
     return;
   }
   const nodes = rows.map((row) => {
+    const key = onboardRowKey(row);
     const li = document.createElement('li');
     li.className = 'onboard__model';
+    li.dataset.onboardRow = key;
     const label = document.createElement('label');
     label.className = 'check check--model';
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.checked = row.selected === true;
-    box.dataset.onboardModel = row.id;
+    box.dataset.onboardModel = key;
     box.dataset.onboardFocus = 'selected';
     box.addEventListener('change', () => {
-      const target = onboardModelRows().find((entry) => entry.id === row.id);
+      const target = onboardRowByKey(key);
       if (target) target.selected = box.checked === true;
-      state.onboard.touched = true;
+      markOnboardEdited();
       renderOnboard();
     });
     const body = document.createElement('span');
@@ -1054,14 +1325,38 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     li.append(label);
     if (row.selected !== true) return li;
 
+    const identity = document.createElement('label');
+    identity.className = 'field field--inline';
+    const identityLabel = document.createElement('span');
+    identityLabel.className = 'field__label';
+    identityLabel.textContent = '显示名称';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.autocomplete = 'off';
+    nameInput.spellcheck = false;
+    nameInput.value = row.name || '';
+    nameInput.placeholder = row.upstreamModelId || row.id;
+    nameInput.dataset.onboardName = key;
+    nameInput.dataset.onboardModel = key;
+    nameInput.dataset.onboardFocus = 'name';
+    /* 输入过程中不写回显示值：用户正在输入半截名称时改写 value 会打断 IME。
+       保存与渲染都读草稿里的原始字符串，提交前才 trim。 */
+    nameInput.addEventListener('input', () => {
+      const target = onboardRowByKey(key);
+      if (!target) return;
+      if (setOnboardModelName(target, nameInput.value)) markOnboardEdited();
+    });
+    identity.append(identityLabel, nameInput);
+    li.append(identity);
+
     const budget = document.createElement('div');
     budget.className = 'onboard__budget';
     const capabilityText = value => typeof value === 'boolean' ? value ? '支持' : '不支持' : '待确认';
-    const provenance = row.metadataKind === 'manual' ? '用户修改' : row.metadataKind === 'preset' ? '厂商资料' : '接口返回';
+    const provenance = row.metadataKind === 'manual' ? '用户修改' : row.metadataKind === 'preset' ? '厂商资料（补全接口未声明项）' : '接口返回';
     budget.append(document.createTextNode(`来源：${provenance}。工具${capabilityText(row.tools)}，推理${capabilityText(row.reasoning)}，图片${capabilityText(row.vision)}。`));
-    for (const [key, labelText] of [['contextWindow', '上下文窗口'], ['maxOutputTokens', '最大输出（可选）']]) {
-      const field = document.createElement('label');
-      field.className = 'field field--inline';
+    for (const [field, labelText] of [['contextWindow', '上下文窗口'], ['maxOutputTokens', '最大输出（可选）']]) {
+      const fieldWrap = document.createElement('label');
+      fieldWrap.className = 'field field--inline';
       const caption = document.createElement('span');
       caption.className = 'field__label';
       caption.textContent = labelText;
@@ -1070,22 +1365,81 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       input.min = '1';
       input.step = '1';
       input.placeholder = '待确认';
-      input.value = Number(row[key]) > 0 ? String(row[key]) : '';
-      input.dataset.onboardBudget = key;
-      input.dataset.onboardModel = row.id;
-      input.dataset.onboardFocus = key;
-      input.addEventListener('change', () => {
-        const target = onboardModelRows().find(entry => entry.id === row.id);
-        if (target) {
-          target[key] = input.value.trim() ? Number(input.value) : undefined;
-          target.metadataKind = 'manual';
-        }
-        renderOnboard();
+      input.value = Number(row[field]) > 0 ? String(row[field]) : '';
+      input.dataset.onboardBudget = field;
+      input.dataset.onboardModel = key;
+      input.dataset.onboardFocus = field;
+      /* 输入时立即写草稿并刷新保存可用状态；不重建这一行，避免输入中丢焦点。 */
+      input.addEventListener('input', () => {
+        const target = onboardRowByKey(key);
+        if (!target) return;
+        const raw = input.value.trim();
+        target[field] = raw === '' ? undefined : Number(raw);
+        target.metadataKind = 'manual';
+        markOnboardEdited();
+        refreshOnboardSaveState();
       });
-      field.append(caption, input);
-      budget.append(field);
+      fieldWrap.append(caption, input);
+      budget.append(fieldWrap);
     }
     li.append(budget);
+
+    if (row.reasoning === true) {
+      const efforts = document.createElement('div');
+      efforts.className = 'field onboard__efforts';
+      const effortLabel = document.createElement('span');
+      effortLabel.className = 'field__label';
+      effortLabel.textContent = '思考档位';
+      const choices = document.createElement('div');
+      choices.className = 'chips';
+      const selectedEfforts = Array.isArray(row.efforts) ? row.efforts : [];
+      const known = STANDARD_ONBOARD_EFFORTS.concat(selectedEfforts)
+        .filter((value, index, list) => list.indexOf(value) === index);
+      for (const value of known) {
+        const choice = document.createElement('label');
+        choice.className = 'check';
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = selectedEfforts.includes(value);
+        check.dataset.onboardEffort = value;
+        check.dataset.onboardModel = key;
+        check.dataset.onboardFocus = 'effort:' + value;
+        check.addEventListener('change', () => {
+          toggleOnboardModelEffort(onboardRowByKey(key), value);
+          markOnboardEdited();
+          renderOnboard();
+        });
+        const text = document.createElement('span');
+        text.textContent = value;
+        choice.append(check, text);
+        choices.append(choice);
+      }
+      const hint = document.createElement('span');
+      hint.className = 'field__hint';
+      hint.textContent = '只勾选上游真实支持的档位；不勾选时不声明 reasoningEfforts。';
+      efforts.append(effortLabel, choices, hint);
+      li.append(efforts);
+
+      const defaultField = document.createElement('label');
+      defaultField.className = 'field field--inline';
+      const defaultLabel = document.createElement('span');
+      defaultLabel.className = 'field__label';
+      defaultLabel.textContent = '默认档位';
+      const select = document.createElement('select');
+      select.dataset.onboardDefault = key;
+      select.dataset.onboardModel = key;
+      select.dataset.onboardFocus = 'default';
+      select.disabled = selectedEfforts.length === 0;
+      syncSelectOptions(select, [{ value: '', label: '自动' }]
+        .concat(selectedEfforts.map((value) => ({ value, label: value }))), row.defaultEffort || '');
+      select.addEventListener('change', () => {
+        setOnboardModelDefaultEffort(onboardRowByKey(key), select.value);
+        markOnboardEdited();
+        renderOnboard();
+      });
+      defaultField.append(defaultLabel, select);
+      li.append(defaultField);
+    }
 
     /* 可选项 = 真实声明 ∩ 连接限制；声明过协议时不能换成一个上游没声明的
        协议，没有声明时才允许用户在连接允许范围内显式确认。已保存但不在
@@ -1096,8 +1450,8 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     protocolLabelNode.className = 'field__label';
     protocolLabelNode.textContent = '接口协议';
     const select = document.createElement('select');
-    select.dataset.onboardProtocol = row.id;
-    select.dataset.onboardModel = row.id;
+    select.dataset.onboardProtocol = key;
+    select.dataset.onboardModel = key;
     select.dataset.onboardFocus = 'protocol';
     const choices = Array.isArray(row.protocolOptions)
       ? row.protocolOptions
@@ -1109,7 +1463,7 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     }
     syncSelectOptions(select, options, row.protocol || '');
     select.addEventListener('change', () => {
-      chooseOnboardProtocol(row.id, select.value);
+      chooseOnboardProtocol(key, select.value);
     });
     protocolField.append(protocolLabelNode, select);
     if (!choices.length) {
@@ -1130,25 +1484,33 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
 
     const caps = document.createElement('div');
     caps.className = 'onboard__caps';
-    const toggle = (key, text, disabled = false) => {
-      const cap = document.createElement('label');
-      cap.className = 'check';
+    const toggle = (cap, text, disabled = false) => {
+      const capLabel = document.createElement('label');
+      capLabel.className = 'check';
       const input = document.createElement('input');
       input.type = 'checkbox';
-      input.checked = row[key] === true;
+      input.checked = row[cap] === true;
       input.disabled = disabled;
-      input.dataset.onboardCap = key;
-      input.dataset.onboardModel = row.id;
-      input.dataset.onboardFocus = key;
+      input.dataset.onboardCap = cap;
+      input.dataset.onboardModel = key;
+      input.dataset.onboardFocus = cap;
       input.addEventListener('change', () => {
-        const target = onboardModelRows().find((entry) => entry.id === row.id);
-        if (target) target[key] = input.checked === true;
+        const target = onboardRowByKey(key);
+        if (target) {
+          target[cap] = input.checked === true;
+          target.metadataKind = 'manual';
+          if (cap === 'reasoning' && target[cap] !== true) {
+            target.efforts = [];
+            delete target.defaultEffort;
+          }
+        }
+        markOnboardEdited();
         renderOnboard();
       });
       const span = document.createElement('span');
       span.textContent = text;
-      cap.append(input, span);
-      return cap;
+      capLabel.append(input, span);
+      return capLabel;
     };
     caps.append(toggle('tools', '工具调用'), toggle('reasoning', '推理'), toggle('vision', '图片输入'));
     li.append(caps);
@@ -1157,9 +1519,45 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
   dom.onboardModels.replaceChildren(...nodes);
   if (focusControl) {
     const target = Array.from(dom.onboardModels.querySelectorAll('[data-onboard-focus]')).find((node) =>
-      node.dataset.onboardModel === focusModel && node.dataset.onboardFocus === focusControl);
-    if (target) target.focus({ preventScroll: true });
+      node.dataset.onboardModel === focusKey && node.dataset.onboardFocus === focusControl);
+    if (target && target.focus) {
+      target.focus({ preventScroll: true });
+      if (typeof target.setSelectionRange === 'function' && active.selectionStart !== undefined) {
+        const start = active.selectionStart;
+        const end = active.selectionEnd;
+        if (start !== null && end !== null) {
+          try { target.setSelectionRange(start, end); } catch { /* 非文本输入忽略 */ }
+        }
+      }
+    }
   }
+}
+
+/* 只刷新「能不能保存」与错误列表，不重建模型行：数字与名称输入在输入过程中
+   调用它，重建会丢焦点和 IME 状态，也会让第一次点击落在已失效的按钮上。 */
+function refreshOnboardSaveState({ selected = null } = {}) {
+  const data = state.data;
+  if (!data || !dom.onboardSave) return;
+  const draft = state.onboard;
+  const rows = onboardModelRows();
+  const chosen = Array.isArray(selected) ? selected : selectedOnboardModels();
+  const ready = configReady(data);
+  const busy = draft.busy || draft.saving;
+  const preview = chosen.length ? onboardProblems({ models: chosen }).problems : [];
+  const blocking = preview.filter((text) => !text.startsWith('至少勾选'));
+  setHidden(dom.onboardErrors, blocking.length === 0);
+  if (dom.onboardErrors) {
+    dom.onboardErrors.replaceChildren(...blocking.map((message) => {
+      const p = document.createElement('p');
+      p.textContent = message;
+      return p;
+    }));
+  }
+  dom.onboardSave.disabled = !ready || busy || !rows.length || !chosen.length || blocking.length > 0;
+  setText(dom.onboardSave, draft.saving ? '正在保存…' : '保存');
+  setText(dom.onboardDraft, rows.length
+    ? (chosen.length ? '将保存 ' + fmtCount(chosen.length) + ' 个模型' : '尚未勾选模型')
+    : '先读取模型，再勾选要接入的模型');
 }
 
 function renderOnboard() {
@@ -1191,28 +1589,13 @@ function renderOnboard() {
   if (dom.onboardBatchContext) dom.onboardBatchContext.disabled = busy || !selected.length;
   if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.disabled = busy || !selected.length;
 
-  const preview = selected.length ? onboardProblems({ models: selected }).problems : [];
-  const blocking = preview.filter((text) => !text.startsWith('至少勾选'));
-  setHidden(dom.onboardErrors, blocking.length === 0);
-  if (dom.onboardErrors) {
-    dom.onboardErrors.replaceChildren(...blocking.map((message) => {
-      const p = document.createElement('p');
-      p.textContent = message;
-      return p;
-    }));
-  }
+  refreshOnboardSaveState({ selected });
 
   const canApply = Boolean(connectionsChanged(data));
   if (dom.onboardRetryApply) {
     setHidden(dom.onboardRetryApply, !(canApply && applyAvailability(data) === 'pending'));
     dom.onboardRetryApply.disabled = !canApply || busy;
   }
-  dom.onboardSave.disabled = !ready || busy || !rows.length || !selected.length || blocking.length > 0;
-  setText(dom.onboardSave, draft.saving ? '正在保存…' : '保存');
-  setText(dom.onboardDraft, rows.length
-    ? (selected.length ? '将保存 ' + fmtCount(selected.length) + ' 个模型' : '尚未勾选模型')
-    : '先读取模型，再勾选要接入的模型');
-
   const sync = syncState(data);
   if (dom.onboardVerdict) {
     setDot(dom.onboardVerdictDot, sync.tone);
@@ -1240,8 +1623,7 @@ function renderOnboard() {
   }
   if (dom.onboardRecommended) {
     const presetId = dom.onboardPreset?.value || '';
-    const recommended = state.providers?.details?.[presetId]?.models || [];
-    const available = recommended.length > 0;
+    const available = presetOnboardModels(presetId).length > 0;
     dom.onboardRecommended.disabled = !ready || busy || !available;
     setHidden(dom.onboardRecommended, !available);
     dom.onboardRecommended.title = busy ? '请等待当前读取完成。' : ready ? '' : '配置当前不可读，暂时不能使用推荐模型。';
@@ -1397,6 +1779,7 @@ async function discoverConnectionEditorModels() {
 async function discoverOnboardModels() {
   const data = state.data;
   if (!data || state.onboard.busy) return null;
+  clearOnboardSaveErrors();
   setHidden(dom.onboardErrors, true);
   const values = onboardConnectionValues();
   const saved = savedOnboardRow(values.id);
@@ -1422,13 +1805,17 @@ async function discoverOnboardModels() {
     }
     /* 重新读取不保留上一轮的勾选：目录可能已经变了，沿用旧选择会保存一条
        上游并不存在的路由。 */
+    /* 同一条上游 ID 的预设资料只补上游缺的字段；真实返回值优先。 */
+    const presetModels = new Map(presetOnboardModels(values.providerPresetId)
+      .map((row) => [row.upstreamModelId, row]));
     state.onboard.discoveryFor = key;
     state.onboard.discovery = {
       checkedAt: discovery.checkedAt || null,
       modelCount: discovery.modelCount,
-      models: preserveOnboardModelNames(discovery.models.map((row) => onboardRowFrom(row, {
-        connection: sameEndpoint ? saved : null,
-      })), sameEndpoint ? state.data?.models : [], values.id),
+      models: preserveOnboardModelNames(discovery.models.map((row) => onboardRowFrom(
+        mergeOnboardPresetMetadata(row, presetModels.get(row && row.id)),
+        { connection: sameEndpoint ? saved : null },
+      )), sameEndpoint ? state.data?.models : [], values.id),
     };
     if (discovery.state !== 'passed') {
       if (dom.onboardDiscoverState) {
@@ -1455,24 +1842,53 @@ async function discoverOnboardModels() {
 }
 
 function useRecommendedOnboardModels() {
-  const data = state.data;
   const presetId = dom.onboardPreset?.value;
-  const detail = state.providers?.details?.[presetId];
-  if (!detail) {
+  const models = presetOnboardModels(presetId);
+  if (!models.length) {
     showToast('请先选择厂商、地区与服务类型；自定义服务请读取模型或手动添加。', 'error');
     return null;
   }
+  clearOnboardSaveErrors();
   const connection = savedOnboardRow(onboardConnectionValues().id);
   state.onboard.discoveryFor = onboardEndpointKey();
   state.onboard.discovery = {
     checkedAt: null,
-    modelCount: detail.models.length,
-    models: detail.models.map(row => onboardRowFrom({
-      ...row, id: row.upstreamModelId, name: row.label, inputModalities: row.inputModalities,
+    modelCount: models.length,
+    models: models.map((row) => onboardRowFrom({
+      ...row,
+      metadataSource: presetMetadataSource(row),
     }, { connection })),
   };
   renderOnboard();
-  return detail.models;
+  return models;
+}
+
+/* 保存时连接是整组替换：同 ID 的已保存连接必须带回它的协议限制与
+   apiKeyEnv（Key 引用），否则后端会按默认为它生成新的环境变量名，
+   已保存的 Key 就不再被这个连接引用。新预设的协议由当前预设带入。 */
+function onboardConnectionProtocols(values, saved) {
+  const preset = providerPreset(values.providerPresetId);
+  const presetProtocols = Array.isArray(preset?.protocols)
+    ? preset.protocols.filter((value) => value === 'chat' || value === 'responses')
+    : [];
+  const savedProtocols = Array.isArray(saved?.protocols)
+    ? saved.protocols.filter((value) => value === 'chat' || value === 'responses')
+    : [];
+  if (saved && (saved.providerPresetId || '') === (values.providerPresetId || '')) return savedProtocols;
+  return presetProtocols.length ? presetProtocols : savedProtocols;
+}
+
+function onboardConnectionPayload(values, saved) {
+  const protocols = onboardConnectionProtocols(values, saved);
+  return {
+    id: values.id,
+    name: values.name,
+    ...(values.providerPresetId ? { providerPresetId: values.providerPresetId } : {}),
+    baseURL: values.baseURL,
+    ...(saved && saved.apiKeyEnv ? { apiKeyEnv: saved.apiKeyEnv } : {}),
+    ...(protocols.length ? { protocols } : {}),
+    ...(values.apiKey.trim() ? { apiKey: values.apiKey.trim() } : {}),
+  };
 }
 
 async function saveOnboard() {
@@ -1493,17 +1909,17 @@ async function saveOnboard() {
     return false;
   }
   state.onboard.saving = true;
+  clearOnboardSaveErrors();
   renderOnboard();
   renderActions(data);
+  const epoch = state.stateReadEpoch;
+  const key = state.key;
+  const revision = state.data.revision;
+  const current = () => epoch === state.stateReadEpoch && key === state.key;
 
   try {
-    const connection = {
-      id: values.id,
-      name: values.name,
-      ...(values.providerPresetId ? { providerPresetId: values.providerPresetId } : {}),
-      baseURL: values.baseURL,
-      ...(values.apiKey.trim() ? { apiKey: values.apiKey.trim() } : {}),
-    };
+    const saved = savedOnboardRow(values.id);
+    const connection = onboardConnectionPayload(values, saved);
     /* 已保存的其它连接必须原样带回：这个端点是整组替换，漏掉就把别的上游删了。
        草稿里对其它连接的未保存修改优先保留，避免它们被服务端旧值覆盖。 */
     const drafts = state.conns.draft || [];
@@ -1517,45 +1933,88 @@ async function saveOnboard() {
     const existing = Array.isArray(state.data.models) ? state.data.models : [];
     const catalogue = mergeOnboardModels(existing, built, values.id);
     const result = await request(API.workspace, { method: 'POST', body: {
-      revision: state.data.revision, connections: [...others, connection], models: catalogue,
+      revision, connections: [...others, connection], models: catalogue,
     } });
     if (!result?.state) throw new ApiError('保存没有返回状态', 'STATE', 200);
+    if (!current()) return false;
     if (dom.onboardKey) dom.onboardKey.value = '';
+    if (dom.onboardDisclosure) dom.onboardDisclosure.open = false;
+    state.conns.base = savedConnectionsSignature(result.state);
+    state.conns.baseRevision = result.state.revision ?? null;
+    state.conns.baseEntity = connectionDraftFrom(result.state);
+    state.conns.draft = connectionDraftFrom(result.state);
+    state.conns.dirty = false;
     state.onboard.touched = false;
+    state.onboard.saving = false;
     adoptState(result.state, { external: true });
+    state.onboard.discovery = null;
+    state.onboard.discoveryFor = null;
+    state.onboard.seq = 0;
+    fillOnboardForm();
     state.lastSync = Date.now();
     renderAll();
+    setSubtab('models', 'catalog');
     showToast('已保存 ' + fmtCount(built.length) + ' 个模型和服务商。请按同步状态同步到 Work。', 'ok');
     return true;
   } catch (error) {
-    state.onboard.saving = false;
-    await handleSaveFailure(error, 'onboard');
+    if (current()) {
+      state.onboard.saving = false;
+      await handleSaveFailure(error, 'onboard');
+    }
     return false;
   } finally {
-    state.onboard.saving = false;
-    if (state.data) {
-      renderOnboard();
-      renderActions(state.data);
+    if (current()) {
+      state.onboard.saving = false;
+      if (state.data) {
+        renderOnboard();
+        renderActions(state.data);
+      }
     }
   }
 }
 
-/* 预设只填地址与已知协议，绝不猜 Key、也绝不覆盖用户已经改过的地址以外字段。 */
+/* 预设建议值只有在字段仍等于「上一预设/已保存回填值」时才覆盖：用户手工
+   改过的标识与名称必须保留，否则加第二条服务商时会写回同一条旧连接。 */
+function onboardSuggestedId(preset) {
+  return preset ? presetsSuggestedId(preset) : '';
+}
+
+function onboardSuggestedName(preset) {
+  return preset ? (preset.name || preset.id || '') : '';
+}
+
+function staleSuggested(value, candidates) {
+  return String(value || '').trim() === '' || candidates.some((candidate) => candidate !== '' && value === candidate);
+}
+
+/* 预设只填地址与已知协议，绝不猜 Key；也不覆盖用户手改过的标识与名称。 */
 function applyOnboardPreset(presetId) {
   if (!dom.onboardBase) return;
   state.onboard.touched = true;
+  clearOnboardSaveErrors();
   const preset = providerPreset(presetId);
-  const previous = dom.onboardPreset.dataset.presetId || '';
-  if (previous !== presetId && dom.onboardKey) dom.onboardKey.value = '';
+  const previousId = dom.onboardPreset.dataset.presetId || '';
+  const previousPreset = providerPreset(previousId);
+  const savedId = savedOnboardTarget()?.id || '';
+  const savedName = savedOnboardTarget()?.name || '';
+  if (previousId !== presetId && dom.onboardKey) dom.onboardKey.value = '';
   dom.onboardPreset.dataset.presetId = presetId;
+  /* 切到自定义时立刻按当前地址重画：目录归属会随预设变化而清空。 */
   if (!preset) {
     if (dom.onboardPresetHint) setText(dom.onboardPresetHint, '已选自定义；地址仍由你填写。');
+    renderOnboard();
     return;
   }
-  if (preset.baseURL) {
-    dom.onboardBase.value = preset.baseURL;
-    if (dom.onboardId && !dom.onboardId.value) dom.onboardId.value = presetsSuggestedId(preset);
-    if (dom.onboardName && !dom.onboardName.value) dom.onboardName.value = preset.name || preset.id;
+  if (preset.baseURL) dom.onboardBase.value = preset.baseURL;
+  const nextId = onboardSuggestedId(preset);
+  if (dom.onboardId && nextId
+    && staleSuggested(dom.onboardId.value, [savedId, onboardSuggestedId(previousPreset)])) {
+    dom.onboardId.value = nextId;
+  }
+  const nextName = onboardSuggestedName(preset);
+  if (dom.onboardName && nextName
+    && staleSuggested(dom.onboardName.value, [savedName, onboardSuggestedName(previousPreset)])) {
+    dom.onboardName.value = nextName;
   }
   if (dom.onboardPresetHint) setText(dom.onboardPresetHint, preset.name
     ? '已套用「' + preset.name + '」的地址与已知协议；仍可改为自定义地址。'
@@ -2275,6 +2734,7 @@ export {
   fillOnboardPresets,
   fillServiceForm,
   onboardBusy,
+  onboardEditingText,
   openConnectionEditor,
   openOnboardWizard,
   protocolLabel,

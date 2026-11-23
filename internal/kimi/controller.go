@@ -163,8 +163,9 @@ type Controller struct {
 	// opening a second overlay.
 	importGranted bool
 	// repairSignature suppresses repeated automatic imports for the same observed
-	// account and old/new loopback addresses once Work is ready. A new drift or
-	// process restart may retry; a Work/settings readiness wait may retry too.
+	// transient failure (a page that was not ready before any import was sent),
+	// a stopped child or a new launch may retry. An uncertain dispatched write
+	// remains suppressed until reconciliation or a process boundary.
 	repairSignature string
 	// loadedGeneration is the intent generation the running child was started
 	// against. A child started before an import cannot have loaded it, so
@@ -535,6 +536,9 @@ func (c *Controller) reapChildLocked() bool {
 	c.host = nil
 	c.bridge = nil
 	c.actions = nil
+	// The suppression belongs to the process that failed to answer; that process
+	// is gone, so a later launch must be free to repair again.
+	c.repairSignature = ""
 	c.mu.Unlock()
 
 	if host != nil {
@@ -724,6 +728,9 @@ func (c *Controller) Stop(ctx context.Context) error {
 	c.host = nil
 	c.bridge = nil
 	c.actions = nil
+	// Stopping the child ends the process a repair suppression was recorded
+	// against; a later start must be able to repair again.
+	c.repairSignature = ""
 	c.mu.Unlock()
 
 	if host != nil {

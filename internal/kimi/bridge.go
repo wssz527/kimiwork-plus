@@ -65,7 +65,32 @@ var (
 	ErrBridgeUnavailable  = errors.New("native_bridge_unavailable")
 	ErrBridgeUnauthorized = errors.New("native_bridge_unauthorized")
 	ErrBridgeBusy         = errors.New("native_bridge_busy")
+	// ErrBridgeTimeout is a call that ran out of its own budget. It is not the
+	// same fact as an endpoint nobody answers: a slow page and a missing child
+	// call for different reactions.
+	ErrBridgeTimeout = errors.New("native_bridge_timeout")
 )
+
+const (
+	// bridgeCallTimeout bounds a page action that only asks or clicks.
+	bridgeCallTimeout = 15 * time.Second
+	// bridgeImportTimeout bounds one import end to end. It covers the bounded
+	// wait for a slow settings page plus the official call and the overlay
+	// close, so an import is never cut off exactly when the page becomes ready.
+	bridgeImportTimeout = 60 * time.Second
+)
+
+// bridgeCallBudget is the budget one operation gets on both sides of the
+// bridge: the client and the host must agree, or the host answers 503 while the
+// caller is still waiting.
+func bridgeCallBudget(operation string) time.Duration {
+	switch operation {
+	case OperationImportModels, OperationImportDirect:
+		return bridgeImportTimeout
+	default:
+		return bridgeCallTimeout
+	}
+}
 
 // BridgeDescriptor is the loopback endpoint a managed host published.
 type BridgeDescriptor struct {
@@ -206,6 +231,9 @@ type BridgeClient struct {
 
 // NewBridgeClient builds a client from a descriptor. The transport never
 // follows a redirect and never honours a proxy: the endpoint is loopback.
+//
+// The client carries no fixed total timeout: each call gets its own budget from
+// bridgeCallBudget, so an import is not cut off by a limit chosen for a click.
 func NewBridgeClient(descriptor BridgeDescriptor) *BridgeClient {
 	transport := &http.Transport{
 		Proxy:              nil,
@@ -214,7 +242,6 @@ func NewBridgeClient(descriptor BridgeDescriptor) *BridgeClient {
 		DialContext:        (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 	}
 	return &BridgeClient{descriptor: descriptor, http: &http.Client{
-		Timeout:   15 * time.Second,
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -286,6 +313,10 @@ func (c *BridgeClient) call(ctx context.Context, operation string, input any, ou
 		}
 		body = encoded
 	}
+	// The call's own budget and the caller's deadline both apply; whichever is
+	// shorter wins, and the caller is never surprised by a limit it did not set.
+	ctx, cancel := context.WithTimeout(ctx, bridgeCallBudget(operation))
+	defer cancel()
 	// The descriptor URL may or may not carry a trailing slash; the operation is
 	// always one path segment.
 	endpoint := strings.TrimRight(c.descriptor.URL, "/") + "/" + operation
@@ -299,6 +330,15 @@ func (c *BridgeClient) call(ctx context.Context, operation string, input any, ou
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
+		// A budget that ran out is reported as such: the endpoint may be fine and
+		// only slow, and a caller must not call that "no bridge". A caller-side
+		// cancellation keeps its own error so the reason survives.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				return ErrBridgeTimeout
+			}
+			return ctxErr
+		}
 		return ErrBridgeUnavailable
 	}
 	defer response.Body.Close()
@@ -308,6 +348,19 @@ func (c *BridgeClient) call(ctx context.Context, operation string, input any, ou
 		return ErrBridgeUnauthorized
 	case http.StatusConflict:
 		return ErrBridgeBusy
+	case http.StatusGatewayTimeout:
+		return ErrBridgeTimeout
+	case http.StatusServiceUnavailable:
+		// The host reports why in its body; keep that reason rather than
+		// collapsing it into "unavailable", which is a different fact.
+		var failure struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(response.Body).Decode(&failure)
+		if failure.Reason != "" {
+			return fmt.Errorf("%s", safeReason(errors.New(failure.Reason)))
+		}
+		return ErrBridgeUnavailable
 	default:
 		return fmt.Errorf("native_bridge_failed:%d", response.StatusCode)
 	}
@@ -434,8 +487,21 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 		reply(http.StatusNotFound, map[string]any{"ok": false, "reason": "native_bridge_not_found"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	// The host's budget matches the client's, so a slow import is never answered
+	// with a deadline the caller did not have.
+	ctx, cancel := context.WithTimeout(request.Context(), bridgeCallBudget(operation))
 	defer cancel()
+	// A host-side budget that ran out is a timeout, not "unavailable": the page
+	// may still be working, and a caller retrying a write must know the
+	// difference.
+	fail := func(err error) {
+		if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrPipeTimeout)) {
+			reply(http.StatusGatewayTimeout, map[string]any{"ok": false,
+				"reason": firstNonEmpty(safeReason(err), ErrBridgeTimeout.Error())})
+			return
+		}
+		reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+	}
 
 	switch operation {
 	case OperationStatus:
@@ -448,7 +514,7 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 	case OperationWorkSurface:
 		surface, err := h.actions.WorkSurface(ctx)
 		if err != nil {
-			reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+			fail(err)
 			return
 		}
 		reply(http.StatusOK, surface)
@@ -476,7 +542,7 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 			}
 			result, err := h.actions.ImportModels(ctx, importRequest)
 			if err != nil {
-				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				fail(err)
 				return
 			}
 			reply(http.StatusOK, result)
@@ -488,28 +554,28 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 			}
 			result, err := h.actions.ImportDirect(ctx, importRequest)
 			if err != nil {
-				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				fail(err)
 				return
 			}
 			reply(http.StatusOK, result)
 		case OperationCloseWorkSettings:
 			result, err := h.actions.CloseWorkSettings(ctx)
 			if err != nil {
-				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				fail(err)
 				return
 			}
 			reply(http.StatusOK, result)
 		case OperationActivateWork:
 			result, err := h.actions.ActivateWork(ctx)
 			if err != nil {
-				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				fail(err)
 				return
 			}
 			reply(http.StatusOK, result)
 		case OperationOpenWorkSettings:
 			result, err := h.actions.OpenWorkSettings(ctx)
 			if err != nil {
-				reply(http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": safeReason(err)})
+				fail(err)
 				return
 			}
 			reply(http.StatusOK, result)
@@ -548,12 +614,26 @@ func safeReason(err error) string {
 	if err == nil {
 		return "native_bridge_failed"
 	}
-	message := err.Error()
-	if len(message) > 80 {
-		message = message[:80]
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "native_bridge_cancelled"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, ErrBridgeTimeout), errors.Is(err, ErrPipeTimeout):
+		return ErrBridgeTimeout.Error()
+	case errors.Is(err, ErrBridgeUnavailable), errors.Is(err, ErrPipeClosed):
+		return ErrBridgeUnavailable.Error()
+	case errors.Is(err, ErrSessionInvalid):
+		return "native_import_page_reloaded"
+	case errors.Is(err, ErrProtocolError), errors.Is(err, ErrRendererUnconfirmed):
+		return NativeContractChanged
 	}
-	if message == "" {
+	message := err.Error()
+	if len(message) > 80 || message == "" || message[0] < 'a' || message[0] > 'z' {
 		return "native_bridge_failed"
+	}
+	for _, r := range message {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return "native_bridge_failed"
+		}
 	}
 	return message
 }

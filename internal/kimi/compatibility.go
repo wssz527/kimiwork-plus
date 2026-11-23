@@ -454,6 +454,12 @@ func InspectPreloadAPIs(archive string) AccountAPICompatCheck {
 }
 
 func mergeLiveAPICheck(staticCheck, liveCheck AccountAPICompatCheck) AccountAPICompatCheck {
+	// A live probe that could not reach a mounted page is not evidence of
+	// anything. Keeping the static inspection instead of overwriting it with
+	// zeros is what stops a slow start from blocking model sync.
+	if liveCheck.Status == CheckStatusUnavailable {
+		return staticCheck
+	}
 	out := staticCheck
 	out.Source = "live"
 	out.GetUserProfile = liveCheck.GetUserProfile
@@ -553,6 +559,11 @@ func SaveOfficialObservation(stateDir string, report CompatibilityReport) error 
 
 // ProbeAccountAPIsLive runs a strictly read-only check against the managed
 // Work shell page (and claw page if open) to confirm the runtime page APIs.
+//
+// It answers ok=false when the probe could not see a mounted preload at all: a
+// page that is still starting answers with no API objects, and that is a pending
+// observation, not evidence that the build lacks them. Reporting it as evidence
+// would block model sync for the lifetime of that process.
 func (c *Controller) ProbeAccountAPIsLive(ctx context.Context) (*AccountAPICompatCheck, bool) {
 	if !accountSessionMu.TryLock() {
 		return nil, false
@@ -580,7 +591,8 @@ func (c *Controller) ProbeAccountAPIsLive(ctx context.Context) (*AccountAPICompa
 	if shell.sessionID == "" {
 		return nil, false
 	}
-	value, err := actions.evaluate(ctx, shell.sessionID, liveAccountAPIProbeExpression)
+	shellTarget := actionTarget{targetID: shell.targetID, sessionID: shell.sessionID}
+	value, err := actions.evaluateTarget(ctx, &shellTarget, liveAccountAPIProbeExpression)
 	if err != nil {
 		return nil, false
 	}
@@ -588,7 +600,12 @@ func (c *Controller) ProbeAccountAPIsLive(ctx context.Context) (*AccountAPICompa
 	if !ok {
 		return nil, false
 	}
+	if raw["mounted"] != true {
+		// The shell page exists but its preload has not mounted yet.
+		return nil, false
+	}
 	check := &AccountAPICompatCheck{
+		Status:          CheckStatusPass,
 		Source:          "live",
 		GetUserProfile:  raw["getUserProfile"] == true,
 		GetByokProfile:  raw["getByokProfile"] == true,
@@ -598,8 +615,11 @@ func (c *Controller) ProbeAccountAPIsLive(ctx context.Context) (*AccountAPICompa
 	}
 	if targets, err := actions.targets(ctx); err == nil {
 		if claw, found := findPath(targets, "/desktopclaw.html"); found && claw.sessionID != "" {
-			if cv, err := actions.evaluate(ctx, claw.sessionID, liveClawAPIProbeExpression); err == nil {
-				if cm, ok := cv.(map[string]any); ok {
+			if cv, err := actions.evaluateTarget(ctx, &claw, liveClawAPIProbeExpression); err == nil {
+				if cm, isMap := cv.(map[string]any); isMap && cm["mounted"] == true {
+					// Only a page whose preload answered may clear the marker: a
+					// claw page that is still loading has no API yet, and that is
+					// not the same fact as a build without one.
 					check.Reason = ""
 					if cm["byokSourcesList"] == true {
 						check.ByokSourcesList = true
@@ -618,6 +638,7 @@ const api = globalThis.kimiAgentAPI;
 const claw = globalThis.clawBridgeAPI;
 const sources = api?.byokSources ?? claw?.byokSources;
 return {
+  mounted: Boolean(api),
   getUserProfile: typeof api?.getUserProfile === "function",
   getByokProfile: typeof api?.getByokProfile === "function",
   byokSourcesList: typeof sources?.list === "function",
@@ -629,6 +650,7 @@ return {
 const api = globalThis.clawBridgeAPI;
 const sources = api?.byokSources;
 return {
+  mounted: Boolean(api),
   byokSourcesList: typeof sources?.list === "function",
   modelImportApi: typeof api?.importByokModels === "function" || (typeof sources?.list === "function" && typeof sources?.preview === "function" && typeof sources?.save === "function")
 };

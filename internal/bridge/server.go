@@ -337,6 +337,11 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 		switch path {
 		case "/api/state":
 			return s.State()
+		case "/api/diagnostics/export":
+			if s.Extra == nil {
+				return nil, errors.New("native_preview_unavailable")
+			}
+			return s.Extra(ctx, path, nil)
 		case "/api/providers":
 			return core.Providers(), nil
 		case "/api/service":
@@ -616,7 +621,7 @@ func (s *Service) State() (core.Document, error) {
 		"integration": core.Document{"state": "unchecked", "imported": false, "reason": "native_preview_unavailable", "desktop": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}},
 		"kimiProcess": core.Document{"running": nil, "state": "unknown"}, "context": core.Document{"policy": core.Document{"mode": "inherit"}, "status": "unavailable"},
 		"tools": core.Document{"available": false, "reason": "native_preview_unavailable", "servers": []any{}}, "search": core.Document{"status": "unavailable"},
-		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
+		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{"operationLog": core.Document{"available": false, "retained": 0, "limit": diagnosticsEventLimit, "lastAt": int64(0), "reason": "diagnostics_unconfigured"}}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
 		"integrationMode": core.IntegrationMode(d), "directMode": directModeBase(d),
 	}
 	s.mu.RLock()

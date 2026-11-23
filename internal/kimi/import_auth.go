@@ -3,6 +3,7 @@ package kimi
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // An import is two separate facts and this file keeps them apart:
@@ -63,6 +64,33 @@ const (
 // opened at once would fight over the same settings page.
 var ErrImportBusy = errors.New("native_import_busy")
 
+const (
+	importBusyWait = 3 * time.Second
+	importBusyPoll = 25 * time.Millisecond
+)
+
+func (c *Controller) waitForImport(ctx context.Context) error {
+	deadline := time.Now().Add(importBusyWait)
+	for {
+		c.mu.Lock()
+		busy := c.importGranted
+		c.mu.Unlock()
+		if !busy {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return ErrImportBusy
+		}
+		timer := time.NewTimer(importBusyPoll)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+}
+
 // ImportModelsAuthorized runs the import as an explicit, one-shot user action:
 // this call, and only this call, may open Kimi's settings page and owns the
 // overlay it opened.
@@ -77,6 +105,11 @@ func (c *Controller) ImportModelsAuthorized(ctx context.Context) (ImportResult, 
 func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount, repairSignature string) (ImportResult, error) {
 	if repairSignature != "" {
 		c.reapChild()
+	}
+	if repairSignature == "" {
+		if err := c.waitForImport(ctx); err != nil {
+			return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
+		}
 	}
 	c.mu.Lock()
 	if c.importGranted || (repairSignature != "" && c.repairSignature == repairSignature) {
@@ -98,7 +131,7 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 		c.mu.Unlock()
 	}()
 	result, err := c.importModels(ctx, true, expectedAccount)
-	if repairSignature != "" && (result.State == ImportStateWaitingWork || result.State == ImportStateWaitingSettings) {
+	if repairSignature != "" && repairFailedTransiently(result) {
 		c.mu.Lock()
 		if c.repairSignature == repairSignature {
 			c.repairSignature = ""
@@ -106,6 +139,26 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 		c.mu.Unlock()
 	}
 	return result, err
+}
+
+// repairFailedTransiently reports only failures that happen before an import
+// expression is dispatched. Once a timeout, a disconnect or a reload can hide
+// whether the official page took the write, the repair signature stays until a
+// later reconciliation or process restart provides fresh evidence.
+func repairFailedTransiently(result ImportResult) bool {
+	if result.OK {
+		return false
+	}
+	return result.State == ImportStateWaitingWork || result.State == ImportStateWaitingSettings
+}
+
+// forgetRepairSignature drops the suppression for the next launch. A signature
+// names a process's own failure to answer; a new or stopped child is a different
+// process, so the old suppression must not outlive it.
+func (c *Controller) forgetRepairSignature() {
+	c.mu.Lock()
+	c.repairSignature = ""
+	c.mu.Unlock()
 }
 
 // RepairIntegration restores a verified existing import after its loopback port
@@ -154,6 +207,9 @@ func (c *Controller) RepairIntegration(ctx context.Context, observed Integration
 // The keys in `request` exist only for the duration of this call. The intent
 // that a later reconcile reads records the source id and aliases, never a key.
 func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectImportRequest) (ImportResult, error) {
+	if err := c.waitForImport(ctx); err != nil {
+		return ImportResult{State: ImportStateFailed, Reason: safeReason(err)}, err
+	}
 	c.reapChild()
 	c.mu.Lock()
 	if c.importGranted {
@@ -299,6 +355,7 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string, ch
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted
 	if integration.Reason == "account_changed" {
+		result.OK = false
 		result.State, result.Reason = ImportStateAccountChanged, NativeAccountChanged
 		result.Applied, result.Adopted = false, false
 		return result

@@ -30,6 +30,7 @@ type Native struct {
 	compatFingerprint   kimi.OfficialFingerprint
 	compatLiveProbedPID int
 	operation           core.Document
+	receipt             *nativeImportReceipt
 	jobs                chan struct{}
 	policies            *nativePolicies
 	web                 *webService
@@ -52,6 +53,7 @@ type Native struct {
 	accountSyncAt     time.Time
 	swarm             kimi.SwarmSnapshot
 	workUsage         *workUsageCollector
+	diagnostics       *diagnosticsLog
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -85,6 +87,7 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	capabilities := kimi.ProbeWorkCapabilities(install)
 	policies.capabilities = capabilities.Subagents
 	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, compatibility: initialCompatibilityReport(), jobs: make(chan struct{}, 2), workCapabilities: capabilities}
+	n.diagnostics = newDiagnosticsLog(s.StateDir)
 	n.workUsage = newWorkUsageCollector(s.StateDir, home, gateway.usage, s.Store, gateway.budget)
 	n.workUsage.Sync()
 	n.quota = newNativeQuota(s, controller.KimiCodeKey, kimi.LocalKimiCodeKey)
@@ -111,6 +114,8 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 		switch path {
 		case "/api/actions":
 			return n.Action(ctx, in)
+		case "/api/diagnostics/export":
+			return n.diagnosticsExport(), nil
 		case "/api/context":
 			return s.saveNativeContext(n.policies, in)
 		case "/api/tools":
@@ -293,15 +298,37 @@ func nativeDesktopState(status kimi.ControllerStatus) core.Document {
 	return desktop
 }
 
+// settledImportReason reports whether a reason only says the import is still
+// waiting for its evidence on disk. A readback that holds and has adopted the
+// import resolves exactly these.
+func settledImportReason(reason string) bool {
+	switch reason {
+	case "", "route_cleanup_pending", "native_import_not_verified", kimi.NativeRequiresRestart:
+		return true
+	}
+	return false
+}
+
+// settledNativeImportReceipt reads a receipt against what the profile now holds.
+// The receipt is the newer evidence only for the parts a readback cannot answer:
+// a refused import is never promoted, and an accepted one is only settled when
+// the readback both holds it and the running application loaded it.
 func settledNativeImportReceipt(current *kimi.IntegrationResult, receipt kimi.ImportResult) kimi.ImportResult {
 	if current == nil {
 		return receipt
 	}
+	// Whether the previous source is still connected is a readback fact, so it is
+	// settled for every receipt. It never says the import itself succeeded.
 	if current.Applied && !current.RouteCleanupPending {
 		receipt.RouteCleanupPending = false
 		if receipt.Reason == "route_cleanup_pending" {
 			receipt.Reason = ""
 		}
+	}
+	if !receipt.OK || (receipt.State != kimi.ImportStateAccepted && receipt.State != kimi.ImportStateRequiresRestart && receipt.State != kimi.ImportStateApplied) {
+		// A refused or account-mismatched import says nothing about what is on
+		// disk. An adopted readback must not report it as an applied import.
+		return receipt
 	}
 	if !current.Adopted {
 		return receipt
@@ -316,11 +343,131 @@ func settledNativeImportReceipt(current *kimi.IntegrationResult, receipt kimi.Im
 			receipt.Reason = ""
 		}
 	}
+	if receipt.State == kimi.ImportStateAccepted && current.Applied && !current.RouteCleanupPending {
+		// The page accepted the import and the readback has held it since. The
+		// receipt describes a settled import, not one still waiting on disk.
+		receipt.State = kimi.ImportStateApplied
+		if settledImportReason(receipt.Reason) {
+			receipt.Reason = ""
+		}
+	}
 	if receipt.RouteCleanupPending {
 		receipt.State = kimi.ImportStateAccepted
 		receipt.Reason = "route_cleanup_pending"
 	}
 	return receipt
+}
+
+// nativeImportReceipt is the last import answer, kept next to the operation that
+// produced it. Native.operation only holds the newest operation of any kind, so
+// a compatibility check or an open-work click would otherwise drop a restart or
+// a route cleanup the import still needs.
+type nativeImportReceipt struct {
+	action  string
+	mode    string
+	account string
+	result  kimi.ImportResult
+}
+
+// nativeImportAction reports whether action runs a model import. Only those
+// operations produce a receipt.
+func nativeImportAction(action string) bool {
+	return action == "connect-kimi" || action == "prepare-native"
+}
+
+func importResultValue(value any) (kimi.ImportResult, bool) {
+	switch typed := value.(type) {
+	case kimi.ImportResult:
+		return typed, true
+	case *kimi.ImportResult:
+		if typed != nil {
+			return *typed, true
+		}
+	}
+	return kimi.ImportResult{}, false
+}
+
+func importReceiptPresent(receipt kimi.ImportResult) bool {
+	return receipt.OK || receipt.State != "" || receipt.Reason != ""
+}
+
+func receiptIntegrationMode(current *kimi.IntegrationResult) string {
+	if current != nil && current.Mode == kimi.IntegrationModeDirect {
+		return kimi.IntegrationModeDirect
+	}
+	return kimi.IntegrationModeGateway
+}
+
+// rememberImportReceipt keeps the answer to the import that just finished. It
+// takes Native.mu itself; finishOperation uses the locked variant so the receipt
+// is recorded together with the operation that produced it.
+func (n *Native) rememberImportReceipt(action string, result any) {
+	n.mu.Lock()
+	n.rememberImportReceiptLocked(action, result)
+	n.mu.Unlock()
+}
+
+func (n *Native) rememberImportReceiptLocked(action string, result any) {
+	if !nativeImportAction(action) {
+		return
+	}
+	receipt, ok := importResultValue(result)
+	if !ok || !importReceiptPresent(receipt) {
+		return
+	}
+	record := &nativeImportReceipt{action: action, mode: kimi.IntegrationModeGateway, result: receipt}
+	if n.isDirectMode() {
+		record.mode = kimi.IntegrationModeDirect
+	}
+	if receipt.Readback != nil {
+		record.account = receipt.Readback.AccountDigest
+	}
+	n.receipt = record
+}
+
+// publishedNativeImport is the receipt State publishes. It is settled against
+// the current readback every time it is read, so a deferred restart turns into
+// `applied` once adoption is observed, and so does an accepted import whose
+// files are now read back. A receipt recorded for another account, or for the
+// other integration mode, never describes the current profile; a route the mode
+// switch left to clean up is the one piece of that receipt that still applies.
+//
+// It reads Native.operation and Native.receipt, so callers hold Native.mu.
+func (n *Native) publishedNativeImport(current *kimi.IntegrationResult) (kimi.ImportResult, bool) {
+	record := n.receipt
+	if record == nil {
+		// No import ran yet: publish the current operation's own answer if it is
+		// one, which is everything an earlier build published.
+		if n.operation == nil || !nativeImportAction(core.String(n.operation["action"])) {
+			return kimi.ImportResult{}, false
+		}
+		receipt, ok := importResultValue(n.operation["result"])
+		if !ok || !importReceiptPresent(receipt) {
+			return kimi.ImportResult{}, false
+		}
+		return settledNativeImportReceipt(current, receipt), true
+	}
+	if current == nil {
+		// Nothing is known about the profile yet, so there is nothing to settle
+		// the receipt against.
+		return settledNativeImportReceipt(nil, record.result), true
+	}
+	if record.account != "" && current.AccountDigest != "" && record.account != current.AccountDigest {
+		// Another account is signed in: the old profile's import is not evidence
+		// about this one, including unfinished cleanup.
+		return kimi.ImportResult{}, false
+	}
+	if record.mode != receiptIntegrationMode(current) {
+		if record.result.OK && (record.result.RouteCleanupPending || record.result.Reason == "route_cleanup_pending") {
+			// Switching modes leaves the previous source to disconnect, and the
+			// selected mode's readback cannot settle that. The restart request
+			// does not carry over.
+			return kimi.ImportResult{OK: record.result.OK, State: kimi.ImportStateAccepted,
+				Reason: "route_cleanup_pending", RouteCleanupPending: true}, true
+		}
+		return kimi.ImportResult{}, false
+	}
+	return settledNativeImportReceipt(current, record.result), true
 }
 
 func (n *Native) integrationForState(current *kimi.IntegrationResult) *kimi.IntegrationResult {
@@ -337,6 +484,9 @@ func (n *Native) integrationForState(current *kimi.IntegrationResult) *kimi.Inte
 }
 
 func (n *Native) State() core.Document {
+	// The log summary may read history from disk on first use; it must happen
+	// before Native.mu is held.
+	operationLog := n.diagnostics.summary()
 	n.mu.Lock()
 	status := n.controller.Status(context.Background())
 	currentIntegration := n.integrationForState(status.Integration)
@@ -360,24 +510,15 @@ func (n *Native) State() core.Document {
 		for k, v := range n.operation {
 			operation[k] = v
 		}
-		var receipt kimi.ImportResult
-		switch value := operation["result"].(type) {
-		case kimi.ImportResult:
-			receipt = value
-		case *kimi.ImportResult:
-			if value != nil {
-				receipt = *value
-			}
-		}
-		if receipt.State != "" || receipt.Reason != "" || receipt.OK {
-			raw, _ := json.Marshal(settledNativeImportReceipt(currentIntegration, receipt))
-			var published core.Document
-			if json.Unmarshal(raw, &published) == nil {
-				integration["nativeImport"] = published
-			}
+	}
+	if receipt, ok := n.publishedNativeImport(currentIntegration); ok {
+		raw, _ := json.Marshal(receipt)
+		var published core.Document
+		if json.Unmarshal(raw, &published) == nil {
+			integration["nativeImport"] = published
 		}
 	}
-	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "compatibility": n.compatibilitySnapshot(), "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason}}
+	out := core.Document{"kimiProcess": process, "integration": integration, "profile": n.controller.ProfileStatus(), "nativeTransport": kimi.ManagedTransportInfo(), "operation": operation, "compatibility": n.compatibilitySnapshot(), "diagnostics": core.Document{"contract": n.contract, "nativeComponents": platform.Components(), "profileReason": n.profileReason, "operationLog": operationLog}}
 	out["workCapabilities"] = n.workCapabilities
 	if n.swarm.State == "" {
 		out["swarm"] = kimi.SwarmSnapshot{State: kimi.SwarmStateUnknown, Reason: "work_swarm_not_checked"}
@@ -418,6 +559,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	if value, present := in["profileMode"]; present {
 		mode, valid := value.(string)
 		if !valid || action != "launch-kimi" || (mode != kimi.ProfileModeOfficial && mode != kimi.ProfileModeExistingAuthorized) {
+			n.logOperationRejected(action, "invalid_profile_mode")
 			return nil, errors.New("invalid_profile_mode")
 		}
 		profileMode = mode
@@ -427,20 +569,26 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	if action == "set-swarm" {
 		var ok bool
 		if swarmEnabled, ok = in["enabled"].(bool); !ok {
+			n.logOperationRejected(action, "invalid_swarm_mode")
 			return nil, errors.New("invalid_swarm_mode")
 		}
 		swarmKey, _ = in["conversationKey"].(string)
 		if !kimi.ValidSwarmConversationKey(swarmKey) {
+			n.logOperationRejected(action, "invalid_swarm_conversation")
 			return nil, errors.New("invalid_swarm_conversation")
 		}
 	}
 	if action == "check-upstream" {
+		started := time.Now()
 		connectionID := core.String(in["connectionId"])
 		if connectionID == "" {
+			n.logOperationRejected(action, "connection_unavailable")
 			return nil, errors.New("connection_unavailable")
 		}
+		n.logOperationStarted("", action)
 		checked, err := n.service.discover(ctx, core.Document{"connectionId": connectionID})
 		if err != nil {
+			n.logOperationFinished("", action, "", "failed", core.ErrorCode(err), time.Since(started).Milliseconds(), nil)
 			return nil, err
 		}
 		result := checked.(core.Document)
@@ -450,26 +598,34 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				operation[key] = value
 			}
 		}
+		n.logOperationFinished("", action, "", core.String(operation["state"]), core.String(operation["reason"]), time.Since(started).Milliseconds(), nil)
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
 	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "check-compatibility", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
 	default:
+		n.logOperationRejected(action, "native_preview_unavailable")
 		return nil, errors.New("native_preview_unavailable")
 	}
 	n.mu.Lock()
 	if n.operation != nil && n.operation["state"] == "running" {
 		n.mu.Unlock()
+		n.logOperationRejected(action, "operation_busy")
 		return nil, errors.New("operation_busy")
 	}
 	id := RandomKey()[:16]
 	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
 	initial := core.Document{"id": id, "action": action, "state": "running"}
 	n.mu.Unlock()
+	n.logOperationStarted(id, action)
 	go func() {
 		timeout := 45 * time.Second
 		if action == "prepare-native" || action == "remove-dns" {
 			timeout = 180 * time.Second
+		} else if action == "connect-kimi" && !n.isDirectMode() {
+			// The import has its own 60 second page budget; the action must not
+			// cancel it first and leave its outcome unknown.
+			timeout = 75 * time.Second
 		} else if action == "connect-kimi" && n.isDirectMode() {
 			// A direct import settles the static hosts entry first, and that can
 			// need one administrator prompt; the gateway path never does.
@@ -546,10 +702,13 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				// The import needs the intranet name to resolve without this
 				// product's listener, so the static entry is settled first. A
 				// machine that already has it costs no administrator prompt.
+				n.setOperationStage(id, diagnosticStagePrepare)
 				if err = n.prepareBYOK(deadline); err == nil {
+					n.setOperationStage(id, diagnosticStageImportDirect)
 					imported, err = n.importDirect(deadline)
 				}
 			} else {
+				n.setOperationStage(id, diagnosticStageImportModels)
 				imported, err = n.controller.ImportModelsAuthorized(deadline)
 			}
 			if err == nil {
@@ -571,14 +730,17 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				break
 			}
 			n.cleanupOrphanedLegacy()
+			n.setOperationStage(id, diagnosticStagePrepare)
 			err = n.prepareBYOK(deadline)
 			var imported *kimi.ImportResult
 			if err == nil {
 				var value kimi.ImportResult
 				var importErr error
 				if n.isDirectMode() {
+					n.setOperationStage(id, diagnosticStageImportDirect)
 					value, importErr = n.importDirect(deadline)
 				} else {
+					n.setOperationStage(id, diagnosticStageImportModels)
 					value, importErr = n.controller.ImportModelsAuthorized(deadline)
 				}
 				imported = &value
@@ -639,12 +801,13 @@ func (n *Native) importDirect(ctx context.Context) (kimi.ImportResult, error) {
 }
 
 func (n *Native) finishOperation(id, state string, result any, err error) {
+	finishedAt := time.Now()
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.operation == nil || n.operation["id"] != id {
+		n.mu.Unlock()
 		return
 	}
-	n.operation["finishedAt"] = time.Now().UnixMilli()
+	n.operation["finishedAt"] = finishedAt.UnixMilli()
 	if errors.Is(err, kimi.ErrUnmanagedKimiRunning) {
 		state = "waiting-kimi-exit"
 	} else if err != nil {
@@ -654,9 +817,31 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 	if result != nil {
 		n.operation["result"] = result
 	}
+	reason := ""
 	if err != nil {
-		n.operation["reason"] = core.ErrorCode(err)
+		reason = core.ErrorCode(err)
+		n.operation["reason"] = reason
 	}
+	action := core.String(n.operation["action"])
+	stage := core.String(n.operation["stage"])
+	duration := finishedAt.UnixMilli() - documentInt64(n.operation["startedAt"])
+	if duration < 0 {
+		duration = 0
+	}
+	// The receipt outlives the operation: a later open-work or compatibility check
+	// replaces Native.operation but must not take a pending restart with it. It is
+	// recorded under the same lock that published this operation, so a newer
+	// operation cannot interleave with it.
+	n.rememberImportReceiptLocked(action, result)
+	n.mu.Unlock()
+	// The diagnostic write happens with Native.mu released: a stalled disk must
+	// not block readers of the operation state, and a failed write is ignored.
+	if reason == "" {
+		if imported := diagnosticImportOf(result); imported != nil {
+			reason = imported.Reason
+		}
+	}
+	n.logOperationFinished(id, action, stage, state, reason, duration, result)
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }

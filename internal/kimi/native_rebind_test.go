@@ -435,3 +435,42 @@ func TestControllerImportRebindsTheCurrentAccount(t *testing.T) {
 		t.Fatalf("the settled import was not applied: %+v", settled)
 	}
 }
+
+// TestNativeConfirmedImportRebindsAfterTheGatewayMoved covers the port change:
+// the confirmed import is what proves the new address works, so requiring the
+// old intent to already name it would refuse the very import that repairs it.
+// The account gates still apply: only the exact profile may be adopted.
+func TestNativeConfirmedImportRebindsAfterTheGatewayMoved(t *testing.T) {
+	fixture := newNativeFixture(t)
+	accounts := newSwitchedAccounts(t)
+	fixture.seedSwitchedStore(t, accounts, "http://127.0.0.1:7777/v1", "http://127.0.0.1:7777/v1")
+	fixture.seedOldIntent(t, accounts, "http://127.0.0.1:9999/v1")
+
+	integration := fixture.integration(t)
+	result := integration.Reconcile(ReconcileOptions{Enabled: true, AllowAccountRebind: true,
+		AccountScope: accounts.newScope, URL: "http://127.0.0.1:7777/v1", Models: testCatalog()})
+	if result.State != IntegrationReady && result.State != IntegrationRepaired {
+		t.Fatalf("a confirmed import on a new port was refused: %s/%s", result.State, result.Reason)
+	}
+	intent, err := integration.readIntent()
+	if err != nil || intent == nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if intent.AccountDigest != accounts.newDigest {
+		t.Fatal("the recorded account did not follow the confirmed import")
+	}
+	if normalizeNativeURL(intent.URL) != "http://127.0.0.1:7777/v1" {
+		t.Fatalf("the recorded address did not move: %s", intent.URL)
+	}
+
+	// The confirmation is still about one account: a profile pointing elsewhere
+	// is refused, so the relaxed address gate is not a blank cheque.
+	foreign := newNativeFixture(t)
+	foreign.seedSwitchedStore(t, accounts, "http://127.0.0.1:7777/v1", "http://127.0.0.1:8888/v1")
+	foreign.seedOldIntent(t, accounts, "http://127.0.0.1:9999/v1")
+	refused := foreign.integration(t).Reconcile(ReconcileOptions{Enabled: true, AllowAccountRebind: true,
+		AccountScope: accounts.newScope, URL: "http://127.0.0.1:7777/v1", Models: testCatalog()})
+	if refused.State == IntegrationReady || refused.State == IntegrationRepaired {
+		t.Fatalf("a profile pointing elsewhere was adopted: %+v", refused)
+	}
+}

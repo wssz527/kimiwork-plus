@@ -437,11 +437,29 @@ The expressions are the released build's own calls:
 | surface | `document.visibilityState`, `#root` painted, `isSettingsPageOpen()` |
 
 `ImportModels` ordering: expected account checked first (nothing is evaluated on
-a mismatch), then the import page is looked for on every allowlisted target; if
-absent and `OpenSettings` was authorised, `openSettings` runs, the target is
-re-polled six times at 250 ms, the import runs, and the overlay is closed through
-the official control. A confirmed import that still owes a restart reports
-`RequiresRestart` rather than claiming it applied.
+a mismatch), then the import page is looked for on every allowlisted `type: page`
+target; if absent and `OpenSettings` was authorised, the Work page is waited for
+and its `openSettings` API is waited for, then `openSettings` runs once. The
+overlay is re-polled every 250 ms within the same 10 s window (a slow start may
+mount the import API only after the overlay target exists), the import runs once,
+and the overlay is closed through the official control. A confirmed import that
+still owes a restart reports `RequiresRestart` rather than claiming it applied.
+The wait ends as soon as the context or the pipe ends, and the close keeps its own
+short budget so a cancelled import still closes the overlay it opened.
+
+A cached CDP session for a target that disappeared is dropped, and a probe that
+meets a dead session re-attaches once. Only read-only probes are retried this way:
+`importByokModels` and the direct `save` are never replayed.
+
+Budgets: an import gets 60 s end to end on both sides of the bridge, other
+operations 15 s. A budget that runs out is `native_bridge_timeout`; a genuinely
+unreachable endpoint is `native_bridge_unavailable`. Failure reasons are mapped
+to bounded machine codes, never raw transport URLs or free-form system errors.
+The explicit gateway import action and account-switch import allow 75 s so their
+caller does not cut off the 60 s bridge budget first. Automatic repair retries
+only a pre-write readiness failure; once a write's result is uncertain, its
+repair signature suppresses automatic replay until reconciliation or a process
+boundary.
 
 `Start` now publishes the bridge itself (`NewCDPActions` + `StartBridgeHost`), so
 `ImportModels` is reachable after a launch. If the bridge cannot start, the

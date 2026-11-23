@@ -970,16 +970,28 @@ func accountConfigUserID(home string) (string, error) {
 }
 
 func accountConfigMatches(home string, userID string) bool {
+	matches, _ := accountConfigState(home, userID)
+	return matches
+}
+
+// accountConfigState answers whether the profile's config still holds this
+// account, and whether the config was readable at all. The official generator
+// rewrites config.json right after an import, so a file that is momentarily
+// absent or half-written is not evidence of a different account.
+func accountConfigState(home string, userID string) (matches bool, readable bool) {
 	if userID == "" {
-		return false
+		return false, true
 	}
 	current, err := accountConfigUserID(home)
-	if err != nil || current != userID {
-		return false
+	if err != nil || current == "" {
+		return false, false
+	}
+	if current != userID {
+		return false, true
 	}
 	// The same identity the import path grades against, so the two features can
 	// never disagree about which account this profile holds.
-	return AccountScope(home) == sha256Hex(userID)
+	return AccountScope(home) == sha256Hex(userID), true
 }
 
 // writeAccountCredentials merges exactly two credential entries into the
