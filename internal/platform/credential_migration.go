@@ -85,8 +85,9 @@ func (m *migratingCredentialStore) saveCurrent(key, value string) error {
 func (m *migratingCredentialStore) Delete(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.legacy.Delete(key); err != nil {
+	if err := m.current.Delete(key); err != nil {
 		return err
 	}
-	return m.current.Delete(key)
+	_ = m.legacy.Delete(key)
+	return nil
 }

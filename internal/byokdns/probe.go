@@ -24,12 +24,18 @@ type Status struct {
 
 type LookupFunc func(context.Context, string) (string, error)
 
+type probeFlight struct {
+	done   chan struct{}
+	epoch  uint64
+	result ProbeResult
+}
+
 type Probe struct {
 	Lookup  LookupFunc
 	mu      sync.Mutex
 	cached  ProbeResult
 	at      time.Time
-	pending chan struct{}
+	pending *probeFlight
 	epoch   uint64
 }
 
@@ -42,7 +48,6 @@ func (p *Probe) Invalidate() {
 }
 
 func (p *Probe) DNS(ctx context.Context) ProbeResult {
-	var epoch uint64
 	for {
 		p.mu.Lock()
 		if !p.at.IsZero() && time.Since(p.at) < time.Minute {
@@ -51,44 +56,68 @@ func (p *Probe) DNS(ctx context.Context) ProbeResult {
 			return result
 		}
 		if p.pending != nil {
-			pending := p.pending
+			flight := p.pending
 			p.mu.Unlock()
 			select {
-			case <-pending:
-				continue
+			case <-flight.done:
+				p.mu.Lock()
+				stale := p.epoch != flight.epoch
+				p.mu.Unlock()
+				if stale {
+					continue
+				}
+				return flight.result
 			case <-ctx.Done():
 				return ProbeResult{Error: "dns_unavailable"}
 			}
 		}
-		p.pending = make(chan struct{})
-		epoch = p.epoch
+		if ctx.Err() != nil {
+			p.mu.Unlock()
+			return ProbeResult{Error: "dns_unavailable"}
+		}
+		flight := &probeFlight{
+			done:  make(chan struct{}),
+			epoch: p.epoch,
+		}
+		p.pending = flight
+		lookup := p.Lookup
+		if lookup == nil {
+			lookup = defaultLookup
+		}
 		p.mu.Unlock()
-		break
-	}
 
-	lookup := p.Lookup
-	if lookup == nil {
-		lookup = defaultLookup
-	}
-	lookupContext, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	address, err := lookup(lookupContext, Domain)
-	cancel()
-	result := ProbeResult{Address: address}
-	if err != nil {
-		result = ProbeResult{Error: "dns_unavailable"}
-	} else {
-		result.Passed = PrivateAddress(address)
-	}
+		go func() {
+			lookupContext, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			address, err := lookup(lookupContext, Domain)
+			cancel()
 
-	p.mu.Lock()
-	if epoch == p.epoch {
-		p.cached = result
-		p.at = time.Now()
+			result := ProbeResult{Address: address}
+			if err != nil {
+				result = ProbeResult{Error: "dns_unavailable"}
+			} else {
+				result.Passed = PrivateAddress(address)
+			}
+
+			p.mu.Lock()
+			flight.result = result
+			if flight.epoch == p.epoch && !errors.Is(err, context.Canceled) {
+				p.cached = result
+				p.at = time.Now()
+			}
+			if p.pending == flight {
+				p.pending = nil
+			}
+			close(flight.done)
+			p.mu.Unlock()
+		}()
+
+		select {
+		case <-flight.done:
+			return flight.result
+		case <-ctx.Done():
+			return ProbeResult{Error: "dns_unavailable"}
+		}
 	}
-	close(p.pending)
-	p.pending = nil
-	p.mu.Unlock()
-	return result
 }
 
 func defaultLookup(ctx context.Context, domain string) (string, error) {

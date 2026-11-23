@@ -2054,3 +2054,400 @@ func TestCheckNowDoesNotOverwriteChannelChangeDuringInflightCheck(t *testing.T) 
 		t.Fatalf("stale in-flight CheckNow overwrote post-channel-switch state: %#v", st)
 	}
 }
+
+func TestPreviewChannelCNBListFirstAndGitHubFallback(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+	makeManifest := func(ver, ch string) testManifestDoc {
+		return testManifestDoc{
+			SchemaVersion: 1,
+			Version:       ver,
+			Channel:       ch,
+			PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+			Artifacts: []testManifestArtifact{{
+				URL:           "pkg.zip",
+				Filename:      "pkg.zip",
+				Filetype:      "zip",
+				Size:          int64(len(zipBytes)),
+				Platform:      runtime.GOOS,
+				Arch:          runtime.GOARCH,
+				DigestAlgo:    "sha256",
+				Digest:        digestB64,
+				SignatureAlgo: "ed25519",
+				Signature:     sigB64,
+			}},
+		}
+	}
+
+	t.Run("cnb_list_and_manifest_succeed_without_github_api", func(t *testing.T) {
+		var cnbListHits, cnbManifestHits, ghAPIHits, ghManifestHits atomic.Int32
+		var sawQuery, sawAccept string
+		var cnbSrv *httptest.Server
+		cnbSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/org/kwp/-/releases":
+				cnbListHits.Add(1)
+				sawQuery = r.URL.RawQuery
+				sawAccept = r.Header.Get("Accept")
+				_ = json.NewEncoder(w).Encode([]githubRelease{
+					{
+						TagName: "v1.1.7",
+						Assets: []githubAsset{{
+							Name:               "update-manifest.json",
+							BrowserDownloadURL: cnbSrv.URL + "/org/kwp/-/releases/download/v1.1.7/update-manifest.json",
+						}},
+					},
+					{
+						TagName:    "v1.1.8-preview.1",
+						Prerelease: true,
+						Assets: []githubAsset{{
+							Name:               "update-manifest-preview.json",
+							BrowserDownloadURL: cnbSrv.URL + "/org/kwp/-/releases/download/v1.1.8-preview.1/update-manifest-preview.json",
+						}},
+					},
+					{
+						TagName:    "v1.1.8-preview.2",
+						Prerelease: true,
+						Assets: []githubAsset{{
+							Name:               "update-manifest-preview.json",
+							BrowserDownloadURL: cnbSrv.URL + "/org/kwp/-/releases/download/v1.1.8-preview.2/update-manifest-preview.json",
+						}},
+					},
+					{
+						TagName:    "v1.1.9-preview.1",
+						Draft:      true,
+						Prerelease: true,
+						Assets: []githubAsset{{
+							Name:               "update-manifest-preview.json",
+							BrowserDownloadURL: cnbSrv.URL + "/org/kwp/-/releases/download/v1.1.9-preview.1/update-manifest-preview.json",
+						}},
+					},
+				})
+			case "/org/kwp/-/releases/download/v1.1.8-preview.2/update-manifest-preview.json":
+				cnbManifestHits.Add(1)
+				_ = json.NewEncoder(w).Encode(makeManifest("1.1.8-preview.2", "preview"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer cnbSrv.Close()
+
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/repos/") {
+				ghAPIHits.Add(1)
+			} else {
+				ghManifestHits.Add(1)
+			}
+			http.Error(w, "should not be contacted", http.StatusInternalServerError)
+		}))
+		defer ghSrv.Close()
+
+		p, err := newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:          "org/kwp",
+			MirrorBase:    cnbSrv.URL,
+			GitHubAPIBase: ghSrv.URL,
+			GitHubWebBase: ghSrv.URL,
+			UseCustomAPI:  false,
+			Channel:       "preview",
+			HTTPClient:    &http.Client{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := p.Check(context.Background(), updater.CheckRequest{
+			CurrentVersion: "1.1.7",
+			Platform:       runtime.GOOS,
+			Arch:           runtime.GOARCH,
+		})
+		if err != nil {
+			t.Fatalf("Check failed: %v", err)
+		}
+		if rel == nil || rel.Version != "1.1.8-preview.2" {
+			t.Fatalf("expected 1.1.8-preview.2, got %+v", rel)
+		}
+		if sawQuery != "page=1&page_size=10" || sawAccept != "application/json" {
+			t.Fatalf("unexpected CNB list request: query=%q accept=%q", sawQuery, sawAccept)
+		}
+		if cnbListHits.Load() != 1 || cnbManifestHits.Load() != 1 || ghAPIHits.Load() != 0 || ghManifestHits.Load() != 0 {
+			t.Fatalf("unexpected hit counts: cnbList=%d cnbManifest=%d ghAPI=%d ghManifest=%d",
+				cnbListHits.Load(), cnbManifestHits.Load(), ghAPIHits.Load(), ghManifestHits.Load())
+		}
+		candidates := extractDownloadCandidates(rel.Metadata)
+		if len(candidates) < 2 || !strings.HasPrefix(candidates[0], cnbSrv.URL+"/") || !strings.HasPrefix(candidates[1], ghSrv.URL+"/") {
+			t.Fatalf("expected [cnb, github] download candidates, got %v", candidates)
+		}
+	})
+
+	t.Run("cnb_list_hit_falls_back_to_github_tag_manifest_when_cnb_manifest_fails", func(t *testing.T) {
+		var ghAPIHits, ghManifestHits atomic.Int32
+		var cnbSrv *httptest.Server
+		cnbSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/org/kwp/-/releases":
+				_ = json.NewEncoder(w).Encode([]githubRelease{{
+					TagName:    "v1.1.8-preview.1",
+					Prerelease: true,
+					Assets: []githubAsset{{
+						Name:               "update-manifest-preview.json",
+						BrowserDownloadURL: cnbSrv.URL + "/org/kwp/-/releases/download/v1.1.8-preview.1/update-manifest-preview.json",
+					}},
+				}})
+			case "/org/kwp/-/releases/download/v1.1.8-preview.1/update-manifest-preview.json":
+				http.Error(w, "mirror unavailable", http.StatusBadGateway)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer cnbSrv.Close()
+
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/org/kwp/releases/download/v1.1.8-preview.1/update-manifest-preview.json":
+				ghManifestHits.Add(1)
+				_ = json.NewEncoder(w).Encode(makeManifest("1.1.8-preview.1", "preview"))
+			default:
+				ghAPIHits.Add(1)
+				http.NotFound(w, r)
+			}
+		}))
+		defer ghSrv.Close()
+
+		p, err := newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:          "org/kwp",
+			MirrorBase:    cnbSrv.URL,
+			GitHubAPIBase: ghSrv.URL,
+			GitHubWebBase: ghSrv.URL,
+			UseCustomAPI:  false,
+			Channel:       "preview",
+			HTTPClient:    &http.Client{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := p.Check(context.Background(), updater.CheckRequest{
+			CurrentVersion: "1.1.7",
+			Platform:       runtime.GOOS,
+			Arch:           runtime.GOARCH,
+		})
+		if err != nil {
+			t.Fatalf("expected fallback to github tag manifest, got err: %v", err)
+		}
+		if rel == nil || rel.Version != "1.1.8-preview.1" || rel.Metadata[metaUpdateSource] != "github" {
+			t.Fatalf("unexpected release: %+v", rel)
+		}
+		if ghManifestHits.Load() != 1 || ghAPIHits.Load() != 0 {
+			t.Fatalf("expected direct github tag manifest without github api, manifest=%d api=%d", ghManifestHits.Load(), ghAPIHits.Load())
+		}
+	})
+
+	t.Run("cnb_list_failure_falls_back_to_github_api_and_picks_highest_semver", func(t *testing.T) {
+		var cnbListHits, ghAPIHits atomic.Int32
+		cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/org/kwp/-/releases" {
+				cnbListHits.Add(1)
+				http.Error(w, "cnb down", http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, "cnb down", http.StatusServiceUnavailable)
+		}))
+		defer cnbSrv.Close()
+
+		var ghSrv *httptest.Server
+		ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/org/kwp/releases":
+				ghAPIHits.Add(1)
+				_ = json.NewEncoder(w).Encode([]githubRelease{
+					{
+						TagName:    "v1.1.8-preview.2",
+						Prerelease: true,
+						Assets: []githubAsset{{
+							Name:               "update-manifest-preview.json",
+							BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.8-preview.2/update-manifest-preview.json",
+						}},
+					},
+					{
+						TagName: "v1.1.8",
+						Assets: []githubAsset{{
+							Name:               "update-manifest.json",
+							BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.8/update-manifest.json",
+						}},
+					},
+					{
+						TagName: "v1.1.7",
+						Assets: []githubAsset{{
+							Name:               "update-manifest.json",
+							BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.7/update-manifest.json",
+						}},
+					},
+				})
+			case "/org/kwp/releases/download/v1.1.8/update-manifest.json":
+				_ = json.NewEncoder(w).Encode(makeManifest("1.1.8", "stable"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ghSrv.Close()
+
+		p, err := newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:          "org/kwp",
+			MirrorBase:    cnbSrv.URL,
+			GitHubAPIBase: ghSrv.URL,
+			GitHubWebBase: ghSrv.URL,
+			UseCustomAPI:  false,
+			Channel:       "preview",
+			HTTPClient:    &http.Client{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := p.Check(context.Background(), updater.CheckRequest{
+			CurrentVersion: "1.1.8-preview.2",
+			Platform:       runtime.GOOS,
+			Arch:           runtime.GOARCH,
+		})
+		if err != nil {
+			t.Fatalf("expected github api fallback to succeed: %v", err)
+		}
+		if rel == nil || rel.Version != "1.1.8" || rel.Channel != "stable" {
+			t.Fatalf("expected stable 1.1.8 > 1.1.8-preview.2, got %+v", rel)
+		}
+		if cnbListHits.Load() != 1 || ghAPIHits.Load() != 1 {
+			t.Fatalf("expected cnbList=1 ghAPI=1, got %d/%d", cnbListHits.Load(), ghAPIHits.Load())
+		}
+	})
+
+	t.Run("both_sources_fail_reports_concise_per_source_reasons", func(t *testing.T) {
+		cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		}))
+		defer cnbSrv.Close()
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "rate limited", http.StatusForbidden)
+		}))
+		defer ghSrv.Close()
+
+		p, err := newMirrorFallbackProvider(mirrorProviderConfig{
+			Repo:          "org/kwp",
+			MirrorBase:    cnbSrv.URL,
+			GitHubAPIBase: ghSrv.URL,
+			GitHubWebBase: ghSrv.URL,
+			UseCustomAPI:  false,
+			Channel:       "preview",
+			HTTPClient:    &http.Client{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = p.Check(context.Background(), updater.CheckRequest{
+			CurrentVersion: "1.1.7",
+			Platform:       runtime.GOOS,
+			Arch:           runtime.GOARCH,
+		})
+		if err == nil {
+			t.Fatal("expected error when both sources fail")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "cnb-releases: HTTP 502") || !strings.Contains(msg, "github-releases: HTTP 403") {
+			t.Fatalf("expected concise per-source reasons, got %q", msg)
+		}
+	})
+}
+
+func TestSelectBestManifestCandidateSemverOrder(t *testing.T) {
+	list := []githubRelease{
+		{
+			TagName: "v1.1.7",
+			Assets:  []githubAsset{{Name: "update-manifest.json", BrowserDownloadURL: "https://example.test/1.1.7"}},
+		},
+		{
+			TagName:    "v1.1.8-preview.2",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/1.1.8-p2"}},
+		},
+		{
+			TagName:    "v1.1.8-preview.10",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/1.1.8-p10"}},
+		},
+		{
+			TagName:    "v1.1.8-preview.1",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/1.1.8-p1"}},
+		},
+		{
+			TagName:    "v1.2.0-preview.1",
+			Draft:      true,
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "update-manifest-preview.json", BrowserDownloadURL: "https://example.test/draft"}},
+		},
+		{
+			TagName:    "v1.3.0-preview.1",
+			Prerelease: true,
+			Assets:     []githubAsset{{Name: "other.zip", BrowserDownloadURL: "https://example.test/no-manifest"}},
+		},
+	}
+
+	got := selectBestManifestCandidate(list, "preview", "https://example.test")
+	if got == nil || got.tag != "v1.1.8-preview.10" {
+		t.Fatalf("expected v1.1.8-preview.10, got %+v", got)
+	}
+
+	list = append(list, githubRelease{
+		TagName: "v1.1.8",
+		Assets:  []githubAsset{{Name: "update-manifest.json", BrowserDownloadURL: "https://example.test/1.1.8"}},
+	})
+	got = selectBestManifestCandidate(list, "preview", "https://example.test")
+	if got == nil || got.tag != "v1.1.8" || got.assetName != "update-manifest.json" {
+		t.Fatalf("expected stable v1.1.8 over previews, got %+v", got)
+	}
+}
+
+func TestCopyHelperBinaryUsesPrivateStateDirAndMode0700(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "daemon-bin")
+	want := []byte("helper-binary-content")
+	if err := os.WriteFile(src, want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir := filepath.Join(t.TempDir(), "private-state")
+	dst, err := copyHelperBinary(src, stateDir)
+	if err != nil {
+		t.Fatalf("copyHelperBinary(stateDir): %v", err)
+	}
+	defer os.Remove(dst)
+
+	if filepath.Dir(dst) != stateDir {
+		t.Fatalf("expected helper inside stateDir %q, got %q", stateDir, dst)
+	}
+	if !strings.HasPrefix(filepath.Base(dst), "kwp-update-helper-") {
+		t.Fatalf("unexpected helper filename: %q", filepath.Base(dst))
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("helper content mismatch: got=%q err=%v", string(got), err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Fatalf("expected helper mode 0700, got %#o", info.Mode().Perm())
+		}
+	}
+
+	fallbackDst, err := copyHelperBinary(src, "")
+	if err != nil {
+		t.Fatalf("copyHelperBinary(fallback): %v", err)
+	}
+	defer os.Remove(fallbackDst)
+	if filepath.Dir(fallbackDst) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("expected fallback helper in TempDir, got %q", fallbackDst)
+	}
+}

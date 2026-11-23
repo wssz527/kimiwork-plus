@@ -887,7 +887,7 @@ func (m *Manager) spawnApplyHelper(plan ApplyPlan) error {
 		return err
 	}
 
-	helperExe, err := copyHelperBinary(m.opts.ExecutablePath)
+	helperExe, err := copyHelperBinary(m.opts.ExecutablePath, m.opts.StateDir)
 	if err != nil {
 		return err
 	}
@@ -903,7 +903,7 @@ func (m *Manager) spawnApplyHelper(plan ApplyPlan) error {
 	return nil
 }
 
-func copyHelperBinary(srcExe string) (string, error) {
+func copyHelperBinary(srcExe, stateDir string) (string, error) {
 	if srcExe == "" {
 		var err error
 		srcExe, err = os.Executable()
@@ -911,20 +911,59 @@ func copyHelperBinary(srcExe string) (string, error) {
 			return "", err
 		}
 	}
-	sweepStaleHelpers()
-	suffix := ""
-	if runtime.GOOS == "windows" {
-		suffix = ".exe"
+	helperDir := strings.TrimSpace(stateDir)
+	if helperDir != "" {
+		if err := core.PrivateDirectory(helperDir); err != nil {
+			return "", err
+		}
+	} else {
+		helperDir = os.TempDir()
 	}
-	dst := filepath.Join(os.TempDir(), fmt.Sprintf("kwp-update-helper-%d%s", time.Now().UnixNano(), suffix))
-	if err := copyFileExact(srcExe, dst, 0o755); err != nil {
+	sweepStaleHelpers(helperDir)
+	if helperDir != os.TempDir() {
+		sweepStaleHelpers(os.TempDir())
+	}
+	pattern := "kwp-update-helper-*"
+	if runtime.GOOS == "windows" {
+		pattern = "kwp-update-helper-*.exe"
+	}
+	in, err := os.Open(srcExe)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	out, err := os.CreateTemp(helperDir, pattern)
+	if err != nil {
+		return "", err
+	}
+	dst := out.Name()
+	cleanup := func(cause error) (string, error) {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return "", cause
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		return cleanup(err)
+	}
+	if err := out.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := out.Chmod(0o700); err != nil {
+		return cleanup(err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
 		return "", err
 	}
 	return dst, nil
 }
 
-func sweepStaleHelpers() {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "kwp-update-helper-*"))
+func sweepStaleHelpers(dir string) {
+	if dir == "" {
+		return
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "kwp-update-helper-*"))
 	if err != nil {
 		return
 	}

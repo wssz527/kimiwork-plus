@@ -20,50 +20,61 @@ func configureDetachedHelper(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
-func waitForProcessExit(pid int, timeout time.Duration) {
+func waitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
-			return
+			return true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	return syscall.Kill(pid, 0) != nil
 }
 
 func stopTargetDesktop(targetApp string, logf func(string, ...any)) {
-	desktopBin := filepath.Join(targetApp, "Contents", "MacOS", "KimiWorkPlus")
-	pids := findProcessPIDsForBinary(desktopBin)
-	if len(pids) == 0 {
-		logf("no running desktop processes matched %s", desktopBin)
+	stopDarwinBinaryProcesses(filepath.Join(targetApp, "Contents", "MacOS", "KimiWorkPlus"), "desktop", targetApp, logf)
+}
+
+func forceStopTargetDaemon(targetApp string, logf func(string, ...any)) {
+	if targetApp == "" {
 		return
 	}
-	logf("stopping %d desktop process(es) for %s: %v", len(pids), targetApp, pids)
+	stopDarwinBinaryProcesses(installedDaemonBinary(targetApp), "daemon", targetApp, logf)
+}
+
+func stopDarwinBinaryProcesses(binaryPath, role, targetApp string, logf func(string, ...any)) {
+	pids := findProcessPIDsForBinary(binaryPath)
+	if len(pids) == 0 {
+		logf("no running %s processes matched %s", role, binaryPath)
+		return
+	}
+	logf("stopping %d %s process(es) for %s: %v", len(pids), role, targetApp, pids)
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		pids = findProcessPIDsForBinary(desktopBin)
+		pids = findProcessPIDsForBinary(binaryPath)
 		if len(pids) == 0 {
-			logf("stopped desktop processes cleanly via SIGTERM for %s", targetApp)
+			logf("stopped %s processes cleanly via SIGTERM for %s", role, targetApp)
 			return
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	logf("desktop process(es) still alive after SIGTERM, sending SIGKILL: %v", pids)
+	logf("%s process(es) still alive after SIGTERM, sending SIGKILL: %v", role, pids)
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		pids = findProcessPIDsForBinary(desktopBin)
+		pids = findProcessPIDsForBinary(binaryPath)
 		if len(pids) == 0 {
-			logf("stopped desktop processes via SIGKILL for %s", targetApp)
+			logf("stopped %s processes via SIGKILL for %s", role, targetApp)
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	logf("warning: desktop process(es) remained alive after SIGKILL: %v", pids)
+	logf("warning: %s process(es) remained alive after SIGKILL: %v", role, pids)
 }
 
 func findProcessPIDsForBinary(binaryPath string) []int {

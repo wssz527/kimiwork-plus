@@ -3,8 +3,8 @@ param(
   [string]$Go = "go",
   [string]$Version = "1.0.0",
   [string]$BuildId = "development",
-  [string]$UpdatePublicKey = "",
-  [string]$UpdateGitHubRepo = "",
+  [string]$UpdatePublicKey = $env:UPDATE_PUBLIC_KEY,
+  [string]$UpdateGitHubRepo = $env:UPDATE_GITHUB_REPO,
   [string]$UpdateMirrorBase = $env:UPDATE_MIRROR_BASE
 )
 $ErrorActionPreference = "Stop"
@@ -35,8 +35,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
   $StubSize = (Get-Item $StubExe).Length
 
-  $ZipPath = Join-Path $OutputDir "KimiWorkPlus-$Version-windows-amd64.zip"
-  $SetupPath = Join-Path $OutputDir "KimiWorkPlus-$Version-windows-amd64-setup.exe"
+  $ZipName = "KimiWorkPlus-$Version-windows-amd64.zip"
+  $SetupName = "KimiWorkPlus-$Version-windows-amd64-setup.exe"
+  $ZipPath = Join-Path $OutputDir $ZipName
+  $SetupPath = Join-Path $OutputDir $SetupName
   $PayloadZip = Join-Path $TmpDir "payload.zip"
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -89,9 +91,31 @@ public static class KwpIconCheck {
       throw "Missing embedded icon resource in $exe"
     }
   }
+
+  $prevGoOS = $env:GOOS
+  $prevGoArch = $env:GOARCH
+  $prevCgo = $env:CGO_ENABLED
+  try {
+    Remove-Item Env:GOOS -ErrorAction SilentlyContinue
+    Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
+    $env:CGO_ENABLED = "0"
+    & $Go run ./cmd/wininstaller --check-payload $SetupPath
+    if ($LASTEXITCODE -ne 0) { throw "Installer payload verification failed for $SetupPath" }
+  } finally {
+    $env:GOOS = $prevGoOS
+    $env:GOARCH = $prevGoArch
+    $env:CGO_ENABLED = $prevCgo
+  }
 } finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $TmpDir
 }
 
-Get-FileHash -Algorithm SHA256 (Join-Path $OutputDir "*.exe"),(Join-Path $OutputDir "*.zip") | Format-Table Hash,Path
+$SumNames = @("KimiWorkPlus.exe", "gateway-daemon.exe", $ZipName, $SetupName)
+$SumLines = foreach ($name in $SumNames) {
+  $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $OutputDir $name)).Hash.ToLowerInvariant()
+  "$hash  $name"
+}
+$SumsPath = Join-Path $OutputDir "SHA256SUMS-windows.txt"
+[System.IO.File]::WriteAllText($SumsPath, (($SumLines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+Get-Content -LiteralPath $SumsPath
 Write-Host "Requires the system Microsoft Edge WebView2 Runtime. No Node.js or Chromium runtime is bundled."

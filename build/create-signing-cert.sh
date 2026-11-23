@@ -47,12 +47,13 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -sha256 \
   -config "$CONF_FILE"
 
+export P12_PASSWORD
 openssl pkcs12 -export \
   -inkey "$KEY_FILE" \
   -in "$CERT_FILE" \
   -out "$P12_FILE" \
   -name "$COMMON_NAME" \
-  -passout "pass:$P12_PASSWORD"
+  -passout env:P12_PASSWORD
 
 rm -f "$CONF_FILE"
 chmod 600 "$KEY_FILE" "$CERT_FILE" "$P12_FILE"

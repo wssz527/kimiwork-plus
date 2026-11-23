@@ -43,26 +43,48 @@ func configureDetachedHelper(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 }
 
-func waitForProcessExit(pid int, timeout time.Duration) {
+func isWindowsProcessAlive(pid int) bool {
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	var code uint32
+	err = syscall.GetExitCodeProcess(h, &code)
+	_ = syscall.CloseHandle(h)
+	return err == nil && code == stillActive
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
-		if err != nil {
-			return
-		}
-		var code uint32
-		err = syscall.GetExitCodeProcess(h, &code)
-		_ = syscall.CloseHandle(h)
-		if err != nil || code != stillActive {
-			return
+		if !isWindowsProcessAlive(pid) {
+			return true
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+	return !isWindowsProcessAlive(pid)
 }
 
-func stopTargetDesktop(targetDir string, logf func(string, ...any)) {
-	script := fmt.Sprintf(`$dir = '%s'; Get-Process -Name 'KimiWorkPlus','gateway-daemon' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue`,
-		strings.ReplaceAll(targetDir, "'", "''"))
+func normalizeWindowsDirPrefix(dir string) string {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(dir), "/", `\`)
+	cleaned = strings.TrimRight(cleaned, `\`)
+	if cleaned == "" {
+		return ""
+	}
+	return cleaned + `\`
+}
+
+func buildWindowsStopProcessScript(targetDir string, names ...string) string {
+	prefix := normalizeWindowsDirPrefix(targetDir)
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	}
+	return fmt.Sprintf(`$dir = '%s'; Get-Process -Name %s -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue`,
+		strings.ReplaceAll(prefix, "'", "''"), strings.Join(quoted, ","))
+}
+
+func runWindowsPowerShell(script string) {
 	u16 := utf16.Encode([]rune(script))
 	raw := make([]byte, len(u16)*2)
 	for i, code := range u16 {
@@ -76,8 +98,18 @@ func stopTargetDesktop(targetDir string, logf func(string, ...any)) {
 	cmd := exec.Command(psExe, "-NoProfile", "-NonInteractive", "-InputFormat", "None", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	_ = cmd.Run()
+}
+
+func stopTargetDesktop(targetDir string, logf func(string, ...any)) {
+	runWindowsPowerShell(buildWindowsStopProcessScript(targetDir, "KimiWorkPlus"))
 	time.Sleep(400 * time.Millisecond)
-	logf("stopped Windows processes under %s", targetDir)
+	logf("stopped Windows desktop processes under %s", targetDir)
+}
+
+func forceStopTargetDaemon(targetDir string, logf func(string, ...any)) {
+	runWindowsPowerShell(buildWindowsStopProcessScript(targetDir, "gateway-daemon"))
+	time.Sleep(400 * time.Millisecond)
+	logf("force-stopped lingering Windows gateway-daemon under %s", targetDir)
 }
 
 func validateStagedArtifact(stagedDir string) error {

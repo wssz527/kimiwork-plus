@@ -1,8 +1,14 @@
 #!/bin/bash
 set -euo pipefail
+if [ -n "${OUTPUT_DIR:-}" ]; then
+  mkdir -p "$OUTPUT_DIR"
+  OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+fi
 cd "$(dirname "$0")/.."
 : "${GO:=go}"
 : "${OUTPUT_DIR:=$PWD/build/output}"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 : "${VERSION:=1.0.0}"
 : "${BUILD_ID:=development}"
 : "${CODESIGN_IDENTITY:=-}"

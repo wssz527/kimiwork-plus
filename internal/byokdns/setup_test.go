@@ -352,3 +352,161 @@ func TestSetupDoesNotReuseResolverWithoutPrivateProbe(t *testing.T) {
 		t.Fatalf("admin calls = %d", adminCalls)
 	}
 }
+
+func TestSetupWindowsReusesManagedHostsWithoutUAC(t *testing.T) {
+	profile := t.TempDir()
+	flag := filepath.Join(profile, "kimi-agent", "byok-availability.json")
+	if err := os.MkdirAll(filepath.Dir(flag), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	managed := "127.0.0.1 localhost\r\n" + HostsMarker + "\r\n" + HostsEntry() + "\r\n"
+	if err := os.WriteFile(hosts, []byte(managed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("prepare_skips_uac_when_managed_hosts_and_probe_pass", func(t *testing.T) {
+		adminCalls := 0
+		setup := Setup{
+			FlagFile:  flag,
+			Platform:  "windows",
+			HostsPath: hosts,
+			Admin: func(context.Context, string, string) error {
+				adminCalls++
+				return nil
+			},
+			Probe: &Probe{Lookup: func(context.Context, string) (string, error) { return Address, nil }},
+		}
+		if err := setup.Run(context.Background(), "prepare"); err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		_, state, err := readFlag(flag)
+		if err != nil || state != "revealed" || adminCalls != 0 {
+			t.Fatalf("state=%s adminCalls=%d err=%v", state, adminCalls, err)
+		}
+	})
+
+	t.Run("prepare_runs_uac_when_probe_fails", func(t *testing.T) {
+		adminCalls := 0
+		setup := Setup{
+			FlagFile:  flag,
+			Platform:  "windows",
+			HostsPath: hosts,
+			Admin: func(_ context.Context, _ string, report string) error {
+				adminCalls++
+				return os.WriteFile(report, []byte("done"), 0o600)
+			},
+			Probe: &Probe{Lookup: func(context.Context, string) (string, error) { return "", errors.New("stale") }},
+		}
+		if err := setup.Run(context.Background(), "prepare"); err != nil {
+			t.Fatalf("prepare with failed probe: %v", err)
+		}
+		if adminCalls != 1 {
+			t.Fatalf("expected 1 admin call when probe fails, got %d", adminCalls)
+		}
+	})
+
+	t.Run("remove_dns_skips_uac_when_no_managed_entry", func(t *testing.T) {
+		cleanHosts := filepath.Join(t.TempDir(), "hosts")
+		if err := os.WriteFile(cleanHosts, []byte("127.0.0.1 localhost\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		adminCalls := 0
+		setup := Setup{
+			FlagFile:  flag,
+			Platform:  "windows",
+			HostsPath: cleanHosts,
+			Admin: func(context.Context, string, string) error {
+				adminCalls++
+				return nil
+			},
+		}
+		if err := setup.Run(context.Background(), "remove-dns"); err != nil {
+			t.Fatalf("remove-dns: %v", err)
+		}
+		if adminCalls != 0 {
+			t.Fatalf("expected 0 admin calls when nothing to remove, got %d", adminCalls)
+		}
+	})
+
+	t.Run("remove_dns_runs_uac_when_managed_entry_exists", func(t *testing.T) {
+		adminCalls := 0
+		setup := Setup{
+			FlagFile:  flag,
+			Platform:  "windows",
+			HostsPath: hosts,
+			Admin: func(_ context.Context, _ string, report string) error {
+				adminCalls++
+				return os.WriteFile(report, []byte("done"), 0o600)
+			},
+		}
+		if err := setup.Run(context.Background(), "remove-dns"); err != nil {
+			t.Fatalf("remove-dns with entry: %v", err)
+		}
+		if adminCalls != 1 {
+			t.Fatalf("expected 1 admin call to remove entry, got %d", adminCalls)
+		}
+	})
+}
+
+func TestProbeCallerCancellationDoesNotCancelSharedLookupOrPoisonCache(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	probe := Probe{Lookup: func(ctx context.Context, _ string) (string, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+				return Address, nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		return Address, nil
+	}}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	res1Ch := make(chan ProbeResult, 1)
+	go func() { res1Ch <- probe.DNS(ctx1) }()
+	<-started
+
+	res2Ch := make(chan ProbeResult, 1)
+	go func() { res2Ch <- probe.DNS(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+
+	cancel1()
+	res1 := <-res1Ch
+	if res1.Passed || res1.Error != "dns_unavailable" {
+		t.Fatalf("cancelled caller result = %#v", res1)
+	}
+
+	close(release)
+	res2 := <-res2Ch
+	if !res2.Passed || res2.Address != Address {
+		t.Fatalf("waiter should receive successful lookup result, got %#v", res2)
+	}
+	res3 := probe.DNS(context.Background())
+	if !res3.Passed || res3.Address != Address || calls.Load() != 1 {
+		t.Fatalf("cache was poisoned or missed: res3=%#v calls=%d", res3, calls.Load())
+	}
+}
+
+func TestProbeCanceledErrorNeverCached(t *testing.T) {
+	var calls atomic.Int32
+	probe := Probe{Lookup: func(context.Context, string) (string, error) {
+		if calls.Add(1) == 1 {
+			return "", context.Canceled
+		}
+		return Address, nil
+	}}
+
+	first := probe.DNS(context.Background())
+	if first.Passed || first.Error != "dns_unavailable" {
+		t.Fatalf("first result = %#v", first)
+	}
+	second := probe.DNS(context.Background())
+	if !second.Passed || second.Address != Address || calls.Load() != 2 {
+		t.Fatalf("context.Canceled must not be cached: second=%#v calls=%d", second, calls.Load())
+	}
+}

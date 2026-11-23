@@ -6,25 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"slices"
-
-	"github.com/wssz527/kimiwork-plus/assets/icon"
 )
-
-func verifyPEIcon(path string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	summary, err := icon.InspectPEIcons(raw)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	if !slices.Contains(summary.GroupIconIDs, icon.AppIconResourceID) || len(summary.IconIDs) == 0 {
-		return fmt.Errorf("%s: missing embedded icon group %d (groups=%v icons=%v)", path, icon.AppIconResourceID, summary.GroupIconIDs, summary.IconIDs)
-	}
-	return nil
-}
 
 func main() {
 	check := flag.String("check-payload", "", "verify embedded payload in a Windows setup executable")

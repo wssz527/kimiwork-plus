@@ -4,6 +4,7 @@ package platform
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -75,17 +76,35 @@ func newDPAPI(service string) (Credentials, error) {
 	return &dpapi{dir: dir}, nil
 }
 
-// path maps a key to a file name. The key is hex-encoded so no key can escape
-// the directory or collide with a reserved name.
+const windowsMaxLegacyPathLen = 248
+
+func (d *dpapi) hashPath(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return filepath.Join(d.dir, "h-"+hex.EncodeToString(digest[:])+".bin")
+}
+
+func (d *dpapi) legacyHexPath(key string) (string, bool) {
+	p := filepath.Join(d.dir, hex.EncodeToString([]byte(key))+".bin")
+	if len(p) > windowsMaxLegacyPathLen {
+		return "", false
+	}
+	return p, true
+}
+
 func (d *dpapi) path(key string) string {
-	return filepath.Join(d.dir, hex.EncodeToString([]byte(key))+".bin")
+	return d.hashPath(key)
 }
 
 func (d *dpapi) Get(key string) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	ciphertext, err := os.ReadFile(d.path(key))
+	ciphertext, err := os.ReadFile(d.hashPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		if legacy, ok := d.legacyHexPath(key); ok {
+			ciphertext, err = os.ReadFile(legacy)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", ErrCredentialMissing
@@ -113,15 +132,32 @@ func (d *dpapi) Set(key, value string) error {
 	if err != nil {
 		return err
 	}
-	// Write to a fresh file and rename, so a crash cannot leave a half-written
-	// secret that then fails to decrypt.
-	temporary := d.path(key) + "." + randomSuffix() + ".tmp"
-	if err := os.WriteFile(temporary, ciphertext, 0o600); err != nil {
+	target := d.hashPath(key)
+	temporary := filepath.Join(d.dir, ".tmp-"+randomSuffix())
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return errors.New("credential_store_failed")
 	}
-	if err := os.Rename(temporary, d.path(key)); err != nil {
-		os.Remove(temporary)
+	if _, err := file.Write(ciphertext); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
 		return errors.New("credential_store_failed")
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return errors.New("credential_store_failed")
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(temporary)
+		return errors.New("credential_store_failed")
+	}
+	if err := os.Rename(temporary, target); err != nil {
+		_ = os.Remove(temporary)
+		return errors.New("credential_store_failed")
+	}
+	if legacy, ok := d.legacyHexPath(key); ok && legacy != target {
+		_ = os.Remove(legacy)
 	}
 	return nil
 }
@@ -130,7 +166,16 @@ func (d *dpapi) Delete(key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if err := os.Remove(d.path(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	var firstErr error
+	if err := os.Remove(d.hashPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		firstErr = err
+	}
+	if legacy, ok := d.legacyHexPath(key); ok && legacy != d.hashPath(key) {
+		if err := os.Remove(legacy); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
 		return errors.New("credential_store_failed")
 	}
 	return nil

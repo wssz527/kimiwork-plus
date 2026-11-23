@@ -56,11 +56,13 @@ const (
 )
 
 type options struct {
-	silent    bool
-	uninstall bool
-	noLaunch  bool
-	launch    bool
-	dir       string
+	silent       bool
+	uninstall    bool
+	noLaunch     bool
+	launch       bool
+	dir          string
+	checkPayload string
+	checkIcon    string
 }
 
 func parseArgs(args []string) options {
@@ -84,6 +86,20 @@ func parseArgs(args []string) options {
 			opt.dir = arg[len("--dir="):]
 		case strings.HasPrefix(lower, "/d="):
 			opt.dir = arg[len("/d="):]
+		case (lower == "--check-payload" || lower == "-check-payload") && i+1 < len(args):
+			i++
+			opt.checkPayload = args[i]
+		case strings.HasPrefix(lower, "--check-payload="):
+			opt.checkPayload = arg[len("--check-payload="):]
+		case strings.HasPrefix(lower, "-check-payload="):
+			opt.checkPayload = arg[len("-check-payload="):]
+		case (lower == "--check-icon" || lower == "-check-icon") && i+1 < len(args):
+			i++
+			opt.checkIcon = args[i]
+		case strings.HasPrefix(lower, "--check-icon="):
+			opt.checkIcon = arg[len("--check-icon="):]
+		case strings.HasPrefix(lower, "-check-icon="):
+			opt.checkIcon = arg[len("-check-icon="):]
 		}
 	}
 	return opt
@@ -115,6 +131,27 @@ func startMenuShortcutPath() (string, error) {
 
 func main() {
 	opt := parseArgs(os.Args[1:])
+	if opt.checkPayload != "" {
+		meta, files, err := inspectPayload(opt.checkPayload)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := verifyPEIcon(opt.checkPayload); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("ok version=%s buildId=%s stubSize=%d files=%v\n", meta.Version, meta.BuildID, meta.StubSize, files)
+		return
+	}
+	if opt.checkIcon != "" {
+		if err := verifyPEIcon(opt.checkIcon); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("ok icon=%s\n", opt.checkIcon)
+		return
+	}
 	var err error
 	if opt.uninstall {
 		err = runUninstall(opt)
@@ -298,6 +335,7 @@ func runUninstall(opt options) error {
 		_ = os.Remove(p)
 		sweepStaleAsides(p)
 	}
+	sweepStaleAsides(filepath.Join(installDir, "uninstall.exe"))
 	_ = os.RemoveAll(filepath.Join(installDir, ".rollback"))
 
 	scheduleSelfDelete(installDir)
@@ -357,8 +395,7 @@ func runPowerShellHidden(script string) ([]byte, error) {
 }
 
 func stopDesktopInDir(installDir string) {
-	ps := fmt.Sprintf(`$dir = %s; Get-Process -Name 'KimiWorkPlus','gateway-daemon' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue`, psQuote(installDir))
-	_, _ = runPowerShellHidden(ps)
+	_, _ = runPowerShellHidden(buildStopDesktopScript(installDir))
 	time.Sleep(300 * time.Millisecond)
 }
 
@@ -377,10 +414,6 @@ func createStartMenuShortcut(targetExe, workDir string) error {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
-}
-
-func psQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func notifyShellIconChange() {
@@ -487,7 +520,7 @@ func deleteUninstallRegistry() {
 }
 
 func scheduleSelfDelete(installDir string) {
-	script := fmt.Sprintf(`for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Milliseconds 300; Remove-Item -LiteralPath %s -Recurse -Force -ErrorAction SilentlyContinue; if (-not (Test-Path -LiteralPath %s)) { break } }`, psQuote(installDir), psQuote(installDir))
+	script := buildSelfDeleteScript(installDir)
 	u16 := utf16.Encode([]rune(script))
 	raw := make([]byte, len(u16)*2)
 	for i, code := range u16 {

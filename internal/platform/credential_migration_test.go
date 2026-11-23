@@ -172,8 +172,9 @@ func TestCredentialMigrationWritesDoNotRequireLegacyAccess(t *testing.T) {
 }
 
 func TestCredentialMigrationDeleteRemovesBothCopies(t *testing.T) {
-	current := newMigrationTestStore("current", nil)
-	legacy := newMigrationTestStore("legacy", nil)
+	var events []string
+	current := newMigrationTestStore("current", &events)
+	legacy := newMigrationTestStore("legacy", &events)
 	current.values["ref"] = "current-value"
 	legacy.values["ref"] = "legacy-value"
 	store := &migratingCredentialStore{current: current, legacy: legacy}
@@ -183,27 +184,47 @@ func TestCredentialMigrationDeleteRemovesBothCopies(t *testing.T) {
 	if len(current.values) != 0 || len(legacy.values) != 0 {
 		t.Fatal("delete left a credential behind")
 	}
+	want := []string{"current.delete", "legacy.delete"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("delete order = %v, want %v", events, want)
+	}
 }
 
-func TestCredentialMigrationDeleteFailureKeepsCurrentValue(t *testing.T) {
-	current := newMigrationTestStore("current", nil)
-	legacy := newMigrationTestStore("legacy", nil)
+func TestCredentialMigrationDeleteClearsCurrentEvenWhenLegacyFails(t *testing.T) {
+	var events []string
+	current := newMigrationTestStore("current", &events)
+	legacy := newMigrationTestStore("legacy", &events)
 	current.values["ref"] = "current-value"
 	legacy.values["ref"] = "legacy-value"
 	legacy.deleteErr = ErrCredentialAccessDenied
 	store := &migratingCredentialStore{current: current, legacy: legacy}
-	if err := store.Delete("ref"); !errors.Is(err, ErrCredentialAccessDenied) {
-		t.Fatalf("delete error = %v", err)
-	}
-	if current.values["ref"] != "current-value" {
-		t.Fatal("current value was deleted while an older legacy value remained")
-	}
-	legacy.deleteErr = nil
 	if err := store.Delete("ref"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("legacy delete error should not block active credential cleanup: %v", err)
 	}
-	if len(current.values) != 0 || len(legacy.values) != 0 {
-		t.Fatal("retry did not delete both copies")
+	if _, ok := current.values["ref"]; ok {
+		t.Fatal("current value was not deleted when legacy delete failed")
+	}
+	want := []string{"current.delete", "legacy.delete"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("delete order = %v, want %v", events, want)
+	}
+}
+
+func TestCredentialMigrationDeleteReturnsCurrentError(t *testing.T) {
+	var events []string
+	current := newMigrationTestStore("current", &events)
+	legacy := newMigrationTestStore("legacy", &events)
+	current.values["ref"] = "current-value"
+	legacy.values["ref"] = "legacy-value"
+	currentErr := errors.New("current_delete_failed")
+	current.deleteErr = currentErr
+	store := &migratingCredentialStore{current: current, legacy: legacy}
+	if err := store.Delete("ref"); !errors.Is(err, currentErr) {
+		t.Fatalf("delete error = %v, want %v", err, currentErr)
+	}
+	want := []string{"current.delete"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("operations = %v, want %v", events, want)
 	}
 }
 

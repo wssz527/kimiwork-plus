@@ -55,6 +55,32 @@ func TestAKeyCannotEscapeTheStoreDirectory(t *testing.T) {
 	}
 }
 
+func TestWindowsStoreLongKeyUsesBoundedHashPath(t *testing.T) {
+	baseDir := `C:\Users\Administrator\AppData\Roaming\kimi-work-plus\secrets\dev.kimi-work-plus`
+	store := &dpapi{dir: baseDir}
+	longKey := strings.Repeat("k", 256)
+
+	hashed := store.path(longKey)
+	if len(hashed) >= 260 {
+		t.Fatalf("hashed path length %d exceeds Windows MAX_PATH: %q", len(hashed), hashed)
+	}
+	if filepath.Dir(hashed) != baseDir {
+		t.Fatalf("hashed path escaped dir: %q", hashed)
+	}
+	if _, ok := store.legacyHexPath(longKey); ok {
+		t.Fatalf("expected legacyHexPath to reject 256-byte key exceeding MAX_PATH")
+	}
+
+	shortKey := "provider-1"
+	legacy, ok := store.legacyHexPath(shortKey)
+	if !ok {
+		t.Fatalf("expected short key to have valid legacyHexPath")
+	}
+	if legacy == store.path(shortKey) {
+		t.Fatalf("hash path and legacy hex path must never collide: %q", legacy)
+	}
+}
+
 // CRYPTPROTECT_UI_FORBIDDEN must be passed on both calls. Without it a blob this
 // user cannot open can put up a dialog, and a background status request then waits
 // inside a prompt it cannot show.
