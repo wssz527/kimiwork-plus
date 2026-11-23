@@ -706,7 +706,7 @@ func ProbeService(ctx Context, options Options, searchEndpoint, fetchEndpoint st
 	search, err := Search(ctx, SearchRequest{TextQuery: Probe.Query}, searchOptions)
 	if err != nil {
 		code := errorCode(err)
-		return ProbeResult{Step: probeStep(code), Code: code, Message: errorMessage(err), ElapsedMS: elapsed()}
+		return ProbeResult{Step: "search", Code: code, Message: errorMessage(err), ElapsedMS: elapsed()}
 	}
 	if len(search.SearchResults) == 0 {
 		return ProbeResult{Step: "search", Code: "web_adapter_empty_results",
@@ -720,18 +720,11 @@ func ProbeService(ctx Context, options Options, searchEndpoint, fetchEndpoint st
 	page, err := Fetch(ctx, FetchRequest{URL: Probe.URL}, fetchOptions)
 	if err != nil {
 		code := errorCode(err)
-		return ProbeResult{Step: probeStep(code), Code: code, Message: errorMessage(err),
+		return ProbeResult{Step: "read", Code: code, Message: errorMessage(err),
 			Results: len(search.SearchResults), ElapsedMS: elapsed()}
 	}
 	return ProbeResult{OK: true, Step: "done", Results: len(search.SearchResults),
 		PageChars: utf16Len(page), ElapsedMS: elapsed()}
-}
-
-func probeStep(code string) string {
-	if code == "web_adapter_extract_failed" || code == "web_adapter_invalid_response" {
-		return "read"
-	}
-	return "search"
 }
 
 func errorCode(err error) string {

@@ -652,6 +652,107 @@ func TestReasoningControlsRejectAnImpossibleBudget(t *testing.T) {
 	}
 }
 
+func TestZeroArgToolUseEmitsValidEmptyObjectArguments(t *testing.T) {
+	wire := anthropicStart +
+		event("content_block_start", `,"index":0,"content_block":{"type":"tool_use","id":"tool_ping","name":"ping","input":{}}`) +
+		event("content_block_stop", `,"index":0`) +
+		event("message_delta", `,"delta":{"stop_reason":"tool_use"}`) + messageStop
+	for _, route := range []string{protocol.ProtocolChat, protocol.ProtocolResponses} {
+		translator, _ := protocol.NewStreamTranslator(route, 1<<20)
+		out := string(translator.Push([]byte(wire))) + string(translator.End())
+		if translator.Outcome() != protocol.OutcomeCompleted {
+			t.Fatalf("%s outcome %q:\n%s", route, translator.Outcome(), out)
+		}
+		if route == protocol.ProtocolChat {
+			var args strings.Builder
+			for _, ev := range sseEvents(out) {
+				choices, _ := ev["choices"].([]any)
+				if len(choices) == 0 {
+					continue
+				}
+				choice, _ := choices[0].(map[string]any)
+				delta, _ := choice["delta"].(map[string]any)
+				calls, _ := delta["tool_calls"].([]any)
+				for _, call := range calls {
+					entry, _ := call.(map[string]any)
+					fn, _ := entry["function"].(map[string]any)
+					if text, ok := fn["arguments"].(string); ok {
+						args.WriteString(text)
+					}
+				}
+			}
+			if args.String() != "{}" {
+				t.Fatalf("chat zero-arg tool arguments = %q, want \"{}\"", args.String())
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(args.String()), &parsed); err != nil {
+				t.Fatalf("chat arguments not valid JSON: %v", err)
+			}
+			continue
+		}
+		var sawArgsDone, sawItemDone, sawCompleted bool
+		for _, ev := range sseEvents(out) {
+			switch ev["type"] {
+			case "response.function_call_arguments.done":
+				sawArgsDone = true
+				if ev["arguments"] != "{}" {
+					t.Fatalf("arguments.done = %#v, want \"{}\"", ev["arguments"])
+				}
+			case "response.output_item.done":
+				sawItemDone = true
+				item, _ := ev["item"].(map[string]any)
+				if item["arguments"] != "{}" {
+					t.Fatalf("output_item.done arguments = %#v, want \"{}\"", item["arguments"])
+				}
+			case "response.completed":
+				sawCompleted = true
+				resp, _ := ev["response"].(map[string]any)
+				output, _ := resp["output"].([]any)
+				if len(output) != 1 {
+					t.Fatalf("completed output len = %d", len(output))
+				}
+				item, _ := output[0].(map[string]any)
+				if item["arguments"] != "{}" {
+					t.Fatalf("completed item arguments = %#v, want \"{}\"", item["arguments"])
+				}
+			}
+		}
+		if !sawArgsDone || !sawItemDone || !sawCompleted {
+			t.Fatalf("missing expected responses events: argsDone=%v itemDone=%v completed=%v\n%s",
+				sawArgsDone, sawItemDone, sawCompleted, out)
+		}
+	}
+}
+
+func TestStreamingSignatureDeltaWithToolUseIsRejected(t *testing.T) {
+	wire := anthropicStart +
+		event("content_block_start", `,"index":0,"content_block":{"type":"thinking","thinking":""}`) +
+		event("content_block_delta", `,"index":0,"delta":{"type":"thinking_delta","thinking":"plan"}`) +
+		event("content_block_delta", `,"index":0,"delta":{"type":"signature_delta","signature":"sig-part-1"}`) +
+		event("content_block_delta", `,"index":0,"delta":{"type":"signature_delta","signature":"-sig-part-2"}`) +
+		event("content_block_stop", `,"index":0`) +
+		event("content_block_start", `,"index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"read","input":{}}`) +
+		event("content_block_delta", `,"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}`) +
+		event("content_block_stop", `,"index":1`) +
+		event("message_delta", `,"delta":{"stop_reason":"tool_use"}`) + messageStop
+	for _, route := range []string{protocol.ProtocolResponses, protocol.ProtocolChat} {
+		translator, _ := protocol.NewStreamTranslator(route, 1<<20)
+		out := string(translator.Push([]byte(wire))) + string(translator.End())
+		if translator.Outcome() != protocol.OutcomeFailed {
+			t.Fatalf("%s outcome = %q, want failed", route, translator.Outcome())
+		}
+		if !strings.Contains(out, "unsupported_thinking_tool_roundtrip") {
+			t.Fatalf("%s missing roundtrip rejection:\n%s", route, out)
+		}
+		if route == protocol.ProtocolResponses && strings.Contains(out, "response.function_call_arguments.done") {
+			t.Fatalf("responses emitted tool_use done before rejecting signed thinking:\n%s", out)
+		}
+		if strings.Contains(out, "response.completed") || strings.Contains(out, "[DONE]") {
+			t.Fatalf("%s completed despite signed thinking + tool_use:\n%s", route, out)
+		}
+	}
+}
+
 func int64Ptr(value int64) *int64 { return &value }
 
 func itoa(value int) string {

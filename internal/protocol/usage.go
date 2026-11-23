@@ -21,7 +21,7 @@ import (
 //     skipped up to its newline and scanning resumes with the next event.
 const (
 	UsageScanLimit = 256 * 1024
-	UsageLineLimit = 64 * 1024
+	UsageLineLimit = 4 * 1024 * 1024
 )
 
 // Usage is the token evidence one upstream reply reported. Every field is a

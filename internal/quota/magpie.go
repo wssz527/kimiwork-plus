@@ -500,12 +500,12 @@ func parseMagpieBalance(text string) (string, *float64) {
 	}
 	if currency == "" {
 		for code := range customUnits {
-			if len(code) != 3 || code == "USD" || code == "CNY" || code == "EUR" || code == "GBP" {
+			if len(code) != 3 || !currencyPattern.MatchString(code) {
 				continue
 			}
-			if strings.HasSuffix(trimmed, code) {
+			if len(trimmed) >= len(code) && strings.EqualFold(trimmed[len(trimmed)-len(code):], code) {
 				currency = code
-				rest = strings.TrimSpace(strings.TrimSuffix(trimmed, code))
+				rest = strings.TrimSpace(trimmed[:len(trimmed)-len(code)])
 				break
 			}
 		}

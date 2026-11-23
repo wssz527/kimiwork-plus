@@ -516,3 +516,39 @@ func (d deadTransport) client() *http.Client {
 		return nil, os.ErrDeadlineExceeded
 	})}
 }
+
+func TestMagpieParsesSuffixCurrencyBalances(t *testing.T) {
+	cases := []struct {
+		raw      string
+		currency string
+		amount   float64
+	}{
+		{"12.50 USD", "USD", 12.5},
+		{"100 CNY", "CNY", 100},
+		{"42.25 EUR", "EUR", 42.25},
+		{"18.75 GBP", "GBP", 18.75},
+		{"1,234.50 USD", "USD", 1234.5},
+	}
+	for _, tc := range cases {
+		var document any
+		payload, _ := json.Marshal([]map[string]any{{
+			"provider": "p",
+			"name":     "P",
+			"kind":     "balance",
+			"balance":  tc.raw,
+		}})
+		if err := json.Unmarshal(payload, &document); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, code := quota.ParseMagpieQuotas(document)
+		if code != "" || len(snapshot.Entries) != 1 {
+			t.Fatalf("%q: code=%q snapshot=%+v", tc.raw, code, snapshot)
+		}
+		entry := snapshot.Entries[0]
+		if entry.BalanceCurrency == nil || *entry.BalanceCurrency != tc.currency ||
+			entry.BalanceAmount == nil || *entry.BalanceAmount != tc.amount {
+			t.Fatalf("%q: got currency=%v amount=%v, want %s %v",
+				tc.raw, entry.BalanceCurrency, entry.BalanceAmount, tc.currency, tc.amount)
+		}
+	}
+}

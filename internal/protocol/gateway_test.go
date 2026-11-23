@@ -762,3 +762,84 @@ func TestFirstByteIsMeasuredForABodylessResponse(t *testing.T) {
 		t.Fatalf("first byte %d ms does not include the upstream head delay", *record.FirstByteMS)
 	}
 }
+
+func TestLargeResponsesCompletedEventExtractsUsage(t *testing.T) {
+	largeText := strings.Repeat("a", 128*1024)
+	completedLine := `event: response.completed` + "\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_big","object":"response","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"` + largeText + `"}]}],"usage":{"input_tokens":321,"output_tokens":654,"total_tokens":975}}}` + "\n\n"
+	fake := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(completedLine))
+	})
+	gateway, url := startGateway(t, fake.server.URL, []protocol.Model{responsesModel("kimi-big")}, nil)
+	reply, _ := post(t, url, "/responses", map[string]any{"model": "kimi-big", "input": "hi", "stream": true}, nil)
+	if reply.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", reply.StatusCode)
+	}
+	record := waitForRecentRecord(t, gateway)
+	if record.Outcome != string(protocol.OutcomeCompleted) {
+		t.Fatalf("outcome = %q, want completed", record.Outcome)
+	}
+	if record.Usage == nil || record.Usage.InputTokens == nil || *record.Usage.InputTokens != 321 ||
+		record.Usage.OutputTokens == nil || *record.Usage.OutputTokens != 654 ||
+		record.Usage.TotalTokens == nil || *record.Usage.TotalTokens != 975 {
+		t.Fatalf("large response.completed usage lost: %+v", record.Usage)
+	}
+}
+
+func TestGatewayUpstreamTimeoutReportedAs504NotCancelled(t *testing.T) {
+	t.Run("before_headers", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		fake := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		})
+		gateway, url := startGateway(t, fake.server.URL, []protocol.Model{chatModel("kimi-slow")}, func(cfg *protocol.Config) {
+			cfg.Timeout = 60 * time.Millisecond
+		})
+		reply, body := post(t, url, "/chat/completions", map[string]any{"model": "kimi-slow", "messages": []any{}}, nil)
+		if reply.StatusCode != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want 504, body = %s", reply.StatusCode, body)
+		}
+		if code := errorCode(t, body); code != "upstream_timeout" {
+			t.Fatalf("code = %q, want upstream_timeout", code)
+		}
+		record := waitForRecentRecord(t, gateway)
+		if record.Status != http.StatusGatewayTimeout || record.Error != "upstream_timeout" ||
+			record.Side != protocol.SideConnection || record.LedgerStatus() != "failed" {
+			t.Fatalf("record = %+v, ledgerStatus = %q", record, record.LedgerStatus())
+		}
+	})
+	t.Run("mid_stream", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		fake := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		})
+		gateway, url := startGateway(t, fake.server.URL, []protocol.Model{chatModel("kimi-slow-stream")}, func(cfg *protocol.Config) {
+			cfg.Timeout = 60 * time.Millisecond
+		})
+		reply, _ := post(t, url, "/chat/completions", map[string]any{"model": "kimi-slow-stream", "messages": []any{}, "stream": true}, nil)
+		if reply.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", reply.StatusCode)
+		}
+		record := waitForRecentRecord(t, gateway)
+		if record.Status != http.StatusGatewayTimeout || record.Error != "upstream_timeout" ||
+			record.Side != protocol.SideConnection || record.Outcome != string(protocol.OutcomeFailed) ||
+			record.LedgerStatus() != "failed" {
+			t.Fatalf("mid-stream timeout record = %+v, ledgerStatus = %q", record, record.LedgerStatus())
+		}
+	})
+}

@@ -20,7 +20,6 @@
 package ledger
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -30,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -440,11 +440,21 @@ func (l *Ledger) load() {
 	}
 	l.bytes = int64(len(raw))
 	skipped := 0
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 64*1024), int(l.maxFileBytes))
-	for scanner.Scan() {
+	for len(raw) > 0 {
+		var line []byte
+		if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
+			line = raw[:idx]
+			raw = raw[idx+1:]
+		} else {
+			line = raw
+			raw = nil
+		}
 		l.lines++
-		line := bytes.TrimSpace(scanner.Bytes())
+		if int64(len(line)) > l.maxFileBytes {
+			skipped++
+			continue
+		}
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
@@ -461,7 +471,7 @@ func (l *Ledger) load() {
 	l.skippedLines = skipped
 	// A damaged line is dropped from the file as soon as it is recognised, so a
 	// later append cannot glue a fresh record onto a truncated tail.
-	if l.prune() > 0 || skipped > 0 {
+	if l.prune() > 0 || skipped > 0 || l.bytes >= l.maxFileBytes {
 		l.compact()
 	}
 }
@@ -703,20 +713,74 @@ func isNilPointer(value any) bool {
 	return value == nil
 }
 
+func (l *Ledger) dropOldest(count int) {
+	if count <= 0 {
+		return
+	}
+	if count > len(l.records) {
+		count = len(l.records)
+	}
+	for i := 0; i < count; i++ {
+		delete(l.index, keyOf(l.records[i]))
+		l.records[i] = nil
+	}
+	l.records = l.records[count:]
+	if len(l.records) == 0 {
+		l.records = nil
+		return
+	}
+	if cap(l.records) > len(l.records)*2 && cap(l.records) > 64 {
+		compacted := make([]*Record, len(l.records))
+		copy(compacted, l.records)
+		l.records = compacted
+	}
+}
+
 func (l *Ledger) prune() int {
 	cutoff := l.now() - int64(l.maxAgeDays)*dayMillis
-	removed := 0
-	for len(l.records) > 0 && l.records[0].atMillis() < cutoff {
-		delete(l.index, keyOf(l.records[0]))
-		l.records = l.records[1:]
-		removed++
+	drop := 0
+	for drop < len(l.records) && l.records[drop].atMillis() < cutoff {
+		drop++
 	}
-	for len(l.records) > l.maxRecords {
-		delete(l.index, keyOf(l.records[0]))
-		l.records = l.records[1:]
-		removed++
+	if len(l.records)-drop > l.maxRecords {
+		drop = len(l.records) - l.maxRecords
 	}
-	return removed
+	if drop > 0 {
+		l.dropOldest(drop)
+	}
+	return drop
+}
+
+func (l *Ledger) quarantineUnreadable() error {
+	if !l.readFailed {
+		return nil
+	}
+	stat, err := os.Lstat(l.file)
+	if err != nil {
+		if os.IsNotExist(err) {
+			l.readFailed = false
+			l.bytes = 0
+			l.lines = 0
+			l.appended = 0
+			return nil
+		}
+		return err
+	}
+	if stat.Mode()&os.ModeSymlink != 0 || !stat.Mode().IsRegular() {
+		return errors.New("unsafe_ledger_file")
+	}
+	backup := l.file + ".corrupt." + strconv.FormatInt(l.now(), 10)
+	if _, err := os.Lstat(backup); err == nil {
+		backup = backup + "." + randomToken()[:8]
+	}
+	if err := os.Rename(l.file, backup); err != nil {
+		return err
+	}
+	l.readFailed = false
+	l.bytes = 0
+	l.lines = 0
+	l.appended = 0
+	return nil
 }
 
 func (l *Ledger) guard() error {
@@ -751,6 +815,14 @@ func (l *Ledger) guard() error {
 func (l *Ledger) append(record *Record) {
 	if err := l.guard(); err != nil {
 		l.writeIssue = "unsafe_file"
+		return
+	}
+	if err := l.quarantineUnreadable(); err != nil {
+		if err.Error() == "unsafe_ledger_file" {
+			l.writeIssue = "unsafe_file"
+		} else {
+			l.writeIssue = "write_failed"
+		}
 		return
 	}
 	line, err := json.Marshal(record)
@@ -796,13 +868,36 @@ func (l *Ledger) compact() {
 		l.writeIssue = "unsafe_file"
 		return
 	}
-	var body bytes.Buffer
-	for _, record := range l.records {
+	if err := l.quarantineUnreadable(); err != nil {
+		if err.Error() == "unsafe_ledger_file" {
+			l.writeIssue = "unsafe_file"
+		} else {
+			l.writeIssue = "write_failed"
+		}
+		return
+	}
+	encoded := make([][]byte, len(l.records))
+	var totalBytes int64
+	for i, record := range l.records {
 		line, err := json.Marshal(record)
 		if err != nil {
 			l.writeIssue = "write_failed"
 			return
 		}
+		encoded[i] = line
+		totalBytes += int64(len(line) + 1)
+	}
+	drop := 0
+	if totalBytes >= l.maxFileBytes {
+		targetBytes := l.maxFileBytes * 3 / 4
+		for drop < len(encoded) && (totalBytes >= l.maxFileBytes || (totalBytes > targetBytes && len(encoded)-drop > 1)) {
+			totalBytes -= int64(len(encoded[drop]) + 1)
+			drop++
+		}
+	}
+	var body bytes.Buffer
+	body.Grow(int(totalBytes))
+	for _, line := range encoded[drop:] {
 		body.Write(line)
 		body.WriteByte('\n')
 	}
@@ -823,6 +918,9 @@ func (l *Ledger) compact() {
 		_ = os.Remove(temporary)
 		l.writeIssue = "write_failed"
 		return
+	}
+	if drop > 0 {
+		l.dropOldest(drop)
 	}
 	l.appended = 0
 	l.bytes = int64(body.Len())
