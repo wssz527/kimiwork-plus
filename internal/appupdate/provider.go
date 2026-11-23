@@ -139,11 +139,12 @@ func (p *mirrorFallbackProvider) Check(ctx context.Context, req updater.CheckReq
 	return p.checkViaGitHubAPI(ctx, req)
 }
 
+type checkSource struct {
+	name        string
+	manifestURL string
+}
+
 func (p *mirrorFallbackProvider) checkStableDirect(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
-	type checkSource struct {
-		name        string
-		manifestURL string
-	}
 	var sources []checkSource
 	if p.mirrorBase != "" {
 		sources = append(sources, checkSource{
@@ -161,6 +162,10 @@ func (p *mirrorFallbackProvider) checkStableDirect(ctx context.Context, req upda
 		return nil, errors.New("mirror-fallback: no update check source configured")
 	}
 
+	return p.checkDirectSources(ctx, req, sources)
+}
+
+func (p *mirrorFallbackProvider) checkDirectSources(ctx context.Context, req updater.CheckRequest, sources []checkSource) (*updater.Release, error) {
 	var errs []string
 	for _, src := range sources {
 		if ctx.Err() != nil {
@@ -184,6 +189,29 @@ func (p *mirrorFallbackProvider) checkStableDirect(ctx context.Context, req upda
 	return nil, fmt.Errorf("update check failed across all sources (%s)", strings.Join(errs, "; "))
 }
 
+func (p *mirrorFallbackProvider) tagPinnedMirrorManifestURL(manifestURL string) string {
+	if p.mirrorBase == "" || strings.ContainsAny(manifestURL, "?#") {
+		return ""
+	}
+	prefix := p.githubWebBase + "/" + p.repo + "/releases/download/"
+	if !strings.HasPrefix(manifestURL, prefix) {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(manifestURL, prefix), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		return ""
+	}
+	asset, err := url.PathUnescape(parts[1])
+	if err != nil || (asset != "update-manifest-"+p.channel+".json" && asset != "update-manifest.json") {
+		return ""
+	}
+	tag, err := url.PathUnescape(parts[0])
+	if err != nil || tag == "" || strings.Contains(tag, "/") {
+		return ""
+	}
+	return p.mirrorBase + "/" + p.repo + "/-/releases/download/" + url.PathEscape(tag) + "/" + asset
+}
+
 func (p *mirrorFallbackProvider) checkViaGitHubAPI(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
 	manifestURL, err := p.resolveGitHubAPIManifestURL(ctx)
 	if err != nil {
@@ -193,16 +221,11 @@ func (p *mirrorFallbackProvider) checkViaGitHubAPI(ctx context.Context, req upda
 		p.recordActiveSource("github")
 		return nil, nil
 	}
-	rel, err := p.fetchDirectManifest(ctx, "github", manifestURL, req)
-	if err != nil {
-		return nil, err
+	sources := []checkSource{{name: "github", manifestURL: manifestURL}}
+	if mirrorURL := p.tagPinnedMirrorManifestURL(manifestURL); mirrorURL != "" {
+		sources = append([]checkSource{{name: "cnb", manifestURL: mirrorURL}}, sources...)
 	}
-	p.recordActiveSource("github")
-	if rel == nil {
-		return nil, nil
-	}
-	p.populateReleaseMetadata(rel, "github")
-	return rel, nil
+	return p.checkDirectSources(ctx, req, sources)
 }
 
 func (p *mirrorFallbackProvider) fetchDirectManifest(ctx context.Context, sourceName, manifestURL string, req updater.CheckRequest) (*updater.Release, error) {

@@ -800,6 +800,126 @@ func TestGitHubManifestProviderChannels(t *testing.T) {
 	}
 }
 
+func TestPreviewManifestCheckUsesMirrorFallback(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist": []byte("<plist/>"),
+	})
+
+	for _, tc := range []struct {
+		name       string
+		failSource string
+		wantSource string
+	}{
+		{name: "github_manifest_timeout", failSource: "github", wantSource: "cnb"},
+		{name: "cnb_manifest_timeout", failSource: "cnb", wantSource: "github"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ghAPIHits atomic.Int32
+			var ghManifestHits atomic.Int32
+			var cnbManifestHits atomic.Int32
+			var ghSrv *httptest.Server
+			manifest := func(artifactURL string) testManifestDoc {
+				return testManifestDoc{
+					SchemaVersion: 1,
+					Version:       "1.1.6-preview.2",
+					Channel:       "preview",
+					PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+					Artifacts: []testManifestArtifact{{
+						URL: artifactURL, Filename: "pkg.zip", Filetype: "zip",
+						Size: int64(len(zipBytes)), Platform: runtime.GOOS, Arch: runtime.GOARCH,
+						DigestAlgo: "sha256", Digest: digestB64, SignatureAlgo: "ed25519", Signature: sigB64,
+					}},
+				}
+			}
+			ghSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/org/kwp/releases":
+					ghAPIHits.Add(1)
+					_ = json.NewEncoder(w).Encode([]githubRelease{{
+						TagName: "v1.1.6-preview.2", Prerelease: true,
+						Assets: []githubAsset{{
+							Name:               "update-manifest-preview.json",
+							BrowserDownloadURL: ghSrv.URL + "/org/kwp/releases/download/v1.1.6-preview.2/update-manifest-preview.json",
+						}},
+					}})
+				case "/org/kwp/releases/download/v1.1.6-preview.2/update-manifest-preview.json":
+					ghManifestHits.Add(1)
+					if tc.failSource == "github" {
+						select {
+						case <-r.Context().Done():
+						case <-time.After(time.Second):
+						}
+						return
+					}
+					_ = json.NewEncoder(w).Encode(manifest(ghSrv.URL + "/org/kwp/releases/download/v1.1.6-preview.2/pkg.zip"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ghSrv.Close()
+
+			cnbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/org/kwp/-/releases/download/v1.1.6-preview.2/update-manifest-preview.json" {
+					http.NotFound(w, r)
+					return
+				}
+				cnbManifestHits.Add(1)
+				if tc.failSource == "cnb" {
+					select {
+					case <-r.Context().Done():
+					case <-time.After(time.Second):
+					}
+					return
+				}
+				_ = json.NewEncoder(w).Encode(manifest("pkg.zip"))
+			}))
+			defer cnbSrv.Close()
+
+			mgr, err := NewManager(Options{
+				StateDir:           t.TempDir(),
+				CurrentVersion:     "1.1.6-preview.1",
+				BuildID:            "preview-1",
+				GitHubRepo:         "org/kwp",
+				MirrorBase:         cnbSrv.URL,
+				GitHubAPIBase:      ghSrv.URL,
+				GitHubWebBase:      ghSrv.URL,
+				CheckSourceTimeout: 100 * time.Millisecond,
+				PublicKey:          pub,
+				HTTPClient:         &http.Client{},
+				DisableAutoRun:     true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mgr.Close()
+			if _, err := mgr.UpdateSettings(nil, "preview"); err != nil {
+				t.Fatal(err)
+			}
+			st, err := mgr.CheckNow(context.Background())
+			if err != nil {
+				t.Fatalf("preview check must recover through the other source: %v", err)
+			}
+			avail, ok := st["available"].(*AvailableRelease)
+			if !ok || avail.Version != "1.1.6-preview.2" || avail.Source != tc.wantSource || st["activeSource"] != tc.wantSource {
+				t.Fatalf("unexpected preview fallback result: %#v", st)
+			}
+			if ghAPIHits.Load() != 1 {
+				t.Fatalf("expected one release discovery call, got %d", ghAPIHits.Load())
+			}
+			if tc.wantSource == "cnb" && (cnbManifestHits.Load() != 1 || ghManifestHits.Load() != 0) {
+				t.Fatalf("expected CNB to answer before GitHub, cnb=%d github=%d", cnbManifestHits.Load(), ghManifestHits.Load())
+			}
+			if tc.wantSource == "github" && (cnbManifestHits.Load() != 1 || ghManifestHits.Load() != 1) {
+				t.Fatalf("expected GitHub to recover a CNB failure, cnb=%d github=%d", cnbManifestHits.Load(), ghManifestHits.Load())
+			}
+		})
+	}
+}
+
 type githubTestTransport func(*http.Request) (*http.Response, error)
 
 func (f githubTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
