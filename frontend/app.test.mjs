@@ -23,6 +23,13 @@ function sourceFunction(name) {
 /* syncState / nativeConnectionText 现在第一步就问接入模式。直连辅助函数用真实实现，
    这样「没有 integrationMode」的旧数据必须原样走网关分支，也一并被这些用例守住。
    失败码归一化也在这里用真实代码，避免测试自己复制一张会漂移的映射表。 */
+const DIAG_REASON_SOURCE = (() => {
+  const start = source.indexOf('const DIAG_REASON = {');
+  assert.notEqual(start, -1, 'missing DIAG_REASON table');
+  const end = source.indexOf('\n};', start);
+  assert.notEqual(end, -1, 'unterminated DIAG_REASON table');
+  return source.slice(start, end + 3);
+})();
 const DIRECT_REASON_SOURCE = (() => {
   const start = source.indexOf('const DIRECT_REASON = {');
   assert.notEqual(start, -1, 'missing DIRECT_REASON table');
@@ -30,9 +37,9 @@ const DIRECT_REASON_SOURCE = (() => {
   assert.notEqual(end, -1, 'unterminated DIRECT_REASON table');
   return source.slice(start, end + 3);
 })();
-const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
+const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
   'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
-  'directRestartRequired', 'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
+  'directRestartRequired', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
 function makeSyncState() {
   return new Function('fmtCount', 'String',
@@ -3763,4 +3770,214 @@ test('app.js wires subagents view rendering and release link external browser en
   assert.match(source, /request\('\/api\/updates\/open-release',\s*\{\s*method:\s*'POST',\s*body:\s*\{\s*\}\s*\}\)/);
   assert.match(source, /const signature = JSON\.stringify\(\[pool, draft\.model \|\| null, state\.subagentSaving\]\);/);
   assert.match(source, /已保存为继承主模型，但配置文件存在冲突未被覆盖/);
+});
+
+test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese guidance without raw codes', async () => {
+  const actionStateStart = source.indexOf('const ACTION_STATE = {');
+  const actionStateEnd = source.indexOf('\n};', actionStateStart);
+  assert.notEqual(actionStateStart, -1);
+  assert.notEqual(actionStateEnd, -1);
+  const actionStateSource = source.slice(actionStateStart, actionStateEnd + 3);
+  const actionLabelStart = source.indexOf('const ACTION_LABEL = {');
+  const actionLabelEnd = source.indexOf('\n};', actionLabelStart);
+  assert.notEqual(actionLabelStart, -1);
+  assert.notEqual(actionLabelEnd, -1);
+  const actionLabelSource = source.slice(actionLabelStart, actionLabelEnd + 3);
+
+  const helpers = new Function(`
+    ${actionLabelSource}
+    ${actionStateSource}
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('operationNote')}
+    return { ACTION_STATE, reasonText, operationNote };
+  `)();
+
+  for (const stateKey of ['waiting-kimi-exit', 'waiting-login', 'waiting-work', 'waiting-settings', 'requires-restart']) {
+    assert.ok(helpers.ACTION_STATE[stateKey], 'missing ACTION_STATE label for ' + stateKey);
+  }
+  for (const code of [
+    'unmanaged_kimi_running',
+    'official_kimi_already_running',
+    'native_bridge_unavailable',
+    'native_bridge_waiting_work',
+    'native_bridge_waiting_settings',
+    'native_bridge_settings_open_refused',
+    'native_bridge_activation_refused',
+    'native_bridge_timeout',
+    'native_bridge_busy',
+    'native_bridge_cancelled',
+    'native_bridge_contract_changed',
+    'native_bridge_failed',
+    'native_bridge_invalid_request',
+    'native_bridge_unauthorized',
+    'native_import_waiting_login',
+    'native_import_account_changed',
+    'native_import_account_unverified',
+    'native_import_page_reloaded',
+    'native_import_busy',
+    'native_import_not_verified',
+    'native_import_requires_restart',
+    'kimi_process_state_unknown',
+    'kimi_start_failed',
+    'kimi_start_cancelled',
+    'kimi_stop_failed',
+    'kimi_user_data_dir_invalid',
+    'kimi_user_data_dir_unavailable',
+    'platform_cannot_manage_child',
+    'translation_attach_failed',
+    'injection_payload_unavailable',
+    'managed_child_unattached',
+    'operation_failed',
+  ]) {
+    const text = helpers.reasonText(code);
+    assert.notEqual(text, code, 'reasonText returned raw code: ' + code);
+    assert.match(text, /[\u4e00-\u9fff]/, 'reasonText is not Chinese for ' + code);
+  }
+
+  assert.match(helpers.operationNote({ action: 'connect-kimi', state: 'waiting-kimi-exit', reason: 'unmanaged_kimi_running' }), /正常退出并重启 Kimi/);
+  assert.match(helpers.operationNote({ action: 'connect-kimi', state: 'waiting-login' }), /完成登录/);
+  assert.match(helpers.operationNote({ action: 'disconnect-models', state: 'failed', reason: 'native_bridge_waiting_work' }), /Work 页面尚未就绪/);
+
+  const connectionText = makeNativeConnectionText();
+  assert.match(connectionText({ integration: { reason: 'native_bridge_waiting_work' } }), /Work 页面尚未就绪/);
+  assert.match(connectionText({ integration: { reason: 'native_bridge_unavailable' } }), /同步到 Work/);
+  assert.match(connectionText({ integration: { desktop: { reason: 'official_kimi_already_running' } } }), /正常退出并重启 Kimi/);
+
+  /* 直连模式下未同步状态遇到非托管 Kimi、等待 Work 或启动失败，不能退回泛化文案或矛盾提示。 */
+  const syncState = makeSyncState();
+  const computeOverviewIssue = new Function(`
+    const fmtCount = (v) => String(v);
+    const budgetNotice = () => '';
+    const applyState = () => ({ word: '已应用' });
+    const savedGatewayConnections = () => [];
+    const savedModelsOf = (d) => (Array.isArray(d?.models) ? d.models : []);
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('syncState')}
+    ${sourceFunction('computeOverviewIssue')}
+    return computeOverviewIssue;
+  `)();
+  const directUnmanaged = {
+    integrationMode: 'direct',
+    gateway: { state: 'running' },
+    models: [{ id: 'ds/chat/deepseek-chat' }],
+    kimiProcess: { running: true },
+    integration: {
+      reason: 'direct_import_required',
+      desktop: { state: 'needs_user_close', managed: false, reason: 'official_kimi_already_running' },
+      directMode: { supported: true, eligibleModels: 1 },
+    },
+  };
+  const directVerdict = syncState(directUnmanaged);
+  assert.equal(directVerdict.code, 'manual-exit');
+  assert.match(directVerdict.note, /正常退出并重启 Kimi/);
+  const directIssue = computeOverviewIssue(directUnmanaged);
+  assert.equal(directIssue.action?.action, 'restart-kimi');
+  assert.match(connectionText(directUnmanaged), /正常退出并重启 Kimi/);
+
+  const directWaitingWork = {
+    integrationMode: 'direct',
+    models: [{ id: 'ds/chat/deepseek-chat' }],
+    integration: {
+      reason: 'direct_import_required',
+      nativeImport: { state: 'waiting-work', reason: 'native_bridge_waiting_work' },
+      directMode: { supported: true, eligibleModels: 1 },
+    },
+  };
+  assert.match(connectionText(directWaitingWork), /Work 页面尚未就绪/);
+
+  const directStartFailed = {
+    integrationMode: 'direct',
+    models: [{ id: 'ds/chat/deepseek-chat' }],
+    integration: {
+      reason: 'direct_import_required',
+      desktop: { state: 'failed', reason: 'kimi_start_failed' },
+      directMode: { supported: true, eligibleModels: 1 },
+    },
+  };
+  assert.match(connectionText(directStartFailed), /未能自动启动官方 Kimi/);
+
+  const dom = {
+    opbar: { hidden: true, dataset: {} },
+    opbarDot: { dataset: {} },
+    opbarName: { textContent: '' },
+    opbarNote: { textContent: '' },
+  };
+  const renderOperation = new Function('dom', `
+    ${actionLabelSource}
+    ${actionStateSource}
+    ${INTEGRATION_HELPERS.join('\n')}
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setDot = (el, t) => { if (el) el.dataset.tone = t; };
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('operationNote')}
+    ${sourceFunction('renderOperation')}
+    return renderOperation;
+  `)(dom);
+
+  renderOperation({ operation: { action: 'connect-kimi', state: 'waiting-kimi-exit', reason: 'unmanaged_kimi_running' } });
+  assert.equal(dom.opbarDot.dataset.tone, 'warn');
+  assert.equal(dom.opbarName.textContent, '重新准备接入 · 等待 Kimi 退出');
+  assert.match(dom.opbarNote.textContent, /正常退出并重启 Kimi/);
+
+  renderOperation({ operation: { action: 'connect-kimi', state: 'waiting-login' } });
+  assert.equal(dom.opbarDot.dataset.tone, 'warn');
+  assert.equal(dom.opbarName.textContent, '重新准备接入 · 等待登录 Kimi');
+
+  /* confirmActionResult 与 runAction 的 Toast 文案覆盖。 */
+  const toasts = [];
+  const actionState = {
+    pendingAction: null,
+    pendingOpId: null,
+    data: null,
+  };
+  const actionEnv = new Function('state', 'toasts', 'API', 'request', `
+    ${actionLabelSource}
+    ${actionStateSource}
+    ${INTEGRATION_HELPERS.join('\n')}
+    const dom = { conn: {}, connText: {} };
+    const showToast = (message, tone) => toasts.push({ message, tone });
+    const renderActions = () => {};
+    const renderOperation = () => {};
+    const adoptState = (next) => { state.data = next; };
+    const loadState = async () => {};
+    const actionUUID = () => 'uuid-1';
+    const clearKey = () => {};
+    const stopPolling = () => {};
+    const showGate = () => {};
+    const setHidden = () => {};
+    const setText = () => {};
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('runAction')}
+    ${sourceFunction('confirmActionResult')}
+    return { runAction, confirmActionResult };
+  `)(actionState, toasts, { actions: '/api/actions' }, async (_url, opts) => ({
+    operation: { id: 'op-' + opts.body.action, action: opts.body.action, state: 'running' },
+  }));
+
+  actionState.data = { integration: { desktop: { managed: false } }, kimiProcess: { running: false } };
+  await actionEnv.runAction('connect-kimi');
+  assert.match(toasts.at(-1).message, /自动启动 Kimi Work 并同步模型配置/);
+  actionState.data = { integration: { desktop: { managed: false } }, kimiProcess: { running: false } };
+  await actionEnv.runAction('disconnect-models');
+  assert.match(toasts.at(-1).message, /自动启动 Kimi Work 并移除本产品接管的模型来源/);
+  actionState.data = { integration: { desktop: { managed: true } }, kimiProcess: { running: true } };
+  await actionEnv.runAction('connect-kimi');
+  assert.match(toasts.at(-1).message, /正在同步模型配置到 Kimi Work/);
+
+  for (const [op, expectedPattern, expectedTone] of [
+    [{ id: 'op-1', action: 'connect-kimi', state: 'waiting-kimi-exit', reason: 'unmanaged_kimi_running' }, /正常退出并重启 Kimi/, 'error'],
+    [{ id: 'op-2', action: 'connect-kimi', state: 'waiting-login' }, /完成登录/, 'warn'],
+    [{ id: 'op-3', action: 'connect-kimi', state: 'requires-restart' }, /正常退出并重启 Kimi/, 'warn'],
+    [{ id: 'op-4', action: 'connect-kimi', state: 'failed', reason: 'kimi_start_failed' }, /未能自动启动官方 Kimi/, 'error'],
+    [{ id: 'op-5', action: 'disconnect-models', state: 'failed', reason: 'operation_failed' }, /操作未能完成/, 'error'],
+  ]) {
+    toasts.length = 0;
+    actionState.data = { operation: op };
+    await actionEnv.confirmActionResult(op.action, op.id);
+    assert.equal(toasts.length, 1, 'expected one toast for ' + op.state);
+    assert.equal(toasts[0].tone, expectedTone);
+    assert.match(toasts[0].message, expectedPattern);
+    assert.doesNotMatch(toasts[0].message, /kimi_start_failed|operation_failed|unmanaged_kimi_running/);
+  }
 });

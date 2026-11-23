@@ -328,7 +328,7 @@ func (c *Controller) Start(ctx context.Context) error {
 
 func (c *Controller) start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return errors.New("kimi_start_cancelled")
 	}
 	c.reapChildLocked()
 	c.mu.Lock()
@@ -416,8 +416,9 @@ func (c *Controller) start(ctx context.Context) error {
 			c.setState(StateFailed, restoreErr.Error())
 			return restoreErr
 		}
-		c.setState(StateFailed, "kimi_start_failed")
-		return err
+		reason := startErrorCode(err)
+		c.setState(StateFailed, reason)
+		return errors.New(reason)
 	}
 	// The child is about to read the profile as it is now, so it can load the
 	// current intent generation. That is what later adoption compares against.
@@ -449,6 +450,28 @@ func (c *Controller) currentGeneration() int {
 		return 0
 	}
 	return integration.ReadbackMode("", settings.integrationMode(), "").Generation
+}
+
+// HasManagedBridge reports whether this controller currently holds a live
+// managed Kimi process with an active native bridge.
+func (c *Controller) HasManagedBridge() bool {
+	c.reapChild()
+	c.mu.Lock()
+	child := c.child
+	bridge := c.bridge
+	c.mu.Unlock()
+	if bridge == nil {
+		return false
+	}
+	if child == nil {
+		return true
+	}
+	select {
+	case <-child.Exit():
+		return false
+	default:
+		return true
+	}
 }
 
 // managedChildAlive reports whether this controller still holds a child that has
@@ -637,14 +660,42 @@ func (c *Controller) abortStart(child *Child, reason string, cause error) error 
 		c.child = child
 		c.mu.Unlock()
 		c.setState(StateFailed, "kimi_stop_failed")
-		return err
+		return errors.New("kimi_stop_failed")
 	}
 	if err := c.restoreWorkIsolation(); err != nil {
 		c.setState(StateFailed, err.Error())
 		return err
 	}
 	c.setState(StateFailed, reason)
+	if reason != "" {
+		return errors.New(reason)
+	}
 	return cause
+}
+
+func startErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, errManagedChildUnsupported) {
+		return "platform_cannot_manage_child"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "kimi_start_cancelled"
+	}
+	s := err.Error()
+	for _, code := range []string{
+		"kimi_application_missing",
+		"kimi_user_data_dir_invalid",
+		"kimi_user_data_dir_unavailable",
+		"kimi_start_cancelled",
+		"kimi_start_failed",
+	} {
+		if s == code || strings.HasPrefix(s, code+": ") {
+			return code
+		}
+	}
+	return "kimi_start_failed"
 }
 
 // startNativeBridge publishes the import bridge for this child and answers the

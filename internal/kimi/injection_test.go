@@ -32,8 +32,15 @@ type fakePage struct {
 	settingsProbeReads     int
 	// workAvailableAfter hides every desktop target for the first N target
 	// reads, so the Work page can be modelled as still mounting.
-	workAvailableAfter int
-	targetReads        int
+	workAvailableAfter     int
+	targetReads            int
+	firstTargetDelay       time.Duration
+	mainDesktopTarget      bool
+	workRequiresActivate   bool
+	activateAvailableAfter int
+	activateProbes         int
+	activateFails          bool
+	workActivated          bool
 	// openAPIAvailableAfter withholds kimiAgentAPI.openSettings for the first N
 	// probes, so the Work page's preload can be modelled as still mounting.
 	openAPIAvailableAfter int
@@ -50,23 +57,25 @@ type fakePage struct {
 	// noShellAPI makes the Work page report no kimiAgentAPI at all.
 	noShellAPI bool
 	// importBlockFor holds the import call for that long before answering.
-	importBlockFor time.Duration
-	importReply    map[string]any
-	closeFails     bool
+	importBlockFor  time.Duration
+	importReply     map[string]any
+	disconnectReply map[string]any
+	closeFails      bool
 
 	// observations
-	methods      []string
-	injections   int
-	removals     int
-	detachCalls  int
-	evaluations  []string
-	lastSource   string
-	contextID    int
-	generation   int
-	bindingCalls int
-	openCalls    int
-	closeCalls   int
-	importCalls  int
+	methods       []string
+	injections    int
+	removals      int
+	detachCalls   int
+	evaluations   []string
+	lastSource    string
+	contextID     int
+	generation    int
+	bindingCalls  int
+	openCalls     int
+	closeCalls    int
+	importCalls   int
+	activateCalls int
 }
 
 func (p *fakePage) record(method string) {
@@ -95,17 +104,30 @@ func (p *fakePage) handle(write func(string)) func(string) {
 			settingsOpen := p.settingsOpen
 			p.targetReads++
 			reads := p.targetReads
-			hideWork := p.workAvailableAfter > 0 && reads <= p.workAvailableAfter
+			firstDelay := time.Duration(0)
+			if reads == 1 {
+				firstDelay = p.firstTargetDelay
+			}
+			hideWork := (p.workAvailableAfter > 0 && reads <= p.workAvailableAfter) ||
+				(p.workRequiresActivate && !p.workActivated)
+			mainDesktop := p.mainDesktopTarget
 			workerWork := p.workerWorkURL
 			workTarget := "work-1"
 			if p.replaceWorkTarget {
 				workTarget = "work-2"
 			}
 			p.mu.Unlock()
+			if firstDelay > 0 {
+				time.Sleep(firstDelay)
+			}
 			targets := []any{
 				map[string]any{"targetId": "chat-1", "type": "page", "url": "https://www.kimi.com/chat/abc-123"},
 				map[string]any{"targetId": "evil", "type": "page", "url": "https://www.kimi.com.evil.test/chat/abc"},
 				map[string]any{"targetId": "worker", "type": "worker", "url": "https://www.kimi.com/chat/abc"},
+			}
+			if mainDesktop {
+				targets = append([]any{map[string]any{"targetId": "main-1", "type": "page",
+					"url": "app://localhost/desktopclaw.html"}}, targets...)
 			}
 			if !hideWork {
 				targets = append([]any{map[string]any{"targetId": workTarget, "type": "page",
@@ -261,7 +283,33 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 			return map[string]any{"asked": []any{}, "failed": []any{"overlay"}}
 		}
 		return map[string]any{"asked": []any{"overlay"}, "failed": []any{}}
+	case strings.Contains(expression, "sources.disconnect") && strings.Contains(expression, "managedGateway"):
+		p.mu.Lock()
+		reply := p.disconnectReply
+		p.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"ok": true, "sources": float64(1)}
+		}
+		return reply
 	case strings.Contains(expression, "openKimiWorkTab"):
+		p.mu.Lock()
+		p.activateProbes++
+		probes := p.activateProbes
+		ready := p.activateAvailableAfter == 0 || probes >= p.activateAvailableAfter
+		fails := p.activateFails
+		if ready {
+			p.activateCalls++
+			if !fails {
+				p.workActivated = true
+			}
+		}
+		p.mu.Unlock()
+		if !ready {
+			return map[string]any{"asked": false, "failed": false}
+		}
+		if fails {
+			return map[string]any{"asked": false, "failed": true}
+		}
 		return map[string]any{"asked": true, "failed": false}
 	case expression == openSettingsProbeExpression:
 		// The read-only presence probe opens nothing and must not be counted as

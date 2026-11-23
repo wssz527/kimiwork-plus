@@ -10,10 +10,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wssz527/kimiwork-plus/assets/injection"
 )
 
 // The tests here cover the slow-start stability corrections: budgets that fit
@@ -476,7 +479,7 @@ func TestOpenSettingsRefreshesAReplacedWorkTarget(t *testing.T) {
 	page := &fakePage{surface: "work", actions: true, importAPI: true, hideSettings: true, replaceWorkTarget: true}
 	harness := newHarness(t, page)
 	actions := NewCDPActions(harness.pipe, t.TempDir(), t.TempDir()).(*cdpActions)
-	target, opened, failure, err := actions.resolveImportTarget(context.Background(), true)
+	target, opened, failure, err := actions.resolveImportTarget(context.Background(), true, false)
 	if err != nil || failure != nil || !opened || target.targetID != "settings" {
 		t.Fatalf("replaced Work target: target=%+v opened=%v failure=%+v err=%v", target, opened, failure, err)
 	}
@@ -556,5 +559,343 @@ func TestSyncAccountModelsRetriesAnUnreadablePage(t *testing.T) {
 	}
 	if state != "pending" {
 		t.Fatalf("state: %s/%s", state, reason)
+	}
+}
+
+func TestResolveImportTargetActivatesWorkOnceWhenAllowed(t *testing.T) {
+	dir := t.TempDir()
+	encoded, _ := json.Marshal(map[string]any{"model": map[string]any{},
+		"credentials": map[string]any{"kimiWeb": map[string]any{"userId": "user-1"}}})
+	if err := os.WriteFile(filepath.Join(dir, NativeWorkConfig), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousStep := settingsReadyStep
+	settingsReadyStep = 10 * time.Millisecond
+	t.Cleanup(func() { settingsReadyStep = previousStep })
+
+	page := &fakePage{
+		surface:                "work",
+		actions:                true,
+		importAPI:              true,
+		hideSettings:           true,
+		mainDesktopTarget:      true,
+		workRequiresActivate:   true,
+		activateAvailableAfter: 2,
+	}
+	harness := newHarness(t, page)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := NewCDPActions(harness.pipe, dir, dir).ImportModels(ctx, ImportRequest{
+		URL: "http://127.0.0.1:9999/v1", Token: "gateway-token",
+		ExpectedAccountKey: sha256Hex("user-1"), OpenSettings: true, ActivateWork: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("expected import after Work activation, got %+v", result)
+	}
+	page.mu.Lock()
+	defer page.mu.Unlock()
+	if page.activateCalls != 1 {
+		t.Fatalf("openKimiWorkTab calls = %d, want 1", page.activateCalls)
+	}
+	if page.openCalls != 1 {
+		t.Fatalf("openSettings calls = %d, want 1", page.openCalls)
+	}
+}
+
+func TestResolveImportTargetDoesNotActivateWorkWhenDisallowed(t *testing.T) {
+	previousWindow, previousStep := settingsReadyWindow, settingsReadyStep
+	settingsReadyWindow, settingsReadyStep = 60*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		settingsReadyWindow, settingsReadyStep = previousWindow, previousStep
+	})
+
+	page := &fakePage{
+		surface:              "work",
+		actions:              true,
+		importAPI:            true,
+		hideSettings:         true,
+		mainDesktopTarget:    true,
+		workRequiresActivate: true,
+	}
+	harness := newHarness(t, page)
+	actions := NewCDPActions(harness.pipe, t.TempDir(), t.TempDir()).(*cdpActions)
+	_, opened, failure, err := actions.resolveImportTarget(context.Background(), true, false)
+	if err != nil || opened || failure == nil {
+		t.Fatalf("want waiting-work failure, got opened=%v failure=%+v err=%v", opened, failure, err)
+	}
+	if failure.State != ImportStateWaitingWork || failure.Reason != NativeWaitingWork {
+		t.Fatalf("failure = %+v, want waiting-work", failure)
+	}
+	page.mu.Lock()
+	defer page.mu.Unlock()
+	if page.activateCalls != 0 {
+		t.Fatalf("background path activated Work %d times", page.activateCalls)
+	}
+}
+
+func TestDisconnectModelsActivatesWorkWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	encoded, _ := json.Marshal(map[string]any{"model": map[string]any{},
+		"credentials": map[string]any{"kimiWeb": map[string]any{"userId": "user-1"}}})
+	if err := os.WriteFile(filepath.Join(dir, NativeWorkConfig), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousStep := settingsReadyStep
+	settingsReadyStep = 10 * time.Millisecond
+	t.Cleanup(func() { settingsReadyStep = previousStep })
+
+	page := &fakePage{
+		surface:              "work",
+		actions:              true,
+		importAPI:            true,
+		hideSettings:         true,
+		mainDesktopTarget:    true,
+		workRequiresActivate: true,
+	}
+	harness := newHarness(t, page)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := NewCDPActions(harness.pipe, dir, dir).DisconnectModels(ctx, DisconnectRequest{
+		ExpectedAccountKey: sha256Hex("user-1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != "disconnected" {
+		t.Fatalf("expected disconnect after Work activation, got %+v", result)
+	}
+	page.mu.Lock()
+	defer page.mu.Unlock()
+	if page.activateCalls != 1 {
+		t.Fatalf("openKimiWorkTab calls = %d, want 1", page.activateCalls)
+	}
+}
+
+func TestImportActivateWorkFlagMatchesExplicitVsBackground(t *testing.T) {
+	profile, kimiHome := nativeProfile(t, "user-1")
+	controller, actions := controllerFor(t, profile, nil)
+	seedNativeProfile(t, kimiHome, "http://127.0.0.1:9999/v1", "cred-1")
+
+	if _, err := controller.ImportModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.importModelsAuthorized(context.Background(), sha256Hex("user-1"), "repair-sig"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.ImportModelsAuthorized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	actions.mu.Lock()
+	imports := append([]ImportRequest(nil), actions.imports...)
+	actions.mu.Unlock()
+	if len(imports) != 3 {
+		t.Fatalf("imports = %d, want 3", len(imports))
+	}
+	if imports[0].ActivateWork || imports[0].OpenSettings {
+		t.Fatalf("passive ImportModels set ActivateWork/OpenSettings: %+v", imports[0])
+	}
+	if imports[1].ActivateWork || !imports[1].OpenSettings {
+		t.Fatalf("background repair set unexpected flags: %+v", imports[1])
+	}
+	if !imports[2].ActivateWork || !imports[2].OpenSettings {
+		t.Fatalf("explicit ImportModelsAuthorized did not set ActivateWork/OpenSettings: %+v", imports[2])
+	}
+
+	settings := controller.Settings()
+	settings.IntegrationMode = IntegrationModeDirect
+	if err := controller.Configure(settings); err != nil {
+		t.Fatal(err)
+	}
+	actions.mu.Lock()
+	actions.direct = ImportResult{OK: true, State: ImportStateAccepted, SourceID: "src-1", Models: 1}
+	actions.mu.Unlock()
+	if _, err := controller.ImportDirectAuthorized(context.Background(), DirectImportRequest{
+		Providers:    []DirectProvider{{ID: "p1", DisplayName: "P1", Protocol: "openai", BaseURL: "https://api.example.com/v1", APIKey: "sk-test"}},
+		Models:       []DirectModel{{ID: "p1/m1", ProviderID: "p1", Model: "m1", DisplayName: "M1", MaxContextSize: 128000, Capabilities: []string{"tools"}}},
+		OpenSettings: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actions.mu.Lock()
+	directs := append([]DirectImportRequest(nil), actions.directs...)
+	actions.mu.Unlock()
+	if len(directs) != 1 || !directs[0].ActivateWork {
+		t.Fatalf("explicit ImportDirectAuthorized did not set ActivateWork: %+v", directs)
+	}
+}
+
+func TestControllerHasManagedBridgeReflectsChildLifecycle(t *testing.T) {
+	profile, _ := nativeProfile(t, "user-1")
+	controller, _ := controllerFor(t, profile, nil)
+	if !controller.HasManagedBridge() {
+		t.Fatal("live bridge without child reported false")
+	}
+
+	alive := &Child{exitWait: make(chan struct{})}
+	controller.mu.Lock()
+	controller.child = alive
+	controller.mu.Unlock()
+	if !controller.HasManagedBridge() {
+		t.Fatal("live child with bridge reported false")
+	}
+
+	close(alive.exitWait)
+	if controller.HasManagedBridge() {
+		t.Fatal("exited child still reported managed bridge")
+	}
+}
+
+func TestResolveImportTargetColdStartSlowTargetsGetsFullWorkAndSettingsWindows(t *testing.T) {
+	dir := t.TempDir()
+	encoded, _ := json.Marshal(map[string]any{"model": map[string]any{},
+		"credentials": map[string]any{"kimiWeb": map[string]any{"userId": "user-1"}}})
+	if err := os.WriteFile(filepath.Join(dir, NativeWorkConfig), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousWindow, previousStep := settingsReadyWindow, settingsReadyStep
+	settingsReadyWindow, settingsReadyStep = 80*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		settingsReadyWindow, settingsReadyStep = previousWindow, previousStep
+	})
+
+	page := &fakePage{
+		surface:                "work",
+		actions:                true,
+		importAPI:              true,
+		hideSettings:           true,
+		mainDesktopTarget:      true,
+		workRequiresActivate:   true,
+		activateAvailableAfter: 2,
+		firstTargetDelay:       120 * time.Millisecond,
+	}
+	harness := newHarness(t, page)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := NewCDPActions(harness.pipe, dir, dir).ImportModels(ctx, ImportRequest{
+		URL: "http://127.0.0.1:9999/v1", Token: "gateway-token",
+		ExpectedAccountKey: sha256Hex("user-1"), OpenSettings: true, ActivateWork: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("slow cold-start target list exhausted readiness window: %+v", result)
+	}
+	page.mu.Lock()
+	defer page.mu.Unlock()
+	if page.activateCalls != 1 || page.openCalls != 1 {
+		t.Fatalf("activateCalls=%d openCalls=%d, want 1/1", page.activateCalls, page.openCalls)
+	}
+}
+
+func TestResolveImportTargetActivationFailureDoesNotLoop(t *testing.T) {
+	previousWindow, previousStep := settingsReadyWindow, settingsReadyStep
+	settingsReadyWindow, settingsReadyStep = 60*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		settingsReadyWindow, settingsReadyStep = previousWindow, previousStep
+	})
+
+	page := &fakePage{
+		surface:              "work",
+		actions:              true,
+		importAPI:            true,
+		hideSettings:         true,
+		mainDesktopTarget:    true,
+		workRequiresActivate: true,
+		activateFails:        true,
+	}
+	harness := newHarness(t, page)
+	actions := NewCDPActions(harness.pipe, t.TempDir(), t.TempDir()).(*cdpActions)
+	_, opened, failure, err := actions.resolveImportTarget(context.Background(), true, true)
+	if err != nil || opened || failure == nil {
+		t.Fatalf("want waiting-work failure, got opened=%v failure=%+v err=%v", opened, failure, err)
+	}
+	if failure.State != ImportStateWaitingWork || failure.Reason != NativeWaitingWork {
+		t.Fatalf("failure = %+v, want waiting-work", failure)
+	}
+	page.mu.Lock()
+	defer page.mu.Unlock()
+	if page.activateCalls != 1 {
+		t.Fatalf("failed openKimiWorkTab was retried: calls = %d, want 1", page.activateCalls)
+	}
+}
+
+func TestControllerStartReturnsNormalizedErrorCodes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("kimi_start_failed: %w", os.ErrNotExist), "kimi_start_failed"},
+		{fmt.Errorf("kimi_start_cancelled: %w", context.Canceled), "kimi_start_cancelled"},
+		{fmt.Errorf("kimi_user_data_dir_unavailable: %w", os.ErrPermission), "kimi_user_data_dir_unavailable"},
+		{fmt.Errorf("%w: handle value does not fit", errManagedChildUnsupported), "platform_cannot_manage_child"},
+		{errors.New("kimi_application_missing"), "kimi_application_missing"},
+		{errors.New("kimi_user_data_dir_invalid"), "kimi_user_data_dir_invalid"},
+		{errors.New("unexpected os error: broken pipe"), "kimi_start_failed"},
+	} {
+		if got := startErrorCode(tc.err); got != tc.want {
+			t.Fatalf("startErrorCode(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+
+	t.Run("cancelled context returns kimi_start_cancelled", func(t *testing.T) {
+		controller, err := NewController(ControllerSettings{StateDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := controller.Start(ctx); err == nil || err.Error() != "kimi_start_cancelled" {
+			t.Fatalf("Start(cancelled) = %v, want kimi_start_cancelled", err)
+		}
+	})
+
+	t.Run("failed attach returns injection_payload_unavailable code", func(t *testing.T) {
+		child, profile := startFakeChild(t)
+		controller, err := NewController(ControllerSettings{StateDir: filepath.Dir(profile), UserDataDir: profile})
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := translationPayload
+		translationPayload = func() ([]byte, injection.Asset, error) {
+			return nil, injection.Asset{}, os.ErrNotExist
+		}
+		t.Cleanup(func() { translationPayload = original })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := controller.attachChild(ctx, child, TranslationSettings{Enabled: false}); err == nil || err.Error() != "injection_payload_unavailable" {
+			t.Fatalf("attachChild() = %v, want injection_payload_unavailable", err)
+		}
+	})
+
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		t.Run("StartOfficial missing binary returns stable code", func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			t.Setenv("AppData", dir)
+			controller, err := NewController(ControllerSettings{
+				StateDir:     filepath.Join(dir, "state"),
+				Installation: Installation{Application: filepath.Join(dir, "missing-kimi")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = controller.StartOfficial(context.Background())
+			if err == nil {
+				t.Fatal("StartOfficial unexpectedly succeeded for missing binary")
+			}
+			if errors.Is(err, ErrUnmanagedKimiRunning) {
+				if err.Error() != "unmanaged_kimi_running" {
+					t.Fatalf("unmanaged err = %q", err.Error())
+				}
+				return
+			}
+			if err.Error() != "kimi_start_failed" {
+				t.Fatalf("StartOfficial missing binary err = %q, want kimi_start_failed", err.Error())
+			}
+		})
 	}
 }

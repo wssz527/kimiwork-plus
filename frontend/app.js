@@ -288,13 +288,20 @@ async function runAction(action, profileMode) {
       renderOperation(state.data);
       renderActions(state.data);
     }
+    const needsAutoLaunch = data?.integration?.desktop?.managed !== true && data?.kimiProcess?.running !== true;
     const submitted = action === 'launch-kimi'
       ? '启动请求已提交，等待运行时状态。'
       : action === 'restart-kimi'
         ? '已请求正常退出 Kimi，等待退出完成后受管重启。'
         : action === 'disconnect-models'
-          ? '正在通过官方接口移除本产品接管的模型来源。'
-          : '操作已提交，等待结果。';
+          ? (needsAutoLaunch
+            ? '正在自动启动 Kimi Work 并移除本产品接管的模型来源，请稍候。'
+            : '正在通过官方接口移除本产品接管的模型来源。')
+          : (action === 'connect-kimi' || action === 'prepare-native')
+            ? (needsAutoLaunch
+              ? '正在自动启动 Kimi Work 并同步模型配置，请稍候。'
+              : '正在同步模型配置到 Kimi Work，请稍候。')
+            : '操作已提交，等待结果。';
     showToast(submitted, 'ok');
     /* 终态由 settlePending 在轮询读取到匹配 operation 时确认，避免重复提示。 */
     await loadState({ silent: true });
@@ -370,7 +377,15 @@ async function confirmActionResult(action, opId) {
   }
 
   if (op.state === 'waiting-kimi-exit') {
-    showToast('检测到另一个 Kimi 实例。请点击「正常退出并重启 Kimi」，由产品完成正常退出和受管重启。', 'error');
+    showToast('检测到另一个未受托管的官方 Kimi 实例。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。', 'error');
+    return;
+  }
+  if (op.state === 'waiting-login') {
+    showToast('已打开官方 Kimi，但尚未确认登录账号。请先在官方窗口完成登录，再重新操作。', 'warn');
+    return;
+  }
+  if (op.state === 'requires-restart') {
+    showToast('模型配置已写入，请等当前任务结束后点击「正常退出并重启 Kimi」使配置生效。', 'warn');
   }
 }
 

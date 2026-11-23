@@ -134,12 +134,6 @@ func (a *cdpActions) integrationRoute() (string, string) {
 
 const (
 	actionCallTimeout = 30 * time.Second
-	// settingsReadyWindow bounds how long an import that opened the settings
-	// overlay waits for its preload API. The page target appears before the API
-	// mounts, and a slow start can take seconds; a fixed handful of reads
-	// rejected exactly that case.
-	settingsReadyWindow = 10 * time.Second
-	settingsReadyStep   = 250 * time.Millisecond
 	// overlayCloseTimeout bounds the close this call still owes after its own
 	// context ended.
 	overlayCloseTimeout = 5 * time.Second
@@ -148,6 +142,15 @@ const (
 	// import carries a whole catalog and its keys.
 	maxDirectExpression = 2 << 20
 	maxDirectCatalog    = 256 << 10
+)
+
+var (
+	// settingsReadyWindow bounds how long an import that opened the settings
+	// overlay waits for its preload API. The page target appears before the API
+	// mounts, and a slow start can take seconds; a fixed handful of reads
+	// rejected exactly that case.
+	settingsReadyWindow = 15 * time.Second
+	settingsReadyStep   = 250 * time.Millisecond
 )
 
 func (a *cdpActions) Connected() bool {
@@ -411,7 +414,7 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 
-	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings)
+	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings, request.ActivateWork)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -492,7 +495,7 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 		request.DisplayName = DirectDisplayName
 	}
 
-	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings)
+	settings, opened, failure, err := a.resolveImportTarget(ctx, request.OpenSettings, request.ActivateWork)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -561,12 +564,13 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 // returned as an error. `opened` says whether this call opened the overlay, so
 // every early return can close it.
 //
-// A slow start is the normal case this has to survive: the Work page may still
-// be mounting when the import arrives, and the settings overlay exists as a
-// target before its preload API does. Both waits are bounded by one deadline and
-// are abandoned the moment the context or the pipe ends.
-func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool) (actionTarget, bool, *ImportResult, error) {
-	deadline := time.Now().Add(settingsReadyWindow)
+// A slow start is the normal case this has to survive: initial CDP target
+// enumeration may wait for a newly launched Electron process, the Work page may
+// still be mounting, and the settings overlay exists as a target before its
+// preload API does. Target acquisition and settings readiness each get a bounded
+// window after the preceding stage settles, and both stop immediately when the
+// outer context or the pipe ends.
+func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings, activateWork bool) (actionTarget, bool, *ImportResult, error) {
 	targets, err := a.targets(ctx)
 	if err != nil {
 		return actionTarget{}, false, nil, err
@@ -577,11 +581,13 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 		if !openSettings {
 			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: NativeWaitingSettings}, nil
 		}
+		workDeadline := time.Now().Add(settingsReadyWindow)
 		work, ok := findPath(targets, "/kimi-agent.html")
 		if !ok {
-			// The Work page itself may still be mounting. It is waited for on the
-			// same deadline as the overlay, and never opened twice.
-			work, ok = a.waitForWorkTarget(ctx, &targets, deadline)
+			// The Work page itself may still be mounting, or Kimi may be sitting on
+			// its chat view. An explicit user action may ask the desktop shell once
+			// to switch into Work before waiting on the Work-readiness deadline.
+			work, ok = a.waitForWorkTarget(ctx, &targets, workDeadline, activateWork)
 			if !ok {
 				if err := a.transportEnded(ctx); err != nil {
 					return actionTarget{}, false, nil, err
@@ -589,7 +595,8 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 				return actionTarget{}, false, &ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
 			}
 		}
-		asked, mounted, err := a.openSettingsWhenReady(ctx, work, deadline)
+		settingsDeadline := time.Now().Add(settingsReadyWindow)
+		asked, mounted, err := a.openSettingsWhenReady(ctx, work, settingsDeadline)
 		if err != nil {
 			return actionTarget{}, false, nil, err
 		}
@@ -616,7 +623,7 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 				a.closeIfOpened(ctx, opened)
 				return actionTarget{}, opened, nil, err
 			}
-			if !time.Now().Before(deadline) {
+			if !time.Now().Before(settingsDeadline) {
 				break
 			}
 			if err := a.waitStep(ctx); err != nil {
@@ -636,11 +643,18 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings bool)
 }
 
 // waitForWorkTarget polls the allowlist until the Work page appears or the
-// deadline passes. It answers whether the page was found.
-func (a *cdpActions) waitForWorkTarget(ctx context.Context, targets *[]actionTarget, deadline time.Time) (actionTarget, bool) {
+// deadline passes. When activateWork is true and Work is absent, it asks the
+// main desktop view once to open the Work tab as soon as its bridge API mounts.
+func (a *cdpActions) waitForWorkTarget(ctx context.Context, targets *[]actionTarget, deadline time.Time, activateWork bool) (actionTarget, bool) {
+	activated := false
 	for {
 		if work, ok := findPath(*targets, "/kimi-agent.html"); ok {
 			return work, true
+		}
+		if activateWork && !activated {
+			if a.tryActivateWorkOnce(ctx, *targets) {
+				activated = true
+			}
 		}
 		if !time.Now().Before(deadline) {
 			return actionTarget{}, false
@@ -657,6 +671,39 @@ func (a *cdpActions) waitForWorkTarget(ctx context.Context, targets *[]actionTar
 		}
 		*targets = fresh
 	}
+}
+
+func (a *cdpActions) tryActivateWorkOnce(ctx context.Context, targets []actionTarget) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	ordered := make([]actionTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.path == "/desktopclaw.html" {
+			ordered = append(ordered, target)
+		}
+	}
+	for _, target := range targets {
+		if target.path != "/desktopclaw.html" {
+			ordered = append(ordered, target)
+		}
+	}
+	for _, target := range ordered {
+		value, err := a.evaluate(ctx, target.sessionID, activateExpression)
+		if err != nil {
+			if errors.Is(err, ErrSessionInvalid) {
+				a.dropSession(target.targetID)
+			}
+			continue
+		}
+		probe, _ := value.(map[string]any)
+		asked, _ := probe["asked"].(bool)
+		failed, _ := probe["failed"].(bool)
+		if asked || failed {
+			return true
+		}
+	}
+	return false
 }
 
 // openSettingsWhenReady waits for the Work page's preload API to mount, then asks

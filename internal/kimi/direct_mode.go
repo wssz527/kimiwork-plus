@@ -83,6 +83,7 @@ type DirectImportRequest struct {
 	Models               []DirectModel    `json:"models"`
 	ExpectedAccountKey   string           `json:"expectedAccountKey,omitempty"`
 	OpenSettings         bool             `json:"openSettings,omitempty"`
+	ActivateWork         bool             `json:"activateWork,omitempty"`
 	ExistingSourceID     string           `json:"existingSourceId,omitempty"`
 	DisconnectGateway    bool             `json:"disconnectGateway,omitempty"`
 	DisconnectGatewayURL string           `json:"disconnectGatewayUrl,omitempty"`

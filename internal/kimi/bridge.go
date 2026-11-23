@@ -130,6 +130,9 @@ type ImportRequest struct {
 	Token              string `json:"token"`
 	ExpectedAccountKey string `json:"expectedAccountKey,omitempty"`
 	OpenSettings       bool   `json:"openSettings,omitempty"`
+	// ActivateWork permits an explicit user action to switch a running Kimi
+	// window into Work when the Work view is not open yet.
+	ActivateWork bool `json:"activateWork,omitempty"`
 	// DisconnectDirectSourceID names the Direct Mode custom source a gateway
 	// import disconnects only after the replacement has been applied.
 	DisconnectDirectSourceID string `json:"disconnectDirectSourceId,omitempty"`

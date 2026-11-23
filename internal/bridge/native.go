@@ -43,17 +43,22 @@ type Native struct {
 	resolverPath        string
 	// hostsPath overrides the static hosts file a Direct Mode prepare writes. It
 	// exists so a test never writes the machine's real /etc/hosts.
-	hostsPath         string
-	workCapabilities  kimi.WorkCapabilities
-	quota             *nativeQuota
-	accounts          *accountManager
-	accountActivation core.Document
-	accountReason     string
-	accountSyncID     string
-	accountSyncAt     time.Time
-	swarm             kimi.SwarmSnapshot
-	workUsage         *workUsageCollector
-	diagnostics       *diagnosticsLog
+	hostsPath          string
+	workCapabilities   kimi.WorkCapabilities
+	quota              *nativeQuota
+	accounts           *accountManager
+	accountActivation  core.Document
+	accountReason      string
+	accountSyncID      string
+	accountSyncAt      time.Time
+	swarm              kimi.SwarmSnapshot
+	workUsage          *workUsageCollector
+	diagnostics        *diagnosticsLog
+	autoLaunch         func(context.Context) error
+	autoOpenWork       func(context.Context) error
+	importModels       func(context.Context) (kimi.ImportResult, error)
+	importDirectModels func(context.Context, kimi.DirectImportRequest) (kimi.ImportResult, error)
+	disconnectModels   func(context.Context) (kimi.DisconnectResult, error)
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -87,6 +92,8 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	capabilities := kimi.ProbeWorkCapabilities(install)
 	policies.capabilities = capabilities.Subagents
 	n := &Native{service: s, controller: controller, policies: policies, process: core.Document{"running": nil, "state": "unknown"}, compatibility: initialCompatibilityReport(), jobs: make(chan struct{}, 2), workCapabilities: capabilities}
+	n.autoLaunch = n.startManagedOfficial
+	n.autoOpenWork = controller.OpenWork
 	n.diagnostics = newDiagnosticsLog(s.StateDir)
 	n.workUsage = newWorkUsageCollector(s.StateDir, home, gateway.usage, s.Store, gateway.budget)
 	n.workUsage.Sync()
@@ -623,9 +630,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		if action == "prepare-native" || action == "remove-dns" {
 			timeout = 180 * time.Second
 		} else if (action == "connect-kimi" && !n.isDirectMode()) || action == "disconnect-models" {
-			// The import/disconnect has its own 60 second page budget; the action must not
-			// cancel it first and leave its outcome unknown.
-			timeout = 75 * time.Second
+			// Auto-launching Kimi plus the 60 second bridge budget (and one
+			// OpenWork retry if Kimi was hidden in the tray) must finish cleanly
+			// before the outer deadline expires.
+			timeout = 120 * time.Second
 		} else if action == "connect-kimi" && n.isDirectMode() {
 			// A direct import settles the static hosts entry first, and that can
 			// need one administrator prompt; the gateway path never does.
@@ -669,20 +677,15 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				}
 			}
 		case "launch-kimi":
-			settings := n.controller.Settings()
-			refreshed := refreshKimiInstallation(settings, func() []kimi.Installation { return kimi.Detect(runtime.GOOS, currentEnvMap()) })
-			if refreshed.Installation != settings.Installation {
-				err = n.controller.Configure(refreshed)
-			}
-			if err == nil {
-				if profileMode == kimi.ProfileModeExistingAuthorized {
+			if profileMode == kimi.ProfileModeExistingAuthorized {
+				if err = n.refreshControllerInstallation(); err == nil {
 					err = n.controller.StartWithExistingLogin(deadline)
-				} else {
-					err = n.controller.StartOfficial(deadline)
 				}
-			}
-			if err == nil {
-				err = n.syncWorkHome()
+				if err == nil {
+					err = n.syncWorkHome()
+				}
+			} else {
+				err = n.startManagedOfficial(deadline)
 			}
 		case "open-work":
 			err = n.controller.OpenWork(deadline)
@@ -694,7 +697,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		case "disconnect-models":
 			n.setOperationStage(id, diagnosticStageDisconnectModels)
 			var removed kimi.DisconnectResult
-			removed, err = n.controller.DisconnectModelsAuthorized(deadline)
+			removed, err = n.disconnectModelsWithAutoStart(deadline)
 			if err == nil && !removed.OK {
 				reason := removed.Reason
 				if reason == "" {
@@ -704,13 +707,15 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 			if err == nil {
 				state = "removed"
-				if n.policies != nil {
+				if n.policies != nil && n.service != nil {
 					if d, _, readErr := n.service.Store.Read(); readErr == nil {
 						_ = n.policies.Configure(d)
 					}
 				}
 			}
-			result = removed
+			if removed.OK || removed.State != "" || removed.Reason != "" {
+				result = removed
+			}
 		case "connect-kimi":
 			if n.modelSyncWriteBlocked() {
 				err = errors.New(kimi.CompatErrModelSyncBlocked)
@@ -729,12 +734,12 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				}
 			} else {
 				n.setOperationStage(id, diagnosticStageImportModels)
-				imported, err = n.controller.ImportModelsAuthorized(deadline)
+				imported, err = n.importModelsWithAutoStart(deadline)
 			}
 			if err == nil {
 				err = importResultError(imported)
 			}
-			if err == nil {
+			if err == nil && n.policies != nil && n.service != nil {
 				if d, _, readErr := n.service.Store.Read(); readErr == nil {
 					_ = n.policies.Configure(d)
 				}
@@ -743,7 +748,9 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if state == "" || state == "accepted" || state == "applied" {
 				state = "prepared"
 			}
-			result = imported
+			if imported.OK || imported.State != "" || imported.Reason != "" {
+				result = imported
+			}
 		case "prepare-native":
 			if n.modelSyncWriteBlocked() {
 				err = errors.New(kimi.CompatErrModelSyncBlocked)
@@ -761,16 +768,18 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 					value, importErr = n.importDirect(deadline)
 				} else {
 					n.setOperationStage(id, diagnosticStageImportModels)
-					value, importErr = n.controller.ImportModelsAuthorized(deadline)
+					value, importErr = n.importModelsWithAutoStart(deadline)
 				}
-				imported = &value
+				if value.OK || value.State != "" || value.Reason != "" {
+					imported = &value
+				}
 				err = importErr
 			}
 			if imported != nil {
 				if err == nil {
 					err = importResultError(*imported)
 				}
-				if err == nil {
+				if err == nil && n.policies != nil && n.service != nil {
 					if d, _, readErr := n.service.Store.Read(); readErr == nil {
 						_ = n.policies.Configure(d)
 					}
@@ -807,6 +816,76 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	return core.Document{"operation": initial}, nil
 }
 
+func (n *Native) refreshControllerInstallation() error {
+	settings := n.controller.Settings()
+	refreshed := refreshKimiInstallation(settings, func() []kimi.Installation { return kimi.Detect(runtime.GOOS, currentEnvMap()) })
+	if refreshed.Installation != settings.Installation {
+		return n.controller.Configure(refreshed)
+	}
+	return nil
+}
+
+func (n *Native) startManagedOfficial(ctx context.Context) error {
+	if err := n.refreshControllerInstallation(); err != nil {
+		return err
+	}
+	if err := n.controller.StartOfficial(ctx); err != nil {
+		return err
+	}
+	return n.syncWorkHome()
+}
+
+func (n *Native) ensureManagedKimi(ctx context.Context) error {
+	if n.controller == nil || n.controller.HasManagedBridge() || n.autoLaunch == nil {
+		return nil
+	}
+	return n.autoLaunch(ctx)
+}
+
+func runWithManagedKimi[T any](
+	ctx context.Context,
+	ensure func(context.Context) error,
+	openWork func(context.Context) error,
+	run func(context.Context) (T, error),
+	waitingWork func(T) bool,
+) (T, error) {
+	var zero T
+	if err := ensure(ctx); err != nil {
+		return zero, err
+	}
+	result, err := run(ctx)
+	if err == nil && waitingWork(result) && openWork != nil {
+		if openErr := openWork(ctx); openErr == nil {
+			result, err = run(ctx)
+		}
+	}
+	return result, err
+}
+
+func importWaitingWork(result kimi.ImportResult) bool {
+	return !result.OK && result.State == kimi.ImportStateWaitingWork
+}
+
+func disconnectWaitingWork(result kimi.DisconnectResult) bool {
+	return !result.OK && result.State == kimi.ImportStateWaitingWork
+}
+
+func (n *Native) importModelsWithAutoStart(ctx context.Context) (kimi.ImportResult, error) {
+	run := n.importModels
+	if run == nil {
+		run = n.controller.ImportModelsAuthorized
+	}
+	return runWithManagedKimi(ctx, n.ensureManagedKimi, n.autoOpenWork, run, importWaitingWork)
+}
+
+func (n *Native) disconnectModelsWithAutoStart(ctx context.Context) (kimi.DisconnectResult, error) {
+	run := n.disconnectModels
+	if run == nil {
+		run = n.controller.DisconnectModelsAuthorized
+	}
+	return runWithManagedKimi(ctx, n.ensureManagedKimi, n.autoOpenWork, run, disconnectWaitingWork)
+}
+
 // importDirect runs one Direct Mode import. The request holds the provider keys,
 // so it stays local to this call: it is never stored on the operation, in a
 // state file or in the settings.
@@ -815,9 +894,17 @@ func (n *Native) importDirect(ctx context.Context) (kimi.ImportResult, error) {
 	if err != nil {
 		return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(err)}, err
 	}
-	result, err := n.controller.ImportDirectAuthorized(ctx, request)
-	request = kimi.DirectImportRequest{}
-	return result, err
+	defer func() {
+		request = kimi.DirectImportRequest{}
+	}()
+	run := n.importDirectModels
+	if run == nil {
+		run = n.controller.ImportDirectAuthorized
+	}
+	return runWithManagedKimi(ctx, n.ensureManagedKimi, n.autoOpenWork,
+		func(ctx context.Context) (kimi.ImportResult, error) {
+			return run(ctx, request)
+		}, importWaitingWork)
 }
 
 func (n *Native) finishOperation(id, state string, result any, err error) {

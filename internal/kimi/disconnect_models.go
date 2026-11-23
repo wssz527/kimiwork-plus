@@ -18,7 +18,7 @@ func (a *cdpActions) DisconnectModels(ctx context.Context, request DisconnectReq
 	if request.ExpectedAccountKey != "" && request.ExpectedAccountKey != current {
 		return DisconnectResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
-	settings, opened, failure, err := a.resolveImportTarget(ctx, true)
+	settings, opened, failure, err := a.resolveImportTarget(ctx, true, true)
 	if err != nil {
 		return DisconnectResult{}, err
 	}

@@ -329,10 +329,15 @@ function directModeState(data) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
       note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
   }
-  /* 还没同步到官方 Kimi：无论 Kimi 是否在跑，下一步都是写入直连配置。 */
+  /* 还没同步到官方 Kimi：若已有非受管官方 Kimi 运行，自动启动会被安全边界拦截，
+     必须先引导用户受管重启，再写入直连配置。 */
   if (!synced) {
+    if (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false)) {
+      return { code: 'manual-exit', tone: 'warn', word: '需先受管重启 Kimi',
+        note: '检测到当前官方 Kimi 未受本产品托管，写入直连配置前请先点击「正常退出并重启 Kimi」，完成受管启动后再同步到 Work。' };
+    }
     return { code: 'pending', tone: 'warn', word: '待写入直连配置',
-      note: '已选择零网关直连模式；请打开 Kimi 并点「同步到 Work」写入服务商地址与静态 hosts。' };
+      note: '已选择零网关直连模式；点「同步到 Work」会自动启动 Kimi 并写入服务商地址与静态 hosts。' };
   }
   /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
      默认值是 hosts，拿它回退等于跳过真实检查。 */
@@ -366,7 +371,6 @@ function nativeConnectionText(data) {
     if (direct?.supported === false) {
       return '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。';
     }
-    const reason = info.reason || info.nativeImport?.reason || '';
     if (directRestartRequired(data)) {
       return '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。';
     }
@@ -375,12 +379,28 @@ function nativeConnectionText(data) {
     if (directRouteCleanupPending(data)) {
       return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
     }
-    /* 失败码由 app-core 统一归一化（native_import_ 前缀、连字符形式），
-       这里不再维护第二张码表，避免两处文案各说一套。 */
-    const directText = directReasonText(reason);
-    if (directText) return directText;
+    const directComplete = directImportComplete(data);
+    if (!directComplete && (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false))) {
+      return '当前官方 Kimi 未受本产品托管，无法写入直连配置。请先点击「正常退出并重启 Kimi」，完成受管启动后再同步到 Work。';
+    }
+    /* 具体失败/等待码优先于宽泛的 direct_import_required，避免等待 Work、
+       等待登录或启动失败被默认待同步提示吞掉。 */
+    const specificInfoReason = info.reason && info.reason !== 'direct_import_required' ? info.reason : '';
+    const primaryReason = specificInfoReason || info.nativeImport?.reason || (!directComplete ? info.desktop?.reason : '') || '';
+    const directText = directReasonText(primaryReason);
+    if (directText && primaryReason !== 'direct_import_required') return directText;
+    if (!directComplete) {
+      for (const candidate of [info.nativeImport?.reason, info.desktop?.reason, specificInfoReason]) {
+        if (typeof candidate === 'string' && candidate && candidate !== 'native_import_not_verified') {
+          const translated = reasonText(candidate);
+          if (translated && translated !== candidate) return translated;
+        }
+      }
+    }
+    const fallbackDirectText = directReasonText(info.reason || '');
+    if (fallbackDirectText) return fallbackDirectText;
     if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
-    if (directImportComplete(data)) {
+    if (directComplete) {
       return directStaticHostsReady(data)
         ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出本软件与后台服务后仍可直接使用这些模型。'
         : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。';
@@ -433,9 +453,17 @@ function nativeConnectionText(data) {
     application_not_found: '官方 Kimi 应用入口不可用。请重新安装官方 Kimi 后再试。',
     base_url_changed: '检测到本机网关地址变化，正在通过官方接口恢复已有接入。',
     profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
-    native_bridge_unavailable: '正在等待 Kimi 接入通道，空闲后会自动恢复。',
+    official_kimi_already_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
+    unmanaged_kimi_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
+    native_bridge_unavailable: '当前未连接到受管 Kimi 通道。点「同步到 Work」会自动启动受管 Kimi；若 Kimi 已在运行，请点「正常退出并重启 Kimi」。',
+    native_bridge_waiting_work: '官方 Kimi 已运行，但 Work 页面尚未就绪。请确认 Kimi 已登录并切换到 Work 视图，或点「打开 Kimi Work」后重试。',
     native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',
+    native_bridge_settings_open_refused: '官方 Kimi 拒绝打开 Work 设置页。请确认 Kimi 窗口已就绪且无阻塞提示后重试。',
+    native_bridge_activation_refused: '未能自动唤起 Kimi Work 视图。请手动切到官方 Kimi 的 Work 页面后重试。',
+    native_bridge_timeout: '等待官方 Kimi 页面响应超时。请确认 Kimi 窗口正常运行后重试。',
     native_bridge_waiting_launch: '等待 Kimi 启动并建立接入通道。',
+    kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
+    kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
     disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「同步到 Work」可重新接管。',
@@ -1174,7 +1202,16 @@ function isInFlight(op) {
 
 function operationNote(op) {
   if (op && op.state === 'waiting-kimi-exit') {
-    return '检测到另一个 Kimi 实例。点击「正常退出并重启 Kimi」后，产品会发送正常退出请求并完成受管重启。';
+    return '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。';
+  }
+  if (op?.state === 'waiting-login') {
+    return '已打开官方 Kimi，但尚未确认登录账号。请先在官方窗口完成登录，再重新操作。';
+  }
+  if (op?.state === 'waiting-work') {
+    return '官方 Kimi 已运行，但 Work 页面尚未就绪。请确认 Kimi 已登录并进入 Work 视图后重试。';
+  }
+  if (op?.state === 'requires-restart') {
+    return '模型配置已写入，请等当前任务结束后点击「正常退出并重启 Kimi」使配置生效。';
   }
   if (op?.action === 'open-work' && op.state === 'failed') return '请从官方 Kimi 窗口进入 Work，或检查接入状态。';
   const code = op && typeof op.reason === 'string' && op.reason ? op.reason : '';
@@ -1192,8 +1229,11 @@ function renderOperation(data) {
   const word = ACTION_STATE[op.state] || op.state || '未知';
   const running = isInFlight(op);
   const bad = op.state === 'failed' || op.state === 'interrupted' || op.state === 'unavailable' || op.state === 'incompatible';
+  const warn = running || op.state === 'waiting-kimi-exit' || op.state === 'waiting-login'
+    || op.state === 'waiting-work' || op.state === 'waiting-settings' || op.state === 'requires-restart'
+    || op.state === 'waiting-idle' || op.state === 'waiting-quit';
   setHidden(dom.opbar, false);
-  setDot(dom.opbarDot, running ? 'warn' : bad ? 'bad' : 'ok');
+  setDot(dom.opbarDot, warn ? 'warn' : bad ? 'bad' : 'ok');
   setText(dom.opbarName, label + ' · ' + word);
   setText(dom.opbarNote, operationNote(op) || '');
   dom.opbar.dataset.running = running ? 'true' : 'false';

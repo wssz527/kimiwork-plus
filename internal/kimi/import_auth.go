@@ -130,7 +130,7 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 		c.importGranted = false
 		c.mu.Unlock()
 	}()
-	result, err := c.importModels(ctx, true, expectedAccount)
+	result, err := c.importModels(ctx, true, repairSignature == "", expectedAccount)
 	if repairSignature != "" && repairFailedTransiently(result) {
 		c.mu.Lock()
 		if c.repairSignature == repairSignature {
@@ -250,6 +250,7 @@ func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectI
 		return ImportResult{State: ImportStateAccountChanged, Reason: NativeAccountChanged}, nil
 	}
 	request.ExpectedAccountKey = account
+	request.ActivateWork = true
 	// Updating the source this tool already manages keeps Kimi's provider ids and
 	// aliases; creating a second source would split the catalog.
 	if request.ExistingSourceID == "" {
@@ -269,12 +270,13 @@ func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectI
 // build's default: the settings page has to be open already, or the answer is
 // waiting-settings for the caller to act on.
 func (c *Controller) ImportModels(ctx context.Context) (ImportResult, error) {
-	return c.importModels(ctx, false, "")
+	return c.importModels(ctx, false, false, "")
 }
 
 // importModels is the one import path. `authorized` permits opening the overlay
-// for an explicit action or a verified own-loopback repair.
-func (c *Controller) importModels(ctx context.Context, authorized bool, expectedAccount string) (ImportResult, error) {
+// for an explicit action or a verified own-loopback repair; `activateWork`
+// permits an explicit user action to switch a running Kimi window into Work.
+func (c *Controller) importModels(ctx context.Context, authorized, activateWork bool, expectedAccount string) (ImportResult, error) {
 	// A child that already exited must not be imported into, and its state must
 	// not stay `ready`.
 	c.reapChild()
@@ -325,7 +327,7 @@ func (c *Controller) importModels(ctx context.Context, authorized bool, expected
 	}
 	result, err := bridge.Client().ImportModels(ctx, ImportRequest{
 		URL: settings.GatewayURL, Token: settings.GatewayToken,
-		ExpectedAccountKey: account, OpenSettings: authorized,
+		ExpectedAccountKey: account, OpenSettings: authorized, ActivateWork: activateWork,
 		DisconnectDirectSourceID: disconnectDirect,
 	})
 	if err != nil {
