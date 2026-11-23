@@ -3,6 +3,7 @@ package quota_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -513,7 +514,7 @@ type deadTransport struct{}
 
 func (d deadTransport) client() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return nil, os.ErrDeadlineExceeded
+		return nil, errors.New("connection refused")
 	})}
 }
 
@@ -551,4 +552,50 @@ func TestMagpieParsesSuffixCurrencyBalances(t *testing.T) {
 				tc.raw, entry.BalanceCurrency, entry.BalanceAmount, tc.currency, tc.amount)
 		}
 	}
+}
+
+func TestMagpieTimeoutClassifiedAsTimeout(t *testing.T) {
+	t.Run("client_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Timeout: 15 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		reader, err := quota.NewMagpie(quota.MagpieOptions{BaseURL: "http://127.0.0.1:3430", HTTPClient: client})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.Refresh(context.Background()); err == nil {
+			t.Fatal("expected timeout error")
+		}
+		state := reader.State()
+		if state.Status != "error" || state.ErrorReason == nil || *state.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout state, got %+v", state)
+		}
+	})
+	t.Run("body_read_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       timeoutReadCloser{},
+					Request:    request,
+				}, nil
+			}),
+		}
+		reader, err := quota.NewMagpie(quota.MagpieOptions{BaseURL: "http://127.0.0.1:3430", HTTPClient: client})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.Refresh(context.Background()); err == nil {
+			t.Fatal("expected body read timeout error")
+		}
+		state := reader.State()
+		if state.Status != "error" || state.ErrorReason == nil || *state.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout on body read, got %+v", state)
+		}
+	})
 }

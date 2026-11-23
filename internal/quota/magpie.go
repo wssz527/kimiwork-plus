@@ -283,7 +283,7 @@ func (m *Magpie) Refresh(ctx context.Context) (*MagpieSnapshot, error) {
 	}
 	reply, err := m.client.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
+		if isTimeoutError(ctx, err) {
 			return m.fail(base, "timeout", nil)
 		}
 		// The most likely failure here is that Magpie is not running.
@@ -306,6 +306,9 @@ func (m *Magpie) Refresh(ctx context.Context) (*MagpieSnapshot, error) {
 	}
 	raw, err := io.ReadAll(io.LimitReader(reply.Body, maxResponseBytes+1))
 	if err != nil {
+		if isTimeoutError(ctx, err) {
+			return m.fail(base, "timeout", nil)
+		}
 		return m.fail(base, "network_error", nil)
 	}
 	if len(raw) > maxResponseBytes {

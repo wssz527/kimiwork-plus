@@ -933,7 +933,7 @@ func (l *Ledger) compact() {
 func randomToken() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return "tmp"
+		return "fallback"
 	}
 	return hex.EncodeToString(buf[:])
 }

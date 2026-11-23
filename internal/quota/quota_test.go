@@ -1453,3 +1453,100 @@ func TestAccountsCorruptSourcesBackedUpBeforeSave(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountsUnreadableSourcesBackedUpBeforeSave(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires non-root Unix permissions to trigger os.ReadFile EACCES")
+	}
+	stateDir := t.TempDir()
+	sourcesPath := filepath.Join(stateDir, "quota-sources.json")
+	original := `{"schemaVersion":1,"sources":[{"adapter":"deepseek","sourceId":"ds-old"}]}` + "\n"
+	if err := os.WriteFile(sourcesPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourcesPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := sourcesPath + ".corrupt.1794196812345"
+	t.Cleanup(func() {
+		_ = os.Chmod(sourcesPath, 0o600)
+		_ = os.Chmod(backupPath, 0o600)
+	})
+	accounts := quota.New(quota.Options{
+		StateDir:    stateDir,
+		Credentials: func(string) string { return deepSeekKey },
+		Now:         func() int64 { return 1794196812345 },
+	})
+	if accounts.State().Cache.Error == nil || *accounts.State().Cache.Error != "store_unavailable" {
+		t.Fatalf("expected store_unavailable cache error, got %+v", accounts.State().Cache.Error)
+	}
+	if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds-new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backupPath, 0o600); err != nil {
+		t.Fatalf("expected unreadable sources backed up at %s: %v", backupPath, err)
+	}
+	backupRaw, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backupRaw) != original {
+		t.Fatalf("backup content %q != %q", string(backupRaw), original)
+	}
+	savedRaw, err := os.ReadFile(sourcesPath)
+	if err != nil {
+		t.Fatalf("read new sources: %v", err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(savedRaw, &saved); err != nil || saved["schemaVersion"] != float64(1) {
+		t.Fatalf("saved sources invalid: %s", savedRaw)
+	}
+}
+
+func TestAccountsFetchTimeoutClassifiedAsTimeout(t *testing.T) {
+	t.Run("client_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Timeout: 15 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		accounts := manager(t, quota.Options{
+			Credentials: func(string) string { return deepSeekKey },
+			HTTPClient:  client,
+		})
+		if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds"}); err != nil {
+			t.Fatal(err)
+		}
+		report := accounts.Refresh(context.Background(), []string{"ds"}, true)
+		if len(report.Results) != 1 || report.Results[0].Status != "error" ||
+			report.Results[0].ErrorReason == nil || *report.Results[0].ErrorReason != "timeout" {
+			t.Fatalf("expected timeout result, got %+v", report.Results)
+		}
+	})
+	t.Run("body_read_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       timeoutReadCloser{},
+					Request:    request,
+				}, nil
+			}),
+		}
+		accounts := manager(t, quota.Options{
+			Credentials: func(string) string { return deepSeekKey },
+			HTTPClient:  client,
+		})
+		if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds"}); err != nil {
+			t.Fatal(err)
+		}
+		report := accounts.Refresh(context.Background(), []string{"ds"}, true)
+		if len(report.Results) != 1 || report.Results[0].Status != "error" ||
+			report.Results[0].ErrorReason == nil || *report.Results[0].ErrorReason != "timeout" {
+			t.Fatalf("expected timeout on body read, got %+v", report.Results)
+		}
+	})
+}

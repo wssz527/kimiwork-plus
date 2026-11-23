@@ -699,3 +699,52 @@ func TestFailoverRetriesTLSHandshakeFailureBeforeSend(t *testing.T) {
 		}
 	})
 }
+
+func TestFailoverDoesNotRetryAfterDisconnectOnReusedKeepAliveConnection(t *testing.T) {
+	var mu sync.Mutex
+	var remoteAddrs []string
+	primary := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		mu.Lock()
+		callIndex := len(remoteAddrs)
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+		mu.Unlock()
+		if callIndex == 0 {
+			jsonReply("first-ok")(w, r, nil)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	standby := newUpstream(t, jsonReply("must not be billed again"))
+	gateway, url := failoverGateway(t, failoverModel("primary", "standby"),
+		map[string]*httptest.Server{"primary": primary.server, "standby": standby.server}, nil)
+
+	firstReply, firstBody := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+	if firstReply.StatusCode != http.StatusOK || !strings.Contains(firstBody, "first-ok") {
+		t.Fatalf("first status %d body %s", firstReply.StatusCode, firstBody)
+	}
+
+	secondReply, _ := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+	if secondReply.StatusCode == http.StatusOK {
+		t.Fatal("expected second request to fail after primary disconnected")
+	}
+	mu.Lock()
+	addrs := append([]string(nil), remoteAddrs...)
+	mu.Unlock()
+	if len(addrs) != 2 || addrs[0] != addrs[1] {
+		t.Fatalf("expected reused keep-alive connection, got remote addrs %v", addrs)
+	}
+	if len(standby.captured()) != 0 {
+		t.Fatalf("standby was retried after POST on reused keep-alive conn: %d attempts", len(standby.captured()))
+	}
+	if record := gateway.Metrics().Recent[0]; record.Attempts != 1 ||
+		record.ConnectionID == nil || *record.ConnectionID != "primary" {
+		t.Fatalf("record = %+v", record)
+	}
+}

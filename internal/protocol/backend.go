@@ -340,7 +340,7 @@ func (t *translatedBody) Read(p []byte) (int, error) {
 	n := copy(p, t.pending)
 	t.pending = t.pending[n:]
 	if len(t.pending) == 0 {
-		t.pending = t.pending[:0]
+		t.pending = nil
 	}
 	return n, nil
 }

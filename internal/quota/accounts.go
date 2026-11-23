@@ -228,7 +228,7 @@ func (a *Accounts) readJSON(file string) (map[string]any, bool, bool) {
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		a.setCacheError("store_unavailable")
-		return nil, false, false
+		return nil, false, true
 	}
 	var document map[string]any
 	if json.Unmarshal(stripBOM(raw), &document) != nil || document == nil {
@@ -306,7 +306,7 @@ func (a *Accounts) writeJSON(file string, value any) {
 func randomToken() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return "tmp"
+		return "fallback"
 	}
 	return hex.EncodeToString(buf[:])
 }
