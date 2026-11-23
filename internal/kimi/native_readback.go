@@ -197,7 +197,7 @@ func (n *NativeIntegration) ReadbackMode(account, mode, directSourceID string) I
 		return out
 	}
 	out.DirectSourceID = stringField(source, "id")
-	if source["quarantined"] == true {
+	if source["quarantined"] == true || stringField(source, "status") == "disconnected" {
 		out.Active = false
 		out.Reason = firstNonEmpty(out.Reason, "profile_delisted")
 		return out

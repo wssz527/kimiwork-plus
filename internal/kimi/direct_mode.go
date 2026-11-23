@@ -918,8 +918,7 @@ func (n *NativeIntegration) verifyDirectAccount(options ReconcileOptions) Integr
 	}
 	rebind := false
 	if intent != nil && intent.AccountDigest != "" && scopeDigest != "" && intent.AccountDigest != scopeDigest {
-		rebind = options.AllowAccountRebind && intent.Active && intent.Mode == IntegrationModeDirect &&
-			sha256Hex(chosen.key) == scopeDigest
+		rebind = options.AllowAccountRebind && sha256Hex(chosen.key) == scopeDigest
 		if !rebind {
 			return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed", Mode: mode}
 		}
@@ -927,14 +926,18 @@ func (n *NativeIntegration) verifyDirectAccount(options ReconcileOptions) Integr
 	if intent != nil && intent.ProfileKeyDigest != "" && !rebind && sha256Hex(chosen.key) != intent.ProfileKeyDigest {
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed", Mode: mode}
 	}
-	source, found := directSourceOf(chosen.sources, firstNonEmpty(options.DirectSourceID, intentDirectSource(intent)))
+	directSourceID := options.DirectSourceID
+	if directSourceID == "" && !rebind {
+		directSourceID = intentDirectSource(intent)
+	}
+	source, found := directSourceOf(chosen.sources, directSourceID)
 	if !found {
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "profile_missing", Mode: mode}
 	}
 	sourceID := stringField(source, "id")
 	result := IntegrationResult{State: IntegrationReady, Mode: mode, DirectSourceID: sourceID,
 		AccountDigest: scopeDigest, ProfileKeyDigest: sha256If(chosen.key)}
-	if source["quarantined"] == true {
+	if source["quarantined"] == true || stringField(source, "status") == "disconnected" {
 		return IntegrationResult{State: IntegrationNeedsImport, Reason: "profile_delisted", Mode: mode,
 			DirectSourceID: sourceID}
 	}
@@ -1006,7 +1009,7 @@ func (n *NativeIntegration) directCatalog(settings ControllerSettings, scope str
 		return nil, "profile_missing", true
 	}
 	sourceID := stringField(source, "id")
-	if source["quarantined"] == true {
+	if source["quarantined"] == true || stringField(source, "status") == "disconnected" {
 		return nil, "profile_delisted", true
 	}
 	if directPendingBlocks(chosen.account, sourceID) {

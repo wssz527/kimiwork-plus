@@ -30,7 +30,7 @@ const DIRECT_REASON_SOURCE = (() => {
   assert.notEqual(end, -1, 'unterminated DIRECT_REASON table');
   return source.slice(start, end + 3);
 })();
-const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
+const INTEGRATION_HELPERS = [DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
   'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
   'directRestartRequired', 'normalizeReasonCode', 'directReasonText'].map(sourceFunction)];
 
@@ -51,6 +51,45 @@ function makeDirectRestartRequired() {
 function growthFunction(name, indent = '') {
   return extractFunction(growthSource, name, indent);
 }
+
+test('a completed model-source disconnect offers a real re-takeover path', () => {
+  const syncState = makeSyncState();
+  const removed = {
+    integrationMode: 'direct', models: [{ id: 'model-1' }],
+    integration: { state: 'disabled', imported: false },
+    operation: { action: 'disconnect-models', state: 'removed' },
+  };
+  const restored = syncState(removed);
+  assert.equal(restored.code, 'restored');
+  assert.match(restored.word, /可重新同步/);
+  assert.match(restored.note, /本地服务商和模型仍保留/);
+  const blockedRestored = syncState({
+    ...removed,
+    compatibility: { guards: { modelSyncWriteBlocked: true } },
+  });
+  assert.equal(blockedRestored.code, 'restored');
+  assert.match(blockedRestored.note, /暂不可重新同步/);
+  const connectionText = makeNativeConnectionText()(removed);
+  assert.match(connectionText, /已移除本产品接管的模型来源/);
+  assert.match(connectionText, /可重新接管/);
+  const afterOtherOp = makeNativeConnectionText()({
+    integrationMode: 'gateway',
+    integration: { state: 'disabled', reason: 'disconnected', imported: false },
+    operation: { action: 'check-compatibility', state: 'done' },
+  });
+  assert.match(afterOtherOp, /已移除本产品接管的模型来源/);
+  for (const key of ['model_disconnect_deferred', 'model_disconnect_apply_failed', 'model_disconnect_byok_source_stale']) {
+    assert.match(source, new RegExp(key + ':'));
+  }
+  const synced = syncState({
+    integrationMode: 'direct', models: [{ id: 'model-1' }],
+    integration: { state: 'ready', imported: true },
+    operation: { action: 'disconnect-models', state: 'removed' },
+  });
+  assert.notEqual(synced.code, 'restored');
+  assert.equal((htmlSource.match(/data-action="disconnect-models"/g) || []).length, 2);
+  assert.match(source, /window\.confirm\('确定移除 KimiWork \+ 接管的模型来源吗？/);
+});
 
 test('unreadable connection credentials expose explicit system authorization even with no config changes', () => {
   const copy = source.slice(source.indexOf('const APPLY_COPY ='), source.indexOf('\nconst APPLY_REFUSAL ='));

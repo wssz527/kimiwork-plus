@@ -36,9 +36,9 @@ import (
 
 // BridgeContractGeneration is the capability number the host advertises. A
 // caller compares it instead of probing routes by failure: a host built before a
-// route existed answers 404 for a route it simply does not have. Generation 6
-// added the Direct Mode import route.
-const BridgeContractGeneration = 6
+// route existed answers 404 for a route it simply does not have. Generation 7
+// added managed model-source disconnection.
+const BridgeContractGeneration = 7
 
 // BridgeDescriptorName is the descriptor file inside the Kimi home.
 const BridgeDescriptorName = ".kimi-work-desktop-bridge.json"
@@ -49,6 +49,7 @@ const (
 	OperationStatus            = "status"
 	OperationImportModels      = "import-models"
 	OperationImportDirect      = "import-direct"
+	OperationDisconnectModels  = "disconnect-models"
 	OperationCloseWorkSettings = "close-work-settings"
 	OperationWorkSurface       = "work-surface"
 	OperationActivateWork      = "activate-work"
@@ -57,7 +58,7 @@ const (
 
 var bridgeOperations = map[string]bool{
 	OperationStatus: true, OperationImportModels: true, OperationImportDirect: true,
-	OperationCloseWorkSettings: true, OperationWorkSurface: true, OperationActivateWork: true,
+	OperationDisconnectModels: true, OperationCloseWorkSettings: true, OperationWorkSurface: true, OperationActivateWork: true,
 	OperationOpenWorkSettings: true,
 }
 
@@ -85,7 +86,7 @@ const (
 // caller is still waiting.
 func bridgeCallBudget(operation string) time.Duration {
 	switch operation {
-	case OperationImportModels, OperationImportDirect:
+	case OperationImportModels, OperationImportDirect, OperationDisconnectModels:
 		return bridgeImportTimeout
 	default:
 		return bridgeCallTimeout
@@ -132,6 +133,25 @@ type ImportRequest struct {
 	// DisconnectDirectSourceID names the Direct Mode custom source a gateway
 	// import disconnects only after the replacement has been applied.
 	DisconnectDirectSourceID string `json:"disconnectDirectSourceId,omitempty"`
+}
+
+// DisconnectRequest identifies only sources this product manages. The account
+// check happens before the official source API is called.
+type DisconnectRequest struct {
+	ExpectedAccountKey string `json:"expectedAccountKey,omitempty"`
+	DirectSourceID     string `json:"directSourceId,omitempty"`
+}
+
+// DisconnectResult reports official source removal, not merely a local state
+// change. Sources is the number disconnected by this call; zero is idempotent
+// success when a previous call already removed them.
+type DisconnectResult struct {
+	OK      bool   `json:"ok"`
+	State   string `json:"state,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Sources int    `json:"sources,omitempty"`
+	Opened  bool   `json:"opened,omitempty"`
+	Closed  *bool  `json:"closed,omitempty"`
 }
 
 // ImportResult is the host's answer. A confirmed import that still owes a
@@ -277,6 +297,13 @@ func (c *BridgeClient) ImportDirect(ctx context.Context, request DirectImportReq
 	return result, err
 }
 
+// DisconnectModels asks the host to disconnect only KimiWork + model sources.
+func (c *BridgeClient) DisconnectModels(ctx context.Context, request DisconnectRequest) (DisconnectResult, error) {
+	var result DisconnectResult
+	err := c.call(ctx, OperationDisconnectModels, request, &result)
+	return result, err
+}
+
 // CloseWorkSettings posts the official overlay close.
 func (c *BridgeClient) CloseWorkSettings(ctx context.Context) (ActionResult, error) {
 	var result ActionResult
@@ -393,6 +420,8 @@ type PageActions interface {
 	// ImportDirect performs a Direct Mode import: the user's own providers are
 	// written into Kimi's custom source through the official byokSources API.
 	ImportDirect(ctx context.Context, request DirectImportRequest) (ImportResult, error)
+	// DisconnectModels removes only this product's gateway and Direct Mode sources.
+	DisconnectModels(ctx context.Context, request DisconnectRequest) (DisconnectResult, error)
 	// WorkSurface reports what is on screen.
 	WorkSurface(ctx context.Context) (WorkSurface, error)
 	// CloseWorkSettings posts the official overlay close.
@@ -553,6 +582,18 @@ func (h *BridgeHost) handle(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 			result, err := h.actions.ImportDirect(ctx, importRequest)
+			if err != nil {
+				fail(err)
+				return
+			}
+			reply(http.StatusOK, result)
+		case OperationDisconnectModels:
+			var disconnectRequest DisconnectRequest
+			if json.Unmarshal(input, &disconnectRequest) != nil {
+				reply(http.StatusBadRequest, map[string]any{"ok": false, "reason": "native_bridge_invalid_request"})
+				return
+			}
+			result, err := h.actions.DisconnectModels(ctx, disconnectRequest)
 			if err != nil {
 				fail(err)
 				return

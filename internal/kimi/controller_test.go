@@ -24,6 +24,7 @@ type fakeActions struct {
 	imported  ImportResult
 	directs   []DirectImportRequest
 	direct    ImportResult
+	removed   DisconnectResult
 	closed    int
 	activated int
 	opened    int
@@ -57,6 +58,15 @@ func (f *fakeActions) ImportDirect(_ context.Context, request DirectImportReques
 		return ImportResult{}, f.failWith
 	}
 	return f.direct, nil
+}
+
+func (f *fakeActions) DisconnectModels(context.Context, DisconnectRequest) (DisconnectResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failWith != nil {
+		return DisconnectResult{}, f.failWith
+	}
+	return f.removed, nil
 }
 
 func (f *fakeActions) CloseWorkSettings(context.Context) (ActionResult, error) {

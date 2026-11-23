@@ -121,7 +121,7 @@ func accountStoreV3ConfigFor(raw map[string]any, mode, directSourceID string) (a
 	if source == nil {
 		return accountModelConfig{}, errors.New(AccountErrUnavailable)
 	}
-	if quarantined, _ := source["quarantined"].(bool); quarantined {
+	if quarantined, _ := source["quarantined"].(bool); quarantined || stringField(source, "status") == "disconnected" {
 		return accountModelConfig{}, errors.New(AccountErrUnavailable)
 	}
 	providers := map[string]any{}
@@ -267,7 +267,7 @@ function pick(value,keys){
   return result;
 }
 var rows=snapshot.sources.map(function(source){
-  var head=pick(source,["id","kind","quarantined","displayName","revision"]);
+  var head=pick(source,["id","kind","quarantined","status","displayName","revision"]);
   if(typeof head.id!=="string"||typeof head.kind!=="string")throw new Error();
   head.providers=(Array.isArray(source.providers)?source.providers:[]).map(function(provider){
     var row=pick(provider,["id","protocol","baseUrl","keyConfigured"]);

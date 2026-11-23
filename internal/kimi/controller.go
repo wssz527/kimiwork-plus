@@ -703,17 +703,23 @@ func (c *Controller) syncActionsIntegrationRoute(settings ControllerSettings, so
 // connected managed source whose disconnect failed or was deferred.
 func (c *Controller) previousDirectSourceID(settings ControllerSettings) string {
 	home := c.kimiHome()
+	account := AccountScope(home)
+	scopeDigest := ""
+	if account != "" {
+		scopeDigest = sha256Hex(account)
+	}
 	native, err := NewNativeIntegration(settings.StateDir, home, IntegrationModeGateway)
 	if err == nil {
 		intent, intentErr := native.readIntent()
-		if intentErr == nil && intent != nil && intent.Active && intent.Mode == IntegrationModeDirect && intent.DirectSourceID != "" {
+		if intentErr == nil && intent != nil && intent.Active && intent.Mode == IntegrationModeDirect && intent.DirectSourceID != "" &&
+			(scopeDigest == "" || intent.AccountDigest == "" || intent.AccountDigest == scopeDigest) {
 			return intent.DirectSourceID
 		}
 	}
 	if settings.integrationMode() != IntegrationModeGateway {
 		return ""
 	}
-	return DirectSourceRemains(home, AccountScope(home), "")
+	return DirectSourceRemains(home, account, "")
 }
 
 // Stop ends the managed child. It never touches any other process.

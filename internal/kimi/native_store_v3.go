@@ -135,7 +135,7 @@ func accountProfile(key string, account, source map[string]any) (profileCandidat
 		}
 	}
 	account3 := &nativeAccountV3{providers: usedFacts, pending: blocking,
-		quarantined:   source["quarantined"] == true,
+		quarantined:   source["quarantined"] == true || stringField(source, "status") == "disconnected",
 		directCleanup: directSourceRemainsInAccount(account, "") != ""}
 	seen := map[string]bool{}
 	for _, fact := range usedFacts {

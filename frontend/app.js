@@ -292,7 +292,9 @@ async function runAction(action, profileMode) {
       ? '启动请求已提交，等待运行时状态。'
       : action === 'restart-kimi'
         ? '已请求正常退出 Kimi，等待退出完成后受管重启。'
-        : '操作已提交，等待结果。';
+        : action === 'disconnect-models'
+          ? '正在通过官方接口移除本产品接管的模型来源。'
+          : '操作已提交，等待结果。';
     showToast(submitted, 'ok');
     /* 终态由 settlePending 在轮询读取到匹配 operation 时确认，避免重复提示。 */
     await loadState({ silent: true });
@@ -356,6 +358,10 @@ async function confirmActionResult(action, opId) {
 
   if (failed && action === 'open-work') {
     showToast('未能打开 Work，请从 Kimi 窗口进入 Work，或在「接入与恢复」检查连接。', 'error');
+    return;
+  }
+  if (action === 'disconnect-models' && op.state === 'removed') {
+    showToast('已移除本产品接管的模型来源。服务商与模型仍保留，可随时重新同步接管。', 'ok');
     return;
   }
   if (failed) {
@@ -1070,7 +1076,13 @@ function bindEvents() {
   });
 
   document.querySelectorAll('[data-action]').forEach((button) => {
-    button.addEventListener('click', () => runAction(button.dataset.action, button.dataset.profileMode));
+    button.addEventListener('click', () => {
+      if (button.dataset.action === 'disconnect-models') {
+        const directNote = state.data?.integrationMode === 'direct' ? '直连模式下的静态 hosts 也会保留。' : '';
+        if (!window.confirm('确定移除 KimiWork + 接管的模型来源吗？\n\n这会从官方 Kimi 移除本产品同步的模型，保留登录、对话、其他模型来源以及本软件中的服务商配置。' + directNote + '之后可随时重新同步接管。')) return;
+      }
+      void runAction(button.dataset.action, button.dataset.profileMode);
+    });
   });
 
   /* 原生搜索与抓取服务 */

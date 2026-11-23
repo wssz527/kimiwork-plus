@@ -200,6 +200,7 @@ controller.SetTranslationHandler(func(ctx context.Context, r kimi.TranslationRep
 | `Tick(ctx)` | re-syncs injection, returns `TranslationStatus` |
 | `Reconcile()` | runs the native integration, returns `IntegrationResult` |
 | `ImportModels(ctx)` | native import through the managed bridge |
+| `DisconnectModelsAuthorized(ctx)` | disconnect only this product's model sources through the official API |
 | `WorkSurface(ctx)` | what is on screen, through the bridge |
 | `StartBridge(ctx, actions)` | publishes the loopback bridge descriptor |
 | `Status(ctx)` | read-only `ControllerStatus` |
@@ -293,6 +294,28 @@ readback evidence: adoption clears restart-only flags, and a clean applied
 snapshot clears cleanup flags. A remaining cleanup survives adoption until the
 old source is actually disconnected.
 
+`POST /api/actions` accepts `{"action":"disconnect-models"}` as an explicit,
+one-shot operation with a 75-second outer timeout (covering the 60-second bridge
+budget). Bridge generation 7 carries the matching `disconnect-models` route. It
+verifies the signed-in account, then uses `byokSources.list` and `disconnect` to
+remove only the loopback `byok-kth` gateway and the managed KimiWork + custom
+source. Other sources and the saved local catalog are not changed. Every step
+checks `scopeToken` consistency and uses the latest account/source revisions;
+clean accounts with `accountRevision: null` succeed idempotently with zero
+sources removed. A disconnect reply whose `status` is `deferred`, `pending`
+(when not settled by `applyPending`), or `apply-failed`—or a final readback with
+an unsettled `applyState` or remaining managed source—is reported as incomplete
+rather than a completed restore. Partial failure preserves the disconnected
+source count and normalizes error codes to underscore tokens compatible with
+`core.ErrorCode` and diagnostic logs. Success marks only the matching account's
+local intent inactive, clears the stale import receipt, and refreshes the
+managed subagent `config.toml`; disconnected or quarantined v3 sources require
+an explicit later import (which may rebind across accounts) and are never
+revived by periodic reconciliation. Because `disconnect-models` validates the
+live `byokSources` contract itself before mutating anything, it remains
+available as a safe escape hatch even when `modelSyncWriteBlocked` pauses new
+model imports.
+
 `POST /api/actions` also accepts `{"action":"remove-dns"}`. It removes only the
 exact owned resolver or marked hosts pair and stops the Mac DNS listener. The
 official reveal flag is intentionally retained. Administrator preparation and
@@ -377,8 +400,8 @@ import can actually repair.
 
 ## 11. Native bridge
 
-`BridgeHost` serves `status`, `work-surface`, `import-models`,
-`close-work-settings`, `activate-work`, `open-work-settings` on a loopback
+`BridgeHost` serves `status`, `work-surface`, `import-models`, `import-direct`,
+`disconnect-models`, `close-work-settings`, `activate-work`, `open-work-settings` on a loopback
 listener bound to port 0, and publishes `.kimi-work-desktop-bridge.json`
 (0600, 64-hex token). Every request is checked for `Origin`, `Sec-Fetch-Site`,
 exact `Host` and a constant-time bearer token. `BridgeClient` refuses any

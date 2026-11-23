@@ -31,9 +31,10 @@ const (
 
 	diagnosticStateRunning = "running"
 
-	diagnosticStagePrepare      = "prepare-byok"
-	diagnosticStageImportModels = "import-models"
-	diagnosticStageImportDirect = "import-direct"
+	diagnosticStagePrepare          = "prepare-byok"
+	diagnosticStageImportModels     = "import-models"
+	diagnosticStageImportDirect     = "import-direct"
+	diagnosticStageDisconnectModels = "disconnect-models"
 )
 
 // diagnosticsFailure is a stored failure code. It is an error so the helpers
@@ -498,7 +499,7 @@ func diagnosticImportState(value string) string {
 // diagnosticStage accepts only the stages this product sets.
 func diagnosticStage(value string) string {
 	switch value {
-	case "", diagnosticStagePrepare, diagnosticStageImportModels, diagnosticStageImportDirect:
+	case "", diagnosticStagePrepare, diagnosticStageImportModels, diagnosticStageImportDirect, diagnosticStageDisconnectModels:
 		return value
 	}
 	return "redacted"
@@ -514,7 +515,7 @@ func diagnosticPhase(phase string) string {
 
 var diagnosticActions = map[string]struct{}{
 	"launch-kimi": {}, "open-work": {}, "restart-kimi": {}, "connect-kimi": {},
-	"prepare-native": {}, "remove-dns": {}, "check-translation": {},
+	"disconnect-models": {}, "prepare-native": {}, "remove-dns": {}, "check-translation": {},
 	"check-compatibility": {}, "apply-connections": {}, "account-capture": {},
 	"account-begin-add": {}, "account-complete-add": {}, "account-cancel-add": {},
 	"account-switch": {}, "account-remove": {}, "set-swarm": {}, "check-upstream": {},

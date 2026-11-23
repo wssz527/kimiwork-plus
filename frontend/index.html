@@ -183,7 +183,7 @@
 
     <section class="view" id="view-models" aria-labelledby="models-heading" hidden>
       <h2 class="sr-only" id="models-heading">模型与服务商</h2>
-      <section class="workspace-sync" aria-label="与 Work 的同步状态"><div><strong id="workspace-sync-state">正在读取同步状态</strong><p id="workspace-sync-note" class="hint">保存服务商与模型后，在这里同步到 Kimi Work。</p></div><div class="action-line action-line--start"><button class="btn btn--outline" data-action="connect-kimi" type="button">同步到 Work</button><button class="btn btn--quiet" data-action="restart-kimi" type="button" id="workspace-restart" hidden>重启 Kimi</button></div></section>
+      <section class="workspace-sync" aria-label="与 Work 的同步状态"><div><strong id="workspace-sync-state">正在读取同步状态</strong><p id="workspace-sync-note" class="hint">保存服务商与模型后，在这里同步到 Kimi Work。</p></div><div class="action-line action-line--start"><button class="btn btn--outline" data-action="connect-kimi" type="button">同步到 Work</button><button class="btn btn--quiet" data-action="restart-kimi" type="button" id="workspace-restart" hidden>重启 Kimi</button><button class="btn btn--quiet" data-action="disconnect-models" type="button">移除接管并还原</button></div></section>
       <div class="subtabs" role="tablist" data-subtab-group="models" aria-label="模型分类">
         <button id="models-tab-catalog" type="button" role="tab" data-subtab-group="models" data-subtab="catalog" aria-selected="true">模型目录</button>
         <button id="models-tab-connections" type="button" role="tab" data-subtab-group="models" data-subtab="connections" aria-selected="false">服务商连接</button>
@@ -380,7 +380,7 @@
   </div>
   <p class="note" id="native-state" role="status">正在检查接入…</p>
   <p class="verdict" id="native-remote" role="status" hidden><span class="dot" id="native-remote-dot" data-tone="neutral"></span><span>接入范围</span><strong id="native-remote-word">仅桌面</strong><span class="verdict__note" id="native-remote-note">只接入本机官方 Kimi 桌面 Work，不同步到 Kimi 手机端。</span></p>
-  <div class="action-line action-line--start"><button class="btn btn--primary" id="native-launch" data-action="launch-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>打开 / 启动 Kimi</button><button class="btn btn--outline" data-action="launch-kimi" data-profile-mode="existing-authorized" type="button" hidden>诊断：沿用登录，隔离 Work</button><button class="btn btn--outline" id="native-sync" data-action="connect-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span id="native-sync-label">重新准备接入</span></button></div>
+  <div class="action-line action-line--start"><button class="btn btn--primary" id="native-launch" data-action="launch-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>打开 / 启动 Kimi</button><button class="btn btn--outline" data-action="launch-kimi" data-profile-mode="existing-authorized" type="button" hidden>诊断：沿用登录，隔离 Work</button><button class="btn btn--outline" id="native-sync" data-action="connect-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span id="native-sync-label">重新准备接入</span></button><button class="btn btn--quiet" data-action="disconnect-models" type="button">移除接管并还原</button></div>
   <p class="hint">默认沿用官方登录、对话、技能和已导入模型。诊断隔离模式才把模型、工具与任务临时放入独立目录，并在退出后恢复原数据位置。</p>
 </section>
         <div class="takeover__foot"><button class="btn btn--quiet" id="ob-advanced-toggle" type="button" aria-expanded="false" aria-controls="ob-advanced">高级恢复选项</button></div>

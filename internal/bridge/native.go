@@ -602,7 +602,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		return core.Document{"operation": operation}, nil
 	}
 	switch action {
-	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "prepare-native", "remove-dns", "check-translation", "check-compatibility", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
+	case "launch-kimi", "open-work", "restart-kimi", "connect-kimi", "disconnect-models", "prepare-native", "remove-dns", "check-translation", "check-compatibility", "apply-connections", "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove", "set-swarm":
 	default:
 		n.logOperationRejected(action, "native_preview_unavailable")
 		return nil, errors.New("native_preview_unavailable")
@@ -622,8 +622,8 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		timeout := 45 * time.Second
 		if action == "prepare-native" || action == "remove-dns" {
 			timeout = 180 * time.Second
-		} else if action == "connect-kimi" && !n.isDirectMode() {
-			// The import has its own 60 second page budget; the action must not
+		} else if (action == "connect-kimi" && !n.isDirectMode()) || action == "disconnect-models" {
+			// The import/disconnect has its own 60 second page budget; the action must not
 			// cancel it first and leave its outcome unknown.
 			timeout = 75 * time.Second
 		} else if action == "connect-kimi" && n.isDirectMode() {
@@ -691,6 +691,26 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			if err == nil {
 				err = n.syncWorkHome()
 			}
+		case "disconnect-models":
+			n.setOperationStage(id, diagnosticStageDisconnectModels)
+			var removed kimi.DisconnectResult
+			removed, err = n.controller.DisconnectModelsAuthorized(deadline)
+			if err == nil && !removed.OK {
+				reason := removed.Reason
+				if reason == "" {
+					reason = "model_disconnect_failed"
+				}
+				err = errors.New(reason)
+			}
+			if err == nil {
+				state = "removed"
+				if n.policies != nil {
+					if d, _, readErr := n.service.Store.Read(); readErr == nil {
+						_ = n.policies.Configure(d)
+					}
+				}
+			}
+			result = removed
 		case "connect-kimi":
 			if n.modelSyncWriteBlocked() {
 				err = errors.New(kimi.CompatErrModelSyncBlocked)
@@ -823,6 +843,9 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		n.operation["reason"] = reason
 	}
 	action := core.String(n.operation["action"])
+	if action == "disconnect-models" && err == nil {
+		n.receipt = nil
+	}
 	stage := core.String(n.operation["stage"])
 	duration := finishedAt.UnixMilli() - documentInt64(n.operation["startedAt"])
 	if duration < 0 {

@@ -181,6 +181,7 @@ const ACTION_LABEL = {
   'prepare-native': '准备原生设置',
   'remove-dns': '移除单域名 DNS',
   'connect-kimi': '重新准备接入',
+  'disconnect-models': '移除接管并还原',
   'check-upstream': '上游检查',
   'apply-connections': '应用连接',
   'account-capture': '保存当前账号',
@@ -289,6 +290,15 @@ const DIAG_REASON = {
   compat_model_sync_blocked: '当前官方 Kimi 版本未通过模型同步兼容性检查，已停止写入模型配置；本机网关和其他功能照常运行。',
   compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；本机网关和其他功能照常运行。',
   invalid_integration_mode: '接入模式不被接受，只支持本机网关或零网关直连；当前模式未更改。',
+  model_disconnect_failed: '模型来源未能移除，请刷新状态后重试。',
+  model_disconnect_unsupported: '当前官方 Kimi 不支持移除模型来源；请升级官方 Kimi 后重试。',
+  model_disconnect_contract_changed: '官方模型来源接口返回了无法确认的结果，未继续操作。请查看诊断信息。',
+  model_disconnect_source_conflict: '接管记录对应的模型来源已被其他配置替换，未移除。请先核对官方模型来源。',
+  model_disconnect_not_verified: '移除请求已发出，但读回仍发现本产品接管的来源。请刷新状态后重试。',
+  model_disconnect_local_state_failed: '官方来源已处理，但本地接管记录未能完成更新。请重试以完成还原。',
+  model_disconnect_deferred: '官方模型来源已提交移除，但 Kimi Work 正在处理任务，尚未生效。请等任务结束或正常重启 Kimi 后，再点一次「移除接管并还原」完成确认。',
+  model_disconnect_apply_failed: '官方模型来源已从列表移除，但写入 Kimi 配置失败。请刷新状态或正常重启 Kimi 后重试。',
+  model_disconnect_byok_source_stale: '官方模型来源状态已变化，未继续移除。请刷新状态后重试。',
 };
 
 /* 直连失败码有三个来源：官方页面给连字符代码，Go 侧再包一层
@@ -386,6 +396,15 @@ const ERROR_HINT = {
   subagent_policy_apply_failed: '目标已保存，但当前策略未能应用，请查看运行时状态。',
   invalid_subagent_effort: '此模型未声明所选思考档位，请重新选择。',
   invalid_integration_mode: '接入模式不被接受，只支持本机网关或零网关直连；当前模式未更改。',
+  model_disconnect_failed: '模型来源未能移除，请刷新状态后重试。',
+  model_disconnect_unsupported: '当前官方 Kimi 不支持移除模型来源；请升级官方 Kimi 后重试。',
+  model_disconnect_contract_changed: '官方模型来源接口返回了无法确认的结果，未继续操作。请查看诊断信息。',
+  model_disconnect_source_conflict: '接管记录对应的模型来源已被其他配置替换，未移除。请先核对官方模型来源。',
+  model_disconnect_not_verified: '移除请求已发出，但读回仍发现本产品接管的来源。请刷新状态后重试。',
+  model_disconnect_local_state_failed: '官方来源已处理，但本地接管记录未能完成更新。请重试以完成还原。',
+  model_disconnect_deferred: '官方模型来源已提交移除，但 Kimi Work 正在处理任务，尚未生效。请等任务结束或正常重启 Kimi 后，再点一次「移除接管并还原」完成确认。',
+  model_disconnect_apply_failed: '官方模型来源已从列表移除，但写入 Kimi 配置失败。请刷新状态或正常重启 Kimi 后重试。',
+  model_disconnect_byok_source_stale: '官方模型来源状态已变化，未继续移除。请刷新状态后重试。',
 };
 
 /* configured（已保存）/ policy（文件与策略）/ runtime（内核运行时）三层，

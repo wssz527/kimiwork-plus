@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -104,6 +105,39 @@ func TestNativeOperationConcurrentStateRead(t *testing.T) {
 	}
 	close(stop)
 	readers.Wait()
+}
+
+func TestNativeDisconnectCompletionClearsOnlySettledImportReceipt(t *testing.T) {
+	receipt := &nativeImportReceipt{result: kimi.ImportResult{OK: true, RequiresRestart: true}}
+	n := &Native{operation: core.Document{"id": "remove", "action": "disconnect-models", "state": "running"}, receipt: receipt}
+	n.finishOperation("remove", "removed", kimi.DisconnectResult{OK: true}, nil)
+	if n.receipt != nil {
+		t.Fatal("a completed disconnect kept the old import restart receipt")
+	}
+	n.receipt = receipt
+	n.operation = core.Document{"id": "failed", "action": "disconnect-models", "state": "running"}
+	n.finishOperation("failed", "failed", kimi.DisconnectResult{}, errors.New("model_disconnect_source_conflict"))
+	if n.receipt != receipt {
+		t.Fatal("a failed disconnect discarded evidence about the existing import")
+	}
+	if n.operation["reason"] != "model_disconnect_source_conflict" {
+		t.Fatalf("normalized disconnect error code was swallowed: %v", n.operation["reason"])
+	}
+}
+
+func TestDiagnosticSanitizerPreservesDisconnectModelsActionStageAndReason(t *testing.T) {
+	sanitized := sanitizeDiagnosticEvent(diagnosticEvent{
+		Time:   1000,
+		ID:     "op-1",
+		Action: "disconnect-models",
+		Phase:  diagnosticPhaseFinish,
+		State:  "failed",
+		Stage:  diagnosticStageDisconnectModels,
+		Reason: "model_disconnect_deferred",
+	})
+	if sanitized.Action != "disconnect-models" || sanitized.Stage != diagnosticStageDisconnectModels || sanitized.Reason != "model_disconnect_deferred" {
+		t.Fatalf("disconnect diagnostic event was redacted: %+v", sanitized)
+	}
 }
 
 func TestNativeOperationIgnoresStaleCompletion(t *testing.T) {

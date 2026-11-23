@@ -56,6 +56,13 @@ function syncState(data) {
   const preparation = info.preparation || {};
   const receipt = info.nativeImport || {};
   const models = Array.isArray(data && data.models) ? data.models : [];
+  if (modelTakeoverRemoved(data)) {
+    const blocked = data?.compatibility?.guards?.modelSyncWriteBlocked === true;
+    return { code: 'restored', tone: 'neutral', word: blocked ? '已移除接管' : '已移除接管，可重新同步',
+      note: blocked
+        ? '本产品同步的模型来源已从官方 Kimi 移除；本地服务商和模型仍保留。当前官方 Kimi 未通过模型同步兼容性检查，暂不可重新同步。'
+        : '本产品同步的模型来源已从官方 Kimi 移除；本地服务商和模型仍保留，点击「同步到 Work」即可重新接管。' };
+  }
   /* 直连模式的判断必须排在网关分支之前：在直连下，官方 Kimi 直接访问服务商，
      网关是否运行、有没有受管子进程都不影响模型可用性。 */
   const direct = directModeState(data);
@@ -202,6 +209,11 @@ function syncState(data) {
 /* ---------- 接入模式：本机网关 / 零网关直连 ---------- */
 
 /* 缺省一律按网关处理：老后端不会返回这两个字段，界面必须保持旧行为。 */
+function modelTakeoverRemoved(data) {
+  return data?.operation?.action === 'disconnect-models'
+    && data.operation.state === 'removed' && data?.integration?.imported !== true;
+}
+
 function savedIntegrationMode(data) {
   return data?.integrationMode === 'direct' ? 'direct' : 'gateway';
 }
@@ -342,6 +354,9 @@ function directModeState(data) {
 function nativeConnectionText(data) {
   const info = data.integration || {};
   const preparation = info.preparation || {};
+  if (modelTakeoverRemoved(data)) {
+    return '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「同步到 Work」可重新接管。';
+  }
   /* 直连模式下官方 Kimi 不经过网关，所以网关侧的 DNS/桥接文案都不成立。 */
   if (savedIntegrationMode(data) === 'direct') {
     const direct = directModeOf(data);
@@ -423,6 +438,9 @@ function nativeConnectionText(data) {
     native_bridge_waiting_launch: '等待 Kimi 启动并建立接入通道。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
+    disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「同步到 Work」可重新接管。',
+    profile_missing: '当前账号尚未同步本产品模型目录。请在模型页点「同步到 Work」接入。',
+    profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在模型页点「同步到 Work」重新接入。',
     native_scope_unverified: '当前自定义 Kimi 目录无法确认归属，自动接管已暂停。',
     account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
     native_import_account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
@@ -1220,6 +1238,12 @@ function renderWorkspaceSync(data) {
   if (data?.compatibility?.guards?.modelSyncWriteBlocked === true) {
     setText($('workspace-sync-state'), '模型同步不可用（已停止写入）');
     setText($('workspace-sync-note'), '当前官方 Kimi 版本未通过目录或存储格式自检，已暂停模型同步写入；本机网关与其他功能照常运行。');
+    setHidden($('workspace-restart'), true);
+    return;
+  }
+  if (modelTakeoverRemoved(data)) {
+    setText($('workspace-sync-state'), '已移除接管，可重新同步');
+    setText($('workspace-sync-note'), '官方 Kimi 中由本产品接管的模型来源已移除；本地服务商和模型仍保留，点击「同步到 Work」即可重新接管。');
     setHidden($('workspace-restart'), true);
     return;
   }

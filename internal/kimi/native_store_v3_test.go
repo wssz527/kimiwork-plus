@@ -355,6 +355,34 @@ func TestNativeStorePrefersTheLegacyRootWhenBothArePresent(t *testing.T) {
 
 // An account with no applied model is not a profile: reporting one as `ready`
 // would let the panel claim models that are not there.
+func TestNativeAccountStoreDisconnectedNeedsExplicitReimport(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const url = "http://127.0.0.1:9999/v1"
+	key := sha256Hex("account-new")
+	fixture.seedV3Store(t, key, url, "cred-1")
+	integration := fixture.integration(t)
+	if result := integration.Reconcile(ReconcileOptions{Enabled: true, URL: url,
+		Models: testCatalog(), AccountScope: key}); result.State != IntegrationReady {
+		t.Fatalf("initial account: %s/%s", result.State, result.Reason)
+	}
+	if result := integration.Disconnect(); result.State != IntegrationDisabled {
+		t.Fatalf("disconnect: %+v", result)
+	}
+	store := fixture.readJSON(t, filepath.Join(fixture.dir, NativeWorkStore))
+	account := store["accounts"].(map[string]any)[key].(map[string]any)
+	account["sources"].([]any)[0].(map[string]any)["status"] = "disconnected"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	result := integration.Reconcile(ReconcileOptions{Enabled: true, URL: url,
+		Models: testCatalog(), AccountScope: key})
+	if result.State != IntegrationNeedsImport || result.Reason != "profile_delisted" {
+		t.Fatalf("disconnected account was revived: %+v", result)
+	}
+	intent, err := integration.readIntent()
+	if err != nil || intent == nil || intent.Active {
+		t.Fatalf("disconnected intent was revived: %+v %v", intent, err)
+	}
+}
+
 func TestNativeAccountStoreWithoutModelsIsNotAProfile(t *testing.T) {
 	fixture := newNativeFixture(t)
 	key := sha256Hex("account-new")

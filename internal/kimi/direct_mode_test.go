@@ -586,6 +586,25 @@ func TestDirectReconcileVerifiesTheManagedSource(t *testing.T) {
 	}
 }
 
+func TestDirectDisconnectedSourceNeedsExplicitReimport(t *testing.T) {
+	fixture := newNativeFixture(t)
+	key := sha256Hex("direct-account")
+	store := directStoreFixture(key)
+	account := store["accounts"].(map[string]any)[key].(map[string]any)
+	account["sources"].([]any)[0].(map[string]any)["status"] = "disconnected"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+	result := fixture.integration(t).Reconcile(ReconcileOptions{Enabled: true,
+		Mode: IntegrationModeDirect, DirectSpec: directSpecFixture(), AccountScope: key})
+	if result.State != IntegrationNeedsImport || result.Reason != "profile_delisted" {
+		t.Fatalf("disconnected direct source was revived: %+v", result)
+	}
+	readback := fixture.integration(t).ReadbackMode(key, IntegrationModeDirect, directSourceID)
+	if readback.Active || readback.HoldsDirect(directSpecFixture()) {
+		t.Fatalf("disconnected direct readback still holds: %+v", readback)
+	}
+}
+
 func TestDirectReconcileReportsAMissingModel(t *testing.T) {
 	fixture := newNativeFixture(t)
 	key := sha256Hex("direct-account")
@@ -852,7 +871,7 @@ func TestControllerGatewayImportDisconnectsTheDirectSource(t *testing.T) {
 	fixture.writeJSON(t, filepath.Join(h.stateDir, NativeWorkIntent), map[string]any{
 		"schemaVersion": NativeWorkSchema, "sourceID": "gateway", "ownerID": "owner",
 		"kimiHome": h.home, "mode": IntegrationModeDirect, "directSourceId": "byok-src-9",
-		"accountDigest": sha256Hex("gateway-account"), "active": true, "generation": 3,
+		"accountDigest": sha256Hex(sha256Hex("gateway-account")), "active": true, "generation": 3,
 	})
 	h.controller.settings.GatewayURL = "http://127.0.0.1:9999/v1"
 	h.controller.settings.GatewayToken = "gateway-token"
