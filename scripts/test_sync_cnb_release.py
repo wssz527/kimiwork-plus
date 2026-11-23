@@ -187,6 +187,22 @@ class SyncCNBReleaseTest(unittest.TestCase):
         finally:
             sync.subprocess.run = original_run
 
+    def test_prerelease_pushes_only_tag_not_main(self):
+        calls = []
+        original_run = sync.subprocess.run
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return sync.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        sync.subprocess.run = fake_run
+        try:
+            sync.push_git_refs("https://cnb.example", "owner/repo", "test-token", "v1.1.5-preview.1", True)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][-1], "refs/tags/v1.1.5-preview.1:refs/tags/v1.1.5-preview.1")
+        finally:
+            sync.subprocess.run = original_run
+
     def test_untrusted_verify_url_rejected(self):
         server = FakeCNBServer(existing_release_id="rel-99")
         self.addCleanup(server.close)

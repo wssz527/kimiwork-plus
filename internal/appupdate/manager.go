@@ -345,6 +345,7 @@ func (m *Manager) UpdateSettings(autoCheck *bool, channel string) (core.Document
 			m.lastErr = nil
 			m.lastSource = ""
 			m.wailsUpdater = nil
+			m.wailsHost = nil
 		}
 	}
 	m.mu.Unlock()
@@ -540,12 +541,12 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, h
 	if u == nil || u.State() != updater.StateAvailable {
 		fresh, freshHost, err := m.newWailsUpdater(channel)
 		if err != nil {
-			m.setError(operationID, "download", err)
+			m.failDownload(operationID, "download", err)
 			return
 		}
 		rel, err := fresh.Check(ctx)
 		if err != nil {
-			m.setError(operationID, "check", err)
+			m.failDownload(operationID, "check", err)
 			return
 		}
 		if rel == nil {
@@ -607,20 +608,22 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, h
 			stage = "verify"
 		}
 		// Reset updater instance so next click retries cleanly from scratch.
-		m.mu.Lock()
-		if m.operationID != operationID {
-			m.mu.Unlock()
-			return
-		}
-		m.wailsUpdater = nil
-		m.mu.Unlock()
-		m.setError(operationID, stage, err)
+		m.failDownload(operationID, stage, err)
 		return
 	}
 
 	stagedPath := u.DownloadedPath()
+	m.mu.Lock()
+	stale := m.operationID != operationID
+	m.mu.Unlock()
+	if stale {
+		if stagedPath != "" {
+			_ = os.RemoveAll(filepath.Dir(stagedPath))
+		}
+		return
+	}
 	if stagedPath == "" {
-		m.setError(operationID, "install", errors.New("staged_payload_missing"))
+		m.failDownload(operationID, "install", errors.New("staged_payload_missing"))
 		return
 	}
 
@@ -630,14 +633,15 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, h
 	}
 	if err := validate(stagedPath); err != nil {
 		_ = os.RemoveAll(filepath.Dir(stagedPath))
-		m.mu.Lock()
-		if m.operationID != operationID {
-			m.mu.Unlock()
-			return
-		}
-		m.wailsUpdater = nil
-		m.mu.Unlock()
-		m.setError(operationID, "verify", err)
+		m.failDownload(operationID, "verify", err)
+		return
+	}
+
+	m.mu.Lock()
+	stale = m.operationID != operationID
+	m.mu.Unlock()
+	if stale {
+		_ = os.RemoveAll(filepath.Dir(stagedPath))
 		return
 	}
 
@@ -649,6 +653,7 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, h
 			return
 		}
 		m.wailsUpdater = nil
+		m.wailsHost = nil
 		if errors.Is(err, context.Canceled) {
 			m.state = "available"
 			m.progress = nil
@@ -674,14 +679,7 @@ func (m *Manager) runDownloadAndApply(ctx context.Context, u *updater.Updater, h
 
 	if err := m.prepareAndLaunchHelper(stagedPath, targetVersion, "update"); err != nil {
 		_ = os.RemoveAll(filepath.Dir(stagedPath))
-		m.mu.Lock()
-		if m.operationID != operationID {
-			m.mu.Unlock()
-			return
-		}
-		m.wailsUpdater = nil
-		m.mu.Unlock()
-		m.setError(operationID, "install", err)
+		m.failDownload(operationID, "install", err)
 		return
 	}
 }
@@ -753,14 +751,21 @@ func (m *Manager) StartRollback() (core.Document, error) {
 
 func (m *Manager) Cancel() core.Document {
 	m.mu.Lock()
-	m.operationID++
+	if m.state == "applying" {
+		st := m.stateLocked()
+		m.mu.Unlock()
+		return st
+	}
+	if m.opCancel != nil || m.state == "downloading" || m.state == "verifying" || m.state == "waiting_idle" {
+		m.operationID++
+	}
 	if m.opCancel != nil {
 		m.opCancel()
 		m.opCancel = nil
 		m.wailsUpdater = nil
 		m.wailsHost = nil
 	}
-	if m.state == "downloading" || m.state == "waiting_idle" {
+	if m.state == "downloading" || m.state == "verifying" || m.state == "waiting_idle" {
 		if m.available != nil {
 			m.state = "available"
 		} else {
@@ -997,6 +1002,17 @@ func (m *Manager) readRollbackMetadata() (RollbackMetadata, bool) {
 func (m *Manager) setError(operationID uint64, stage string, err error) {
 	m.mu.Lock()
 	if m.operationID == operationID {
+		m.state = "error"
+		m.lastErr = classifyUpdateError(stage, err)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) failDownload(operationID uint64, stage string, err error) {
+	m.mu.Lock()
+	if m.operationID == operationID {
+		m.wailsUpdater = nil
+		m.wailsHost = nil
 		m.state = "error"
 		m.lastErr = classifyUpdateError(stage, err)
 	}

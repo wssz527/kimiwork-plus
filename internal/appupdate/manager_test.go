@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -387,6 +388,290 @@ func TestStaleUpdaterEventsDoNotOverwriteReplacementOperation(t *testing.T) {
 	host.Emit(updater.EventVerifying)
 	if mgr.state != "verifying" {
 		t.Fatalf("current updater event was rejected: state=%s", mgr.state)
+	}
+}
+
+func TestCancelledDownloadCannotCorruptImmediateRetry(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+		"Contents/Info.plist":           []byte("<plist/>"),
+		"Contents/MacOS/KimiWorkPlus":   bytes.Repeat([]byte("a"), 128<<10),
+		"Contents/MacOS/gateway-daemon": []byte("stub"),
+	})
+
+	var attempts atomic.Int32
+	firstChunkSent := make(chan struct{})
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			doc := testManifestDoc{
+				SchemaVersion: 1,
+				Version:       "1.1.5",
+				Channel:       "stable",
+				Name:          "KimiWork + 1.1.5",
+				PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+				Artifacts: []testManifestArtifact{{
+					URL:           srv.URL + "/pkg.zip",
+					Filename:      "pkg.zip",
+					Filetype:      "zip",
+					Size:          int64(len(zipBytes)),
+					Platform:      runtime.GOOS,
+					Arch:          runtime.GOARCH,
+					DigestAlgo:    "sha256",
+					Digest:        digestB64,
+					SignatureAlgo: "ed25519",
+					Signature:     sigB64,
+				}},
+			}
+			_ = json.NewEncoder(w).Encode(doc)
+		case "/pkg.zip":
+			if attempts.Add(1) == 1 {
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipBytes)))
+				half := len(zipBytes) / 2
+				_, _ = w.Write(zipBytes[:half])
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				close(firstChunkSent)
+				<-r.Context().Done()
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipBytes)))
+			_, _ = w.Write(zipBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	mgr, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.4",
+		BuildID:        "1.1.4-test",
+		TargetPath:     filepath.Join(t.TempDir(), "nonexistent.app"),
+		FeedURL:        srv.URL + "/manifest.json",
+		PublicKey:      pub,
+		HTTPClient:     srv.Client(),
+		DisableAutoRun: true,
+		ValidateStaged: func(string) error { return nil },
+		IdleCheck:      func() (bool, string) { return false, "busy" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	if _, err := mgr.CheckNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	<-firstChunkSent
+
+	cancelled := mgr.Cancel()
+	if cancelled["state"] != "available" || cancelled["progress"] != nil {
+		t.Fatalf("expected clean available state after cancel, got state=%v progress=%v", cancelled["state"], cancelled["progress"])
+	}
+
+	if _, err := mgr.StartDownloadAndApply(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if mgr.state != "waiting_idle" || mgr.opCancel == nil || mgr.lastErr != nil {
+		t.Fatalf("stale download corrupted retry: state=%s opCancel=%v err=%#v", mgr.state, mgr.opCancel != nil, mgr.lastErr)
+	}
+}
+
+func TestCancelDuringVerifyingResetsStateAndAllowsRetry(t *testing.T) {
+	cases := []struct {
+		name           string
+		firstErr       error
+		immediateRetry bool
+	}{
+		{name: "old_validate_errors", firstErr: errors.New("stale codesign failure"), immediateRetry: false},
+		{name: "old_validate_succeeds", firstErr: nil, immediateRetry: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zipBytes, digestB64, sigB64 := makeSignedTestZip(t, priv, "Kimi Work+.app", map[string][]byte{
+				"Contents/Info.plist":           []byte("<plist/>"),
+				"Contents/MacOS/KimiWorkPlus":   []byte("stub"),
+				"Contents/MacOS/gateway-daemon": []byte("stub"),
+			})
+
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/manifest.json":
+					doc := testManifestDoc{
+						SchemaVersion: 1,
+						Version:       "1.1.5",
+						Channel:       "stable",
+						Name:          "KimiWork + 1.1.5",
+						PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+						Artifacts: []testManifestArtifact{{
+							URL:           srv.URL + "/pkg.zip",
+							Filename:      "pkg.zip",
+							Filetype:      "zip",
+							Size:          int64(len(zipBytes)),
+							Platform:      runtime.GOOS,
+							Arch:          runtime.GOARCH,
+							DigestAlgo:    "sha256",
+							Digest:        digestB64,
+							SignatureAlgo: "ed25519",
+							Signature:     sigB64,
+						}},
+					}
+					_ = json.NewEncoder(w).Encode(doc)
+				case "/pkg.zip":
+					_, _ = w.Write(zipBytes)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			var validateCalls atomic.Int32
+			var firstStagedDir atomic.Value
+			firstEntered := make(chan struct{})
+			releaseFirst := make(chan struct{})
+
+			mgr, err := NewManager(Options{
+				StateDir:       t.TempDir(),
+				CurrentVersion: "1.1.4",
+				BuildID:        "1.1.4-test",
+				TargetPath:     filepath.Join(t.TempDir(), "nonexistent.app"),
+				FeedURL:        srv.URL + "/manifest.json",
+				PublicKey:      pub,
+				HTTPClient:     srv.Client(),
+				DisableAutoRun: true,
+				ValidateStaged: func(stagedPath string) error {
+					if validateCalls.Add(1) == 1 {
+						firstStagedDir.Store(filepath.Dir(stagedPath))
+						close(firstEntered)
+						<-releaseFirst
+						return tc.firstErr
+					}
+					return nil
+				},
+				IdleCheck: func() (bool, string) { return false, "busy" },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mgr.Close()
+
+			if _, err := mgr.CheckNow(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mgr.StartDownloadAndApply(); err != nil {
+				t.Fatal(err)
+			}
+			<-firstEntered
+
+			if got := mgr.State()["state"]; got != "verifying" {
+				t.Fatalf("expected verifying state during validation, got %v", got)
+			}
+
+			cancelled := mgr.Cancel()
+			if cancelled["state"] != "available" || cancelled["progress"] != nil {
+				t.Fatalf("expected verifying cancel to reset to available, got state=%v progress=%v", cancelled["state"], cancelled["progress"])
+			}
+
+			if tc.immediateRetry {
+				if _, err := mgr.StartDownloadAndApply(); err != nil {
+					t.Fatal(err)
+				}
+				waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+			}
+
+			close(releaseFirst)
+			stagedDir, _ := firstStagedDir.Load().(string)
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(stagedDir); os.IsNotExist(err) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if _, err := os.Stat(stagedDir); !os.IsNotExist(err) {
+				t.Fatalf("stale verifying staged directory was not cleaned up: %s", stagedDir)
+			}
+			time.Sleep(50 * time.Millisecond)
+
+			if tc.immediateRetry {
+				mgr.mu.Lock()
+				state, opCancel, lastErr := mgr.state, mgr.opCancel, mgr.lastErr
+				mgr.mu.Unlock()
+				if state != "waiting_idle" || opCancel == nil || lastErr != nil {
+					t.Fatalf("stale verify completion corrupted retry: state=%s opCancel=%v err=%#v", state, opCancel != nil, lastErr)
+				}
+				return
+			}
+
+			st := mgr.State()
+			if st["state"] != "available" || st["error"] != nil {
+				t.Fatalf("stale verify error overwrote cancelled state: state=%v err=%v", st["state"], st["error"])
+			}
+			if _, err := mgr.StartDownloadAndApply(); err != nil {
+				t.Fatal(err)
+			}
+			waitUntilState(t, mgr, "waiting_idle", 5*time.Second)
+		})
+	}
+}
+
+func TestCancelDuringApplyingDoesNotSwallowError(t *testing.T) {
+	mgr, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.4",
+		BuildID:        "1.1.4-test",
+		DisableAutoRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	opCtx, opCancel := context.WithCancel(context.Background())
+	defer opCancel()
+
+	mgr.mu.Lock()
+	mgr.state = "applying"
+	mgr.operationID = 7
+	mgr.opCancel = opCancel
+	mgr.mu.Unlock()
+
+	st := mgr.Cancel()
+	if st["state"] != "applying" {
+		t.Fatalf("expected applying state to remain uncancelled, got %v", st["state"])
+	}
+
+	mgr.mu.Lock()
+	gotOpID := mgr.operationID
+	gotCancel := mgr.opCancel
+	mgr.mu.Unlock()
+	if gotOpID != 7 || gotCancel == nil || opCtx.Err() != nil {
+		t.Fatalf("Cancel mutated applying operation: operationID=%d opCancelPresent=%v ctxErr=%v", gotOpID, gotCancel != nil, opCtx.Err())
+	}
+
+	mgr.setError(7, "install", errors.New("update_backup_failed: disk full"))
+	after := mgr.State()
+	if after["state"] != "error" || after["error"] == nil {
+		t.Fatalf("expected applying error to be preserved after Cancel, got state=%v err=%v", after["state"], after["error"])
 	}
 }
 
