@@ -279,3 +279,126 @@ func TestIntegrationResultAccountDigestHashLevelIsConsistent(t *testing.T) {
 		t.Fatalf("Readback.AccountDigest = %+v, want %q", withRB.Readback, wantScope)
 	}
 }
+
+func TestDetachAllStopsEventLoopAndDoesNotConsumePipeEvents(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+
+	oldHost := NewHost(harness.pipe, InjectionOptions{
+		Payload:  testPayload,
+		Revision: "rev-old",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	oldHost.DetachAll(ctx)
+
+	select {
+	case <-oldHost.loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("oldHost eventLoop did not exit after DetachAll")
+	}
+	// The retired host also refuses every later sync and accepts a second detach
+	// without touching the stop channel twice.
+	if _, err := oldHost.Sync(ctx); err == nil {
+		t.Fatal("a detached host still synced")
+	}
+	oldHost.DetachAll(ctx)
+	select {
+	case <-oldHost.loopDone:
+	default:
+		t.Fatal("loopDone must stay closed")
+	}
+
+	// Pipe stays open: a new host sharing it must receive every subsequent event.
+	// The events are dispatched one at a time: the reply path only runs eight
+	// handlers at once and drops the rest by design, so a burst would not prove
+	// anything about the detached host.
+	received := make(chan string, 1)
+	newHost := NewHost(harness.pipe, InjectionOptions{
+		Payload:  testPayload,
+		Revision: "rev-new",
+		OnReply: func(_ context.Context, _ *SurfaceSession, _ int, id string, _ any) {
+			received <- id
+		},
+	})
+	defer newHost.DetachAll(ctx)
+
+	sessions, err := newHost.Sync(ctx)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("newHost.Sync: %v", err)
+	}
+	session := sessions[0]
+	const total = 32
+	for i := range total {
+		id := "ev-" + itoa(i)
+		harness.pipe.dispatch(`{"method":"Runtime.bindingCalled","sessionId":"` + session.SessionID +
+			`","params":{"name":"__kwgTranslate","payload":"{\"id\":\"` + id + `\",\"value\":\"x\"}","executionContextId":` +
+			itoa(session.ContextID()) + `}}`)
+		select {
+		case got := <-received:
+			if got != id {
+				t.Fatalf("event %d answered %q, want %q", i, got, id)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("event %d was never delivered; the detached host is still consuming pipe events", i)
+		}
+	}
+}
+
+func TestControllerTickConcurrentLazyHostCreatesSingleHost(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+
+	profile := filepath.Join(t.TempDir(), "profile")
+	controller, err := NewController(ControllerSettings{
+		StateDir:    filepath.Dir(profile),
+		UserDataDir: profile,
+		Translation: TranslationSettings{Enabled: true, Provider: "bing", TargetLanguage: "zh", View: "translated"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := &Child{pipe: harness.pipe, exitWait: make(chan struct{})}
+	controller.mu.Lock()
+	controller.child = child
+	controller.mu.Unlock()
+	t.Cleanup(func() {
+		controller.mu.Lock()
+		host := controller.host
+		controller.host = nil
+		controller.child = nil
+		controller.mu.Unlock()
+		if host != nil {
+			host.DetachAll(context.Background())
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = controller.Tick(ctx)
+		}()
+	}
+	wg.Wait()
+
+	controller.mu.Lock()
+	host := controller.host
+	controller.mu.Unlock()
+	if host == nil {
+		t.Fatal("expected controller.host to be initialized")
+	}
+	// A later Tick must reuse that host: a second construction would leave the
+	// first one with a live event loop reading the same pipe.
+	if status := controller.Tick(ctx); status.State == "active" || status.State == "attaching" {
+		controller.mu.Lock()
+		again := controller.host
+		controller.mu.Unlock()
+		if again != host {
+			t.Fatal("Tick replaced an existing host")
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -224,7 +225,7 @@ func message(code string) string {
 	case "export_write_failed":
 		return "无法写入导出文件，请检查下载目录权限后重试。"
 	case "open_url_failed":
-		return "无法调起系统默认浏览器，请手动访问发布页。"
+		return "无法调起系统默认浏览器，请手动在浏览器中打开链接。"
 	case "update_not_available":
 		return "当前没有可安装的新版本，请先点击「检查更新」。"
 	case "rollback_unavailable":
@@ -653,7 +654,7 @@ func (s *Service) writeExportJSON(prefix string, value any) (string, error) {
 	if err != nil {
 		return "", errors.New("export_write_failed")
 	}
-	name := prefix + "-" + time.Now().Format("20060102-150405") + ".json"
+	base := prefix + "-" + time.Now().Format("20060102-150405")
 
 	primaryDir := strings.TrimSpace(s.ExportDir)
 	if primaryDir == "" {
@@ -663,7 +664,7 @@ func (s *Service) writeExportJSON(prefix string, value any) (string, error) {
 	}
 	if primaryDir != "" {
 		if info, statErr := os.Stat(primaryDir); statErr == nil && info.IsDir() {
-			if saved, writeErr := writePrivateExportFile(primaryDir, name, data); writeErr == nil {
+			if saved, writeErr := writePrivateExportFile(primaryDir, base, data); writeErr == nil {
 				return saved, nil
 			}
 		}
@@ -671,7 +672,7 @@ func (s *Service) writeExportJSON(prefix string, value any) (string, error) {
 	if strings.TrimSpace(s.StateDir) != "" {
 		fallbackDir := filepath.Join(s.StateDir, "exports")
 		if mkErr := os.MkdirAll(fallbackDir, 0o700); mkErr == nil {
-			if saved, writeErr := writePrivateExportFile(fallbackDir, name, data); writeErr == nil {
+			if saved, writeErr := writePrivateExportFile(fallbackDir, base, data); writeErr == nil {
 				return saved, nil
 			}
 		}
@@ -701,35 +702,41 @@ func marshalExportJSON(value any) ([]byte, error) {
 	return append(encoded, '\n'), nil
 }
 
-func writePrivateExportFile(dir, name string, data []byte) (string, error) {
-	target := filepath.Join(dir, name)
-	tmp, err := os.CreateTemp(dir, ".export-*.tmp")
-	if err != nil {
-		return "", err
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
+func writePrivateExportFile(dir, base string, data []byte) (string, error) {
+	const maxAttempts = 1000
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		name := base + ".json"
+		if attempt > 1 {
+			name = base + "-" + strconv.Itoa(attempt) + ".json"
 		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return "", err
+		target := filepath.Join(dir, name)
+		// O_EXCL is what makes the suffix a guarantee rather than a guess: two
+		// exports in the same second each get their own file, and the loser
+		// moves on instead of truncating the winner.
+		file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		// The body is written, flushed and closed before the name is reported, so
+		// a reader never sees a file this call is still filling. A failure removes
+		// the partial file instead of leaving a truncated export behind.
+		_, writeErr := file.Write(data)
+		if writeErr == nil {
+			writeErr = file.Sync()
+		}
+		if closeErr := file.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		if writeErr != nil {
+			_ = os.Remove(target)
+			return "", writeErr
+		}
+		return target, nil
 	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return "", err
-	}
-	cleanup = false
-	return target, nil
+	return "", os.ErrExist
 }
 
 func (s *Service) State() (core.Document, error) {

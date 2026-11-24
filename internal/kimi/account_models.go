@@ -124,8 +124,8 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			}
 			return "failed", NativeAccountChanged
 		}
-		integration := c.reconcile(true, scope)
-		if !integration.Applied || integration.Changed {
+		integration, gen, stale := c.reconcileChecked(true, scope)
+		if stale || !integration.Applied || integration.Changed {
 			reason = firstNonEmpty(integration.Reason, "account_models_not_verified")
 			continue
 		}
@@ -138,19 +138,43 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			}
 			return "failed", NativeAccountChanged
 		}
-		c.mu.Lock()
-		c.deferredChild = nil
-		c.loadedKnown, c.loadedGeneration = true, integration.Readback.Generation
-		integration.Adopted = true
-		c.integration = &integration
-		c.mu.Unlock()
+		if !c.adoptVerifiedCatalog(gen, integration) {
+			reason = "account_models_not_verified"
+			continue
+		}
 		return "ready", ""
 	}
 	return "pending", reason
 }
 
-func (c *Controller) confirmRunningCatalog(ctx context.Context, result IntegrationResult) IntegrationResult {
+// adoptVerifiedCatalog records a catalog the runtime answered for, under the
+// same lock a reconcile commits with. It never starts a new generation: this is
+// evidence about the configuration the caller already reconciled, so bumping
+// the generation here would make the result it just wrote stale.
+func (c *Controller) adoptVerifiedCatalog(gen uint64, integration IntegrationResult) bool {
+	if integration.Readback == nil {
+		return false
+	}
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settingsGen != gen {
+		return false
+	}
+	c.deferredChild = nil
+	c.loadedKnown, c.loadedGeneration = true, integration.Readback.Generation
+	integration.Adopted = true
+	c.integration = &integration
+	return true
+}
+
+func (c *Controller) confirmRunningCatalog(ctx context.Context, result IntegrationResult, gen uint64) IntegrationResult {
+	c.mu.Lock()
+	if c.settingsGen != gen {
+		c.mu.Unlock()
+		return result
+	}
 	child, bridge, settings := c.child, c.bridge, c.settings
 	deferred := c.deferredChild == child
 	c.mu.Unlock()
@@ -189,7 +213,7 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.child != child || c.bridge != bridge || c.deferredChild == child || c.integration == nil || c.integration.Readback != result.Readback {
+	if c.settingsGen != gen || c.child != child || c.bridge != bridge || c.deferredChild == child || c.integration == nil || c.integration.Readback != result.Readback {
 		return result
 	}
 	select {

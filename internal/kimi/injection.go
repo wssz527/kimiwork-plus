@@ -142,6 +142,9 @@ type Host struct {
 	sessions   map[string]*SurfaceSession // keyed by target id
 	stopped    bool
 	replySlots chan struct{}
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	loopDone   chan struct{}
 
 	// contextWaiters are released when a session's main world is reported.
 	contextWaiters map[*SurfaceSession][]chan int
@@ -153,7 +156,8 @@ func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 		options.CallTimeout = DefaultCallTimeout
 	}
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
-		replySlots: make(chan struct{}, 8), contextWaiters: map[*SurfaceSession][]chan int{}}
+		replySlots: make(chan struct{}, 8), stopCh: make(chan struct{}), loopDone: make(chan struct{}),
+		contextWaiters: map[*SurfaceSession][]chan int{}}
 	// One permanent reader for unsolicited events. Without it, navigation and
 	// binding messages would only be seen while a context wait happened to be
 	// running, which is exactly the window where they matter least.
@@ -232,18 +236,35 @@ func (h *Host) onReplyHandler() func(context.Context, *SurfaceSession, int, stri
 }
 
 // eventLoop routes every unsolicited CDP message to the session it belongs to.
+//
+// A retired host stops here. Without the stop channel its reader would keep
+// taking events off the shared pipe after DetachAll, and the host that replaced
+// it would only see a fraction of the bindings and navigation events.
 func (h *Host) eventLoop() {
-	for event := range h.pipe.Events() {
-		h.mu.Lock()
-		var targets []*SurfaceSession
-		for _, session := range h.sessions {
-			if event.SessionID == "" || event.SessionID == session.SessionID {
-				targets = append(targets, session)
+	defer close(h.loopDone)
+	events := h.pipe.Events()
+	done := h.pipe.Done()
+	for {
+		select {
+		case <-h.stopCh:
+			return
+		case <-done:
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
 			}
-		}
-		h.mu.Unlock()
-		for _, session := range targets {
-			h.handleEvent(session, event)
+			h.mu.Lock()
+			var targets []*SurfaceSession
+			for _, session := range h.sessions {
+				if event.SessionID == "" || event.SessionID == session.SessionID {
+					targets = append(targets, session)
+				}
+			}
+			h.mu.Unlock()
+			for _, session := range targets {
+				h.handleEvent(session, event)
+			}
 		}
 	}
 }
@@ -825,6 +846,9 @@ func (h *Host) withdraw(ctx context.Context, stop bool) {
 		h.stopped = true
 	}
 	h.mu.Unlock()
+	if stop {
+		h.stopOnce.Do(func() { close(h.stopCh) })
+	}
 
 	disabled := map[string]any{"enabled": false}
 	if settings := h.settings(); settings != nil {

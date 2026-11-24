@@ -549,6 +549,9 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	if err != nil || !result.Verified {
 		return result, err
 	}
+	// The switch wrote another account's profile, so any reconcile that read the
+	// previous generation must not commit over it.
+	c.beginConfigWrite()
 	home, homeErr := c.WorkHome()
 	surface, surfaceErr := c.accountSurface()
 	if homeErr != nil || surfaceErr != nil {

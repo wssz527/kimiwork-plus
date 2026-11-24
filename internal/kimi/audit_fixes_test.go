@@ -1,12 +1,14 @@
 package kimi
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDirectCatalogAndSelectorsDoNotCrossAccounts(t *testing.T) {
@@ -138,5 +140,246 @@ func TestStableErrorCodeNormalization(t *testing.T) {
 	}
 	if got := stableErrorCode(ErrImportBusy, "fallback_code"); got != ErrImportBusy.Error() {
 		t.Fatalf("stable error code was replaced: %q", got)
+	}
+}
+
+func TestConcurrentConfigureAndReconcileDoesNotRollbackNewMode(t *testing.T) {
+	profile, home := nativeProfile(t, "user-1")
+	seedNativeProfile(t, home, "http://127.0.0.1:9999/v1", "cred-1")
+	stateDir := filepath.Dir(profile)
+
+	gatewaySettings := ControllerSettings{
+		StateDir:        stateDir,
+		UserDataDir:     profile,
+		IntegrationMode: IntegrationModeGateway,
+		GatewayURL:      "http://127.0.0.1:9999/v1",
+		Models:          testCatalog(),
+	}
+	directSettings := ControllerSettings{
+		StateDir:        stateDir,
+		UserDataDir:     profile,
+		IntegrationMode: IntegrationModeDirect,
+		DirectSpec: &DirectSpec{
+			Providers: []DirectProviderSpec{
+				{ID: "p1", DisplayName: "P1", Protocol: "chat", BaseURL: "https://api.example.com/v1"},
+			},
+			Models: []DirectModel{
+				{ID: "m1", ProviderID: "p1", Model: "m1", DisplayName: "M1", MaxContextSize: 128000, Capabilities: []string{"tools"}},
+			},
+		},
+	}
+
+	controller, err := NewController(gatewaySettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	controller.mu.Lock()
+	controller.beforeReconcileHook = func() {
+		close(entered)
+		<-release
+	}
+	controller.mu.Unlock()
+
+	ctx := context.Background()
+	staleDone := make(chan IntegrationResult, 1)
+	go func() {
+		staleDone <- controller.ReconcileWithReadback(ctx)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stale reconcile did not reach hook")
+	}
+
+	// Clear hook before Configure so subsequent reconciles run freely.
+	controller.mu.Lock()
+	controller.beforeReconcileHook = nil
+	controller.mu.Unlock()
+
+	if err := controller.Configure(directSettings); err != nil {
+		t.Fatalf("Configure direct: %v", err)
+	}
+	fresh := controller.ReconcileWithReadback(ctx)
+	if fresh.Mode != IntegrationModeDirect {
+		t.Fatalf("fresh reconcile mode = %q, want direct", fresh.Mode)
+	}
+
+	// Resume stale gateway reconcile: it must detect settingsGen drift and abort.
+	close(release)
+	select {
+	case <-staleDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stale reconcile did not finish")
+	}
+
+	status := controller.Status(ctx)
+	if status.Integration == nil || status.Integration.Mode != IntegrationModeDirect {
+		t.Fatalf("stale reconcile rolled back mode: %+v", status.Integration)
+	}
+
+	// Exercise concurrent Configure + ReconcileWithReadback under -race.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 20 {
+			if i%2 == 0 {
+				_ = controller.Configure(gatewaySettings)
+			} else {
+				_ = controller.Configure(directSettings)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 20 {
+			_ = controller.ReconcileWithReadback(ctx)
+		}
+	}()
+	wg.Wait()
+	if err := controller.Configure(directSettings); err != nil {
+		t.Fatal(err)
+	}
+	final := controller.ReconcileWithReadback(ctx)
+	if final.Mode != IntegrationModeDirect {
+		t.Fatalf("final mode after race = %q, want direct", final.Mode)
+	}
+}
+
+// TestStaleReconcilePerformsNoDiskWrite proves the generation is checked before
+// the profile is touched, not only before the answer is stored. A reconcile that
+// lost the race must leave the intent exactly as the winning configuration wrote
+// it; an end-of-function check alone would still have rewritten the file.
+func TestStaleReconcilePerformsNoDiskWrite(t *testing.T) {
+	profile, home := nativeProfile(t, "user-1")
+	seedNativeProfile(t, home, "http://127.0.0.1:9999/v1", "cred-1")
+	stateDir := filepath.Dir(profile)
+	intentPath := filepath.Join(stateDir, NativeWorkIntent)
+
+	settings := ControllerSettings{
+		StateDir:    stateDir,
+		UserDataDir: profile,
+		GatewayURL:  "http://127.0.0.1:9999/v1",
+		Models:      testCatalog(),
+	}
+	controller, err := NewController(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := controller.ReconcileWithReadback(context.Background()); !result.Applied {
+		t.Fatalf("fixture was not applied: %+v", result)
+	}
+	committed := controller.Status(context.Background()).Integration
+	if committed == nil {
+		t.Fatal("the fixture committed no result")
+	}
+	beforeState := committed.State
+	before, err := os.ReadFile(intentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	controller.mu.Lock()
+	controller.beforeReconcileHook = func() {
+		close(entered)
+		<-release
+	}
+	controller.mu.Unlock()
+
+	staleDone := make(chan IntegrationResult, 1)
+	go func() { staleDone <- controller.ReconcileWithReadback(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stale reconcile never reached the hook")
+	}
+
+	// The hook runs before the critical section, so this Configure is the winner.
+	if err := controller.Configure(ControllerSettings{
+		StateDir:        stateDir,
+		UserDataDir:     profile,
+		IntegrationMode: IntegrationModeDirect,
+		DirectSpec:      &DirectSpec{Models: []DirectModel{{ID: "m1", ProviderID: "p1", Model: "m1"}}},
+	}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	controller.mu.Lock()
+	controller.beforeReconcileHook = nil
+	controller.mu.Unlock()
+
+	close(release)
+	select {
+	case result := <-staleDone:
+		// The stale call answers with the result that is actually committed — the
+		// gateway one it started from — and never with a claim about the mode it
+		// did not reconcile. The gateway mode is the empty Mode.
+		if result.Mode != "" || result.State != beforeState {
+			t.Fatalf("stale reconcile answered %q/%q, want the committed gateway result %q", result.Mode, result.State, beforeState)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stale reconcile never finished")
+	}
+
+	after, err := os.ReadFile(intentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("stale reconcile rewrote the intent:\nbefore=%s\nafter=%s", before, after)
+	}
+	// The winner still owns the answer, and a later reconcile runs on the new
+	// configuration rather than on state a stale write left behind.
+	status := controller.Status(context.Background())
+	if status.Integration == nil || status.Integration.Mode != "" || status.Integration.State != beforeState {
+		t.Fatalf("stale reconcile replaced the committed result: %+v", status.Integration)
+	}
+}
+
+// TestConfigureWaitsForRunningReconcile pins the other half of the contract: a
+// Configure cannot slip between a reconcile's disk write and its result. While
+// the critical section is held, Configure must not return.
+func TestConfigureWaitsForRunningReconcile(t *testing.T) {
+	profile, home := nativeProfile(t, "user-1")
+	seedNativeProfile(t, home, "http://127.0.0.1:9999/v1", "cred-1")
+	stateDir := filepath.Dir(profile)
+
+	settings := ControllerSettings{
+		StateDir:    stateDir,
+		UserDataDir: profile,
+		GatewayURL:  "http://127.0.0.1:9999/v1",
+		Models:      testCatalog(),
+	}
+	controller, err := NewController(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Take the critical section the way a reconcile does, then prove a Configure
+	// cannot complete while it is held.
+	controller.reconcileMu.Lock()
+	configured := make(chan error, 1)
+	go func() {
+		next := settings
+		next.Models = nil
+		configured <- controller.Configure(next)
+	}()
+	select {
+	case err := <-configured:
+		t.Fatalf("Configure returned while a reconcile held the critical section: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	controller.reconcileMu.Unlock()
+	select {
+	case err := <-configured:
+		if err != nil {
+			t.Fatalf("Configure: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Configure never returned after the critical section was released")
 	}
 }

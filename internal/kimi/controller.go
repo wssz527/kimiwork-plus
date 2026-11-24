@@ -146,10 +146,19 @@ type SurfaceSummary struct {
 }
 
 // Controller manages one Kimi install.
+//
+// Lock order is accountSessionMu -> lifecycle -> reconcileMu -> mu. Nothing
+// takes mu and then reconcileMu: a reconcile reads its generation and settings
+// under mu, releases it, and only then enters the critical section. reconcileMu
+// covers every write this package makes to the official profile and to the page
+// route, so a Configure that changes the mode cannot interleave with a reconcile
+// that is writing the previous one.
 type Controller struct {
 	lifecycle   sync.Mutex
+	reconcileMu sync.Mutex
 	mu          sync.Mutex
 	settings    ControllerSettings
+	settingsGen uint64
 	state       ControllerState
 	reason      string
 	child       *Child
@@ -162,6 +171,10 @@ type Controller struct {
 	integration *IntegrationResult
 	translation *TranslationStatus
 	startedAt   time.Time
+	// beforeReconcileHook runs between reading the generation and entering the
+	// reconcile critical section. It is a test seam for the window a Configure
+	// must be able to win; production leaves it nil.
+	beforeReconcileHook func()
 	// importGranted is held only while the one authorised import runs. It is
 	// what makes the authorisation one-shot: a second call waits rather than
 	// opening a second overlay.
@@ -228,13 +241,16 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 	}
 	c.mu.Unlock()
 	sourceID := c.directSourceID(settings)
+	c.reconcileMu.Lock()
 	c.mu.Lock()
 	previousEnabled := c.settings.Translation.Enabled
 	c.settings = settings
+	c.settingsGen++
 	actions := c.actions
 	host := c.host
 	c.mu.Unlock()
 	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
+	c.reconcileMu.Unlock()
 	if host != nil {
 		// Configure takes the host's own lock and invalidates the sessions whose
 		// scope changed, so this cannot race a concurrent Sync.
@@ -250,6 +266,22 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 		}
 	}
 	return nil
+}
+
+// beginConfigWrite ends the previous configuration generation and waits for any
+// reconcile that is already inside its critical section to finish. A caller that
+// is about to change the mode, the catalog or the intent uses it so that an
+// older reconcile cannot write the previous configuration back over the new
+// one: the reconcile aborts on the generation it no longer owns.
+//
+// It takes reconcileMu for the bump only. The caller does not hold it across its
+// own work, because the reconcile that follows must be able to take it again.
+func (c *Controller) beginConfigWrite() {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	c.mu.Lock()
+	c.settingsGen++
+	c.mu.Unlock()
 }
 
 // Status is a read-only snapshot. It never starts or stops anything.
@@ -897,30 +929,28 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 			c.mu.Unlock()
 			return status
 		}
-		created := NewHost(child.Pipe(), InjectionOptions{
-			Payload:  string(payload),
-			Revision: translation.Revision(),
-			Settings: translationPublic(translation),
-			OnReply:  c.onReply,
-		})
 		c.mu.Lock()
 		if c.child == child && c.host == nil && c.settings.Translation.Enabled {
-			c.host = created
-			host = created
-		} else {
-			host = c.host
+			liveTranslation := c.settings.Translation
+			// NewHost must be built under the same lock that publishes it: two
+			// concurrent Ticks would otherwise both see host == nil and the loser
+			// would leave a detached host whose event loop still reads the pipe.
+			c.host = NewHost(child.Pipe(), InjectionOptions{
+				Payload:  string(payload),
+				Revision: liveTranslation.Revision(),
+				Settings: translationPublic(liveTranslation),
+				OnReply:  c.onReply,
+			})
 		}
-		stillEnabled := c.child == child && c.settings.Translation.Enabled
+		host = c.host
+		stillSameChild := c.child == child
+		stillEnabled := stillSameChild && c.settings.Translation.Enabled
 		c.mu.Unlock()
-		if host != created {
-			created.DetachAll(ctx)
-		}
-		if host == nil {
+		if !stillSameChild || host == nil {
 			return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
 		}
 		if !stillEnabled {
-			status := TranslationStatus{State: "inactive", Reason: "translation_disabled"}
-			return status
+			return TranslationStatus{State: "inactive", Reason: "translation_disabled"}
 		}
 	}
 	sessions, err := host.Sync(ctx)
@@ -1005,33 +1035,80 @@ func (c *Controller) Reconcile() IntegrationResult {
 // The account is always taken from this controller's selected profile, never
 // from the caller's configuration and never from a directory outside it.
 func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
-	result := c.reconcile(true, "")
+	result, gen, stale := c.reconcileChecked(true, "")
+	if stale {
+		return result
+	}
 	if result.Applied && !result.Adopted && !result.Changed && accountSessionMu.TryLock() {
 		defer accountSessionMu.Unlock()
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		result = c.confirmRunningCatalog(ctx, result)
+		result = c.confirmRunningCatalog(ctx, result, gen)
 	}
 	return result
 }
 
 func (c *Controller) reconcile(withReadback bool, confirmedAccount string) IntegrationResult {
+	result, _, _ := c.reconcileChecked(withReadback, confirmedAccount)
+	return result
+}
+
+func (c *Controller) staleReconcileResult(gen uint64) (bool, IntegrationResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settingsGen == gen {
+		return false, IntegrationResult{}
+	}
+	if c.integration != nil {
+		return true, *c.integration
+	}
+	return true, IntegrationResult{State: IntegrationNeedsImport, Mode: c.settings.integrationMode()}
+}
+
+func (c *Controller) commitReconcileResult(gen uint64, result IntegrationResult, withReadback bool) (IntegrationResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settingsGen != gen {
+		if c.integration != nil {
+			return *c.integration, true
+		}
+		return IntegrationResult{State: IntegrationNeedsImport, Mode: c.settings.integrationMode()}, true
+	}
+	if withReadback && result.Applied && result.Readback != nil {
+		result.Adopted = c.runtimeLoadedLocked(result.Readback.Generation)
+	}
+	c.integration = &result
+	return result, false
+}
+
+func (c *Controller) reconcileChecked(withReadback bool, confirmedAccount string) (IntegrationResult, uint64, bool) {
 	c.mu.Lock()
 	settings := c.settings
+	gen := c.settingsGen
+	hook := c.beforeReconcileHook
 	c.mu.Unlock()
 
 	// A child that exited is recorded before anything is written for it.
 	c.reapChild()
+
+	if hook != nil {
+		hook()
+	}
+
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
 
 	account, verified := c.profileAccount()
 	scope := account
 	if confirmedAccount != "" && (!verified || confirmedAccount != account) {
 		result := IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed",
 			AccountDigest: sha256If(account), Readback: c.readback(account)}
-		c.mu.Lock()
-		c.integration = &result
-		c.mu.Unlock()
-		return result
+		committed, stale := c.commitReconcileResult(gen, result, false)
+		return committed, gen, stale
 	}
 	if !verified {
 		// Nothing is read from a profile without an identity, and no reconcile
@@ -1039,10 +1116,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		if withReadback {
 			result := IntegrationResult{State: IntegrationAccountUnknown, Reason: "waiting-login",
 				Readback: c.readback("")}
-			c.mu.Lock()
-			c.integration = &result
-			c.mu.Unlock()
-			return result
+			committed, stale := c.commitReconcileResult(gen, result, false)
+			return committed, gen, stale
 		}
 		scope = settings.AccountScope
 	}
@@ -1052,10 +1127,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 	integration, err := NewNativeIntegration(settings.StateDir, kimiDir, mode)
 	if err != nil {
 		result := IntegrationResult{State: IntegrationConflict, Reason: "invalid_integration_path", Mode: mode}
-		c.mu.Lock()
-		c.integration = &result
-		c.mu.Unlock()
-		return result
+		committed, stale := c.commitReconcileResult(gen, result, false)
+		return committed, gen, stale
 	}
 	options := ReconcileOptions{AccountScope: scope, AllowAccountRebind: confirmedAccount != "", Mode: mode}
 	if mode == IntegrationModeDirect {
@@ -1066,7 +1139,13 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		options.URL = settings.GatewayURL
 		options.Models = settings.Models
 	}
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
 	result := integration.Reconcile(options)
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
 	c.syncActionsIntegrationRoute(settings, result.DirectSourceID)
 	if withReadback {
 		readback := integration.ReadbackMode(account, mode, result.DirectSourceID)
@@ -1087,13 +1166,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		}
 		result.Applied = result.Applied && (result.State == IntegrationReady || result.State == IntegrationRepaired)
 	}
-	c.mu.Lock()
-	if withReadback && result.Applied {
-		result.Adopted = c.runtimeLoadedLocked(result.Readback.Generation)
-	}
-	c.integration = &result
-	c.mu.Unlock()
-	return result
+	committed, stale := c.commitReconcileResult(gen, result, withReadback)
+	return committed, gen, stale
 }
 
 func (c *Controller) recordImportReload(child *Child, deferred bool) {

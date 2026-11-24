@@ -53,6 +53,12 @@ func (c *Controller) DisconnectModelsAuthorized(ctx context.Context) (Disconnect
 		result.Reason = "model_disconnect_local_state_failed"
 		return result, errors.New(result.Reason)
 	}
+	// The whole write is inside reconcileMu: a reconcile that read the previous
+	// generation must not restore the models this call removed, and the result
+	// committed here must not be overwritten by one that started earlier.
+	// Lock order stays reconcileMu -> mu, the same order a reconcile uses.
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
 	disconnected := integration.DisconnectForAccount(account)
 	if disconnected.State != IntegrationDisabled {
 		result.OK = false
@@ -60,9 +66,9 @@ func (c *Controller) DisconnectModelsAuthorized(ctx context.Context) (Disconnect
 		result.Reason = "model_disconnect_local_state_failed"
 		return result, errors.New(result.Reason)
 	}
-	readback := c.readback(account)
-	disconnected.Readback = readback
+	disconnected.Readback = c.readback(account)
 	c.mu.Lock()
+	c.settingsGen++
 	c.integration = &disconnected
 	c.mu.Unlock()
 	return result, nil

@@ -353,6 +353,7 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string, ch
 		return result
 	}
 	c.recordImportReload(child, result.RequiresRestart)
+	c.beginConfigWrite()
 	integration := c.reconcile(true, expectedAccount)
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted

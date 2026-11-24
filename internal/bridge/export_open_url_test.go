@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,6 +115,9 @@ func TestPostOpenURLValidationAndExecution(t *testing.T) {
 	code, doc = postJSON(t, s, http.MethodPost, "/api/open-url", core.Document{"url": "https://example.com"}, s.Endpoint.Key, s.Endpoint.URL)
 	if code != http.StatusServiceUnavailable || core.String(core.Object(doc["error"])["code"]) != "open_url_failed" {
 		t.Fatalf("opener failure: status=%d doc=%+v", code, doc)
+	}
+	if msg := core.String(core.Object(doc["error"])["message"]); msg == "" || bytes.Contains([]byte(msg), []byte("发布页")) {
+		t.Fatalf("open_url_failed message should be generic, got %q", msg)
 	}
 }
 
@@ -353,5 +358,125 @@ func TestWorkUsageExportQueryIgnoresInjectedNow(t *testing.T) {
 	}
 	if parsed["schemaVersion"] != float64(ledger.SchemaVersion) {
 		t.Fatalf("unexpected schemaVersion: %v", parsed["schemaVersion"])
+	}
+}
+
+func TestWritePrivateExportFileSameSecondDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	base := "kimi-work-plus-diagnostics-20261124-020500"
+
+	first, err := writePrivateExportFile(dir, base, []byte("{\"seq\":1}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := writePrivateExportFile(dir, base, []byte("{\"seq\":2}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := writePrivateExportFile(dir, base, []byte("{\"seq\":3}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantNames := []string{
+		base + ".json",
+		base + "-2.json",
+		base + "-3.json",
+	}
+	gotPaths := []string{first, second, third}
+	wantBodies := []string{"{\"seq\":1}\n", "{\"seq\":2}\n", "{\"seq\":3}\n"}
+	for i := range gotPaths {
+		if filepath.Base(gotPaths[i]) != wantNames[i] {
+			t.Fatalf("export[%d] name=%q, want %q", i, filepath.Base(gotPaths[i]), wantNames[i])
+		}
+		raw, err := os.ReadFile(gotPaths[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != wantBodies[i] {
+			t.Fatalf("export[%d] body=%q, want %q", i, string(raw), wantBodies[i])
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(gotPaths[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o600 {
+				t.Fatalf("export[%d] perm=%o, want 0600", i, perm)
+			}
+		}
+	}
+}
+
+// TestWritePrivateExportFileConcurrentSameSecond exports the same base from many
+// goroutines at once. Every call must own a distinct file with its own body: a
+// check-then-create would have two of them open the same name.
+func TestWritePrivateExportFileConcurrentSameSecond(t *testing.T) {
+	dir := t.TempDir()
+	base := "kimi-work-plus-usage-20261124-020500"
+	const writers = 24
+
+	paths := make([]string, writers)
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			body := []byte("{\"seq\":" + strconv.Itoa(index) + "}\n")
+			path, err := writePrivateExportFile(dir, base, body)
+			if err != nil {
+				t.Errorf("writer %d: %v", index, err)
+				return
+			}
+			paths[index] = path
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for i, path := range paths {
+		if path == "" {
+			t.Fatalf("writer %d produced no file", i)
+		}
+		if seen[path] {
+			t.Fatalf("two writers shared %q", path)
+		}
+		seen[path] = true
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "{\"seq\":" + strconv.Itoa(i) + "}\n"; string(raw) != want {
+			t.Fatalf("%q holds %q, want its own %q", path, raw, want)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != writers {
+		t.Fatalf("directory holds %d files, want %d", len(entries), writers)
+	}
+}
+
+// TestWritePrivateExportFileLeavesNoPartialFileOnFailure makes the failure path
+// visible: a directory that cannot be written must not leave a half-made export
+// behind for the next run to mistake for a complete one.
+func TestWritePrivateExportFileLeavesNoPartialFileOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if _, err := writePrivateExportFile(dir, "kimi-work-plus-diagnostics-20261124-020500", []byte("{}\n")); err == nil {
+		t.Skip("this filesystem does not enforce directory permissions")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed export left %d files behind", len(entries))
 	}
 }
