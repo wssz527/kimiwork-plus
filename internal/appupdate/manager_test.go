@@ -2491,6 +2491,118 @@ func TestSelectBestManifestCandidateSemverOrder(t *testing.T) {
 	}
 }
 
+func TestDefaultCheckPeriodIsTwoHours(t *testing.T) {
+	if defaultCheckPeriod != 2*time.Hour {
+		t.Fatalf("defaultCheckPeriod = %s, want 2h", defaultCheckPeriod)
+	}
+	if startupCheckDelay != 5*time.Second {
+		t.Fatalf("startupCheckDelay = %s, want 5s", startupCheckDelay)
+	}
+
+	mgr, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.10",
+		BuildID:        "1.1.10-test",
+		DisableAutoRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	if mgr.opts.CheckPeriod != 2*time.Hour {
+		t.Fatalf("resolved CheckPeriod = %s, want 2h", mgr.opts.CheckPeriod)
+	}
+	if mgr.opts.StartupDelay != 5*time.Second {
+		t.Fatalf("resolved StartupDelay = %s, want 5s", mgr.opts.StartupDelay)
+	}
+	if st := mgr.State(); st["autoCheck"] != true {
+		t.Fatalf("auto check should default to enabled: %#v", st)
+	}
+
+	override, err := NewManager(Options{
+		StateDir:       t.TempDir(),
+		CurrentVersion: "1.1.10",
+		BuildID:        "1.1.10-test",
+		CheckPeriod:    7 * time.Minute,
+		StartupDelay:   250 * time.Millisecond,
+		DisableAutoRun: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer override.Close()
+	if override.opts.CheckPeriod != 7*time.Minute {
+		t.Fatalf("explicit CheckPeriod = %s, want 7m", override.opts.CheckPeriod)
+	}
+	if override.opts.StartupDelay != 250*time.Millisecond {
+		t.Fatalf("explicit StartupDelay = %s, want 250ms", override.opts.StartupDelay)
+	}
+}
+
+func TestBackgroundAutoCheckHonorsSettings(t *testing.T) {
+	var manifestHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		manifestHits.Add(1)
+		http.Error(w, "feed unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	stateDir := t.TempDir()
+	if err := core.AtomicJSON(filepath.Join(stateDir, settingsFileName), Settings{Version: 1, AutoCheck: false, Channel: "stable"}); err != nil {
+		t.Fatalf("seed update settings: %v", err)
+	}
+
+	mgr, err := NewManager(Options{
+		StateDir:       stateDir,
+		CurrentVersion: "1.1.10",
+		BuildID:        "1.1.10-test",
+		FeedURL:        srv.URL + "/manifest.json",
+		HTTPClient:     srv.Client(),
+		CheckPeriod:    50 * time.Millisecond,
+		StartupDelay:   20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	if st := mgr.State(); st["autoCheck"] != false {
+		t.Fatalf("seeded auto check setting not applied: %#v", st)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	if hits := manifestHits.Load(); hits != 0 {
+		t.Fatalf("auto check ran while disabled: %d manifest requests", hits)
+	}
+
+	enabled := true
+	if _, err := mgr.UpdateSettings(&enabled, ""); err != nil {
+		t.Fatalf("enable auto check: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for manifestHits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hits := manifestHits.Load(); hits == 0 {
+		t.Fatal("auto check did not run after being enabled")
+	}
+
+	disabled := false
+	if _, err := mgr.UpdateSettings(&disabled, ""); err != nil {
+		t.Fatalf("disable auto check: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	baseline := manifestHits.Load()
+	time.Sleep(300 * time.Millisecond)
+	if hits := manifestHits.Load(); hits != baseline {
+		t.Fatalf("auto check kept running after being disabled: %d -> %d manifest requests", baseline, hits)
+	}
+}
+
 func TestCopyHelperBinaryUsesPrivateStateDirAndMode0700(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "daemon-bin")
 	want := []byte("helper-binary-content")

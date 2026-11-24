@@ -25,7 +25,7 @@ const (
 	rollbackDirName    = "rollback"
 	rollbackPrevName   = "previous"
 	rollbackMetaFile   = "metadata.json"
-	defaultCheckPeriod = 24 * time.Hour
+	defaultCheckPeriod = 2 * time.Hour
 	startupCheckDelay  = 5 * time.Second
 )
 
