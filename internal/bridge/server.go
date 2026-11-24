@@ -127,7 +127,7 @@ func reply(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, e error) {
 	code := core.ErrorCode(e)
 	status := 503
-	if strings.HasPrefix(code, "invalid_") || code == "protocol_conflict" || code == "context_window_exceeds_limit" {
+	if strings.HasPrefix(code, "invalid_") || code == "protocol_conflict" || code == "context_window_exceeds_limit" || code == "kimi_k3_model_id_conflict" {
 		status = 400
 	}
 	switch code {
@@ -180,6 +180,8 @@ func message(code string) string {
 		return "此项原生能力当前不可用，请检查后台服务状态后重试。"
 	case "connection_in_use":
 		return "仍有模型使用此连接，请先修改模型。"
+	case "operation_busy":
+		return "上一次操作仍在进行，请稍后重试。"
 	case "credentials_unavailable":
 		return "加密凭据存储不可用，密钥未保存。"
 	case "account_work_busy":

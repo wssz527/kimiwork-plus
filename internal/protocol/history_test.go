@@ -12,7 +12,7 @@ import (
 func TestGatewayForwardsKimiHistoryWithoutForeignThinking(t *testing.T) {
 	const assistantContent = `"reasoning_content":"kimi-private","reasoning_details":[{"text":"kimi-private"}],"reasoning":"kimi-private", "content":[{"type":"thinking","thinking":"kimi-private"},%s]`
 	chat := `{"model":"switch-to","reasoning_effort":"high","messages":[{"role":"user","content":"original request"},{"role":"assistant",` + strings.Replace(assistantContent, "%s", `{"type":"text","text":"visible text"}`, 1) + `,"tool_calls":[{"id":"call_a","type":"function","function":{"name":"lookup","arguments":"{\"n\":1}"}}]},{"role":"tool","tool_call_id":"call_a","content":"tool answer"},{"role":"user","content":"follow up"},{"role":"assistant","reasoning_content":"active thought","reasoning_details":[{"text":"active details"}],"reasoning":"active reasoning","content":[{"type":"thinking","thinking":"kimi-private"}],"tool_calls":[{"id":"call_b","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_b","content":"active result"}]}`
-	responses := `{"model":"switch-to","reasoning":{"effort":"high"},"input":[{"role":"user","content":"original request"},{"type":"message","role":"assistant",` + strings.Replace(assistantContent, "%s", `{"type":"output_text","text":"visible text"}`, 1) + `},{"type":"thinking","thinking":"kimi-private"},{"summary":[{"type":"summary_text","text":"kimi-private"}],"type":"reasoning"},{"type":"reasoning","id":"","encrypted_content":false,"summary":[{"type":"summary_text","text":"kimi-private"}]},{"type":"reasoning","id":"rs_native","summary":[]},{"type":"reasoning","summary":[],"encrypted_content":"native-encrypted"},{"type":"function_call","call_id":"call_a","name":"lookup","arguments":"{\"n\":1}"},{"type":"function_call_output","call_id":"call_a","output":"tool answer"},{"role":"user","content":"follow up"}]}`
+	responses := `{"model":"switch-to","reasoning":{"effort":"high"},"input":[{"role":"user","content":"original request"},{"type":"message","role":"assistant",` + strings.Replace(assistantContent, "%s", `{"type":"output_text","text":"visible text"}`, 1) + `},{"type":"thinking","thinking":"kimi-private"},{"summary":[{"type":"summary_text","text":"kimi-private"}],"type":"reasoning"},{"type":"reasoning","id":"","encrypted_content":false,"summary":[{"type":"summary_text","text":"kimi-private"}]},{"type":"reasoning","id":"msg_1_item_1","summary":[{"type":"summary_text","text":"kimi-private"}]},{"type":"reasoning","id":"anthropic_item_0","summary":[{"type":"summary_text","text":"kimi-private"}]},{"type":"reasoning","id":"rs_native","summary":[]},{"type":"reasoning","summary":[],"encrypted_content":"native-encrypted"},{"type":"reasoning","id":"msg_1_item_2","summary":[],"encrypted_content":"native-encrypted-synthetic-id"},{"type":"function_call","call_id":"call_a","name":"lookup","arguments":"{\"n\":1}"},{"type":"function_call_output","call_id":"call_a","output":"tool answer"},{"role":"user","content":"follow up"}]}`
 	for _, tc := range []struct {
 		name, route, path, upstreamPath, payload string
 		anthropic                                bool
@@ -78,9 +78,18 @@ func TestGatewayForwardsKimiHistoryWithoutForeignThinking(t *testing.T) {
 					}
 				}
 			} else if tc.route == ProtocolResponses {
-				for _, item := range []string{`{"type":"reasoning","id":"rs_native","summary":[]}`, `{"type":"reasoning","summary":[],"encrypted_content":"native-encrypted"}`} {
+				for _, item := range []string{
+					`{"type":"reasoning","id":"rs_native","summary":[]}`,
+					`{"type":"reasoning","summary":[],"encrypted_content":"native-encrypted"}`,
+					`{"type":"reasoning","id":"msg_1_item_2","summary":[],"encrypted_content":"native-encrypted-synthetic-id"}`,
+				} {
 					if !strings.Contains(body, item) {
 						t.Errorf("native Responses item %s was changed: %s", item, body)
+					}
+				}
+				for _, forbidden := range []string{`"msg_1_item_1"`, `"anthropic_item_0"`} {
+					if strings.Contains(body, forbidden) {
+						t.Errorf("synthetic reasoning item %s leaked: %s", forbidden, body)
 					}
 				}
 			} else {

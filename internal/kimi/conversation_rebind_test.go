@@ -69,10 +69,12 @@ func conversationFixture(t *testing.T) (conversationStore, string, string) {
 	home := filepath.Join(profile, "daimon-share", "daimon")
 	store := conversationStore{profile: profile, home: home, nodePath: node}
 	conversationTestSQL(t, store, `
-		db.exec("CREATE TABLE conversations (conversation_key TEXT PRIMARY KEY, extra_json TEXT, title TEXT, first_user_text TEXT, workspace_path TEXT, updated_at_ms INTEGER NOT NULL) STRICT");
-		const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?)');
-		insert.run(`+"`"+conversationFixtureKey+"`"+`, '{"runtimePreferences":{"modelAlias":"kimi-k3","thinkingLevel":"high","other":true},"unrelated":9007199254740993}', '', ' An earlier   conversation ', '/test', 20);
-		insert.run('second', '{"runtimePreferences":{"modelAlias":"byok-kth-resp/prior","thinkingLevel":"high"}}', 'Second', '', '', 10);
+		db.exec("CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
+		db.prepare("INSERT INTO schema_metadata VALUES ('schema_version', '1')").run();
+		db.exec("CREATE TABLE conversations (agent_id TEXT NOT NULL, conversation_key TEXT NOT NULL, kernel_records_path TEXT, extra_json TEXT, title TEXT, first_user_text TEXT, workspace_path TEXT, updated_at_ms INTEGER NOT NULL, PRIMARY KEY (agent_id, conversation_key)) STRICT");
+		const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+		insert.run('main', `+"`"+conversationFixtureKey+"`"+`, '/records/1', '{"runtimePreferences":{"modelAlias":"kimi-k3","thinkingLevel":"high","other":true},"unrelated":9007199254740993}', '', ' An earlier   conversation ', '/test', 20);
+		insert.run('main', 'second', '/records/2', '{"runtimePreferences":{"modelAlias":"byok-kth-resp/prior","thinkingLevel":"high"}}', 'Second', '', '', 10);
 	`)
 	dir := filepath.Join(profile, "kimi-agent")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -496,11 +498,11 @@ func TestConversationAliasMigrationPreservesSupportedEffortAndBatches(t *testing
 	const previous = "byok-kth-kimi/group/kimi-example"
 	const target = "byok-kth-kimi/kimi-k3-kwp-example"
 	conversationTestSQL(t, store, `
-		const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?)');
+		const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 		const preferences = (modelAlias, thinkingLevel) => JSON.stringify({runtimePreferences: {modelAlias, thinkingLevel}});
-		insert.run('earlier', preferences('byok-kth-kimi/group/kimi-example', 'max'), '', '', '', 1);
-		insert.run('later', preferences('byok-kth-kimi/group/kimi-example', 'high'), '', '', '', 2);
-		insert.run('malformed', 'malformed', '', '', '', 3);
+		insert.run('main', 'earlier', '/records/e', preferences('byok-kth-kimi/group/kimi-example', 'max'), '', '', '', 1);
+		insert.run('main', 'later', '/records/l', preferences('byok-kth-kimi/group/kimi-example', 'high'), '', '', '', 2);
+		insert.run('main', 'malformed', '/records/m', 'malformed', '', '', '', 3);
 	`)
 	request := conversationSQLiteRequest{Operation: "rebind", PreviousAlias: previous, ModelAlias: target,
 		SupportEfforts: []string{"low", "high"}, ThinkingLevel: "low", Limit: 1}
@@ -538,4 +540,228 @@ func TestConversationAliasMigrationPreservesSupportedEffortAndBatches(t *testing
 	if err != nil || got.Conversations[3].ThinkingLevel != "low" {
 		t.Fatalf("explicit rebind inherited old thinkingLevel: %+v, %v", got, err)
 	}
+}
+
+func TestConversationVisibilityScopeSchemaVersionAndNullPreferences(t *testing.T) {
+	store, _, _ := conversationFixture(t)
+	conversationTestSQL(t, store, `
+		const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+		insert.run('subagent', `+"`"+conversationFixtureKey+"`"+`, '/records/s', '{"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Subagent duplicate', '', '', 99);
+		insert.run('subagent', 'sub-only', '/records/s2', '{"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Subagent only', '', '', 98);
+		insert.run('main', 'temp-conv', '/records/t', '{"temporaryConversation":true,"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Temp', '', '', 97);
+		insert.run('main', 'onboarding-pending', '/records/o1', '{"onboardingImport":{},"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Onboarding pending', '', '', 96);
+		insert.run('main', 'onboarding-no-records', null, '{"onboardingImport":{"completedAt":"2026-11-24T00:00:00Z"},"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Onboarding no records', '', '', 95);
+		insert.run('main', 'fork-preparing', '/records/f1', '{"forkCreation":{"state":"preparing"},"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Fork preparing', '', '', 94);
+		insert.run('main', 'onboarding-done', '/records/o2', '{"onboardingImport":{"completedAt":"2026-11-24T00:00:00Z"},"runtimePreferences":null}', 'Onboarding done', '', '', 93);
+		insert.run('main', 'fork-ready', '/records/f2', '{"forkCreation":{"state":"ready"},"runtimePreferences":{"modelAlias":"kimi-k3"}}', 'Fork ready', '', '', 92);
+	`)
+	list, err := store.run(context.Background(), conversationSQLiteRequest{Operation: "list", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, row := range list.Conversations {
+		keys = append(keys, row.ConversationKey)
+	}
+	want := []string{"onboarding-done", "fork-ready", conversationFixtureKey, "second"}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("visible keys = %v, want %v", keys, want)
+	}
+	for _, hidden := range []string{"sub-only", "temp-conv", "onboarding-pending", "onboarding-no-records", "fork-preparing"} {
+		if _, err := store.run(context.Background(), conversationSQLiteRequest{
+			Operation: "rebind", ConversationKeys: []string{hidden}, ModelAlias: conversationFixtureAlias, ThinkingLevel: "low",
+		}); err == nil || err.Error() != "conversation_not_found" {
+			t.Fatalf("hidden conversation %s rebind = %v", hidden, err)
+		}
+	}
+	// Duplicate key in another agent must not fail main rebind, and runtimePreferences:null must be accepted.
+	if _, err := store.run(context.Background(), conversationSQLiteRequest{
+		Operation: "rebind", ConversationKeys: []string{conversationFixtureKey, "onboarding-done", "fork-ready"},
+		ModelAlias: conversationFixtureAlias, ThinkingLevel: "low",
+	}); err != nil {
+		t.Fatalf("rebind visible rows failed: %v", err)
+	}
+	subAlias := strings.TrimSpace(conversationTestSQL(t, store, `console.log(JSON.parse(db.prepare("SELECT extra_json FROM conversations WHERE agent_id = 'subagent' AND conversation_key = ?").get(`+"`"+conversationFixtureKey+"`"+`).extra_json).runtimePreferences.modelAlias)`))
+	if subAlias != "kimi-k3" {
+		t.Fatalf("subagent row was unexpectedly modified: %s", subAlias)
+	}
+	doneAlias := strings.TrimSpace(conversationTestSQL(t, store, `console.log(JSON.parse(db.prepare("SELECT extra_json FROM conversations WHERE agent_id = 'main' AND conversation_key = 'onboarding-done'").get().extra_json).runtimePreferences.modelAlias)`))
+	if doneAlias != conversationFixtureAlias {
+		t.Fatalf("runtimePreferences:null row not updated: %s", doneAlias)
+	}
+	// Unsupported schema_version must be refused.
+	conversationTestSQL(t, store, `db.prepare("UPDATE schema_metadata SET value = '2' WHERE key = 'schema_version'").run();`)
+	if _, err := store.run(context.Background(), conversationSQLiteRequest{Operation: "list", Limit: 10}); err == nil || err.Error() != "conversation_database_schema_unsupported" {
+		t.Fatalf("schema v2 = %v", err)
+	}
+}
+
+func TestConversationIntentJournalCrashRecoveryAndCancellationErrors(t *testing.T) {
+	t.Run("crash after commit converges JSON on WorkConversations when Kimi stopped", func(t *testing.T) {
+		store, selection, bindings := conversationFixture(t)
+		// Simulate DB committed but SIGKILL happened before JSON files were replaced.
+		conversationTestSQL(t, store, `
+			db.prepare("UPDATE conversations SET extra_json = json_set(extra_json, '$.runtimePreferences.modelAlias', ?, '$.runtimePreferences.thinkingLevel', ?) WHERE agent_id = 'main' AND conversation_key = ?")
+				.run('`+conversationFixtureAlias+`', 'low', `+"`"+conversationFixtureKey+"`"+`);
+		`)
+		journal := map[string]any{
+			"version":     1,
+			"hadOfficial": true,
+			"hasMore":     false,
+			"entries": []map[string]any{{
+				"key":           conversationFixtureKey,
+				"oldAlias":      "kimi-k3",
+				"oldLevel":      "high",
+				"modelAlias":    conversationFixtureAlias,
+				"thinkingLevel": "low",
+				"byok":          true,
+			}},
+		}
+		raw, _ := json.Marshal(journal)
+		conversationTestWrite(t, store.journalPath(), string(raw))
+
+		// While Kimi is running, WorkConversations must NOT touch Electron JSON files.
+		controller := &Controller{settings: ControllerSettings{UserDataDir: store.profile, ProfileMode: ProfileModeIsolated,
+			Installation: Installation{Application: "fixture"}, ConversationNodePath: store.nodePath}}
+		prevList := listOfficialProcesses
+		t.Cleanup(func() { listOfficialProcesses = prevList })
+		running := true
+		listOfficialProcesses = func(context.Context, string) ([]int, bool, string) {
+			if running {
+				return []int{42}, true, ""
+			}
+			return nil, true, ""
+		}
+		_ = controller.WorkConversations(context.Background())
+		if !store.hasPendingJournal() || conversationTestRead(t, selection) != conversationFixtureSelection {
+			t.Fatal("WorkConversations mutated JSON while Kimi was running")
+		}
+
+		// Once Kimi is stopped, WorkConversations recovers the committed journal and syncs both JSON files.
+		running = false
+		list := controller.WorkConversations(context.Background())
+		if list.Reason != "" || store.hasPendingJournal() {
+			t.Fatalf("journal not recovered: reason=%s pending=%t", list.Reason, store.hasPendingJournal())
+		}
+		if content := conversationTestRead(t, selection); !strings.Contains(content, conversationFixtureAlias) || !strings.Contains(content, `"keep":true`) {
+			t.Fatalf("selection not converged: %s", content)
+		}
+		if content := conversationTestRead(t, bindings); !strings.Contains(content, conversationFixtureAlias) || !strings.Contains(content, "byok-other") {
+			t.Fatalf("bindings not converged: %s", content)
+		}
+	})
+
+	t.Run("crash before commit removes journal and preserves JSON", func(t *testing.T) {
+		store, selection, bindings := conversationFixture(t)
+		journal := map[string]any{
+			"version":     1,
+			"hadOfficial": true,
+			"hasMore":     false,
+			"entries": []map[string]any{{
+				"key":           conversationFixtureKey,
+				"oldAlias":      "kimi-k3",
+				"oldLevel":      "high",
+				"modelAlias":    conversationFixtureAlias,
+				"thinkingLevel": "low",
+				"byok":          true,
+			}},
+		}
+		raw, _ := json.Marshal(journal)
+		conversationTestWrite(t, store.journalPath(), string(raw))
+
+		got, err := store.run(context.Background(), conversationSQLiteRequest{Operation: "recover"})
+		if err != nil || got.Recovered != "rolled_back" || store.hasPendingJournal() {
+			t.Fatalf("recover = %+v, err = %v, pending = %t", got, err, store.hasPendingJournal())
+		}
+		if conversationTestRead(t, selection) != conversationFixtureSelection || conversationTestRead(t, bindings) != conversationFixtureBindings {
+			t.Fatal("JSON files were modified during rollback recovery")
+		}
+	})
+
+	t.Run("timeout after journal write recovers committed and rolled-back outcomes", func(t *testing.T) {
+		store, selection, bindings := conversationFixture(t)
+		previous := execCommandContext
+		t.Cleanup(func() { execCommandContext = previous })
+		// First invocation simulates a hung child after journal write + DB commit; recovery must converge JSON and succeed.
+		firstCall := true
+		execCommandContext = func(ctx context.Context, node string, args ...string) *exec.Cmd {
+			if firstCall {
+				firstCall = false
+				journal, _ := json.Marshal(map[string]any{
+					"version":     1,
+					"hadOfficial": true,
+					"hasMore":     false,
+					"entries": []map[string]any{{
+						"key":           conversationFixtureKey,
+						"oldAlias":      "kimi-k3",
+						"oldLevel":      "high",
+						"modelAlias":    conversationFixtureAlias,
+						"thinkingLevel": "low",
+						"byok":          true,
+					}},
+				})
+				conversationTestSQL(t, store, `
+					db.prepare("UPDATE conversations SET extra_json = json_set(extra_json, '$.runtimePreferences.modelAlias', ?, '$.runtimePreferences.thinkingLevel', ?) WHERE agent_id = 'main' AND conversation_key = ?")
+						.run('`+conversationFixtureAlias+`', 'low', `+"`"+conversationFixtureKey+"`"+`);
+				`)
+				conversationTestWrite(t, store.journalPath(), string(journal))
+				return exec.CommandContext(ctx, node, "-e", `setInterval(() => {}, 1000)`)
+			}
+			return exec.CommandContext(ctx, node, args...)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+		defer cancel()
+		got, err := store.run(ctx, conversationSQLiteRequest{Operation: "rebind", ConversationKeys: []string{conversationFixtureKey}, ModelAlias: conversationFixtureAlias, ThinkingLevel: "low"})
+		if err != nil || !slices.Equal(got.ConversationKeys, []string{conversationFixtureKey}) || store.hasPendingJournal() {
+			t.Fatalf("post-timeout commit recovery = %+v, err = %v, pending = %t", got, err, store.hasPendingJournal())
+		}
+		if !strings.Contains(conversationTestRead(t, selection), conversationFixtureAlias) || !strings.Contains(conversationTestRead(t, bindings), conversationFixtureAlias) {
+			t.Fatal("post-timeout commit recovery did not converge both JSON files")
+		}
+
+		// Second test simulates hung child after journal write BEFORE DB commit; recovery must clean journal and report cancelled.
+		store2, selection2, bindings2 := conversationFixture(t)
+		firstCall = true
+		execCommandContext = func(ctx context.Context, node string, args ...string) *exec.Cmd {
+			if firstCall {
+				firstCall = false
+				journal, _ := json.Marshal(map[string]any{
+					"version":     1,
+					"hadOfficial": true,
+					"hasMore":     false,
+					"entries": []map[string]any{{
+						"key":           conversationFixtureKey,
+						"oldAlias":      "kimi-k3",
+						"oldLevel":      "high",
+						"modelAlias":    conversationFixtureAlias,
+						"thinkingLevel": "low",
+						"byok":          true,
+					}},
+				})
+				conversationTestWrite(t, store2.journalPath(), string(journal))
+				return exec.CommandContext(ctx, node, "-e", `setInterval(() => {}, 1000)`)
+			}
+			return exec.CommandContext(ctx, node, args...)
+		}
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 120*time.Millisecond)
+		defer cancel2()
+		if _, err := store2.run(ctx2, conversationSQLiteRequest{Operation: "rebind", ConversationKeys: []string{conversationFixtureKey}, ModelAlias: conversationFixtureAlias, ThinkingLevel: "low"}); err == nil || err.Error() != "conversation_rebind_cancelled" || store2.hasPendingJournal() {
+			t.Fatalf("post-timeout rollback recovery = %v, pending = %t", err, store2.hasPendingJournal())
+		}
+		if conversationTestRead(t, selection2) != conversationFixtureSelection || conversationTestRead(t, bindings2) != conversationFixtureBindings {
+			t.Fatal("post-timeout rollback recovery modified JSON files")
+		}
+	})
+
+	t.Run("pre-cancelled context returns accurate error code", func(t *testing.T) {
+		store, _, _ := conversationFixture(t)
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := store.run(cancelled, conversationSQLiteRequest{Operation: "rebind"}); err == nil || err.Error() != "conversation_rebind_cancelled" {
+			t.Fatalf("cancelled rebind = %v", err)
+		}
+		if _, err := store.run(cancelled, conversationSQLiteRequest{Operation: "list", Limit: 10}); err == nil || err.Error() != "conversation_database_unavailable" {
+			t.Fatalf("cancelled list = %v", err)
+		}
+	})
 }

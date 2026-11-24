@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 func cleanOpenAIHistory(payload []byte, route string) []byte {
 	field := "messages"
@@ -59,10 +62,30 @@ func isForeignResponsesThinking(item *Document) bool {
 	case "reasoning":
 		id, _ := rawString(item.values["id"])
 		encrypted, _ := rawString(item.values["encrypted_content"])
-		return id == "" && encrypted == ""
+		if encrypted != "" {
+			return false
+		}
+		return id == "" || isSyntheticItemID(id)
 	default:
 		return false
 	}
+}
+
+func isSyntheticItemID(id string) bool {
+	index := strings.LastIndex(id, "_item_")
+	if index <= 0 {
+		return false
+	}
+	suffix := id[index+len("_item_"):]
+	if suffix == "" {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		if suffix[i] < '0' || suffix[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanOpenAIAssistant(item *Document, route string, cleanReasoning bool) (edited, keep bool) {

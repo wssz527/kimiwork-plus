@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	conversationListLimit    = 100
-	conversationRebindLimit  = 500
-	conversationWriteTimeout = 30 * time.Second
+	conversationListLimit      = 100
+	conversationRebindLimit    = 500
+	conversationWriteTimeout   = 30 * time.Second
+	conversationRecoverTimeout = 5 * time.Second
+	conversationJournalName    = ".kwp-conversation-rebind.journal.json"
 )
 
 var (
@@ -96,6 +98,7 @@ type conversationSQLiteResult struct {
 	ConversationKeys []string           `json:"conversationKeys"`
 	HasMore          bool               `json:"hasMore"`
 	HadOfficial      *bool              `json:"hadOfficial"`
+	Recovered        string             `json:"recovered"`
 	Error            string             `json:"error"`
 }
 
@@ -118,8 +121,6 @@ func (c *Controller) conversationStore() (conversationStore, error) {
 }
 
 func (c *Controller) WorkConversations(ctx context.Context) ConversationList {
-	c.lifecycle.Lock()
-	defer c.lifecycle.Unlock()
 	settings := c.Settings()
 	result := ConversationList{Conversations: []WorkConversation{}, Models: []ConversationModel{}}
 	result.Application = conversationApplication(ctx, settings.Installation.Application)
@@ -128,6 +129,15 @@ func (c *Controller) WorkConversations(ctx context.Context) ConversationList {
 	if err != nil {
 		result.Reason = stableErrorCode(err, "conversation_database_unavailable")
 		return result
+	}
+	if result.Application == NotRunning && store.hasPendingJournal() {
+		c.lifecycle.Lock()
+		if conversationApplication(ctx, settings.Installation.Application) == NotRunning && !c.managedChildAlive() {
+			recoverCtx, cancel := context.WithTimeout(ctx, conversationRecoverTimeout)
+			_, _ = store.run(recoverCtx, conversationSQLiteRequest{Operation: "recover"})
+			cancel()
+		}
+		c.lifecycle.Unlock()
 	}
 	result.Models = store.models()
 	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -388,8 +398,26 @@ func addConversationModel(models []ConversationModel, row map[string]any, protoc
 		DirectAnthropicHistoryWarning: sourceKind == "custom" && protocol == "anthropic"})
 }
 
+func (s conversationStore) journalPath() string {
+	return filepath.Join(s.profile, "kimi-agent", conversationJournalName)
+}
+
+func (s conversationStore) hasPendingJournal() bool {
+	if s.profile == "" {
+		return false
+	}
+	info, err := os.Stat(s.journalPath())
+	return err == nil && info.Mode().IsRegular()
+}
+
 func (s conversationStore) run(ctx context.Context, request conversationSQLiteRequest) (conversationSQLiteResult, error) {
 	var result conversationSQLiteResult
+	if ctx.Err() != nil {
+		if request.Operation == "rebind" {
+			return result, errors.New("conversation_rebind_cancelled")
+		}
+		return result, errors.New("conversation_database_unavailable")
+	}
 	request.Database = filepath.Join(s.home, "agents", "main", "sessions", "hosted-logical", "conversations.sqlite")
 	info, err := os.Stat(request.Database)
 	if errors.Is(err, os.ErrNotExist) {
@@ -398,7 +426,7 @@ func (s conversationStore) run(ctx context.Context, request conversationSQLiteRe
 	if err != nil || !info.Mode().IsRegular() {
 		return result, errors.New("conversation_database_unavailable")
 	}
-	if request.Operation == "rebind" {
+	if s.profile != "" {
 		request.AgentDirectory = filepath.Join(s.profile, "kimi-agent")
 	}
 	input, err := json.Marshal(request)
@@ -406,6 +434,12 @@ func (s conversationStore) run(ctx context.Context, request conversationSQLiteRe
 		return result, errors.New("invalid_conversation_rebind")
 	}
 	for _, node := range conversationNodes(s.install, s.nodePath) {
+		if ctx.Err() != nil {
+			if request.Operation == "rebind" {
+				return result, errors.New("conversation_rebind_cancelled")
+			}
+			return result, errors.New("conversation_database_unavailable")
+		}
 		command := execCommandContext(ctx, node.path, "-e", conversationSQLiteScript)
 		hideBackgroundCommand(command)
 		command.Env = node.environment(command.Environ())
@@ -422,7 +456,8 @@ func (s conversationStore) run(ctx context.Context, request conversationSQLiteRe
 			case "":
 				validList := request.Operation == "list" && result.Conversations != nil
 				validRebind := request.Operation == "rebind" && result.HadOfficial != nil
-				if runErr == nil && (validList || validRebind) {
+				validRecover := request.Operation == "recover" && result.Recovered != ""
+				if runErr == nil && (validList || validRebind || validRecover) {
 					return result, nil
 				}
 			default:
@@ -430,10 +465,26 @@ func (s conversationStore) run(ctx context.Context, request conversationSQLiteRe
 			}
 		}
 		if ctx.Err() != nil {
-			if request.Operation == "rebind" && command.Process != nil {
+			if request.Operation == "rebind" {
+				if command.Process == nil {
+					return result, errors.New("conversation_rebind_cancelled")
+				}
+				if s.hasPendingJournal() {
+					recoverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), conversationRecoverTimeout)
+					recovered, recoverErr := s.run(recoverCtx, conversationSQLiteRequest{Operation: "recover"})
+					cancel()
+					if recoverErr == nil {
+						switch recovered.Recovered {
+						case "committed":
+							return recovered, nil
+						case "rolled_back":
+							return result, errors.New("conversation_rebind_cancelled")
+						}
+					}
+				}
 				return result, errConversationRollbackFailed
 			}
-			break
+			return result, errors.New("conversation_database_unavailable")
 		}
 	}
 	return result, errors.New("conversation_node_unavailable")

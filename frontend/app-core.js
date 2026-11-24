@@ -412,6 +412,7 @@ const ERROR_HINT = {
   credential_interaction_not_restored: '系统凭据交互状态未能恢复，请重启后台服务后重试。',
   credential_store_failed: '系统凭据操作未完成，请查看诊断状态；密钥未保存。',
   panel_action_busy: '上一次操作仍在执行，请等待结果。',
+  operation_busy: '上一次操作仍在进行，请稍后重试。',
   panel_action_conflict: '操作标识已被使用，请刷新后重试。',
   panel_action_limit: '短时间内操作过多，请稍后再试。',
   panel_receipt_conflict: '操作记录有冲突，请检查状态目录。',

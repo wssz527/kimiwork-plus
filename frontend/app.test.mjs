@@ -4866,25 +4866,30 @@ test('batch selection confirms Kimi restart and displays a restart failure after
   assert.match(env.get('result').textContent, /已改绑 2 个会话。Kimi 未能重启，请手动打开 Kimi/);
 });
 
-test('conversation rebind defaults to the first supported effort when the model has no default', async () => {
+test('conversation rebind prefers the first non-off supported effort when the model has no default', async () => {
   const target = { ...rebindTarget, protocol: 'google-genai', defaultEffort: '',
     supportEfforts: ['zeta', 'max', 'high', 'low', 'off', 'alpha', 'medium', 'xhigh'] };
+  const offOnly = { ...target, alias: 'byok-custom/off-only', displayName: 'OffOnly', supportEfforts: ['off'] };
   const chat = { ...target, alias: 'byok-custom/chat', protocol: 'openai', supportEfforts: [] };
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [target, chat], application: 'not_running', kimiRunning: false },
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [target, offOnly, chat], application: 'not_running', kimiRunning: false },
     { conversationKeys: ['official-1'], kimiRestarted: false });
   await openConversationTestPanel(env);
   assert.deepEqual(env.get('model').children.slice(1).map(option => option.textContent),
-    ['Claude · Google GenAI · 直连', 'Claude · OpenAI Chat · 直连']);
+    ['Claude · Google GenAI · 直连', 'OffOnly · Google GenAI · 直连', 'Claude · OpenAI Chat · 直连']);
   env.get('model').value = target.alias;
   await env.get('model').fire('change');
   assert.deepEqual(env.get('effort').children.map(option => option.value), ['off', 'low', 'medium', 'high', 'xhigh', 'max', 'alpha', 'zeta']);
-  assert.equal(env.get('effort').value, 'off');
+  assert.equal(env.get('effort').value, 'low');
   const [first] = env.get('list').querySelectorAll();
   first.checked = true;
   await env.get('list').fire('change', first);
   await env.get('review').fire('click');
+  assert.match(env.get('confirm-text').textContent, /思考档位：low/);
   await env.get('submit').fire('click');
-  assert.equal(env.calls[1][1].body.thinkingLevel, 'off');
+  assert.equal(env.calls[1][1].body.thinkingLevel, 'low');
+  env.get('model').value = offOnly.alias;
+  await env.get('model').fire('change');
+  assert.equal(env.get('effort').value, 'off');
   env.get('model').value = chat.alias;
   await env.get('model').fire('change');
   assert.equal(env.get('effort').disabled, true);

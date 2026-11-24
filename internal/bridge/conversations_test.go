@@ -123,3 +123,20 @@ func TestConversationAliasMigrationRejectsMixedSelection(t *testing.T) {
 		t.Fatal("accepted a migration request with conversation keys")
 	}
 }
+
+func TestServerMapsK3ConflictAndOperationBusyErrors(t *testing.T) {
+	for _, tc := range []struct {
+		code       string
+		wantStatus int
+		wantText   string
+	}{
+		{"kimi_k3_model_id_conflict", http.StatusBadRequest, "冲突"},
+		{"operation_busy", http.StatusConflict, "上一次操作仍在进行"},
+	} {
+		w := httptest.NewRecorder()
+		fail(w, errors.New(tc.code))
+		if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantText) {
+			t.Fatalf("fail(%s) = %d %s, want %d containing %q", tc.code, w.Code, w.Body.String(), tc.wantStatus, tc.wantText)
+		}
+	}
+}

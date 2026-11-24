@@ -30,8 +30,6 @@ func (n *Native) rebindWorkConversations(ctx context.Context, in core.Document) 
 	n.logOperationStarted(id, action)
 	defer func() { n.finishOperation(id, "done", nil, err) }()
 
-	n.service.mutation.Lock()
-	defer n.service.mutation.Unlock()
 	if ctx.Err() != nil {
 		err = errors.New("conversation_rebind_cancelled")
 		return nil, err

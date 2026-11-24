@@ -935,7 +935,7 @@ function mountConversationRebind() {
     if (model?.defaultEffort) choices.unshift(['', '模型默认（' + model.defaultEffort + '）']);
     else if (!efforts.length) choices.push(['', '自动']);
     options(ui.effort, choices);
-    ui.effort.value = choices[0][0];
+    ui.effort.value = model?.defaultEffort ? '' : (efforts.find(level => level !== 'off') || choices[0][0]);
     ui.effort.disabled = !efforts.length;
   }
 
@@ -1027,7 +1027,10 @@ function mountConversationRebind() {
       confirmed.migratePreviousAlias = true;
       setText(ui['confirm-text'], `将使用旧别名的「${model.displayName}」会话迁移到当前别名${suffix}。`);
     } else {
-      setText(ui['confirm-text'], `将 ${confirmed.conversationKeys.length} 个会话改绑到「${model.displayName}」${suffix}。`);
+      const effortNote = confirmed.thinkingLevel
+        ? `（思考档位：${confirmed.thinkingLevel}）`
+        : (model.defaultEffort ? `（思考档位：默认 ${model.defaultEffort}）` : '');
+      setText(ui['confirm-text'], `将 ${confirmed.conversationKeys.length} 个会话改绑到「${model.displayName}」${effortNote}${suffix}。`);
     }
     setText(ui.submit, migrate ? '确认迁移' : confirmed.restartKimi ? '确认改绑并重启' : '确认改绑');
     setHidden(ui.confirm, false);
