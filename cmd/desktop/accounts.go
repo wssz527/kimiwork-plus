@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wssz527/kimiwork-plus/internal/bridge"
@@ -82,8 +80,8 @@ func (c accountTrayClient) request(ctx context.Context, method, path string, inp
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return errors.New("account_action_rejected")
 	}
-	raw, err := io.ReadAll(io.LimitReader(res.Body, (64<<10)+1))
-	if err != nil || len(raw) > 64<<10 {
+	raw, err := io.ReadAll(io.LimitReader(res.Body, trayResponseLimit+1))
+	if err != nil || len(raw) > trayResponseLimit {
 		return errors.New("account_service_invalid_response")
 	}
 	if output != nil && json.Unmarshal(raw, output) != nil {
@@ -92,53 +90,46 @@ func (c accountTrayClient) request(ctx context.Context, method, path string, inp
 	return nil
 }
 
-func installAccountTray(app *application.App, tray *application.SystemTray, menu *application.Menu, dir string, showAccounts func()) {
-	client := accountTrayClient{dir: dir, client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	accounts := menu.AddSubmenu("切换 Kimi 账号")
-	accounts.Add("打开账号管理").OnClick(func(*application.Context) { showAccounts() })
-	var loading atomic.Bool
-	open := func() {
-		if !loading.CompareAndSwap(false, true) {
-			return
-		}
-		go func() {
-			var response struct {
-				Accounts trayAccounts `json:"accounts"`
-			}
-			err := client.request(context.Background(), http.MethodGet, "/api/accounts", nil, &response)
-			application.InvokeAsync(func() {
-				defer loading.Store(false)
-				accounts.Clear()
-				if err != nil || response.Accounts.State != "ready" {
-					accounts.Add("账号状态暂不可读").SetEnabled(false)
-				} else if len(response.Accounts.Accounts) == 0 {
-					accounts.Add("尚未保存账号").SetEnabled(false)
-				} else {
-					for _, row := range response.Accounts.Accounts {
-						id := row.ID
-						label := trayAccountLabel(row)
-						item := accounts.AddCheckbox(label, row.ID == response.Accounts.CurrentID)
-						item.SetEnabled(row.ID != response.Accounts.CurrentID && !response.Accounts.Adding && response.Accounts.RestoreAccountID == "")
-						item.OnClick(func(*application.Context) {
-							showAccounts()
-							go func() {
-								err := client.request(context.Background(), http.MethodPost, "/api/actions", map[string]any{"action": "account-switch", "accountId": id}, nil)
-								if err != nil {
-									application.InvokeAsync(func() {
-										app.Dialog.Error().SetTitle("账号切换未开始").SetMessage("本机后台未接受切换请求。请在账号管理中查看当前状态后重试。").Show()
-									})
-								}
-							}()
+type trayAccountsView struct {
+	app    *application.App
+	menu   *application.Menu
+	client accountTrayClient
+	show   func()
+}
+
+func (v *trayAccountsView) refresh(state trayAccounts, err error) {
+	v.menu.Clear()
+	if err != nil || state.State != "ready" {
+		v.menu.Add("账号状态暂不可读").SetEnabled(false)
+	} else if len(state.Accounts) == 0 {
+		v.menu.Add("尚未保存账号").SetEnabled(false)
+	} else {
+		for _, row := range state.Accounts {
+			id := row.ID
+			label := trayAccountLabel(row)
+			item := v.menu.AddCheckbox(label, row.ID == state.CurrentID)
+			item.SetEnabled(row.ID != state.CurrentID && !state.Adding && state.RestoreAccountID == "")
+			item.OnClick(func(*application.Context) {
+				if v.show != nil {
+					v.show()
+				}
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), trayAccountActionTimeout)
+					defer cancel()
+					err := v.client.request(ctx, http.MethodPost, "/api/actions", map[string]any{"action": "account-switch", "accountId": id}, nil)
+					if err != nil {
+						application.InvokeAsync(func() {
+							v.app.Dialog.Error().SetTitle("账号切换未开始").SetMessage("本机后台未接受切换请求。请在账号管理中查看当前状态后重试。").Show()
 						})
 					}
-				}
-				accounts.AddSeparator()
-				accounts.Add("打开账号管理").OnClick(func(*application.Context) { showAccounts() })
-				menu.Update()
-				tray.OpenMenu()
+				}()
 			})
-		}()
+		}
 	}
-	tray.OnClick(open)
-	tray.OnRightClick(open)
+	v.menu.AddSeparator()
+	v.menu.Add("打开账号管理").OnClick(func(*application.Context) {
+		if v.show != nil {
+			v.show()
+		}
+	})
 }

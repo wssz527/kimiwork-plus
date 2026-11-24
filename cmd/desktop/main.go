@@ -32,6 +32,48 @@ const openAccountsJS = `(() => {
   }
 })();`
 
+const openConversationsJS = `(() => {
+  const open = () => {
+    if (typeof window.__kwpOpenConversations === 'function') {
+      window.__kwpOpenConversations();
+      return;
+    }
+    document.getElementById('nav-conversations')?.click();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open, { once: true });
+  } else {
+    open();
+  }
+})();`
+
+const openUpdatesJS = `(() => {
+  const open = () => {
+    if (typeof window.__kwpOpenUpdates === 'function') {
+      window.__kwpOpenUpdates();
+      return;
+    }
+    document.getElementById('nav-maintenance')?.click();
+    document.getElementById('settings-tab-connection')?.click();
+    const panel = document.getElementById('update-panel');
+    if (panel) {
+      panel.scrollIntoView({ block: 'start' });
+      document.getElementById('upd-check')?.focus({ preventScroll: true });
+    }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open, { once: true });
+  } else {
+    open();
+  }
+})();`
+
+var windowNavScripts = map[string]string{
+	"accounts":      openAccountsJS,
+	"conversations": openConversationsJS,
+	"updates":       openUpdatesJS,
+}
+
 func singleInstanceEncryptionKey(stateDir string) [32]byte {
 	clean := filepath.Clean(strings.TrimSpace(stateDir))
 	if abs, err := filepath.Abs(clean); err == nil {
@@ -44,14 +86,14 @@ func singleInstanceEncryptionKey(stateDir string) [32]byte {
 }
 
 type windowNavController struct {
-	mu                  sync.Mutex
-	waitForNavFinish    bool
-	navLoaded           bool
-	loadedOriginURL     string
-	loadedKey           string
-	pendingOpenAccounts bool
-	setURL              func(string)
-	execJS              func(string)
+	mu               sync.Mutex
+	waitForNavFinish bool
+	navLoaded        bool
+	loadedOriginURL  string
+	loadedKey        string
+	pendingNavTarget string
+	setURL           func(string)
+	execJS           func(string)
 }
 
 func newWindowNavController(waitForNavFinish bool, initialOriginURL, initialKey string, setURL, execJS func(string)) *windowNavController {
@@ -67,12 +109,12 @@ func newWindowNavController(waitForNavFinish bool, initialOriginURL, initialKey 
 func (c *windowNavController) OnNavigationFinished() {
 	c.mu.Lock()
 	c.navLoaded = true
-	run := c.pendingOpenAccounts
-	c.pendingOpenAccounts = false
+	target := c.pendingNavTarget
+	c.pendingNavTarget = ""
 	execJS := c.execJS
 	c.mu.Unlock()
-	if run && execJS != nil {
-		execJS(openAccountsJS)
+	if target != "" && execJS != nil {
+		execJS(windowNavScripts[target])
 	}
 }
 
@@ -100,19 +142,34 @@ func (c *windowNavController) ApplyEndpoint(next bridge.Endpoint) {
 	}
 }
 
-func (c *windowNavController) RequestOpenAccounts() {
+func (c *windowNavController) RequestNavigate(target string) {
+	if _, ok := windowNavScripts[target]; !ok {
+		return
+	}
 	c.mu.Lock()
 	if c.waitForNavFinish && !c.navLoaded {
-		c.pendingOpenAccounts = true
+		c.pendingNavTarget = target
 		c.mu.Unlock()
 		return
 	}
-	c.pendingOpenAccounts = false
+	c.pendingNavTarget = ""
 	execJS := c.execJS
 	c.mu.Unlock()
 	if execJS != nil {
-		execJS(openAccountsJS)
+		execJS(windowNavScripts[target])
 	}
+}
+
+func (c *windowNavController) RequestOpenAccounts() {
+	c.RequestNavigate("accounts")
+}
+
+func (c *windowNavController) RequestOpenConversations() {
+	c.RequestNavigate("conversations")
+}
+
+func (c *windowNavController) RequestOpenUpdates() {
+	c.RequestNavigate("updates")
 }
 
 func windowDiagnosticMessage(goos, status string) string {
@@ -271,29 +328,7 @@ func main() {
 		tray.SetLabel("K+ · 页面加载失败")
 		tray.SetTooltip("KimiWork + · 页面加载失败")
 	})
-	trayMenu := app.NewMenu()
-	trayMenu.Add("打开 KimiWork +").OnClick(func(*application.Context) { openWindow() })
-	trayMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
-		message := windowDiagnosticMessage(runtime.GOOS, diagnostics.Status())
-		app.Dialog.Info().SetTitle("KimiWork + 窗口诊断").SetMessage(message).Show()
-	})
-	trayMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
-		path, err := diagnostics.Export(*dir)
-		if err != nil {
-			app.Dialog.Error().SetTitle("无法导出窗口诊断").SetMessage("请检查应用状态目录是否可写，然后重试。").Show()
-			return
-		}
-		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
-	})
-	installAccountTray(app, tray, trayMenu, *dir, func() {
-		openWindow()
-		application.InvokeAsync(func() {
-			nav.RequestOpenAccounts()
-		})
-	})
-	trayMenu.AddSeparator()
-	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })
-	tray.SetMenu(trayMenu)
+	installTray(app, tray, *dir, diagnostics, openWindow, nav)
 	if err := app.Run(); err != nil {
 		app.Dialog.Error().SetTitle("KimiWork + 窗口启动失败").SetMessage("系统未能创建应用窗口。请重新打开应用；若仍失败，请导出窗口诊断。\n\n诊断信息：" + err.Error()).Show()
 		log.Printf("desktop_window_failed: %v", err)
