@@ -1,6 +1,6 @@
-import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
-import { isInFlight, renderActions, syncState } from './app-overview.js';
+import { isInFlight, renderActions, renderOverviewStatus, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
 
 /* ---------- connection helpers ---------- */
@@ -1582,66 +1582,12 @@ function renderOnboard() {
   }
 }
 
+/* 总览主卡只有一个渲染入口：renderOverviewStatus 同时维护 verdict、主动作、
+   #ob-retry-apply 与 #handoff。这个旧名字保留为委托，避免模型页与向导里的
+   既有调用绕过状态机再写一遍 #ob-verdict-*。 */
 function renderOnboardOverview(data = state.data) {
   if (!data) return;
-  const draft = state.onboard || {};
-  const busy = Boolean(draft.busy || draft.saving);
-  const canApply = Boolean(connectionsChanged(data));
-  if (dom.onboardRetryApply) {
-    setHidden(dom.onboardRetryApply, !(canApply && applyAvailability(data) === 'pending'));
-    dom.onboardRetryApply.disabled = !canApply || busy;
-  }
-  const sync = syncState(data);
-  if (dom.onboardVerdict) {
-    setDot(dom.onboardVerdictDot, sync.tone);
-    setText(dom.onboardVerdictWord, sync.word);
-    setText(dom.onboardVerdictNote, sync.note);
-  }
-  if (dom.handoff) {
-    const operation = data.operation;
-    const activeAction = operation && ['launch-kimi', 'restart-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
-    dom.handoff.dataset.state = (activeAction && isInFlight(operation)) || ['authorizing', 'busy', 'importing'].includes(sync.code) ? 'running' : 'idle';
-    dom.handoff.dataset.tone = sync.tone;
-  }
-  renderLaunch(data);
-}
-
-function renderLaunch(data) {
-  if (!dom.onboardLaunch) return;
-  const launchActions = ['launch-kimi', 'open-work', 'restart-kimi'];
-  const running = isInFlight(data?.operation) && launchActions.includes(data.operation.action);
-  const blocked = isInFlight(data?.operation) && !running;
-  const sync = syncState(data);
-  const alreadyRunning = data?.kimiProcess?.running === true;
-  const integration = data?.integration;
-  const isDirect = data?.integrationMode === 'direct';
-  const needsRestart = (!isDirect && integration?.desktop?.managed === false) || ['manual-exit', 'restart'].includes(sync.code);
-  const action = !alreadyRunning ? 'launch-kimi' : needsRestart ? 'restart-kimi' : 'open-work';
-  dom.onboardLaunch.dataset.action = action;
-  dom.onboardLaunch.dataset.profileMode = '';
-  dom.onboardLaunch.hidden = false;
-  dom.onboardLaunch.disabled = running || blocked || Boolean(state.pendingAction);
-  setText(dom.onboardLaunch, ACTION_LABEL[action]);
-  dom.onboardLaunch.setAttribute('aria-busy', running ? 'true' : 'false');
-  if (dom.onboardLaunchHint) {
-    const hint = action === 'restart-kimi' ? '点击后会正常退出 Kimi，再沿用当前登录和 Work 数据重新启动。' : action === 'launch-kimi' ? recoveryCopy(sync) : null;
-    setHidden(dom.onboardLaunchHint, !hint);
-    setText(dom.onboardLaunchHint, hint || '');
-  }
-}
-
-function recoveryCopy(sync) {
-  return {
-    login: '请先在 Kimi Work 登录，再点「打开 / 启动 Kimi」。',
-    authorization: '需要一次系统授权；点「打开 / 启动 Kimi」继续，不会反复弹窗。',
-    busy: 'Kimi 正在处理任务，空闲后会自动继续；现在不需要重复点击。',
-    conflict: '检测到其他来源的接入，未覆盖；请先核对 Kimi 设置中的现有配置。',
-    'manual-exit': '点击「正常退出并重启 Kimi」，由产品请求系统正常退出并受管重启。',
-    'waiting-quit': '退出请求已发出；关闭完成后会自动受管重启，请等待运行状态读回。',
-    daimon: '模型暂时还不能在 Kimi 里选择；后台会自动对齐，不用重复点击或重启桌面。',
-    synced: '已核对模型目录。启动后可在 Work 中选择模型。',
-    imported: '已导入模型目录，后台还会核对；需要时仍可点「打开 / 启动 Kimi」。',
-  }[sync.code] || null;
+  renderOverviewStatus(data);
 }
 
 
@@ -2626,7 +2572,7 @@ async function saveConnections() {
       state.conns.draft = connectionDraftFrom(state.data);
       state.conns.dirty = false;
       renderAll();
-      showToast('已保存。请按同步状态同步到 Work。', 'ok');
+      showToast('已保存，后台将自动同步到 Kimi Work。', 'ok');
     } else {
       state.connsSaving = false;
       await loadState({ silent: true });

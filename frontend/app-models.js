@@ -379,9 +379,32 @@ function routeIdFor(connectionId, upstreamModelId, protocol) {
 }
 
 /* 换连接或手改上游 ID 时只该改前缀与末段：协议家族沿用当前路由 ID，
-   否则用户已经确认的 Chat/Responses 选择会被「按上游名猜一次」改掉。 */
-function routeIdPreservingProtocol(connectionId, upstreamModelId, currentId) {
-  return routeIdFor(connectionId, upstreamModelId, modelFamilyFor(currentId));
+   否则用户已经确认的 Chat/Responses 选择会被「按上游名猜一次」改掉。
+   但连接只允许单一协议时以连接为准——否则会生成一个保存必被拒的 resp-
+   路由。预设协议只在路由与连接都没给出结论时参与。 */
+function draftProtocolFamily(draft) {
+  if (!draft) return null;
+  const currentFamily = modelFamilyFor(draft.id);
+  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
+  const allowed = connection && Array.isArray(connection.protocols) && connection.protocols.length
+    ? connection.protocols : null;
+  if (allowed) {
+    if (allowed.length === 1) return allowed[0];
+    if (currentFamily && allowed.includes(currentFamily)) return currentFamily;
+    return preferredProtocol(allowed);
+  }
+  if (currentFamily) return currentFamily;
+  const preset = providerPreset(draft.providerPresetId) || providerPreset((connection || {}).providerPresetId);
+  const presetProtocols = preset && Array.isArray(preset.protocols) && preset.protocols.length ? preset.protocols : null;
+  if (presetProtocols) return preferredProtocol(presetProtocols);
+  return null;
+}
+
+/* 手输上游模型名或换连接时的默认路由 ID：协议段优先服从连接与预设，
+   都对不上时才按上游名猜。 */
+function suggestedRouteId(draft) {
+  if (!draft) return '';
+  return routeIdFor(draft.connectionId, draft.upstreamModelId, draftProtocolFamily(draft));
 }
 
 function connectionRowsOf(data) {
@@ -1345,6 +1368,20 @@ function rebaseEditor() {
   showToast('已按最新配置保留你的修改，请核对后再次保存。', 'ok');
 }
 
+/* 这些字段都在「高级」折叠区内：保存被拦下时必须自动展开，否则用户只看到
+   保存按钮变灰，却找不到要改哪一行。 */
+const ADVANCED_ERROR_PATTERNS = [
+  /^模型 ID/,
+  /^已存在相同 ID 的模型/,
+  /定价/,
+  /备用连接/,
+  /当前模型路由 ID 会被解析为/,
+];
+
+function errorNeedsAdvanced(message) {
+  return ADVANCED_ERROR_PATTERNS.some((pattern) => pattern.test(String(message || '')));
+}
+
 function validateEditor(editor) {
   const { model, errors } = buildModel(editor.draft);
   const models = (state.data && state.data.models) || [];
@@ -1358,6 +1395,7 @@ function validateEditor(editor) {
     errors.push('连接「' + connectionLabel(connection) + '」只允许 ' + connection.protocols.map(protocolLabel).join('/')
       + '，当前模型路由 ID 会被解析为 ' + protocolLabel(model.protocol) + '。');
   }
+  if (dom.mAdvanced && errors.some(errorNeedsAdvanced)) dom.mAdvanced.open = true;
   return { model, errors };
 }
 
@@ -1725,7 +1763,7 @@ function renderEditorRouting(editor) {
   syncSelectOptions(dom.mConnection, options, draft.connectionId || '');
   if (dom.mConnection) dom.mConnection.disabled = !rows.length || state.modelsSaving;
 
-  const suggested = routeIdFor(draft.connectionId, draft.upstreamModelId);
+  const suggested = suggestedRouteId(draft);
   /* 只有用户明确给了上游 ID 且协议已被确认时，才把建议值自动写进路由 ID。
      协议待确认（picker 命中未声明协议的候选）时留空，交给用户手填。 */
   if (suggested && draft.protocolConfirmed !== false && !String(draft.id || '').trim()) {
@@ -1821,7 +1859,7 @@ function renderBudgetControls(editor) {
 
 /* ---------- saving ---------- */
 
-async function saveCatalogue(models, { close = true, message = '已保存。请按同步状态同步到 Work。' } = {}) {
+async function saveCatalogue(models, { close = true, message = '已保存，后台将自动同步到 Kimi Work。' } = {}) {
   const data = state.data;
   if (!data || state.modelsSaving) return false;
   if (!configReady(data)) {
@@ -1944,7 +1982,9 @@ export {
   resetModelSignature,
   resolveAlias,
   routeIdFor,
-  routeIdPreservingProtocol,
+  draftProtocolFamily,
+  suggestedRouteId,
+  errorNeedsAdvanced,
   runConnectionCheck,
   runDiscovery,
   saveCatalogue,

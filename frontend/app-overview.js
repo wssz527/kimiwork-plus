@@ -1,4 +1,4 @@
-import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard, renderOnboardOverview } from './app-connections.js';
+import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
 import { clearDisconnectConfirm, handleSaveFailure, loadState, runAction, setView } from './app.js';
@@ -26,25 +26,36 @@ function restartBannerState(data) {
   const models = Array.isArray(data?.models) ? data.models : [];
   const running = data?.kimiProcess?.running === true;
   const managed = data?.integration?.desktop?.managed === true;
-  const pendingWork = auto.pending === true || syncNeedsImport(data);
-  const waitingUnmanaged = auto.state === 'waiting_unmanaged'
-    || (running && !managed && models.length > 0 && pendingWork);
-  if (waitingUnmanaged) {
-    return {
-      action: 'restart-kimi',
-      label: '重启并接管 Kimi 生效',
-      text: '检测到外部启动的官方 Kimi Work 正在运行。需要重启并接管一次，才能把最新模型配置同步到它的模型菜单。',
-    };
-  }
-  const unadopted = running && managed && data?.integration?.applied === true
-    && data?.integration?.adopted !== true
-    && !['idle', 'scheduled', 'syncing', 'deferred_offline', 'waiting_unmanaged'].includes(auto.state || '');
-  if (auto.state === 'requires_restart' || nativeRestartReceipt(data) || unadopted) {
-    return {
-      action: 'restart-kimi',
-      label: '立即重启 Kimi 生效',
-      text: '模型菜单已更新，重启 Kimi Work 后即可在下拉框看到最新变化。',
-    };
+  /* 已移除接管或兼容性门禁拦住写入时，重启与接管都不会让模型出现：
+     这时只保留末尾的凭据授权提示，其余分支全部跳过。 */
+  const restartMoot = modelTakeoverRemoved(data) || data?.compatibility?.guards?.modelSyncWriteBlocked === true;
+  const direct = savedIntegrationMode(data) === 'direct';
+  /* 直连不可用或没有合格模型时，催促「重启并接管」只会让用户白重启一次：
+     真正要做的是更新官方 Kimi 或补齐可直连模型。 */
+  const directLimited = direct && (directModeOf(data)?.supported === false || directHasNoEligibleModels(data));
+  if (!restartMoot && !directLimited) {
+    const pendingWork = auto.pending === true || syncNeedsImport(data);
+    const waitingUnmanaged = auto.state === 'waiting_unmanaged'
+      || (running && !managed && models.length > 0 && pendingWork);
+    if (waitingUnmanaged) {
+      return {
+        action: 'restart-kimi',
+        label: '重启并接管 Kimi 生效',
+        text: '检测到外部启动的官方 Kimi Work 正在运行。需要重启并接管一次，才能把最新模型配置同步到它的模型菜单。',
+      };
+    }
+    /* failed / waiting_login 不是「已写入、只差重启」：同步没成功或还没登录时
+       说「模型菜单已更新」是错的，交给总览说明真正原因。 */
+    const unadopted = running && managed && data?.integration?.applied === true
+      && data?.integration?.adopted !== true
+      && !['idle', 'scheduled', 'syncing', 'deferred_offline', 'waiting_unmanaged', 'failed', 'waiting_login'].includes(auto.state || '');
+    if (auto.state === 'requires_restart' || nativeRestartReceipt(data) || unadopted) {
+      return {
+        action: 'restart-kimi',
+        label: '立即重启 Kimi 生效',
+        text: '模型菜单已更新，重启 Kimi Work 后即可在下拉框看到最新变化。',
+      };
+    }
   }
   if (credentialAuthPending(data)) {
     return {
@@ -114,7 +125,7 @@ function syncState(data) {
     return { code: 'restored', tone: 'neutral', word: blocked ? '已移除接管' : '已移除接管，可重新同步',
       note: blocked
         ? '本产品同步的模型来源已从官方 Kimi 移除；本地服务商和模型仍保留。当前官方 Kimi 未通过模型同步兼容性检查，暂不可重新同步。'
-        : '本产品同步的模型来源已从官方 Kimi 移除；本地服务商和模型仍保留，点击「同步到 Work」即可重新接管。' };
+        : '本产品同步的模型来源已从官方 Kimi 移除；本地服务商和模型仍保留，点「重新同步模型目录」即可重新接管。' };
   }
   /* 直连模式的判断必须排在网关分支之前：在直连下，官方 Kimi 直接访问服务商，
      网关是否运行、有没有受管子进程都不影响模型可用性。 */
@@ -162,7 +173,7 @@ function syncState(data) {
   }
   if (has('account_changed', 'native_import_account_changed') && info.readback?.accountVerified === true) {
     return { code: 'pending', tone: 'warn', word: '当前账号待同步',
-      note: '当前账号已登录，模型目录还未与此账号完成核对。请在模型页同步到 Work。' };
+      note: '当前账号已登录，模型目录还未与此账号完成核对。请在模型与服务商页点「重新同步模型目录」完成核对。' };
   }
   if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
@@ -204,7 +215,7 @@ function syncState(data) {
      切到哪一侧，只说明收尾欠清理。 */
   if (directRouteCleanupPending(data)) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
-      note: '新配置已写入并读回，但旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。' };
+      note: '新配置已写入并读回，但旧的服务商来源仍保留着；请点「重新同步模型目录」重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。' };
   }
   /* 只有 synchronized 声明原生 profile 已核对。已保存、已导入和已核对是三件
      不同的事：目录证据也不能被夸大成已经真实选模或已经收到回复。 */
@@ -264,7 +275,7 @@ function syncState(data) {
 /* 总览只说用户此刻要做什么：能直接切换、正在自动同步、要重启、要接管，
    或者只差一次登录/授权。原生对账细节仍留在设置页与诊断里。 */
 function overviewState(data) {
-  const base = { launch: 'launch-kimi', launchLabel: '打开 Kimi Work' };
+  const base = { launch: 'launch-kimi', launchLabel: '启动 Kimi Work' };
   if (!data) return { code: 'loading', tone: 'neutral', word: '读取中', note: '正在读取接入状态…', ...base };
   const auto = autoSyncOf(data);
   const models = Array.isArray(data.models) ? data.models : [];
@@ -281,13 +292,28 @@ function overviewState(data) {
     return { code: 'blocked', tone: 'bad', word: '同步需要处理',
       note: '当前官方 Kimi 版本未通过模型同步兼容性检查，已暂停写入；本机网关照常运行。请更新官方 Kimi 或本软件后重试。', ...base };
   }
+  /* 直连的硬限制排在重启与接管之前：版本不支持时重启多少次也不会成功，
+     没有合格模型时缺的是模型声明而不是一次接手。 */
+  if (direct) {
+    if (directModeOf(data)?.supported === false) {
+      return { code: 'unsupported', tone: 'bad', word: '当前官方 Kimi 不支持直连',
+        note: '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或到「设置 → 接入与更新」改用本机网关模式。',
+        launch: 'open-connection', launchLabel: '查看接入模式' };
+    }
+    if (models.length && directHasNoEligibleModels(data)) {
+      return { code: 'no-eligible', tone: 'warn', word: '没有可直连的模型',
+        note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在「模型与服务商」补齐这三项。',
+        launch: 'open-models', launchLabel: '前往补齐模型' };
+    }
+  }
   if (auto.state === 'waiting_login') {
     return { code: 'login', tone: 'warn', word: '需要登录 Kimi',
       note: '请先在官方 Kimi 窗口完成登录；保存的模型会在登录后自动同步。', ...base };
   }
   if (!models.length) {
     return { code: 'empty', tone: 'neutral', word: '等待添加模型',
-      note: '先在「模型与服务商」添加至少一个服务商与模型；保存后会自动同步。', ...base };
+      note: '先在「模型与服务商」添加至少一个服务商与模型；保存后会自动同步。',
+      launch: 'open-models', launchLabel: '前往添加模型' };
   }
   if (auto.state === 'requires_restart' || nativeRestartReceipt(data)) {
     return { code: 'restart', tone: 'warn', word: '需重启 Kimi 生效',
@@ -301,7 +327,9 @@ function overviewState(data) {
       note: '检测到外部启动的官方 Kimi 正在运行；重启并接管一次即可同步最新模型。',
       launch: 'restart-kimi', launchLabel: '重启并接管 Kimi' };
   }
-  if (auto.state === 'scheduled' || auto.state === 'syncing' || operation.action === 'auto-sync') {
+  /* 只有仍在跑的那次 auto-sync 才是「正在同步」：完成后 action 还是 auto-sync，
+     状态却已经是 synced/failed，单看 action 会让总览永远卡在同步中。 */
+  if (auto.state === 'scheduled' || auto.state === 'syncing' || (operation.action === 'auto-sync' && isInFlight(operation))) {
     return { code: 'syncing', tone: 'warn', word: '正在自动同步…',
       note: '正在把已保存的模型写入 Kimi Work；完成后即可在模型下拉框看到。', ...base };
   }
@@ -312,20 +340,27 @@ function overviewState(data) {
   if (auto.state === 'failed') {
     if (auto.reason === 'direct_prepare_required') {
       return { code: 'prepare', tone: 'warn', word: '同步需要处理',
-        note: '直连模式首次写入静态 hosts 需要一次系统授权。打开「设置 → 接入与更新」，点一次「重新同步模型目录」完成授权即可。', ...base };
+        note: '直连模式首次写入静态 hosts 需要一次系统授权。打开「设置 → 接入与更新 → 高级排障」，点一次「重新同步模型目录」完成授权即可。', ...base };
     }
     const reason = auto.reason ? reasonText(auto.reason) : '';
     return { code: 'failed', tone: 'bad', word: '同步需要处理',
       note: (reason || '后台自动同步未能完成') + '。可在「设置 → 接入与更新」查看原因并重试。', ...base };
   }
   if (direct) {
-    const ready = directImportComplete(data) && directStaticHostsReady(data);
+    const ready = directImportComplete(data) && directStaticHostsReady(data) && !directRouteCleanupPending(data);
     if (!ready) {
       return { code: 'deferred', tone: 'warn', word: '已保存，打开 Kimi 时自动同步',
-        note: '直连配置尚未写入官方 Kimi；打开 Kimi Work 或到设置页重新同步一次即可完成。', ...base };
+        note: directRouteCleanupPending(data)
+          ? '新的直连配置已写入，但旧的服务商来源还没清理；后台会重试收尾，也可到「设置 → 接入与更新 → 高级排障」重新同步一次。'
+          : '直连配置尚未写入官方 Kimi；打开 Kimi Work 或到「设置 → 接入与更新 → 高级排障」重新同步一次即可完成。', ...base };
     }
     return { code: 'ready', tone: 'ok', word: '已就绪',
       note: '官方 Kimi 正在直连第三方模型；退出本软件后也能继续使用。', ...base };
+  }
+  /* 从直连切回网关时旧来源可能还欠清理：这时说「已就绪」会让人直接退出后台。 */
+  if (directRouteCleanupPending(data)) {
+    return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
+      note: '新配置已写入并读回，但旧的服务商来源仍保留着；后台会重试清理，也可到「设置 → 接入与更新 → 高级排障」重新同步一次。在清理完成前不要退出后台服务。', ...base };
   }
   const info = data?.integration || {};
   if (auto.state === 'synced' || info.adopted === true || (info.applied === true && info.desktop?.managed === false)) {
@@ -336,18 +371,48 @@ function overviewState(data) {
     note: '模型已保存，后台会在 Kimi 空闲时自动同步；不用重复点击。', ...base };
 }
 
+/* 主动作只表达「此刻点一下能得到什么」：能打开已在运行的 Kimi 就不重启，
+   没有模型就先去模型页，不能靠重启解决的事不摆重启按钮。 */
+const OVERVIEW_NAV_ACTIONS = new Set(['restart-kimi', 'open-models', 'open-connection']);
+
+function overviewLaunchAction(data, info) {
+  if (OVERVIEW_NAV_ACTIONS.has(info.launch)) return info.launch;
+  return data?.kimiProcess?.running === true ? 'open-work' : 'launch-kimi';
+}
+
+const OVERVIEW_LAUNCH_LABELS = { 'launch-kimi': '启动 Kimi Work', 'open-work': '打开 Kimi Work' };
+
+function overviewLaunchLabel(action, info) {
+  if (info.launchLabel && info.launch === action) return info.launchLabel;
+  return OVERVIEW_LAUNCH_LABELS[action] || ACTION_LABEL[action] || '打开 Kimi Work';
+}
+
 function renderOverviewStatus(data) {
   const info = overviewState(data);
   setDot(dom.onboardVerdictDot, info.tone);
   setText(dom.onboardVerdictWord, info.word);
   setText(dom.onboardVerdictNote, info.note);
+  if (dom.handoff) {
+    const operation = data?.operation;
+    const activeAction = operation && ['launch-kimi', 'open-work', 'restart-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
+    dom.handoff.dataset.state = (activeAction && isInFlight(operation)) || ['authorizing', 'busy', 'importing', 'syncing'].includes(info.code)
+      ? 'running' : 'idle';
+    dom.handoff.dataset.tone = info.tone;
+  }
+  /* 旧凭据迁移只在 credentialAuthPending 时说：老引导的「重试应用连接」
+     不属于新总览，永远不在主卡露出。 */
+  if (dom.onboardRetryApply) {
+    setHidden(dom.onboardRetryApply, true);
+    dom.onboardRetryApply.disabled = true;
+  }
   if (dom.onboardLaunch) {
     const busy = isInFlight(data?.operation);
-    dom.onboardLaunch.dataset.action = info.launch || 'launch-kimi';
+    const action = overviewLaunchAction(data, info);
+    dom.onboardLaunch.dataset.action = action;
     dom.onboardLaunch.dataset.profileMode = '';
     dom.onboardLaunch.hidden = false;
     dom.onboardLaunch.disabled = busy || Boolean(state.pendingAction);
-    setText(dom.onboardLaunch, info.launchLabel || '打开 Kimi Work');
+    setText(dom.onboardLaunch, overviewLaunchLabel(action, info));
     dom.onboardLaunch.setAttribute('aria-busy', busy ? 'true' : 'false');
   }
   if (dom.onboardLaunchHint) {
@@ -355,7 +420,9 @@ function renderOverviewStatus(data) {
       ? '点击后会正常退出 Kimi，再沿用当前登录和 Work 数据重新启动，约 2–3 秒。'
       : info.code === 'takeover'
         ? '将正常退出当前外部启动的 Kimi，并由本产品受管重启后完成同步。'
-        : '';
+        : info.code === 'empty' || info.code === 'no-eligible'
+          ? '先保存至少一个真实模型；后台会自动把它同步到 Kimi Work。'
+          : '';
     setHidden(dom.onboardLaunchHint, !hint);
     setText(dom.onboardLaunchHint, hint);
   }
@@ -365,8 +432,11 @@ function renderOverviewStatus(data) {
 
 /* 缺省一律按网关处理：老后端不会返回这两个字段，界面必须保持旧行为。 */
 function modelTakeoverRemoved(data) {
-  return data?.operation?.action === 'disconnect-models'
-    && data.operation.state === 'removed' && data?.integration?.imported !== true;
+  if (data?.operation?.action === 'disconnect-models'
+    && data.operation.state === 'removed' && data?.integration?.imported !== true) return true;
+  /* 后续的只读操作会覆盖 data.operation，移除接管的证据只剩集成状态本身：
+     这时也必须保持「已移除接管」，否则界面会回到「已保存，待接入」。 */
+  return data?.integration?.autoSync?.reason === 'disconnected' && data?.integration?.imported !== true;
 }
 
 function savedIntegrationMode(data) {
@@ -380,6 +450,17 @@ function effectiveIntegrationMode(data) {
 function directModeOf(data) {
   const direct = data?.directMode;
   return direct && typeof direct === 'object' ? direct : null;
+}
+
+/* 直连没有可写入的模型：新后端用 eligibleModelIds 表达（空数组同样是证据），
+   老后端只有数字。两者都没有时不能凭 0 猜，返回 false 交给回执说明。 */
+function directHasNoEligibleModels(data) {
+  const direct = directModeOf(data);
+  if (!direct) return false;
+  if (Array.isArray(direct.eligibleModelIds)) {
+    return direct.eligibleModelIds.every((id) => typeof id !== 'string' || !id);
+  }
+  return direct.eligibleModels !== undefined && Number(direct.eligibleModels) === 0;
 }
 
 /* 切换收尾：新配置已写入并读回，但旧的受管来源还没清理掉。
@@ -464,12 +545,9 @@ function directModeState(data) {
   const synced = directImportComplete(data);
   /* 一个可直连模型都没有：无论回执怎么写，模型目录都进不了官方 Kimi。
      新后端给 eligibleModelIds 时它就是更精确的答案（空数组同样是证据）。 */
-  const noEligible = Array.isArray(direct?.eligibleModelIds)
-    ? direct.eligibleModelIds.every((id) => typeof id !== 'string' || !id)
-    : direct?.eligibleModels === 0;
-  if (direct && noEligible) {
+  if (direct && directHasNoEligibleModels(data)) {
     return { code: 'pending', tone: 'warn', word: '没有可直连的模型',
-      note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在模型页补齐，再同步到 Work。' };
+      note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在模型页补齐，再点「重新同步模型目录」。' };
   }
   /* 官方延迟应用时先重启，重启后旧回执不再阻塞清理。此时若先提示清理，
      用户会在尚未采用新配置时反复同步，并看不到真正的下一步。 */
@@ -482,17 +560,17 @@ function directModeState(data) {
      说「已就绪」则更糟，会让人直接退出后台并以为旧路由已经清理。 */
   if (directRouteCleanupPending(data)) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
-      note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请再点一次「同步到 Work」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
+      note: '新的直连配置已写入并读回，旧的服务商来源仍保留着；请点「重新同步模型目录」重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。' };
   }
   /* 还没同步到官方 Kimi：若已有非受管官方 Kimi 运行，自动启动会被安全边界拦截，
      必须先引导用户受管重启，再写入直连配置。 */
   if (!synced) {
     if (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false)) {
       return { code: 'manual-exit', tone: 'warn', word: '需先受管重启 Kimi',
-        note: '检测到当前官方 Kimi 未受本产品托管，写入直连配置前请先点击「正常退出并重启 Kimi」，完成受管启动后再同步到 Work。' };
+        note: '检测到当前官方 Kimi 未受本产品托管，写入直连配置前请先点击「正常退出并重启 Kimi」，完成受管启动后再点「重新同步模型目录」。' };
     }
     return { code: 'pending', tone: 'warn', word: '待写入直连配置',
-      note: '已选择零网关直连模式；点「同步到 Work」会自动启动 Kimi 并写入服务商地址与静态 hosts。' };
+      note: '已选择零网关直连模式；点「重新同步模型目录」会自动启动 Kimi 并写入服务商地址与静态 hosts。' };
   }
   /* directMode 行存在时它就是 hosts 的唯一答案：Windows 非 macOS 的 setup
      默认值是 hosts，拿它回退等于跳过真实检查。 */
@@ -508,14 +586,14 @@ function directModeState(data) {
   }
   /* 模型写进去了、静态 hosts 还没补齐：这时说「已就绪」会让人以为能退出后台。 */
   return { code: 'pending', tone: 'warn', word: '待补齐静态 hosts',
-    note: '直连模型已写入官方 Kimi；请再点一次「同步到 Work」写入静态 hosts，之后才能彻底退出后台服务。' };
+    note: '直连模型已写入官方 Kimi；请点「重新同步模型目录」写入静态 hosts，之后才能彻底退出后台服务。' };
 }
 
 function nativeConnectionText(data) {
   const info = data.integration || {};
   const preparation = info.preparation || {};
   if (modelTakeoverRemoved(data)) {
-    return '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「同步到 Work」可重新接管。';
+    return '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「重新同步模型目录」可重新接管。';
   }
   /* 直连模式下官方 Kimi 不经过网关，所以网关侧的 DNS/桥接文案都不成立。 */
   if (savedIntegrationMode(data) === 'direct') {
@@ -532,11 +610,11 @@ function nativeConnectionText(data) {
     /* 收尾未完成不等同导入失败：新配置已写入，只是旧来源还留着。
        这句话必须排在失败码之前，否则 reason 会把它说成一次失败。 */
     if (directRouteCleanupPending(data)) {
-      return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
+      return '新的直连配置已写入并读回，但旧的服务商来源还保留着，切换收尾未完成；点「重新同步模型目录」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。';
     }
     const directComplete = directImportComplete(data);
     if (!directComplete && (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false))) {
-      return '当前官方 Kimi 未受本产品托管，无法写入直连配置。请先点击「正常退出并重启 Kimi」，完成受管启动后再同步到 Work。';
+      return '当前官方 Kimi 未受本产品托管，无法写入直连配置。请先点击「正常退出并重启 Kimi」，完成受管启动后再点「重新同步模型目录」。';
     }
     /* 具体失败/等待码优先于宽泛的 direct_import_required，避免等待 Work、
        等待登录或启动失败被默认待同步提示吞掉。 */
@@ -558,9 +636,9 @@ function nativeConnectionText(data) {
     if (directComplete) {
       return directStaticHostsReady(data)
         ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出本软件与后台服务后仍可直接使用这些模型。'
-        : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。';
+        : '直连模型已写入官方 Kimi；点「重新同步模型目录」补齐静态 hosts 后即可彻底退出后台服务。';
     }
-    return '已选择零网关直连模式，但还没有写入官方 Kimi；请在模型页点「同步到 Work」。';
+    return '已选择零网关直连模式，但还没有写入官方 Kimi；请在模型页点「重新同步模型目录」。';
   }
   if (preparation.state === 'preparing') return '正在准备首次接入，请处理系统授权窗口。';
   if (preparation.state === 'cancelled') return '上次系统授权已取消。点「打开 / 启动 Kimi」或「重新准备接入」可继续。';
@@ -571,7 +649,7 @@ function nativeConnectionText(data) {
   /* 从直连切回网关后旧来源仍可能欠清理；这句话必须排在「已读回」之前，
      否则连接页会把未收尾的切换说成已完成。 */
   if (directRouteCleanupPending(data)) {
-    return '新配置已写入并读回，但旧的服务商来源仍保留着，切换收尾未完成；点「同步到 Work」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。';
+    return '新配置已写入并读回，但旧的服务商来源仍保留着，切换收尾未完成；点「重新同步模型目录」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。';
   }
   /* 系统直接启动的 Kimi 不是首次使用：模型配置可能已在磁盘上，只是没有受管进程。
      落到末尾兜底会把它说成「首次使用」，反而让用户重复点启动。 */
@@ -589,7 +667,7 @@ function nativeConnectionText(data) {
     work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
     work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
     work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
-    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「旧会话改绑模型」中刷新。',
+    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「会话」页刷新。',
     work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
     native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧版本或其他接入实例，再重新准备。',
     native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
@@ -611,7 +689,7 @@ function nativeConnectionText(data) {
     profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
     official_kimi_already_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
     unmanaged_kimi_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
-    native_bridge_unavailable: '当前未连接到受管 Kimi 通道。点「同步到 Work」会自动启动受管 Kimi；若 Kimi 已在运行，请点「正常退出并重启 Kimi」。',
+    native_bridge_unavailable: '当前未连接到受管 Kimi 通道。点「重新同步模型目录」会自动启动受管 Kimi；若 Kimi 已在运行，请点「正常退出并重启 Kimi」。',
     native_bridge_waiting_work: '官方 Kimi 已运行，但 Work 页面尚未就绪。请确认 Kimi 已登录并切换到 Work 视图，或点「打开 Kimi Work」后重试。',
     native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',
     native_bridge_settings_open_refused: '官方 Kimi 拒绝打开 Work 设置页。请确认 Kimi 窗口已就绪且无阻塞提示后重试。',
@@ -622,9 +700,9 @@ function nativeConnectionText(data) {
     kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
-    disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「同步到 Work」可重新接管。',
-    profile_missing: '当前账号尚未同步本产品模型目录。请在模型页点「同步到 Work」接入。',
-    profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在模型页点「同步到 Work」重新接入。',
+    disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「重新同步模型目录」可重新接管。',
+    profile_missing: '当前账号尚未同步本产品模型目录。请在模型页点「重新同步模型目录」接入。',
+    profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在模型页点「重新同步模型目录」重新接入。',
     native_scope_unverified: '当前自定义 Kimi 目录无法确认归属，自动接管已暂停。',
     account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
     native_import_account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
@@ -1384,6 +1462,10 @@ function operationNote(op) {
   return reasonText(code);
 }
 
+/* 后台自动同步结束后 state 会停在 synced / deferred_offline 等收敛态，这时
+   黄色「操作条」没有信息量：把它藏掉，只在真正需要用户处理时露出来。 */
+const AUTO_SYNC_QUIET_STATES = new Set(['synced', 'idle', 'deferred_offline']);
+
 function renderOperation(data) {
   const op = data && data.operation;
   if (!op) {
@@ -1394,13 +1476,28 @@ function renderOperation(data) {
   const word = ACTION_STATE[op.state] || op.state || '未知';
   const running = isInFlight(op);
   if (op.action === 'auto-sync') {
+    const state = op.state || '';
+    if (!running && AUTO_SYNC_QUIET_STATES.has(state)) {
+      dom.opbar.dataset.running = 'false';
+      setHidden(dom.opbar, true);
+      return;
+    }
+    const syncing = running || state === 'syncing';
+    const bad = state === 'failed' || state === 'interrupted' || state === 'unavailable';
+    /* 只剩需要用户处理的状态会留在屏幕上：除明确的失败与已完成，其余都按
+       「还要等/还要做」显示黄色，不再常驻一条无差别的警告。 */
+    const tone = bad ? 'bad' : state === 'done' ? 'ok' : 'warn';
     setHidden(dom.opbar, false);
-    setDot(dom.opbarDot, 'warn');
-    setText(dom.opbarName, running ? '正在自动同步模型目录…' : '自动同步模型目录 · ' + word);
-    setText(dom.opbarNote, running
+    setDot(dom.opbarDot, tone);
+    setText(dom.opbarName, syncing
+      ? '正在自动同步模型目录…'
+      : state === 'scheduled'
+        ? '等待自动同步模型目录…'
+        : '自动同步模型目录 · ' + word);
+    setText(dom.opbarNote, syncing || state === 'scheduled'
       ? '保存的更改由后台自动写入 Kimi Work，不需要手动点同步；需要重启时会在这里提示。'
       : operationNote(op) || '');
-    dom.opbar.dataset.running = running ? 'true' : 'false';
+    dom.opbar.dataset.running = syncing ? 'true' : 'false';
     return;
   }
   const bad = op.state === 'failed' || op.state === 'interrupted' || op.state === 'unavailable' || op.state === 'incompatible';
@@ -1416,10 +1513,9 @@ function renderOperation(data) {
 
 function renderActions(data) {
   if (isInFlight(data && data.operation)) clearDisconnectConfirm();
-  if (data && !onboardBusy()) {
-    if (state.view === 'models') renderOnboard();
-    else renderOnboardOverview(data);
-  }
+  /* 总览主卡只由 renderOverviewStatus 渲染；模型页的向导进度由 renderOnboard 负责。
+     这里不再用旧的 syncState 覆盖 #ob-verdict-*，也不会再露出 #ob-retry-apply。 */
+  if (data && !onboardBusy() && state.view === 'models') renderOnboard();
   if (!state.actionButtons.length) return;
   const running = isInFlight(data && data.operation);
   /* 保存模式期间也锁定同步按钮：否则 renderActions 会把 renderIntegrationMode
@@ -1454,16 +1550,22 @@ function renderActions(data) {
 function renderWorkspaceSync(data) {
   const integration = data.integration || {};
   const models = Array.isArray(data.models) ? data.models : [];
+  /* 日常保存与切模式都由后台自动同步；只有「必须用户手动触发一次
+     connect-kimi」的少数状态才露出这个快捷入口。 */
+  const resync = $('workspace-resync');
+  const showResync = (visible) => { if (resync) setHidden(resync, !visible); };
   if (data?.compatibility?.guards?.modelSyncWriteBlocked === true) {
     setText($('workspace-sync-state'), '模型同步不可用（已停止写入）');
     setText($('workspace-sync-note'), '当前官方 Kimi 版本未通过目录或存储格式自检，已暂停模型同步写入；本机网关与其他功能照常运行。');
     setHidden($('workspace-restart'), true);
+    showResync(false);
     return;
   }
   if (modelTakeoverRemoved(data)) {
     setText($('workspace-sync-state'), '已移除接管，可重新同步');
-    setText($('workspace-sync-note'), '官方 Kimi 中由本产品接管的模型来源已移除；本地服务商和模型仍保留，点击「同步到 Work」即可重新接管。');
+    setText($('workspace-sync-note'), '官方 Kimi 中由本产品接管的模型来源已移除；本地服务商和模型仍保留，点「重新同步模型目录」即可重新接管。');
     setHidden($('workspace-restart'), true);
+    showResync(true);
     return;
   }
   const mode = savedIntegrationMode(data);
@@ -1475,22 +1577,38 @@ function renderWorkspaceSync(data) {
   // Direct mode can legitimately leave models behind (no tools, no key, ...),
   // so completeness is measured against the eligible set, never the total.
   if (mode === 'direct') {
+    /* 版本不支持或没有可直连模型时，重同步只会重复失败：先说清原因。 */
+    if (directModeOf(data)?.supported === false) {
+      setText($('workspace-sync-state'), '当前官方 Kimi 不支持直连');
+      setText($('workspace-sync-note'), '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或在下方「接入模式」改用本机网关模式。');
+      setHidden($('workspace-restart'), true);
+      showResync(false);
+      return;
+    }
+    if (models.length && directHasNoEligibleModels(data)) {
+      setText($('workspace-sync-state'), '没有可直连的模型');
+      setText($('workspace-sync-note'), '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在下方「已启用模型目录」补齐，后台会自动写入。');
+      setHidden($('workspace-restart'), true);
+      showResync(false);
+      return;
+    }
     /* directImportComplete 已经要求官方 Kimi 处于 direct，所以模式改了这里必然是 false。 */
     const synced = directImportComplete(data);
     const restart = directRestartRequired(data);
     const hosts = directStaticHostsReady(data);
     const cleanup = directRouteCleanupPending(data);
-    setText($('workspace-sync-state'), restart ? '需要重启 Kimi' : cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Work' : '待写入直连配置');
+    setText($('workspace-sync-state'), restart ? '需要重启 Kimi' : cleanup ? '切换收尾未完成' : synced ? '已直连同步到 Kimi' : '等待自动写入直连配置');
     setText($('workspace-sync-note'), restart
       ? '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。'
       : cleanup
-        ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
+        ? '新的直连配置已写入并读回，旧的服务商来源还保留着；点「重新同步模型目录」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。'
         : synced
           ? (hosts
             ? '已通过直连模式写入官方 Kimi 且静态 hosts 就绪；退出 KimiWork + 与后台服务后仍可直接使用这些模型。'
-            : '直连模型已写入官方 Kimi；点「同步到 Work」补齐静态 hosts 后即可彻底退出后台服务。')
-          : '已选择零网关直连模式。点击「同步到 Work」将服务商地址与静态 hosts 写入官方 Kimi，之后可退出本软件。');
+            : '直连模型已写入官方 Kimi；点「重新同步模型目录」补齐静态 hosts 后即可彻底退出后台服务。')
+          : '已选择零网关直连模式。后台会在打开 Kimi 时自动写入服务商地址与静态 hosts；也可以点「重新同步模型目录」立即写入，之后可退出本软件。');
     setHidden($('workspace-restart'), !restart);
+    showResync(!restart && (!synced || cleanup));
     return;
   }
   /* 回执要求重启时，重启提示必须先于模式/清理提示；否则用户会去重复同步。 */
@@ -1498,6 +1616,7 @@ function renderWorkspaceSync(data) {
     setText($('workspace-sync-state'), '需要重启 Kimi');
     setText($('workspace-sync-note'), '模型配置已写入。正常重启 Kimi 后，在选择器中确认。');
     setHidden($('workspace-restart'), false);
+    showResync(false);
     return;
   }
   /* Direct → Gateway 也共用收尾判断：旧来源没清理就不能显示绿色已同步，
@@ -1505,14 +1624,16 @@ function renderWorkspaceSync(data) {
      「待切回网关」之前：官方还停在直连时，缺的正是这次清理。 */
   if (cleanupPending) {
     setText($('workspace-sync-state'), '切换收尾未完成');
-    setText($('workspace-sync-note'), '已切回本机网关模式，但旧的服务商来源还保留着；点「同步到 Work」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。');
+    setText($('workspace-sync-note'), '已切回本机网关模式，但旧的服务商来源还保留着；点「重新同步模型目录」可重试清理旧来源并同步。在清理完成前不要退出后台服务，也不要当作旧路由已清理。');
     setHidden($('workspace-restart'), true);
+    showResync(true);
     return;
   }
   if (modeChanged) {
     setText($('workspace-sync-state'), '待切回网关并同步');
     setText($('workspace-sync-note'), '已切回本机网关模式，后台会自动将官方 Kimi 恢复为本机网关路由。');
     setHidden($('workspace-restart'), true);
+    showResync(false);
     return;
   }
   const imported = Object.keys(integration.aliases || {}).sort();
@@ -1527,10 +1648,11 @@ function renderWorkspaceSync(data) {
       ? '已读回当前模型配置。当前 Kimi 非托管运行，请在官方窗口确认模型。'
       : '已读回当前模型配置。打开 Kimi 后可在模型选择器中确认。';
   }
-  setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Work' : restart ? '需要重启 Kimi' : '待同步到 Work');
+  setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Kimi Work' : restart ? '需要重启 Kimi' : '等待自动同步到 Kimi Work');
   setText($('workspace-sync-note'), !models.length ? '添加服务商并选择模型，保存后会自动同步。' : synced ? syncedNote
     : restart ? '模型配置已写入。正常重启 Kimi 后，在选择器中确认。' : '模型已保存；后台会自动同步到官方模型选择器，需要刷新时顶部会提示重启 Kimi。');
   setHidden($('workspace-restart'), !restart);
+  showResync(false);
 }
 
 
@@ -1619,7 +1741,7 @@ function renderIntegrationMode(data) {
   setText(dom.directModeHosts, restartRequired
     ? '请先正常退出并重启 Kimi；重启完成前无需重复同步，也请保留后台服务。'
     : directRouteCleanupPending(data)
-      ? '重新点「同步到 Work」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
+      ? '重新点「重新同步模型目录」可重试清理旧来源；在清理完成前不要退出后台服务，也不要当作旧路由已清理。'
       : directStaticHostsReady(data)
         ? '静态 hosts 已就绪，直连同步完成后可彻底停止后台服务与退出 KimiWork +。'
         : '首次同步直连模式时将写入一次静态 hosts（并清理旧单域名 DNS 配置），之后不再依赖后台 DNS。');
@@ -1650,7 +1772,7 @@ function renderIntegrationMode(data) {
   }
 }
 
-/* 切换模式只是保存偏好；真正写入官方 Kimi 仍是「同步到 Work」那一步。 */
+/* 切换模式只是保存偏好；真正写入官方 Kimi 仍是「重新同步模型目录」那一步。 */
 async function chooseIntegrationMode(mode, { onSaved } = {}) {
   if (!INTEGRATION_MODES.includes(mode)) return false;
   const data = state.data;
@@ -1739,7 +1861,6 @@ function updateStateSummary(updates) {
     case 'up_to_date': return { tone: 'ok', word: '已是最新版本' };
     case 'available': return { tone: 'warn', word: '发现新版本 ' + (updates.available?.version || '') };
     case 'downloading': return { tone: 'warn', word: '正在下载更新' };
-    case 'downloaded': return { tone: 'warn', word: '已下载，等待安装' };
     case 'verifying': return { tone: 'warn', word: '正在校验签名' };
     case 'waiting_idle': return { tone: 'warn', word: '等待空闲后替换' };
     case 'applying': return { tone: 'warn', word: '正在替换并重启' };
@@ -1855,30 +1976,47 @@ function renderUpdates(data) {
     }
   }
 
-  /* 新版本提醒同时出现在三处：顶栏「设置」圆点、总览精简横条与设置页更新卡片。
-     available 时可直接下载；downloaded 时直接安装并重启。 */
-  const notice = Boolean(available && available.version) && (st === 'available' || st === 'downloaded');
+  /* 总览只保留顶部这一条 #update-banner：可用时直接下载；下载/校验/等待/替换
+     期间只说明进度（详细进度在设置页），绝不再引用后端不存在的安装接口。 */
+  const updateInProgress = ['downloading', 'verifying', 'waiting_idle', 'applying'].includes(st);
+  const notice = Boolean(available && available.version) && (st === 'available' || updateInProgress || st === 'error');
   const navDot = $('nav-update-dot');
-  if (navDot) navDot.hidden = !notice;
+  if (navDot) navDot.hidden = !(Boolean(available && available.version) && st === 'available');
   const banner = $('update-banner');
   const bannerText = $('update-banner-text');
   if (banner && bannerText) {
     banner.hidden = !notice;
     if (notice) {
       const versionText = String(available.version).startsWith('v') ? available.version : 'v' + available.version;
-      setText(bannerText, `发现新版本 ${versionText}。下载验签后会在空闲时替换并重启本软件，不影响官方 Kimi。`);
       const primary = $('update-banner-primary');
-      if (primary) {
-        const action = st === 'downloaded' ? 'apply' : 'download';
-        primary.dataset.updateAction = action;
-        primary.disabled = false;
-        setText(primary, st === 'downloaded' ? '立即安装并重启' : '立即下载并更新');
+      if (st === 'available') {
+        setText(bannerText, `发现新版本 ${versionText}。下载验签后会在空闲时替换并重启本软件，不影响官方 Kimi。`);
+        if (primary) {
+          primary.hidden = false;
+          primary.dataset.updateAction = 'download';
+          primary.disabled = false;
+          setText(primary, '立即下载并更新');
+        }
+      } else if (updateInProgress) {
+        setText(bannerText, `新版本 ${versionText}：${summary.word}。可在「设置 → 接入与更新」查看详细进度，完成后会自动替换重启。`);
+        if (primary) {
+          primary.hidden = true;
+          primary.dataset.updateAction = 'download';
+        }
+      } else {
+        setText(bannerText, `新版本 ${versionText} 的更新未完成：${updates.error?.message || '下载或校验失败'}。可重试；当前版本与网关不受影响。`);
+        if (primary) {
+          primary.hidden = false;
+          primary.dataset.updateAction = 'download';
+          primary.disabled = false;
+          setText(primary, '重试下载并更新');
+        }
       }
     }
   }
   const topBanner = $('update-top-banner');
   const topText = $('update-top-banner-text');
-  const overviewCard = $('overview-update-card');
+  /* 总览只有顶部一条 #update-banner：旧的重复更新卡片已从页面移除。 */
   if (available && available.version && ['available', 'downloading', 'verifying', 'waiting_idle', 'applying'].includes(st)) {
     const firstLine = String(available.notes || '').split(/\r?\n/).map(line => line.trim()).find(Boolean) || '';
     const brief = firstLine ? '：' + (firstLine.length > 64 ? firstLine.slice(0, 64) + '…' : firstLine) : '';
@@ -1886,14 +2024,8 @@ function renderUpdates(data) {
       topBanner.hidden = state.view === 'overview' || state.view === 'maintenance';
       setText(topText, `发现新版本 ${available.version}${brief}`);
     }
-    if (overviewCard) {
-      overviewCard.hidden = false;
-      setText($('overview-update-title'), `发现 KimiWork + 新版本 ${available.version}`);
-      setText($('overview-update-notes'), available.notes || '包含稳定性修复与新功能，下载并验签后在空闲时替换重启。');
-    }
-  } else {
-    if (topBanner) topBanner.hidden = true;
-    if (overviewCard) overviewCard.hidden = true;
+  } else if (topBanner) {
+    topBanner.hidden = true;
   }
 
   const progressWrap = $('upd-progress-wrap');
@@ -2010,7 +2142,6 @@ function renderUpdates(data) {
 const UPDATE_ENDPOINTS = {
   check: '/api/updates/check',
   download: '/api/updates/download',
-  apply: '/api/updates/apply',
   cancel: '/api/updates/cancel',
   rollback: '/api/updates/rollback',
   settings: '/api/updates/settings',
@@ -2036,9 +2167,6 @@ async function updateAction(action, body = {}, okMessage = '') {
     else if (u?.error?.message) showToast(u.error.message, 'error');
   } else if (endpoint === '/api/updates/download') {
     showToast('已开始下载更新包，验签并等待空闲后会自动替换重启。', 'ok');
-  } else if (endpoint === '/api/updates/apply') {
-    showToast('已请求安装已下载的更新；本软件会在空闲时替换并重启。', 'ok');
-    void waitForUpdateReconnect(prevBuild, '版本替换');
   } else if (endpoint === '/api/updates/rollback') {
     showToast('已启动回退到上一版本，等待空闲后将替换并重启。', 'ok');
     void waitForUpdateReconnect(prevBuild, '回退');

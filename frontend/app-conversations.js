@@ -1,4 +1,4 @@
-import { $, API, dom, request, setHidden, setText, showToast, state, stripModelAliasPrefix } from './app-core.js';
+import { $, API, MODEL_ALIAS_PREFIXES, MODEL_ALIAS_UUID_PREFIX, dom, reasonText, request, setHidden, setText, showToast, state, stripModelAliasPrefix } from './app-core.js';
 import { savedIntegrationMode } from './app-overview.js';
 import { loadState } from './app.js';
 
@@ -63,6 +63,15 @@ function directoryNameOf(model) {
   return name || model.id || '';
 }
 
+/* 旧别名属于哪一侧只看别名自己的前缀：`byok-kth-*` 是本机网关写入的，
+   `byok-<uuid>/` 是官方直连写入的。按当前模式猜会把历史会话标错来源。 */
+function aliasSourceKind(raw) {
+  if (typeof raw !== 'string' || !raw) return '';
+  if (MODEL_ALIAS_PREFIXES.some((prefix) => raw.startsWith(prefix))) return 'kth';
+  if (MODEL_ALIAS_UUID_PREFIX.test(raw)) return 'custom';
+  return '';
+}
+
 function humanizeConversationModel(alias, knownModels, stateModels) {
   if (typeof alias !== 'string' || !alias.trim()) return 'Kimi 官方模型';
   const raw = alias.trim();
@@ -78,8 +87,8 @@ function humanizeConversationModel(alias, knownModels, stateModels) {
     const match = catalogue.find((model) => model && (model.id === stripped || model.alias === stripped
       || model.upstreamModelId === stripped));
     if (match) {
-      const gateway = savedIntegrationMode(state.data) !== 'direct';
-      return withSource(directoryNameOf(match), gateway ? 'kth' : 'custom', false);
+      const source = aliasSourceKind(raw) || (savedIntegrationMode(state.data) !== 'direct' ? 'kth' : 'custom');
+      return withSource(directoryNameOf(match), source, false);
     }
     if (KIMI_COMPATIBLE_ID.test(stripped)) return '网关模型（目录未列出）';
     return stripped;
@@ -147,6 +156,33 @@ function defaultEffortFor(model, ordered) {
   if (model.defaultEffort) return '';
   const list = ordered || (Array.isArray(model.supportEfforts) ? model.supportEfforts : []);
   return list.find((level) => level !== 'off') || (list.length ? list[0] : '');
+}
+
+/* 换模会写会话库并可能重启 Kimi：读不到库、Kimi 运行状态未知、正在读或已有
+   请求在途时一律禁用，绝不把「未知」当成「未运行」直接写入绑定。 */
+function canSwitchConversations(list) {
+  if (!list) return false;
+  if (list.reason) return false;
+  if (list.application === 'unknown') return false;
+  if (state.conversations.loading || state.conversations.pending) return false;
+  return true;
+}
+
+/* 旧别名迁移只针对「确实有会话还在用旧别名」的模型：网关模式下几乎每个模型
+   都带 previousAlias，只看字段非空会让迁移横幅常驻误报。 */
+function migrationMatchesOf(list) {
+  const models = list && Array.isArray(list.models)
+    ? list.models.filter((model) => model && typeof model.previousAlias === 'string' && model.previousAlias) : [];
+  const conversations = list && Array.isArray(list.conversations) ? list.conversations : [];
+  const matched = [];
+  let count = 0;
+  for (const model of models) {
+    const hits = conversations.filter((row) => row && row.modelAlias === model.previousAlias);
+    if (!hits.length) continue;
+    matched.push({ model, count: hits.length });
+    count += hits.length;
+  }
+  return { models: matched.map((entry) => entry.model), matches: matched, count };
 }
 
 /* ---------- 页面 ---------- */
@@ -247,17 +283,23 @@ function mountConversationsPage() {
     return new Set(state.conversations.selected);
   }
 
+  function migrationMatches(list = currentList()) {
+    return migrationMatchesOf(list);
+  }
+
   function renderGuide() {
     const direct = savedIntegrationMode(state.data) === 'direct';
     if (ui.guide) ui.guide.dataset.mode = direct ? 'direct' : 'gateway';
     setText(ui.guideText, direct
       ? '当前为零网关直连模式：官方 Kimi 限制跨服务商切换模型会新开对话。如需保留上下文换模型，请在下方直接为对应会话选择新模型（将自动退出并重开 Kimi，约 2–3 秒）。'
       : '当前为本机网关模式：K3、K3.1 Pro 与所有已启用模型可直接在 Kimi 聊天窗口的模型下拉框自由切换，无需在此操作。下方列表仅用于切换最初由 K2.8 Preview 创建的对话（也可在 Kimi 内先点 K3.1 Pro 再点目标模型免重启切换），或一键迁移旧版历史会话。');
-    const migrating = modelsOf(currentList()).filter((model) => model && model.previousAlias);
-    setHidden(ui.migration, migrating.length === 0);
-    if (migrating.length) {
-      setText(ui.migrationText, '发现旧版模型别名会话，可一键迁移至新兼容别名。');
-      if (ui.migrateAll) ui.migrateAll.disabled = state.conversations.pending;
+    const migration = migrationMatches();
+    setHidden(ui.migration, migration.count === 0);
+    if (migration.count) {
+      setText(ui.migrationText, '发现 ' + migration.count + ' 条旧版模型别名会话，可一键迁移至新兼容别名。');
+    }
+    if (ui.migrateAll) {
+      ui.migrateAll.disabled = migration.count === 0 || !canSwitchConversations(currentList()) || state.conversations.pending;
     }
   }
 
@@ -277,6 +319,7 @@ function mountConversationsPage() {
 
   function hideConfirm() {
     state.conversations.confirm = null;
+    state.conversations.rowConfirm = null;
     setHidden(ui.confirm, true);
   }
 
@@ -323,10 +366,15 @@ function mountConversationsPage() {
       if (checkbox.checked) state.conversations.noConfirm = true;
       void submitSwitch([conversation.conversationKey], model, thinkingLevel);
     });
-    cancel.addEventListener('click', () => { host.hidden = true; });
+    cancel.addEventListener('click', () => {
+      host.hidden = true;
+      state.conversations.rowConfirm = null;
+    });
     actions.append(remember, submit, cancel);
     host.append(text, actions);
     host.hidden = false;
+    /* 标记给轮询用：展开中的行内确认条不能被 2 秒轮询重建掉。 */
+    state.conversations.rowConfirm = conversation.conversationKey;
     if (submit.focus) submit.focus({ preventScroll: true });
   }
 
@@ -407,7 +455,7 @@ function mountConversationsPage() {
     target.dataset.convTarget = key;
     const selectedAlias = state.conversations.targets[key] || (models[0] ? models[0].alias : '');
     fillSelect(target, targetOptions(), selectedAlias);
-    target.disabled = models.length === 0 || state.conversations.pending;
+    target.disabled = !canSwitchConversations(currentList()) || models.length === 0;
     targetLabel.append(targetCaption, target);
 
     const effortLabel = document.createElement('label');
@@ -426,7 +474,7 @@ function mountConversationsPage() {
       const model = models.find((entry) => entry.alias === target.value) || null;
       const choices = effortChoices(model);
       fillSelect(effort, optionEntries(choices.values, choices.labels), choices.fallback);
-      effort.disabled = !model || state.conversations.pending;
+      effort.disabled = !model || !canSwitchConversations(currentList());
     });
     effort.addEventListener('change', () => {
       state.conversations.efforts[key] = effort.value;
@@ -437,11 +485,15 @@ function mountConversationsPage() {
     button.className = 'btn btn--primary btn--sm conv-switch';
     button.dataset.convSwitch = key;
     button.textContent = '切换模型';
-    button.disabled = models.length === 0 || state.conversations.pending;
+    button.disabled = !canSwitchConversations(currentList()) || models.length === 0;
     button.addEventListener('click', () => {
       const model = targetModelFor(key);
       if (!model) {
         showToast('请先选择目标模型。', 'error');
+        return;
+      }
+      if (!canSwitchConversations(currentList())) {
+        showToast(conversationListStatus(currentList()), 'warn');
         return;
       }
       if (currentList()?.kimiRunning === true && !state.conversations.noConfirm) {
@@ -482,42 +534,61 @@ function mountConversationsPage() {
     }
   }
 
+  function batchModelOf(list = currentList()) {
+    const models = modelsOf(list);
+    const alias = state.conversations.batchModel || (models[0] ? models[0].alias : '');
+    return models.find((model) => model.alias === alias) || null;
+  }
+
+  function matchedCountForModel(model, list = currentList()) {
+    if (!model) return 0;
+    const entry = migrationMatches(list).matches.find((row) => row.model.alias === model.alias);
+    return entry ? entry.count : 0;
+  }
+
   function syncBatchState() {
     const list = currentList();
     const models = modelsOf(list);
     const selected = selectedKeys();
+    const switchable = canSwitchConversations(list);
     if (ui.batchGo) {
-      ui.batchGo.disabled = !list || !selected.size || !models.length || state.conversations.pending;
+      ui.batchGo.disabled = !switchable || !selected.size || !models.length;
       setText(ui.batchGo, state.conversations.pending ? '正在切换…' : '切换所选会话');
     }
-    const migrating = models.some((model) => model && model.previousAlias);
+    /* 批量迁移跟着用户当前选中的模型走：旧版本这里总是迁移第一个带旧别名的
+       模型，选中的模型根本没有被用到。 */
+    const batchModel = batchModelOf(list);
+    const batchMatched = Boolean(batchModel && batchModel.previousAlias) && matchedCountForModel(batchModel, list) > 0;
     if (ui.batchMigrate) {
-      ui.batchMigrate.disabled = !list || !migrating || state.conversations.pending;
+      ui.batchMigrate.disabled = !switchable || !batchMatched;
     }
     if (ui.batchNote) {
       setText(ui.batchNote, !models.length
         ? '当前没有可用的第三方模型；请先在「模型与服务商」保存并同步。'
         : selected.size
           ? '已选择 ' + selected.size + ' 个会话。'
-          : '勾选上方会话后，可为它们统一选择目标模型与思考档位；旧别名迁移会把使用旧版兼容别名的历史会话更新为当前别名。');
+          : batchModel && batchModel.previousAlias
+            ? '勾选上方会话后，可为它们统一选择目标模型与思考档位；「迁移旧别名」只处理所选模型名下仍是旧版兼容别名的历史会话。'
+            : '勾选上方会话后，可为它们统一选择目标模型与思考档位；所选模型没有旧版兼容别名，不需要迁移。');
     }
   }
 
   function renderBatch() {
     const list = currentList();
     const models = modelsOf(list);
+    const switchable = canSwitchConversations(list);
     const entries = models.map((model) => ({
       value: model.alias,
       label: humanizeConversationModel(model.alias, models, state.data?.models),
     }));
     const current = state.conversations.batchModel || (models[0] ? models[0].alias : '');
     fillSelect(ui.batchModel, entries, current);
-    if (ui.batchModel) ui.batchModel.disabled = !models.length || state.conversations.pending;
+    if (ui.batchModel) ui.batchModel.disabled = !switchable || !models.length;
     const model = models.find((entry) => entry.alias === ui.batchModel?.value) || models[0] || null;
     const choices = effortChoices(model);
     const effortCurrent = state.conversations.batchEffort === undefined ? choices.fallback : state.conversations.batchEffort;
     fillSelect(ui.batchEffort, optionEntries(choices.values, choices.labels), effortCurrent);
-    if (ui.batchEffort) ui.batchEffort.disabled = !model || state.conversations.pending;
+    if (ui.batchEffort) ui.batchEffort.disabled = !switchable || !model;
     state.conversations.batchModel = ui.batchModel?.value || current;
     state.conversations.batchEffort = ui.batchEffort?.value ?? effortCurrent;
     syncBatchState();
@@ -529,10 +600,13 @@ function mountConversationsPage() {
     renderBatch();
   }
 
-  async function load({ preserveResult = false } = {}) {
+  async function load({ preserveResult = false, preserveSelection = false } = {}) {
     const c = state.conversations;
     if (c.loading || !state.key) return;
     const key = state.key;
+    const previous = preserveSelection
+      ? { targets: { ...c.targets }, efforts: { ...c.efforts }, selected: Array.isArray(c.selected) ? c.selected.slice() : [] }
+      : null;
     c.loading = true;
     c.error = '';
     if (!preserveResult) setResult('');
@@ -550,9 +624,19 @@ function mountConversationsPage() {
       c.efforts = {};
       c.selected = [];
       c.confirm = null;
+      /* 自动重刷不应丢掉用户正在选的目标模型、档位与勾选：只保留仍存在于
+         新列表里的键，其余随旧列表一起丢弃。 */
+      const aliases = new Set(next.models.map((model) => model && model.alias).filter(Boolean));
+      const conversationKeys = new Set(next.conversations.map((row) => row && row.conversationKey).filter(Boolean));
       for (const conversation of next.conversations) {
-        if (next.models.length) c.targets[conversation.conversationKey] = next.models[0].alias;
+        const conversationKey = conversation.conversationKey;
+        const kept = previous && previous.targets[conversationKey];
+        if (next.models.length) c.targets[conversationKey] = kept && aliases.has(kept) ? kept : next.models[0].alias;
+        const effort = previous && previous.efforts[conversationKey];
+        if (effort !== undefined) c.efforts[conversationKey] = effort;
       }
+      if (previous) c.selected = previous.selected.filter((conversationKey) => conversationKeys.has(conversationKey));
+      if (previous && c.batchModel && !aliases.has(c.batchModel)) c.batchModel = '';
       setStatus(conversationListStatus(next));
     } catch (error) {
       if (state.key !== key) return;
@@ -569,7 +653,7 @@ function mountConversationsPage() {
   async function submitSwitch(keys, model, thinkingLevel, { migrate = false } = {}) {
     const c = state.conversations;
     const list = currentList();
-    if (!list || c.pending || !model) return;
+    if (!canSwitchConversations(list) || !model) return;
     const kimiRunning = list.kimiRunning === true;
     const payload = migrate
       ? { targetModelAlias: model.alias, thinkingLevel, restartKimi: kimiRunning, migratePreviousAlias: true }
@@ -603,7 +687,7 @@ function mountConversationsPage() {
         }
       }
       if (reply?.hasMore) parts.push('还有旧别名会话待迁移，可再次点「一键迁移旧别名会话」。');
-      if (reply?.restartReason) parts.push('重启提示：' + reply.restartReason);
+      if (reply?.restartReason) parts.push('重启提示：' + (reasonText(reply.restartReason) || reply.restartReason));
       setResult(parts.join(''));
       showToast(parts[0], 'ok');
     } catch (error) {
@@ -614,21 +698,119 @@ function mountConversationsPage() {
       c.pending = false;
       if (!state.key) return;
       try { await loadState({ silent: true }); } catch {}
-      await load({ preserveResult: true });
+      await load({ preserveResult: true, preserveSelection: true });
       setStatus(conversationListStatus(currentList()));
     }
   }
 
+  /* 一键迁移：只遍历「确有会话还在旧别名」的模型。restartKimi 只放在最后
+     一笔请求上，避免每个模型各重启一次 Kimi；Kimi 运行中时先确认一次。
+     后端在 Kimi 仍运行时拒绝 restartKimi=false 的写入，那种模型会被记下并
+     提示再点一次（每次点击至少推进一个模型，直到没有旧别名会话）。 */
+  async function runMigration(migration = migrationMatches()) {
+    const c = state.conversations;
+    if (c.pending || !canSwitchConversations(currentList())) return;
+    if (!migration.count || !migration.models.length) {
+      showToast('没有使用旧版别名的会话需要迁移。', 'warn');
+      return;
+    }
+    const list = currentList();
+    const kimiRunning = list?.kimiRunning === true;
+    c.pending = true;
+    c.confirm = null;
+    hideConfirm();
+    setResult('');
+    setStatus(kimiRunning ? '正在迁移旧别名会话，并在最后一笔后退出重开 Kimi…' : '正在迁移旧别名会话…');
+    render();
+    let migrated = 0;
+    let restarted = false;
+    const notes = [];
+    const blocked = [];
+    try {
+      for (let index = 0; index < migration.models.length; index += 1) {
+        const model = migration.models[index];
+        const last = index === migration.models.length - 1;
+        try {
+          const reply = await request(API.rebindConversations, {
+            method: 'POST',
+            body: {
+              targetModelAlias: model.alias,
+              thinkingLevel: defaultEffortFor(model),
+              restartKimi: last ? kimiRunning : false,
+              migratePreviousAlias: true,
+            },
+          });
+          if (Array.isArray(reply?.conversationKeys)) migrated += reply.conversationKeys.length;
+          if (reply?.kimiRestarted) restarted = true;
+          if (reply?.hasMore) notes.push('「' + displayNameOf(model) + '」还有旧别名会话待迁移。');
+          if (reply?.directAnthropicHistoryWarning) {
+            notes.push('提示：直连 Anthropic 可能因历史中的官方思考块拒绝继续，如遇报错请新建对话。');
+          }
+          if (Array.isArray(reply?.warnings)) {
+            for (const warning of reply.warnings) {
+              if (typeof warning === 'string' && warning) notes.push(warning);
+            }
+          }
+          if (reply?.restartReason) notes.push('重启提示：' + (reasonText(reply.restartReason) || reply.restartReason));
+        } catch (error) {
+          const code = error?.code || '';
+          const name = '「' + displayNameOf(model) + '」';
+          if (code === 'conversation_kimi_restart_required') {
+            blocked.push(name + '需要 Kimi 退出后写入');
+          } else {
+            notes.push(name + (conversationReasonText(code) || error?.message || '迁移未完成'));
+          }
+        }
+      }
+      const parts = [];
+      parts.push(migrated ? '已迁移 ' + migrated + ' 个旧别名会话。' : '本次没有可迁移的旧别名会话。');
+      if (kimiRunning) {
+        parts.push(restarted ? 'Kimi 已自动重启，打开后即可继续原对话。' : 'Kimi 未能自动重启，请手动打开 Kimi 后继续。');
+      }
+      if (blocked.length) {
+        parts.push('另有 ' + blocked.length + ' 个模型的旧别名会话因 Kimi 仍在运行未写入（' + blocked.join('、') + '）；再点一次「迁移旧别名会话」即可继续。');
+      }
+      for (const note of notes) parts.push(note);
+      setResult(parts.join(''));
+      showToast(parts[0], blocked.length ? 'warn' : 'ok');
+    } finally {
+      c.pending = false;
+      if (!state.key) return;
+      try { await loadState({ silent: true }); } catch {}
+      await load({ preserveResult: true, preserveSelection: true });
+      setStatus(conversationListStatus(currentList()));
+    }
+  }
+
+  /* 迁移入口：Kimi 运行中先确认一次，避免刚点下拉就被悄悄重启。 */
+  function requestMigration(migration = migrationMatches()) {
+    const list = currentList();
+    if (!canSwitchConversations(list)) {
+      showToast(conversationListStatus(list), 'warn');
+      return;
+    }
+    if (!migration.count || !migration.models.length) {
+      showToast('没有使用旧版别名的会话需要迁移。', 'warn');
+      return;
+    }
+    if (list.kimiRunning === true && !state.conversations.noConfirm) {
+      showPageConfirm('将把 ' + migration.count + ' 条旧别名会话迁移到新兼容别名，并在最后一笔后自动关闭重开 Kimi Work（约 2–3 秒）。请确认当前没有正在生成的回复。',
+        { migration: true });
+      return;
+    }
+    void runMigration(migration);
+  }
+
   function requestBatch(model, thinkingLevel, keys, { migrate = false } = {}) {
     const list = currentList();
-    if (!list || !model) return;
+    if (!canSwitchConversations(list) || !model) return;
     if (!migrate && !keys.length) {
       showToast('请先勾选要切换的会话。', 'error');
       return;
     }
     if (list.kimiRunning === true && !state.conversations.noConfirm) {
       const label = migrate
-        ? '将把旧别名会话迁移到「' + displayNameOf(model) + '」'
+        ? '将把「' + displayNameOf(model) + '」名下的旧别名会话迁移到当前别名'
         : '将把 ' + keys.length + ' 个会话切换到「' + displayNameOf(model) + '」';
       showPageConfirm(label + '，并自动关闭重开 Kimi Work（约 2–3 秒）以写入会话绑定。请确认当前没有正在生成的回复。',
         { keys, model, thinkingLevel, migrate });
@@ -675,25 +857,53 @@ function mountConversationsPage() {
   });
   if (ui.batchMigrate) ui.batchMigrate.addEventListener('click', () => {
     const list = currentList();
-    const model = modelsOf(list).find((entry) => entry && entry.previousAlias);
-    if (!model) {
-      showToast('当前没有可迁移的旧别名模型。', 'warn');
+    if (!canSwitchConversations(list)) {
+      showToast(conversationListStatus(list), 'warn');
       return;
     }
-    requestBatch(model, defaultEffortFor(model), [], { migrate: true });
+    /* 迁移用户当前在批量工具栏里选中的模型，而不是列表里的第一个。 */
+    const model = batchModelOf(list);
+    if (!model || !model.previousAlias) {
+      showToast('所选模型没有旧版兼容别名，不需要迁移。', 'warn');
+      return;
+    }
+    if (!matchedCountForModel(model, list)) {
+      showToast('所选模型名下没有使用旧别名的会话。', 'warn');
+      return;
+    }
+    requestBatch(model, ui.batchEffort?.value ?? defaultEffortFor(model), [], { migrate: true });
   });
   if (ui.migrateAll) ui.migrateAll.addEventListener('click', () => {
-    const model = modelsOf(currentList()).find((entry) => entry && entry.previousAlias);
-    if (!model) return;
-    requestBatch(model, defaultEffortFor(model), [], { migrate: true });
+    requestMigration(migrationMatches());
   });
   if (ui.confirmSubmit) ui.confirmSubmit.addEventListener('click', () => {
     const pending = state.conversations.confirm;
     if (!pending) return;
     hideConfirm();
+    if (pending.migration) {
+      void runMigration(migrationMatches());
+      return;
+    }
     void submitSwitch(pending.keys, pending.model, pending.thinkingLevel, { migrate: pending.migrate });
   });
   if (ui.confirmCancel) ui.confirmCancel.addEventListener('click', () => hideConfirm());
+
+  /* 用户正在页面上操作时不能被自动重刷打断：展开中的确认条、会话页里的
+     下拉与搜索框都算占用，只标记 stale 等下次切回页面再刷新。 */
+  function userBusyInConversations() {
+    if (state.conversations.confirm) return true;
+    if (state.conversations.rowConfirm) return true;
+    const list = ui.list;
+    if (list && typeof list.querySelectorAll === 'function') {
+      for (const host of list.querySelectorAll('[data-conv-confirm]')) {
+        if (host && host.hidden !== true) return true;
+      }
+    }
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (!active) return false;
+    if (list && typeof list.contains === 'function' && list.contains(active)) return true;
+    return active === ui.query || active === ui.queryClear || active === ui.batchModel || active === ui.batchEffort;
+  }
 
   function onState(next) {
     const signature = JSON.stringify([
@@ -705,21 +915,51 @@ function mountConversationsPage() {
     const changed = lastSignature !== '';
     lastSignature = signature;
     const list = currentList();
-    if (list) list.kimiRunning = next?.kimiProcess?.running === true;
-    renderGuide();
-    if (changed && state.view === 'conversations' && !state.conversations.loading && !state.conversations.pending) {
-      setStatus('账号、接入配置或 Kimi 状态已变化，正在刷新会话…');
-      void load({ preserveResult: true });
+    if (list) {
+      list.kimiRunning = next?.kimiProcess?.running === true;
+      /* 运行状态无法确认时必须锁住所有换模入口：把 unknown 当成「未运行」
+         会跳过重启确认，直接往一个正在使用的会话库里写绑定。状态重新可确认
+         后再放开，免得上一次未知把按钮永久锁死。 */
+      if (next?.kimiProcess?.state === 'unknown') {
+        list.application = 'unknown';
+        list.kimiRunning = false;
+      } else if (list.application === 'unknown') {
+        list.application = next?.kimiProcess?.running === true ? 'running' : 'not_running';
+      }
     }
+    renderGuide();
+    if (!changed) return;
+    if (state.view !== 'conversations') {
+      state.conversations.stale = true;
+      return;
+    }
+    if (state.conversations.loading || state.conversations.pending) {
+      state.conversations.stale = true;
+      return;
+    }
+    if (userBusyInConversations()) {
+      state.conversations.stale = true;
+      return;
+    }
+    setStatus('账号、接入配置或 Kimi 状态已变化，正在刷新会话…');
+    void load({ preserveResult: true, preserveSelection: true });
   }
 
   return {
     show() {
       renderGuide();
-      if (!currentList() && !state.conversations.loading) void load();
-      else syncBatchState();
+      if (state.conversations.loading) return;
+      /* 离页期间状态变过：回到会话页时立即补一次读取，而不是等用户手动刷新。
+         但轮询也会调用 show()：用户正展开确认条或操作下拉时继续等，别把
+         刚点开的东西重建成新行。 */
+      if (!currentList() || state.conversations.stale) {
+        if (userBusyInConversations()) return;
+        void load({ preserveSelection: true });
+        return;
+      }
+      syncBatchState();
     },
-    refresh: () => load(),
+    refresh: () => load({ preserveSelection: true }),
     onState,
     reset() {
       lastSignature = '';
@@ -728,9 +968,12 @@ function mountConversationsPage() {
 }
 
 export {
+  aliasSourceKind,
+  canSwitchConversations,
   conversationListStatus,
   defaultEffortFor,
   humanizeConversationModel,
+  migrationMatchesOf,
   mountConversationsPage,
   relativeTime,
   workspaceTail,

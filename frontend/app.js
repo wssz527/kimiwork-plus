@@ -1,6 +1,6 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderOnboardOverview, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
-import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, routeIdPreservingProtocol, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
+import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
 import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 import { mountConversationsPage } from './app-conversations.js';
@@ -69,10 +69,7 @@ function setView(view, { persist = true } = {}) {
     }
     state.composing = false;
     clearDisconnectConfirm();
-    if (state.data && view === 'overview') {
-      renderOnboardOverview(state.data);
-      renderOverview(state.data, { view: 'overview' });
-    }
+    if (state.data && view === 'overview') renderOverview(state.data, { view: 'overview' });
     if (view === 'models') {
       if (state.data) {
         renderWorkspaceSync(state.data);
@@ -188,7 +185,6 @@ function renderAll() {
   renderPreviewLifecycle(state.data);
   if (view === 'overview') {
     renderOverview(state.data, { view: 'overview' });
-    renderOnboardOverview(state.data);
   } else if (view === 'models') {
     renderWorkspaceSync(state.data);
     renderModels();
@@ -233,6 +229,7 @@ async function loadState({ silent = false } = {}) {
       dom.gate.hidden = true;
     }
     renderAll();
+    flushPendingUpdatesPanelReveal();
     if (!state.initialUpdateCheckDone) {
       state.initialUpdateCheckDone = true;
       maybeCheckUpdatesOnFocus();
@@ -628,6 +625,9 @@ const FOCUS_UPDATE_BUSY_STATES = ['checking', 'downloading', 'verifying', 'downl
 function focusUpdateDue(updates, now) {
   if (!updates || typeof updates !== 'object') return false;
   if (updates.autoCheck === false) return false;
+  /* 'local' 是没有更新器的本地构建：后端对每次检查都回 503，
+     每 60 秒聚焦就发一次只会制造失败日志。 */
+  if (updates.state === 'local') return false;
   if (FOCUS_UPDATE_BUSY_STATES.includes(updates.state)) return false;
   if (now - Number(state.lastFocusUpdateCheckAt || 0) <= FOCUS_UPDATE_MIN_INTERVAL_MS) return false;
   const last = Date.parse(updates.lastCheckedAt || '');
@@ -657,10 +657,18 @@ function maybeCheckUpdatesOnFocus({ now = Date.now() } = {}) {
 }
 
 /* 托盘「前往更新」与总览「查看更新说明」共用的定位入口：切到设置 → 接入与更新，
-   展开折叠区，只滚动 .main 并聚焦手动检查按钮，绝不调用 scrollIntoView。 */
+   展开折叠区，只滚动 .main 并聚焦手动检查按钮，绝不调用 scrollIntoView。
+   首次 #shell 揭开前布局还不能滚动：记下挂起标记，等 shell 显示后补做一次。 */
+let pendingUpdatesPanelReveal = false;
+
 function openUpdatesPanel() {
   setView('maintenance');
   setSubtab('maintenance', 'connection');
+  const revealed = typeof dom.shell === 'undefined' || !dom.shell || dom.shell.hidden !== true;
+  if (!revealed) {
+    pendingUpdatesPanelReveal = true;
+    return;
+  }
   const panel = $('update-panel');
   if (panel) {
     for (let node = panel; node; node = node.parentElement) {
@@ -670,6 +678,14 @@ function openUpdatesPanel() {
   }
   const check = $('upd-check');
   if (check && typeof check.focus === 'function') check.focus({ preventScroll: true });
+}
+
+/* #shell 揭开后补做挂起的那次定位，保证托盘入口在冷启动时不丢。 */
+function flushPendingUpdatesPanelReveal() {
+  if (!pendingUpdatesPanelReveal) return;
+  if (!dom.shell || dom.shell.hidden === true) return;
+  pendingUpdatesPanelReveal = false;
+  openUpdatesPanel();
 }
 
 function bindEvents() {
@@ -757,6 +773,9 @@ function bindEvents() {
     try {
       const tasks = [loadState(), refreshOverviewToday({ force: true })];
       if (state.view === 'usage') tasks.push(usagePanel.reload());
+      /* 会话页的列表来自独立接口：顶栏刷新必须把它一起重读，否则用户点了
+         刷新仍看到旧的会话与模型。 */
+      if (state.view === 'conversations') tasks.push(conversationsPanel.refresh());
       if (plusPanel && typeof plusPanel.refresh === 'function') tasks.push(plusPanel.refresh({ live: state.view === 'usage' }));
       await Promise.all(tasks);
     } finally {
@@ -824,8 +843,6 @@ function bindEvents() {
     if (typeof window.__kwpOpenUpdates === 'function') window.__kwpOpenUpdates();
     else openUpdatesPanel();
   });
-  const overviewUpdGo = $('overview-update-go');
-  if (overviewUpdGo) overviewUpdGo.addEventListener('click', openUpdateSection);
   const updReleaseLink = $('upd-release-link');
   if (updReleaseLink) updReleaseLink.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -912,7 +929,7 @@ function bindEvents() {
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
 
-  /* 接入模式：切换只保存偏好，写入官方 Kimi 仍由「同步到 Work」完成。 */
+  /* 接入模式：切换只保存偏好，写入官方 Kimi 仍由「重新同步模型目录」完成。 */
   if (dom.integrationModeGroup) dom.integrationModeGroup.addEventListener('change', (event) => {
     const target = event.target;
     if (!target || target.name !== 'integration-mode') return;
@@ -1212,8 +1229,8 @@ function bindEvents() {
     editor.draft.contextLimit = '';
     editor.budgetNote = null;
     if (editor.draft.upstreamModelId) {
-      /* 路由 ID 的协议段是用户已经确认的语义：换连接只换前缀，不改 Chat/Responses。 */
-      editor.draft.id = routeIdPreservingProtocol(editor.draft.connectionId, editor.draft.upstreamModelId, editor.draft.id);
+      /* 路由 ID 的协议段沿用用户已确认的选择；但连接只允许单一协议时以连接为准。 */
+      editor.draft.id = suggestedRouteId(editor.draft);
       if (dom.mId) dom.mId.value = editor.draft.id;
     }
     state.picker.models = null;
@@ -1236,7 +1253,7 @@ function bindEvents() {
     /* 换了上游模型，旧模型声明的上限就不再成立。 */
     editor.draft.contextLimit = '';
     editor.budgetNote = null;
-    const suggested = routeIdPreservingProtocol(editor.draft.connectionId, editor.draft.upstreamModelId, editor.draft.id);
+    const suggested = suggestedRouteId(editor.draft);
     if (suggested && !editor.draft.touched.has('id')) {
       editor.draft.id = suggested;
       if (dom.mId) dom.mId.value = suggested;
@@ -1244,7 +1261,7 @@ function bindEvents() {
          默认按 Responses 生成，高级里仍可切换。 */
       editor.draft.protocolConfirmed = true;
       editor.draft.protocolSource = 'derived';
-      editor.draft.protocolHint = '已按上游模型名自动推导本地路由与接口协议；可在「高级」中修改。';
+      editor.draft.protocolHint = '已按连接允许的协议与上游模型名自动推导本地路由；可在「高级」中修改。';
     }
     renderEditor();
   });
@@ -1313,11 +1330,25 @@ function bindEvents() {
 
   document.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => {
-      if (button.dataset.action === 'disconnect-models') {
+      const action = button.dataset.action;
+      if (action === 'disconnect-models') {
         requestDisconnectConfirm(button);
         return;
       }
-      void runAction(button.dataset.action, button.dataset.profileMode);
+      /* 总览主卡在没有模型或直连不受支持时引导去对应的页面，而不是发一次
+         后端不认识的操作。 */
+      if (action === 'open-models') {
+        setView('models');
+        revealWorkspaceSection('catalog-panel');
+        return;
+      }
+      if (action === 'open-connection') {
+        setView('maintenance');
+        setSubtab('maintenance', 'connection');
+        revealWorkspaceSection('native-panel');
+        return;
+      }
+      void runAction(action, button.dataset.profileMode);
     });
   });
 

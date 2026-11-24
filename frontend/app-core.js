@@ -19,7 +19,6 @@ const API = {
   openUrl: '/api/open-url',
   updatesCheck: '/api/updates/check',
   updatesDownload: '/api/updates/download',
-  updatesApply: '/api/updates/apply',
   updatesSettings: '/api/updates/settings',
   updatesCancel: '/api/updates/cancel',
   updatesRollback: '/api/updates/rollback',
@@ -220,9 +219,19 @@ const ACTION_STATE = {
   'waiting-idle': '等待 Kimi 空闲',
   'waiting-quit': '等待 Kimi 正常退出',
   'waiting-login': '等待登录 Kimi',
+  waiting_login: '等待登录 Kimi',
   'waiting-work': '等待 Kimi Work 就绪',
   'waiting-settings': '等待 Kimi 设置页',
+  'waiting-unmanaged': '待重启接管后同步',
+  waiting_unmanaged: '待重启接管后同步',
   'requires-restart': '需正常重启 Kimi',
+  requires_restart: '待重启 Kimi 生效',
+  /* 后台 auto-sync 的收敛态：完成后 action 仍是 auto-sync，状态是这些值。 */
+  synced: '已同步',
+  scheduled: '等待同步',
+  syncing: '正在同步',
+  deferred_offline: '待打开 Kimi 时同步',
+  idle: '已就绪',
   active: '已连接',
   inactive: '等待 Kimi 启动',
   cancelled: '已取消',
@@ -341,7 +350,7 @@ const DIAG_REASON = {
   native_import_requires_restart: '模型配置已写入，请等当前任务结束后正常重启 Kimi 以生效。',
   kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
   kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
-  conversation_rollback_failed: '会话绑定恢复尚未完成。请在「旧会话改绑模型」中刷新。',
+  conversation_rollback_failed: '会话绑定恢复尚未完成。请在「会话」页刷新。',
   kimi_start_cancelled: '自动启动官方 Kimi 已取消。',
   kimi_stop_failed: '未能正常停止当前受管 Kimi 进程，请先在官方窗口退出后再试。',
   kimi_user_data_dir_invalid: '官方 Kimi 数据目录路径无效，请检查诊断信息。',
@@ -360,7 +369,7 @@ const DIAG_REASON = {
    native_import_/native_ 前缀，主程序自己用下划线代码。三者指向同一张表，
    归一化后查一次，文案才不会按调用路径变来变去。 */
 const DIRECT_REASON = {
-  direct_import_required: '直连配置还没有写入官方 Kimi；请在模型页点「同步到 Work」。',
+  direct_import_required: '直连配置还没有写入官方 Kimi；请在模型页点「重新同步模型目录」。',
   direct_mode_unsupported: '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。',
   direct_preview_refused: '官方 Kimi 拒绝了这次直连写入，现有配置未被改动；请确认官方窗口没有正在同步或编辑模型源，再重新同步。',
   direct_no_eligible_models: '没有可直连的模型：至少需要一个已声明工具调用、已绑定连接且有密钥的模型。',
@@ -371,14 +380,14 @@ const DIRECT_REASON = {
   direct_disconnect_failed: '没能断开旧的接入源，官方 Kimi 可能仍走原来的路由；请重新同步，并在官方窗口确认模型来源。',
   direct_foreign_source: '官方 Kimi 中已有不是本产品写入的模型源，未覆盖；请先核对现有来源后再同步。',
   direct_catalog_too_large: '这次要导入的模型目录超过了官方 Kimi 单次接受的上限，本次未写入；请减少单次导入的模型，或拆分连接后分批同步。',
-  models_removed: '官方 Kimi 里已经没有这次要导入的部分模型，可能是官方更新或来源被改动；请重新同步到 Work。',
-  route_cleanup_pending: '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成；点「同步到 Work」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。',
+  models_removed: '官方 Kimi 里已经没有这次要导入的部分模型，可能是官方更新或来源被改动；请点「重新同步模型目录」重试。',
+  route_cleanup_pending: '新的直连配置已写入并读回，但旧的服务商来源还没清理，切换收尾未完成；点「重新同步模型目录」可重试清理。在此之前不要退出后台服务，也不要当作旧路由已清理。',
   direct_spec_missing: '当前没有可直连的模型或连接；请在模型页补齐后重新同步。',
   /* 旧 Go 版本与页面直接给出的代码；归一化后和上面的下划线代码指向同一句。 */
   foreign_source: '官方 Kimi 中已有不是本产品写入的模型源，未覆盖；请先核对现有来源后再同步。',
   gateway_disconnect_failed: '没能断开旧的网关接入源，官方 Kimi 可能仍指向本机网关；请重新同步，确认直连已生效后再退出后台服务。',
   import_failed: '官方 Kimi 没有接受这次直连写入，现有配置未被改动；请稍后重新同步，仍失败时查看诊断信息。',
-  models_missing: '官方 Kimi 里还缺这次要导入的模型；请重新同步到 Work，仍失败时查看诊断信息。',
+  models_missing: '官方 Kimi 里还缺这次要导入的模型；请点「重新同步模型目录」重试，仍失败时查看诊断信息。',
   contract_changed: '官方 Kimi 的模型源接口与预期不同，本次未写入任何内容；请更新官方 Kimi 或本软件后重试。',
   byok_source_stale: '官方 Kimi 的模型源在写入期间被更新，本次未继续；请重新同步。',
   native_import_direct_mode: '直连模式会把服务商地址与密钥直接写入官方 Kimi，不再经过本机网关。',
@@ -880,6 +889,8 @@ const state = {
   conversations: {
     list: null, loading: false, error: '', query: '', stale: false, pending: false,
     targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null,
+    /* 展开中的行内确认条（会话键）：轮询据此暂停自动重刷。 */
+    rowConfirm: null,
   },
 };
 

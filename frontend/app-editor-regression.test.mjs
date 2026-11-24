@@ -30,7 +30,7 @@ const coreFunction = name => extractFunction(coreSource, name);
 
 const MODEL_HELPERS = ['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf', 'priceDraftFrom',
   'failoverDraftFrom', 'buildPrice', 'buildFailover', 'buildModel', 'canonicalPrice', 'canonicalFailover',
-  'canonicalModel', 'routeIdFor', 'routeIdPreservingProtocol'].map(modelFunction);
+  'canonicalModel', 'routeIdFor', 'preferredProtocol', 'draftProtocolFamily', 'suggestedRouteId'].map(modelFunction);
 
 /* 候选选择与协议推导共用这一整套真实实现：预设与连接只在此处注入。 */
 const PICKER_ENV = `
@@ -158,14 +158,34 @@ test('an explicit-empty protocol is still refused instead of reusing the manual 
   assert.match(draft.protocolHint, /明确声明不支持/);
 });
 
-test('routeIdPreservingProtocol only rewrites the connection prefix and upstream segment', () => {
-  const routeIdPreservingProtocol = new Function(modelFunction('modelFamilyFor') + '\n'
-    + modelFunction('routeIdFor') + '\n' + modelFunction('routeIdPreservingProtocol')
-    + '\nreturn routeIdPreservingProtocol;')();
-  assert.equal(routeIdPreservingProtocol('other', 'model-a', 'conn/kimi-model-a'), 'other/kimi-model-a');
-  assert.equal(routeIdPreservingProtocol('other', 'model-b', 'conn/resp-model-a'), 'other/resp-model-b');
-  /* 没有可沿用的协议时退回 routeIdFor 的既有规则（按上游名推导）。 */
-  assert.equal(routeIdPreservingProtocol('other', 'deepseek-v4', ''), 'other/resp-deepseek-v4');
+test('the suggested route id follows the connection protocol before guessing from the upstream name', () => {
+  const makeSuggested = (connections = []) => new Function('connections', `
+    const state = { data: { connections: { saved: connections } } };
+    const providerPreset = id => (state.providers?.presets || []).find(preset => preset.id === id) || null;
+    ${modelFunction('modelFamilyFor')}
+    ${modelFunction('routeIdFor')}
+    ${modelFunction('connectionRowsOf')}
+    ${modelFunction('findConnection')}
+    ${modelFunction('preferredProtocol')}
+    ${modelFunction('draftProtocolFamily')}
+    ${modelFunction('suggestedRouteId')}
+    return suggestedRouteId;
+  `)(connections);
+
+  /* 只允许 Chat 的连接上手输模型名：必须推导 kimi- 前缀，不能再推 resp-。 */
+  const chatOnly = makeSuggested([{ id: 'conn-a', protocols: ['chat'], apiKeySet: true }]);
+  assert.equal(chatOnly({ connectionId: 'conn-a', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-a/kimi-deepseek-v4');
+  /* 只允许 Responses 时反过来。 */
+  const respOnly = makeSuggested([{ id: 'conn-b', protocols: ['responses'], apiKeySet: true }]);
+  assert.equal(respOnly({ connectionId: 'conn-b', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-b/resp-deepseek-v4');
+  /* 两条都允许时沿用当前路由已确认的协议，只换前缀与末段。 */
+  const open = makeSuggested([{ id: 'conn-c', protocols: ['chat', 'responses'], apiKeySet: true }]);
+  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'model-a', id: 'conn/kimi-model-a' }), 'conn-c/kimi-model-a');
+  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'model-b', id: 'conn/resp-model-a' }), 'conn-c/resp-model-b');
+  /* 都没给出结论时才按上游名猜。 */
+  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-c/resp-deepseek-v4');
+  /* 连接限制与当前路由冲突时以连接为准，避免生成保存必被拒的路由。 */
+  assert.equal(chatOnly({ connectionId: 'conn-a', upstreamModelId: 'model-b', id: 'conn/resp-model-a' }), 'conn-a/kimi-model-b');
 });
 
 test('toggling an effort off also clears a default that pointed at it', async () => {
@@ -527,10 +547,10 @@ test('the visibility handler uses the same busy rule as the poller', () => {
 test('changing the connection or the upstream id drops the stale context limit', () => {
   const connectionBlock = appFunctionSpan(appSource, "if (dom.mConnection) dom.mConnection.addEventListener('change'");
   assert.match(connectionBlock, /contextLimit = ''/);
-  assert.match(connectionBlock, /routeIdPreservingProtocol/);
+  assert.match(connectionBlock, /suggestedRouteId/);
   const upstreamBlock = appFunctionSpan(appSource, "if (dom.mUpstream) dom.mUpstream.addEventListener('input'");
   assert.match(upstreamBlock, /contextLimit = ''/);
-  assert.match(upstreamBlock, /routeIdPreservingProtocol/);
+  assert.match(upstreamBlock, /suggestedRouteId/);
 });
 
 test('editingBusy pauses polling during connection editor typing or IME composition', () => {

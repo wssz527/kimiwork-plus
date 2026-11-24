@@ -38,7 +38,7 @@ const DIRECT_REASON_SOURCE = (() => {
   return source.slice(start, end + 3);
 })();
 const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
-  'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
+  'directHasNoEligibleModels', 'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
   'directRestartRequired', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
 function makeSyncState() {
@@ -157,24 +157,42 @@ test('missing official Kimi has an explicit installation next step', () => {
 });
 
 test('overview only promotes restart when it is needed', () => {
-  const launch = { dataset: {}, setAttribute() {} };
-  const renderLaunch = new Function('dom', `
+  const launch = { dataset: {}, setAttribute() {}, hidden: false, disabled: false, textContent: '' };
+  const handoff = { dataset: {} };
+  const retryApply = { hidden: false, disabled: false };
+  const api = new Function('dom', `
     const ACTION_LABEL = {'open-work': '打开 Kimi Work', 'launch-kimi': '启动 Kimi Work', 'restart-kimi': '重启 Kimi'};
-    const state = {};
-    const isInFlight = () => false;
-    const syncState = data => ({ code: data.sync });
-    const setText = (element, text) => { element.textContent = text; };
-    ${sourceFunction('renderLaunch')}
-    return renderLaunch;
-  `)({ onboardLaunch: launch });
-  renderLaunch({ kimiProcess: { running: true }, integration: { desktop: { managed: true } }, sync: 'synced' });
+    const state = { pendingAction: null };
+    const isInFlight = op => op?.state === 'running';
+    const setDot = () => {};
+    const setText = (element, text) => { if (element) element.textContent = text; };
+    const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };
+    const overviewState = data => data._info;
+    const OVERVIEW_NAV_ACTIONS = new Set(['restart-kimi', 'open-models', 'open-connection']);
+    const OVERVIEW_LAUNCH_LABELS = { 'launch-kimi': '启动 Kimi Work', 'open-work': '打开 Kimi Work' };
+    ${sourceFunction('overviewLaunchAction')}
+    ${sourceFunction('overviewLaunchLabel')}
+    ${sourceFunction('renderOverviewStatus')}
+    return { overviewLaunchAction, renderOverviewStatus };
+  `)({ onboardLaunch: launch, onboardLaunchHint: null, onboardVerdictDot: null, onboardVerdictWord: null,
+    onboardVerdictNote: null, handoff, onboardRetryApply: retryApply });
+
+  api.renderOverviewStatus({ kimiProcess: { running: true }, _info: { code: 'ready', tone: 'ok', word: '已就绪', note: '' } });
   assert.equal(launch.dataset.action, 'open-work');
-  renderLaunch({ kimiProcess: { running: true }, integration: { desktop: { managed: false } } });
+  assert.equal(retryApply.hidden, true, 'the legacy retry-apply button never comes back on the new overview');
+  assert.equal(handoff.dataset.state, 'idle');
+  api.renderOverviewStatus({ kimiProcess: { running: true }, _info: { code: 'restart', tone: 'warn', word: '', note: '', launch: 'restart-kimi' } });
   assert.equal(launch.dataset.action, 'restart-kimi');
-  renderLaunch({ kimiProcess: { running: true }, sync: 'restart' });
-  assert.equal(launch.dataset.action, 'restart-kimi');
-  renderLaunch({ kimiProcess: { running: false } });
+  assert.equal(handoff.dataset.tone, 'warn');
+  api.renderOverviewStatus({ kimiProcess: { running: false }, _info: { code: 'pending', tone: 'warn', word: '', note: '' } });
   assert.equal(launch.dataset.action, 'launch-kimi');
+  api.renderOverviewStatus({ kimiProcess: { running: false }, _info: { code: 'empty', tone: 'neutral', word: '', note: '', launch: 'open-models' } });
+  assert.equal(launch.dataset.action, 'open-models');
+  api.renderOverviewStatus({ kimiProcess: { running: false }, _info: { code: 'no-eligible', tone: 'warn', word: '', note: '', launch: 'open-models' } });
+  assert.equal(launch.dataset.action, 'open-models');
+  /* 未知的 launch 值不直接写进 data-action：兜底回打开/启动。 */
+  assert.equal(api.overviewLaunchAction({ kimiProcess: { running: true } }, { launch: 'takeover' }), 'open-work');
+  assert.equal(api.overviewLaunchAction({ kimiProcess: { running: false } }, { launch: 'takeover' }), 'launch-kimi');
 });
 
 test('budget notice distinguishes reminders, refusals and disabled protection', () => {
@@ -2296,7 +2314,7 @@ test('direct mode reports the unsynced, ready, and zero-gateway states without a
   assert.equal(pending.code, 'pending');
   assert.equal(pending.tone, 'warn');
   assert.equal(pending.word, '待写入直连配置');
-  assert.match(pending.note, /同步到 Work/);
+  assert.match(pending.note, /重新同步模型目录/);
   assert.doesNotMatch(pending.note, /重启/);
 
   /* 只要 integration.mode 还不是 direct，就必须说「待写入」。 */
@@ -2413,7 +2431,7 @@ test('a synced direct import without static hosts asks for one more sync', () =>
   assert.equal(verdict.code, 'pending');
   assert.equal(verdict.tone, 'warn');
   assert.equal(verdict.word, '待补齐静态 hosts');
-  assert.match(verdict.note, /再点一次「同步到 Work」/);
+  assert.match(verdict.note, /点「重新同步模型目录」/);
   assert.doesNotMatch(verdict.note, /退出本软件/);
 
   /* directMode 存在时 setup.dns.state === 'hosts' 不是证据：
@@ -2531,7 +2549,7 @@ test('route cleanup pending never reads as a finished switch', () => {
     assert.equal(verdict.code, 'pending', 'variant ' + i + ' must not report ready');
     assert.equal(verdict.word, '切换收尾未完成');
     assert.match(verdict.note, /旧的服务商来源仍保留/);
-    assert.match(verdict.note, /再点一次「同步到 Work」/);
+    assert.match(verdict.note, /点「重新同步模型目录」/);
     assert.match(verdict.note, /不要退出后台服务/);
     assert.match(verdict.note, /旧路由已清理/);
     assert.doesNotMatch(verdict.note, /直连已就绪|切换全部完成/);
@@ -2568,7 +2586,7 @@ test('an unsupported official version is named instead of asking for another syn
   assert.match(verdict.word, /不支持直连/);
   assert.match(verdict.note, /3\.2\.28\+/);
   assert.match(verdict.note, /本机网关/);
-  assert.doesNotMatch(verdict.note, /同步到 Work/);
+  assert.doesNotMatch(verdict.note, /重新同步模型目录/);
 });
 
 test('catalog-size and removed-model failures name the next step without claiming success', () => {
@@ -2584,7 +2602,7 @@ test('catalog-size and removed-model failures name the next step without claimin
   assert.doesNotMatch(tooLarge, /direct_catalog_too_large/);
 
   const removed = fn('models_removed');
-  assert.match(removed, /重新同步到 Work/);
+  assert.match(removed, /重新同步模型目录/);
   assert.match(removed, /已经没有/);
   assert.doesNotMatch(removed, /models_removed/);
 
@@ -2601,9 +2619,10 @@ test('catalog-size and removed-model failures name the next step without claimin
 
 function makeWorkspaceSyncEnv() {
   const nodes = {};
-  for (const id of ['workspace-sync-state', 'workspace-sync-note', 'workspace-restart']) {
-    nodes[id] = { id, textContent: '', hidden: false };
+  for (const id of ['workspace-sync-state', 'workspace-sync-note', 'workspace-restart', 'workspace-resync']) {
+    nodes[id] = { id, textContent: '', hidden: false, disabled: false };
   }
+  nodes['workspace-resync'].hidden = true;
   const code = [
     ...INTEGRATION_HELPERS,
     'const $ = id => nodes[id] || null;',
@@ -2675,7 +2694,7 @@ test('the workspace bar and the gateway fact both show an unfinished route clean
 
   /* 没有收尾标记时依旧是原来的已同步文案。 */
   render(base);
-  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
 
   const fact = new Function(
     [...INTEGRATION_HELPERS,
@@ -2705,9 +2724,10 @@ test('the models sync bar names the pending direct write and the gateway fallbac
 
   /* 直连已选、官方 Kimi 还是网关：说明下一步是写入直连配置。 */
   render({ integrationMode: 'direct', models, integration: { mode: 'gateway' } });
-  assert.equal(nodes['workspace-sync-state'].textContent, '待写入直连配置');
-  assert.match(nodes['workspace-sync-note'].textContent, /服务商地址与静态 hosts 写入官方 Kimi/);
+  assert.equal(nodes['workspace-sync-state'].textContent, '等待自动写入直连配置');
+  assert.match(nodes['workspace-sync-note'].textContent, /自动写入服务商地址与静态 hosts/);
   assert.match(nodes['workspace-sync-note'].textContent, /之后可退出本软件/);
+  assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
 
   /* 切回网关、官方 Kimi 仍是直连：说明下一步是恢复网关路由。 */
   render({ integrationMode: 'gateway', models, integration: { mode: 'direct' } });
@@ -2724,7 +2744,7 @@ test('the models sync bar names the pending direct write and the gateway fallbac
     integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
       aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
   });
-  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
   assert.match(nodes['workspace-sync-note'].textContent, /静态 hosts 就绪/);
   assert.match(nodes['workspace-sync-note'].textContent, /仍可直接使用这些模型/);
 
@@ -2737,14 +2757,14 @@ test('the models sync bar names the pending direct write and the gateway fallbac
     integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
       aliases: { 'conn/resp/model-a': 'byok-uuid/model-a', 'conn/chat/model-b': 'byok-uuid/model-b' } },
   });
-  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
   assert.match(nodes['workspace-sync-note'].textContent, /补齐静态 hosts/);
 
   /* 网关模式原有四种文案不得变化。 */
   render({ models: [], integration: {} });
   assert.equal(nodes['workspace-sync-state'].textContent, '尚未添加模型');
   render({ models, integration: { adopted: true, aliases: { 'conn/resp/model-a': 'a', 'conn/chat/model-b': 'b' } } });
-  assert.equal(nodes['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.equal(nodes['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   render({ models, integration: { applied: true, adopted: false, aliases: { 'conn/resp/model-a': 'a', 'conn/chat/model-b': 'b' } } });
   assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
   assert.equal(nodes['workspace-restart'].hidden, false);
@@ -2783,7 +2803,7 @@ test('a direct write that needs restart exposes the restart action instead of an
       aliases: { 'conn/resp/model-a': 'byok-uuid/model-a', 'conn/chat/model-b': 'byok-uuid/model-b' } },
   };
   render(ready);
-  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Work');
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
   assert.equal(nodes['workspace-restart'].hidden, true);
   assert.equal(syncState(ready).word, '直连已就绪');
 
@@ -3114,7 +3134,7 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   };
   assert.equal(syncState(clean).code, 'synced');
   renderWorkspace(clean);
-  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   render(clean);
   assert.equal(nodes['integration-mode-state'].hidden, true);
   assert.equal(nodes['native-sync-label'].textContent, '重新准备接入');
@@ -3129,11 +3149,11 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   assert.equal(syncState(unmanagedRestart).code, 'synced');
   assert.doesNotMatch(syncState(unmanagedRestart).word, /重启/);
   renderWorkspace(unmanagedRestart);
-  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   assert.equal(workspace['workspace-restart'].hidden, true);
   assert.match(workspace['workspace-sync-note'].textContent, /非托管运行/);
   renderWorkspace({ ...unmanagedRestart, kimiProcess: { running: false } });
-  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Work');
+  assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   assert.match(workspace['workspace-sync-note'].textContent, /打开 Kimi 后/);
   assert.equal(workspace['workspace-restart'].hidden, true);
   assert.doesNotMatch(connectionText(unmanagedRestart), /需要重启|等待.*重启/);
@@ -3319,6 +3339,9 @@ test('the shell banner promotes one direct restart action and keeps the credenti
     const savedIntegrationMode = data => data?.integrationMode === 'direct' ? 'direct' : 'gateway';
     const budgetNotice = () => '';
     ${sourceFunction('isInFlight')}
+    ${sourceFunction('modelTakeoverRemoved')}
+    ${sourceFunction('directModeOf')}
+    ${sourceFunction('directHasNoEligibleModels')}
     ${sourceFunction('nativeRestartReceipt')}
     ${sourceFunction('credentialAuthPending')}
     ${sourceFunction('connectionRowsOf')}
@@ -3903,7 +3926,7 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
 
   const connectionText = makeNativeConnectionText();
   assert.match(connectionText({ integration: { reason: 'native_bridge_waiting_work' } }), /Work 页面尚未就绪/);
-  assert.match(connectionText({ integration: { reason: 'native_bridge_unavailable' } }), /同步到 Work/);
+  assert.match(connectionText({ integration: { reason: 'native_bridge_unavailable' } }), /重新同步模型目录/);
   assert.match(connectionText({ integration: { desktop: { reason: 'official_kimi_already_running' } } }), /正常退出并重启 Kimi/);
 
   /* 直连模式下未同步状态遇到非托管 Kimi、等待 Work 或启动失败，不能退回泛化文案或矛盾提示。 */
@@ -4187,35 +4210,20 @@ test('cold-start /api/state failure hides fullscreen gate so connection banner a
   assert.ok(calls.includes('gate:expired'));
 });
 
-test('direct mode renderLaunch avoids unnecessary restart and renderOnboardSteps accepts ready', () => {
-  const launch = { dataset: {}, setAttribute() {} };
+test('the onboarding steps accept a ready direct sync and the old launch override is gone', () => {
   const steps = ['connection', 'catalogue', 'apply', 'sync'].map((step) => ({ dataset: { step, done: 'false' } }));
-  const dom = {
-    onboardLaunch: launch,
-    onboardLaunchHint: { hidden: true, textContent: '' },
-    onboardSteps: { querySelectorAll: () => steps },
-  };
+  const dom = { onboardSteps: { querySelectorAll: () => steps } };
   const api = new Function('dom', `
-    const ACTION_LABEL = { 'open-work': '打开 Kimi Work', 'launch-kimi': '启动 Kimi Work', 'restart-kimi': '重启 Kimi' };
     const state = { data: { connections: { saved: [{ id: 'ds', baseURL: 'https://api.deepseek.com/v1' }] } } };
-    const isInFlight = () => false;
-    const syncState = data => ({ code: data.sync });
     const connectionsChanged = () => false;
     const connectionRowsOf = (data) => data?.connections?.saved || [];
-    const setText = (el, t) => { if (el) el.textContent = t; };
+    const syncState = data => ({ code: data.sync });
     const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
     ${sourceFunction('savedOnboardTarget')}
     ${sourceFunction('mountedSavedModels')}
-    ${sourceFunction('recoveryCopy')}
-    ${sourceFunction('renderLaunch')}
     ${sourceFunction('renderOnboardSteps')}
-    return { renderLaunch, renderOnboardSteps };
+    return { renderOnboardSteps };
   `)(dom);
-
-  api.renderLaunch({ integrationMode: 'direct', kimiProcess: { running: true }, integration: { desktop: { managed: false } }, sync: 'ready' });
-  assert.equal(launch.dataset.action, 'open-work');
-  api.renderLaunch({ integrationMode: 'direct', kimiProcess: { running: true }, integration: { desktop: { managed: false } }, sync: 'restart' });
-  assert.equal(launch.dataset.action, 'restart-kimi');
 
   const done = api.renderOnboardSteps(
     { integrationMode: 'direct', sync: 'ready', models: [{ id: 'ds/chat/r1', connectionId: 'ds' }], connections: { saved: [{ id: 'ds' }] } },
@@ -4223,6 +4231,9 @@ test('direct mode renderLaunch avoids unnecessary restart and renderOnboardSteps
   );
   assert.equal(done.sync, true);
   assert.equal(steps.find((s) => s.dataset.step === 'sync').dataset.done, 'true');
+  /* 旧 renderLaunch 会覆盖总览的主动作；现在只剩 renderOverviewStatus 一个入口。 */
+  assert.equal(source.includes('function renderLaunch('), false);
+  assert.equal(source.includes('function recoveryCopy('), false);
 });
 
 test('renderConnectionEditor protects active or composing inputs, respects managed providerFlow, and applyProviderPreset clears ceKey', () => {
@@ -4616,7 +4627,6 @@ test('renderAll and setView render services on maintenance, onboard overview on 
     const renderActions = () => calls.push('actions');
     const renderPreviewLifecycle = () => calls.push('lifecycle');
     const renderOverview = (_d, opts) => calls.push('overview:' + opts?.view);
-    const renderOnboardOverview = () => calls.push('onboardOverview');
     const renderWorkspaceSync = () => calls.push('workspaceSync');
     const renderOnboard = () => calls.push('onboard');
     const renderModels = () => calls.push('models');
@@ -4639,7 +4649,8 @@ test('renderAll and setView render services on maintenance, onboard overview on 
 
   api.renderAll();
   assert.ok(calls.includes('overview:overview'));
-  assert.ok(calls.includes('onboardOverview'));
+  /* 旧 renderOnboardOverview 会在这里用 syncState 覆盖总览主卡；现在只剩一个入口。 */
+  assert.equal(calls.includes('overview:overview'), true);
   assert.ok(calls.includes('plus:overview'));
   assert.equal(calls.includes('services'), false);
 
@@ -4915,12 +4926,16 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
     CONVERSATION_CONSTANTS,
     'const $ = id => id === "conv-q-clear" ? ui.queryClear : null;',
     'const savedIntegrationMode = data => data?.integrationMode === "direct" ? "direct" : "gateway";',
+    'const reasonText = code => ({ conversation_kimi_restart_failed: "Kimi 未能自动重启" })[code] || "";',
     sourceFunction('sourceWord'),
     sourceFunction('displayNameOf'),
     sourceFunction('withSource'),
     sourceFunction('directoryNameOf'),
     sourceFunction('stripModelAliasPrefix'),
+    sourceFunction('aliasSourceKind'),
     sourceFunction('humanizeConversationModel'),
+    sourceFunction('canSwitchConversations'),
+    sourceFunction('migrationMatchesOf'),
     sourceFunction('relativeTime'),
     sourceFunction('workspaceTail'),
     sourceFunction('conversationListStatus'),
@@ -4965,6 +4980,7 @@ test('conversation model aliases become readable names and never leak raw UUID o
     sourceFunction('displayNameOf'),
     sourceFunction('withSource'),
     sourceFunction('directoryNameOf'),
+    sourceFunction('aliasSourceKind'),
     sourceFunction('humanizeConversationModel'),
     'return humanizeConversationModel;',
   ].join('\n'))();
@@ -4975,7 +4991,9 @@ test('conversation model aliases become readable names and never leak raw UUID o
   const known = [{ alias: gatewayAlias, displayName: 'DeepSeek V4.1 Flash', sourceKind: 'kth' }];
   assert.equal(fn(gatewayAlias, known, []), 'DeepSeek V4.1 Flash · 网关');
   const uuidAlias = 'byok-12345678-1234-1234-1234-123456789abc/glm-5';
-  assert.equal(fn(uuidAlias, [], [{ id: 'glm-5', name: 'GLM-5.3 Flash' }]), 'GLM-5.3 Flash · 网关');
+  /* `byok-<uuid>/` 是官方直连写入的别名：来源标签只看别名前缀，不跟当前模式。 */
+  assert.equal(fn(uuidAlias, [], [{ id: 'glm-5', name: 'GLM-5.3 Flash' }]), 'GLM-5.3 Flash · 直连');
+  assert.equal(fn('byok-kth-kimi/glm-5', [], [{ id: 'glm-5', name: 'GLM-5.3 Flash' }]), 'GLM-5.3 Flash · 网关');
   const unknown = fn('byok-kth-kimi/kimi-k3-kwp-' + 'c'.repeat(64), [], []);
   assert.doesNotMatch(unknown, /byok|kimi-k3-kwp/);
   assert.match(unknown, /目录未列出/);
@@ -5052,17 +5070,57 @@ test('the conversations guide follows the saved integration mode and search filt
   assert.equal(env.ui.empty.hidden, false);
 });
 
-test('previous-alias models surface a one-click migration entry and send the migration flag', async () => {
-  const model = makeConversationModel({ previousAlias: 'byok-kth-kimi/group/deepseek' });
-  const env = makeConversationPageEnv({ kimiRunning: false, models: [model] });
+test('the alias migration entry only appears for real matches and migrates every matched model', async () => {
+  const first = makeConversationModel({ alias: 'byok-kth-kimi/kimi-a', displayName: '模型 A', previousAlias: 'byok-kth-kimi/group/a' });
+  const second = makeConversationModel({ alias: 'byok-kth-kimi/kimi-b', displayName: '模型 B', previousAlias: 'byok-kth-kimi/group/b' });
+  const rows = [
+    { conversationKey: 'recent', title: '新会话', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
+    { conversationKey: 'older', title: '旧会话', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
+  ];
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [first, second], conversations: rows });
+  env.setReply({ conversationKeys: ['older'], kimiRestarted: false });
   await env.page.refresh();
+  /* 只有 previousAlias 字段、没有匹配会话的模型不显示迁移提示。 */
   assert.equal(env.ui.migration.hidden, false);
+  assert.match(env.ui.migrationText.textContent, /发现 1 条旧版模型别名会话/);
   assert.equal(env.ui.migrateAll.disabled, false);
   await env.ui.migrateAll.fire('click');
   await flushConversation();
-  const post = env.calls.find(call => call[1]?.method === 'POST');
-  assert.deepEqual(post[1].body, { targetModelAlias: model.alias, thinkingLevel: '', restartKimi: false, migratePreviousAlias: true });
+  const posts = env.calls.filter(call => call[1]?.method === 'POST');
+  assert.equal(posts.length, 1, 'only the model with a real match is migrated, and only once');
+  assert.equal(posts[0][1].body.targetModelAlias, second.alias);
+  assert.equal(posts[0][1].body.migratePreviousAlias, true);
+  assert.equal(posts[0][1].body.restartKimi, false);
   assert.match(env.ui.result.textContent, /已迁移 1 个旧别名会话/);
+
+  const quiet = makeConversationPageEnv({ kimiRunning: false, models: [first], conversations: rows });
+  await quiet.page.refresh();
+  assert.equal(quiet.ui.migration.hidden, true, 'a previousAlias without matching conversations must stay quiet');
+  assert.equal(quiet.ui.migrateAll.disabled, true);
+
+  /* 多个模型各自有命中时逐个迁移，只有最后一笔请求带重启标记。 */
+  const multiRows = [
+    { conversationKey: 'k1', title: 'A', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/a', isByok: true },
+    { conversationKey: 'k2', title: 'B', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
+  ];
+  const multi = makeConversationPageEnv({ kimiRunning: true, models: [first, second], conversations: multiRows });
+  multi.setReply({ conversationKeys: ['k2'], kimiRestarted: true });
+  await multi.page.refresh();
+  assert.match(multi.ui.migrationText.textContent, /发现 2 条旧版模型别名会话/);
+  await multi.ui.migrateAll.fire('click');
+  /* Kimi 运行中先确认一次，不直接发请求。 */
+  assert.equal(multi.calls.filter(call => call[1]?.method === 'POST').length, 0);
+  assert.equal(multi.ui.confirm.hidden, false);
+  assert.match(multi.ui.confirmText.textContent, /2 条旧别名会话/);
+  await multi.ui.confirmSubmit.fire('click');
+  await flushConversation();
+  const migrationPosts = multi.calls.filter(call => call[1]?.method === 'POST');
+  assert.equal(migrationPosts.length, 2);
+  assert.equal(migrationPosts[0][1].body.targetModelAlias, first.alias);
+  assert.equal(migrationPosts[0][1].body.restartKimi, false, 'earlier models must not restart Kimi');
+  assert.equal(migrationPosts[1][1].body.targetModelAlias, second.alias);
+  assert.equal(migrationPosts[1][1].body.restartKimi, true, 'only the last request restarts Kimi once');
+  assert.match(multi.ui.result.textContent, /已迁移 2 个旧别名会话/);
 });
 
 test('the restart banner clicks restart-kimi directly and only credential cases navigate', async () => {
@@ -5200,10 +5258,19 @@ test('an available update lights the settings dot and the overview banner with d
   assert.match(nodes['update-banner-text'].textContent, /发现新版本 v1\.1\.11/);
   assert.equal(nodes['update-banner-primary'].dataset.updateAction, 'download');
   assert.equal(nodes['update-banner-primary'].textContent, '立即下载并更新');
+  /* 旧的重复卡片已从页面移除：总览只有顶部一条 #update-banner。 */
+  assert.equal(htmlSource.includes('overview-update-card'), false);
+
+  /* 下载/校验/等待期间只说明进度，不提供后端不存在的安装动作。 */
+  renderUpdates({ updates: { state: 'downloading', available: { version: '1.1.11' } } });
+  assert.equal(nodes['update-banner'].hidden, false);
+  assert.equal(nodes['update-banner-primary'].hidden, true);
+  assert.match(nodes['update-banner-text'].textContent, /正在下载更新/);
+  assert.equal(nodes['nav-update-dot'].hidden, true, 'only a plain available state lights the settings dot');
 
   renderUpdates({ updates: { state: 'downloaded', available: { version: '1.1.11' } } });
-  assert.equal(nodes['update-banner-primary'].dataset.updateAction, 'apply');
-  assert.equal(nodes['update-banner-primary'].textContent, '立即安装并重启');
+  assert.equal(nodes['update-banner-primary'].dataset.updateAction, 'download');
+  assert.notEqual(nodes['update-banner-primary'].textContent, '立即安装并重启');
 
   renderUpdates({ updates: { state: 'up_to_date' } });
   assert.equal(nodes['nav-update-dot'].hidden, true);
@@ -5213,4 +5280,509 @@ test('an available update lights the settings dot and the overview banner with d
   assert.match(appText, /dom\.updateBannerPrimary\.dataset\.updateAction/);
   assert.match(appText, /await updateAction\(action, \{\}\)/);
   assert.match(appText, /window\.__kwpOpenUpdates\(\)|openUpdatesPanel\(\)/);
+});
+
+test('the front-end update endpoints match the bridge routes and never call a missing apply route', () => {
+  const coreText = readFileSync(new URL('./app-core.js', import.meta.url), 'utf8');
+  const overviewText = readFileSync(new URL('./app-overview.js', import.meta.url), 'utf8');
+  const serverText = readFileSync(new URL('../internal/bridge/server.go', import.meta.url), 'utf8');
+  assert.doesNotMatch(coreText, /updatesApply/);
+  assert.doesNotMatch(overviewText, /updates\/apply/);
+  for (const route of ['check', 'download', 'cancel', 'rollback', 'settings']) {
+    assert.match(serverText, new RegExp('"/api/updates/' + route + '"'));
+    assert.match(overviewText, new RegExp("'/api/updates/" + route + "'"));
+  }
+  assert.doesNotMatch(serverText, /\/api\/updates\/apply"/);
+  /* 更新横幅的主按钮只下载；安装由后台在空闲时自动完成。 */
+  const endpoints = overviewText.slice(overviewText.indexOf('const UPDATE_ENDPOINTS = {'), overviewText.indexOf('};', overviewText.indexOf('const UPDATE_ENDPOINTS = {')));
+  assert.doesNotMatch(endpoints, /apply/);
+});
+
+/* ---------- 总览状态机与后台自动同步的回归 ---------- */
+
+function makeOverviewState() {
+  return new Function(`
+    const fmtCount = value => String(value);
+    const isInFlight = op => op?.state === 'running';
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('autoSyncOf')}
+    ${sourceFunction('syncNeedsImport')}
+    ${sourceFunction('overviewState')}
+    return overviewState;
+  `)();
+}
+
+function makeRestartBannerState() {
+  return new Function(`
+    const credentialAuthPending = () => false;
+    ${INTEGRATION_HELPERS.join('\n')}
+    ${sourceFunction('autoSyncOf')}
+    ${sourceFunction('syncNeedsImport')}
+    ${sourceFunction('restartBannerState')}
+    return restartBannerState;
+  `)();
+}
+
+function makeOverviewStatusEnv() {
+  const nodes = {};
+  for (const id of ['ob-verdict-dot', 'ob-verdict-word', 'ob-verdict-note', 'ob-launch', 'ob-launch-hint', 'ob-retry-apply', 'handoff']) {
+    nodes[id] = { id, textContent: '', hidden: false, disabled: false, dataset: {}, setAttribute() {} };
+  }
+  nodes['ob-launch-hint'].hidden = true;
+  const dom = {
+    onboardVerdictDot: nodes['ob-verdict-dot'],
+    onboardVerdictWord: nodes['ob-verdict-word'],
+    onboardVerdictNote: nodes['ob-verdict-note'],
+    onboardLaunch: nodes['ob-launch'],
+    onboardLaunchHint: nodes['ob-launch-hint'],
+    onboardRetryApply: nodes['ob-retry-apply'],
+    handoff: nodes.handoff,
+  };
+  const code = [
+    'const ACTION_LABEL = { "launch-kimi": "启动 Kimi Work", "open-work": "打开 Kimi Work", "restart-kimi": "重启 Kimi" };',
+    'const setDot = (element, tone) => { if (element) element.dataset.tone = tone; };',
+    'const setText = (element, text) => { if (element) element.textContent = text; };',
+    'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
+    'const isInFlight = op => op?.state === "running";',
+    'const OVERVIEW_NAV_ACTIONS = new Set(["restart-kimi", "open-models", "open-connection"]);',
+    'const OVERVIEW_LAUNCH_LABELS = { "launch-kimi": "启动 Kimi Work", "open-work": "打开 Kimi Work" };',
+    'const renderShell = () => {};',
+    'const renderOperation = () => {};',
+    'const renderActions = () => {};',
+    'const plusPanel = { render() {} };',
+    'const renderPreviewLifecycle = () => {};',
+    ...INTEGRATION_HELPERS,
+    sourceFunction('autoSyncOf'),
+    sourceFunction('syncNeedsImport'),
+    sourceFunction('overviewState'),
+    sourceFunction('overviewLaunchAction'),
+    sourceFunction('overviewLaunchLabel'),
+    sourceFunction('renderOverviewStatus'),
+    /* 与真实的 renderOverview 一致：总览主卡只有这一个渲染入口。 */
+    'const renderOverview = data => renderOverviewStatus(data);',
+    sourceFunction('renderAll'),
+    'return { renderAll, overviewState };',
+  ].join('\n');
+  const state = { pendingAction: null, view: 'overview', actionButtons: [], data: null };
+  const api = new Function('dom', 'state', code)(dom, state);
+  return { nodes, state, api };
+}
+
+test('renderAll keeps the overview verdict and action for every auto-sync state', () => {
+  const { nodes, state, api } = makeOverviewStatusEnv();
+  const integration = { mode: 'gateway', imported: true, applied: true, adopted: true, desktop: { managed: true } };
+  const cases = [
+    ['requires_restart', 'restart', 'restart-kimi'],
+    ['syncing', 'syncing', 'open-work'],
+    ['deferred_offline', 'deferred', 'open-work'],
+    ['waiting_unmanaged', 'takeover', 'restart-kimi'],
+    ['synced', 'ready', 'open-work'],
+  ];
+  for (const [syncState, code, action] of cases) {
+    const data = {
+      integrationMode: 'gateway',
+      models: [{ id: 'conn/resp/a' }],
+      kimiProcess: { running: true, state: 'running' },
+      integration: { ...integration, autoSync: { state: syncState } },
+      operation: { action: 'auto-sync', state: syncState },
+    };
+    const expected = api.overviewState(data);
+    assert.equal(expected.code, code, syncState + ' must map to ' + code);
+    state.data = data;
+    api.renderAll();
+    assert.equal(nodes['ob-verdict-word'].textContent, expected.word,
+      syncState + ': the old onboard overview must not overwrite the verdict');
+    assert.equal(nodes['ob-launch'].dataset.action, action, syncState + ': the launch action must follow the verdict');
+    assert.equal(nodes['ob-retry-apply'].hidden, true, syncState + ': the legacy retry-apply button stays hidden');
+    assert.equal(nodes['handoff'].dataset.tone, expected.tone);
+  }
+  /* 旧实现里的第二个入口与它的私有 launch 推导都已删除。 */
+  assert.doesNotMatch(source, /renderOnboardOverview\(state\.data\)/);
+  assert.doesNotMatch(source, /function renderLaunch\(/);
+  const start = source.indexOf('function renderOnboardOverview(');
+  const delegate = source.slice(start, source.indexOf('\n}', start));
+  assert.match(delegate, /renderOverviewStatus\(data\)/);
+  assert.doesNotMatch(delegate, /syncState|renderLaunch|onboardRetryApply/);
+});
+
+test('a finished auto-sync no longer sticks on “正在自动同步…” or leaks the raw state code', () => {
+  const table = source.slice(source.indexOf('const ACTION_STATE = {'), source.indexOf('\n};', source.indexOf('const ACTION_STATE = {')) + 3);
+  for (const key of ['synced', 'deferred_offline', 'waiting_unmanaged', 'requires_restart', 'waiting_login', 'idle', 'scheduled', 'syncing']) {
+    assert.match(table, new RegExp(key + ':'), 'ACTION_STATE must translate ' + key);
+  }
+  const nodes = {
+    opbar: { dataset: {}, hidden: false },
+    opbarDot: { dataset: {} },
+    opbarName: { textContent: '' },
+    opbarNote: { textContent: '' },
+  };
+  const renderOperation = new Function('dom', `
+    const ACTION_LABEL = { 'auto-sync': '自动同步模型目录' };
+    ${table}
+    const setDot = (element, tone) => { if (element) element.dataset.tone = tone; };
+    const setText = (element, text) => { if (element) element.textContent = text; };
+    const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };
+    const reasonText = code => '原因:' + code;
+    const AUTO_SYNC_QUIET_STATES = new Set(['synced', 'idle', 'deferred_offline']);
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('operationNote')}
+    ${sourceFunction('renderOperation')}
+    return renderOperation;
+  `)(nodes);
+
+  for (const state of ['synced', 'idle', 'deferred_offline']) {
+    nodes.opbar.hidden = false;
+    renderOperation({ operation: { action: 'auto-sync', state } });
+    assert.equal(nodes.opbar.hidden, true, state + ' is a quiet finished state');
+  }
+  renderOperation({ operation: { action: 'auto-sync', state: 'running' } });
+  assert.equal(nodes.opbar.hidden, false);
+  assert.match(nodes.opbarName.textContent, /正在自动同步模型目录/);
+  assert.equal(nodes.opbarDot.dataset.tone, 'warn');
+  renderOperation({ operation: { action: 'auto-sync', state: 'syncing' } });
+  assert.match(nodes.opbarName.textContent, /正在自动同步模型目录/);
+  renderOperation({ operation: { action: 'auto-sync', state: 'scheduled' } });
+  assert.match(nodes.opbarName.textContent, /等待自动同步模型目录/);
+  renderOperation({ operation: { action: 'auto-sync', state: 'requires_restart' } });
+  assert.match(nodes.opbarName.textContent, /待重启 Kimi 生效/);
+  assert.doesNotMatch(nodes.opbarName.textContent, /requires_restart/);
+  assert.equal(nodes.opbarDot.dataset.tone, 'warn');
+  renderOperation({ operation: { action: 'auto-sync', state: 'failed', reason: 'direct_import_failed' } });
+  assert.equal(nodes.opbarDot.dataset.tone, 'bad');
+  assert.match(nodes.opbarNote.textContent, /原因:direct_import_failed/);
+  assert.doesNotMatch(nodes.opbarName.textContent, /failed|synced|deferred_offline/);
+});
+
+test('a removed takeover survives later read-only operations and direct limits never ask for a restart', () => {
+  const overviewState = makeOverviewState();
+  const restartBannerState = makeRestartBannerState();
+  const removed = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    integration: { imported: false, autoSync: { reason: 'disconnected' } },
+    operation: { action: 'check-compatibility', state: 'done' },
+  };
+  assert.equal(overviewState(removed).code, 'restored');
+  assert.equal(restartBannerState(removed), null, 'a removed takeover must not promote a restart');
+
+  const directLimited = {
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { desktop: { managed: false }, autoSync: { state: 'waiting_unmanaged' } },
+    directMode: { supported: false },
+  };
+  const unsupported = overviewState(directLimited);
+  assert.equal(unsupported.code, 'unsupported');
+  assert.equal(unsupported.launch, 'open-connection');
+  assert.equal(restartBannerState(directLimited), null);
+
+  const noEligible = { ...directLimited, directMode: { supported: true, eligibleModels: 0 } };
+  const noEligibleVerdict = overviewState(noEligible);
+  assert.equal(noEligibleVerdict.code, 'no-eligible');
+  assert.equal(noEligibleVerdict.launch, 'open-models');
+  assert.match(noEligibleVerdict.note, /工具调用/);
+  assert.equal(restartBannerState(noEligible), null);
+
+  /* 网关模式下旧直连来源欠清理时不能说「已就绪」。 */
+  const cleanup = overviewState({
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true },
+    integration: { imported: true, applied: true, adopted: true, desktop: { managed: true },
+      autoSync: { state: 'synced' },
+      nativeImport: { reason: 'route_cleanup_pending', routeCleanupPending: true } },
+  });
+  assert.equal(cleanup.code, 'pending');
+  assert.equal(cleanup.word, '切换收尾未完成');
+
+  /* 同步失败与等待登录都不属于「已写入、只差重启」。 */
+  const failedSync = { integrationMode: 'gateway', models: [{ id: 'a' }],
+    kimiProcess: { running: true },
+    integration: { imported: false, applied: true, adopted: false, desktop: { managed: true }, autoSync: { state: 'failed' } } };
+  assert.equal(restartBannerState(failedSync), null);
+  const waitingLogin = { ...failedSync, integration: { ...failedSync.integration, autoSync: { state: 'waiting_login' } } };
+  assert.equal(restartBannerState(waitingLogin), null);
+});
+
+test('an empty model list sends the overview action to the models page instead of a launch', () => {
+  const { nodes, state, api } = makeOverviewStatusEnv();
+  state.data = { integrationMode: 'gateway', models: [], kimiProcess: { running: false } };
+  api.renderAll();
+  assert.equal(nodes['ob-launch'].dataset.action, 'open-models');
+  assert.equal(nodes['ob-launch'].textContent, '前往添加模型');
+  assert.equal(nodes['ob-launch-hint'].hidden, false);
+});
+
+test('canSwitchConversations refuses unreadable lists, unknown Kimi state and busy requests', () => {
+  const state = { conversations: { loading: false, pending: false } };
+  const fn = new Function('state', `
+    ${sourceFunction('canSwitchConversations')}
+    return canSwitchConversations;
+  `)(state);
+  assert.equal(fn(null), false);
+  assert.equal(fn({ reason: 'conversation_database_missing' }), false);
+  assert.equal(fn({ application: 'unknown' }), false);
+  assert.equal(fn({ application: 'not_running' }), true);
+  state.conversations.loading = true;
+  assert.equal(fn({ application: 'not_running' }), false);
+  state.conversations.loading = false;
+  state.conversations.pending = true;
+  assert.equal(fn({ application: 'not_running' }), false);
+});
+
+test('an unknown Kimi state disables every conversation switch entry', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  env.setList({
+    conversations: [
+      { conversationKey: 'recent', title: '新会话', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
+    ],
+    models: [makeConversationModel()],
+    application: 'unknown',
+    kimiRunning: false,
+  });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'recent');
+  assert.equal(switchButton.disabled, true);
+  assert.equal(findNode(row, node => node.dataset?.convTarget === 'recent').disabled, true);
+  assert.equal(env.ui.batchGo.disabled, true);
+  assert.equal(env.ui.batchMigrate.disabled, true);
+  await switchButton.fire('click');
+  await flushConversation();
+  assert.equal(env.calls.filter(call => call[1]?.method === 'POST').length, 0, 'unknown state must never write a binding');
+
+  /* 运行状态未知时 onState 必须把列表标成 unknown，而不是当成「未运行」。 */
+  env.page.onState({ revision: 'rev-unknown', kimiProcess: { running: false, state: 'unknown' } });
+  assert.equal(env.state.conversations.list.application, 'unknown');
+  assert.equal(env.state.conversations.list.kimiRunning, false);
+  await flushConversation();
+});
+
+test('the conversations page refreshes on return and keeps the user selection when polling', async () => {
+  const rows = [
+    { conversationKey: 'recent', title: '新会话', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
+    { conversationKey: 'older', title: '旧会话', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
+  ];
+  const env = makeConversationPageEnv({ kimiRunning: false, conversations: rows });
+  await env.page.refresh();
+  env.state.conversations.selected = ['older'];
+  env.state.conversations.targets.recent = env.state.conversations.list.models[0].alias;
+  env.state.conversations.efforts.recent = 'high';
+
+  /* 离页期间状态变化：只记 stale，等回到会话页再读。 */
+  env.state.view = 'overview';
+  env.page.onState({ revision: 'rev-1', kimiProcess: { running: false, state: 'not_running' } });
+  env.page.onState({ revision: 'rev-2', kimiProcess: { running: false, state: 'not_running' } });
+  assert.equal(env.state.conversations.stale, true);
+  assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 1, 'no background fetch while away');
+  env.state.view = 'conversations';
+  env.page.show();
+  await flushConversation();
+  assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 2, 'returning to the page refreshes');
+  assert.deepEqual(env.state.conversations.selected, ['older'], 'selection survives the refresh');
+  assert.equal(env.state.conversations.efforts.recent, 'high', 'effort choice survives the refresh');
+});
+
+test('a save blocked by an advanced field opens the advanced drawer', () => {
+  const patterns = source.slice(source.indexOf('const ADVANCED_ERROR_PATTERNS = ['),
+    source.indexOf('\n];', source.indexOf('const ADVANCED_ERROR_PATTERNS = [')) + 3);
+  const dom = { mAdvanced: { open: false } };
+  const validateEditor = new Function('state', 'dom', `
+    ${patterns}
+    const buildModel = draft => ({ model: { id: draft.id, connectionId: '', protocol: 'responses' }, errors: draft.errors.slice() });
+    const findConnection = () => null;
+    const connectionLabel = () => '';
+    const protocolLabel = value => value;
+    ${sourceFunction('errorNeedsAdvanced')}
+    ${sourceFunction('validateEditor')}
+    return validateEditor;
+  `)({ data: { models: [] } }, dom);
+
+  validateEditor({ originalId: null, draft: { id: 'a', errors: [] } });
+  assert.equal(dom.mAdvanced.open, false);
+  validateEditor({ originalId: null, draft: { id: 'a', errors: ['备用连接最多 8 条。'] } });
+  assert.equal(dom.mAdvanced.open, true, 'failover errors live inside the advanced drawer');
+  dom.mAdvanced.open = false;
+  validateEditor({ originalId: null, draft: { id: 'a', errors: ['定价必须同时填写输入与输出价格；只有一半无法估算花费。'] } });
+  assert.equal(dom.mAdvanced.open, true, 'pricing errors live inside the advanced drawer');
+  dom.mAdvanced.open = false;
+  validateEditor({ originalId: null, draft: { id: 'a', errors: ['上下文窗口必须是正整数。'] } });
+  assert.equal(dom.mAdvanced.open, false, 'main-field errors leave the drawer as it was');
+});
+
+test('a local build without an updater never triggers the focus check', () => {
+  const focusUpdateDue = new Function('state', `
+    const FOCUS_UPDATE_MIN_INTERVAL_MS = 60_000;
+    const FOCUS_UPDATE_STALE_MS = 30 * 60 * 1000;
+    const FOCUS_UPDATE_BUSY_STATES = ['checking', 'downloading', 'verifying', 'downloaded', 'applying', 'rolling_back', 'waiting_idle'];
+    ${sourceFunction('focusUpdateDue')}
+    return focusUpdateDue;
+  `)({ lastFocusUpdateCheckAt: 0 });
+  const now = Date.parse('2026-11-25T12:00:00+08:00');
+  /* 'local' 是没有更新器的构建：后端每次都回 503，不能每 60 秒发一次。 */
+  assert.equal(focusUpdateDue({ autoCheck: true, state: 'local', lastCheckedAt: '' }, now), false);
+  assert.equal(focusUpdateDue({ autoCheck: true, state: 'idle', lastCheckedAt: '' }, now), true);
+  assert.equal(focusUpdateDue({ autoCheck: false, state: 'idle', lastCheckedAt: '' }, now), false);
+});
+
+test('a tray update request before the shell is revealed is replayed once', () => {
+  const calls = [];
+  const dom = { shell: { hidden: true } };
+  const panel = { tagName: 'SECTION' };
+  const check = { focus(options) { calls.push(['focus', options]); } };
+  const api = new Function('dom', '$', 'setView', 'setSubtab', 'scrollMainToElement', `
+    let pendingUpdatesPanelReveal = false;
+    ${sourceFunction('openUpdatesPanel')}
+    ${sourceFunction('flushPendingUpdatesPanelReveal')}
+    return { openUpdatesPanel, flushPendingUpdatesPanelReveal, pending: () => pendingUpdatesPanelReveal };
+  `)(dom, id => (id === 'update-panel' ? panel : id === 'upd-check' ? check : null),
+    view => calls.push(['view', view]), (group, tab) => calls.push(['subtab', group, tab]),
+    element => calls.push(['scroll', element]));
+
+  api.openUpdatesPanel();
+  assert.deepEqual(calls, [['view', 'maintenance'], ['subtab', 'maintenance', 'connection']]);
+  assert.equal(api.pending(), true, 'the reveal must wait for #shell');
+  dom.shell.hidden = false;
+  api.flushPendingUpdatesPanelReveal();
+  assert.equal(calls.filter(call => call[0] === 'scroll' && call[1] === panel).length, 1);
+  assert.equal(calls.filter(call => call[0] === 'focus').length, 1);
+  assert.deepEqual(calls.find(call => call[0] === 'focus')[1], { preventScroll: true });
+  assert.equal(api.pending(), false);
+  api.flushPendingUpdatesPanelReveal();
+  assert.equal(calls.filter(call => call[0] === 'scroll').length, 1, 'only replayed once');
+});
+
+test('the top-bar refresh also reloads the conversations page', () => {
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = appText.indexOf('if (dom.refresh) dom.refresh.addEventListener');
+  assert.notEqual(start, -1);
+  const block = appText.slice(start, appText.indexOf('if (dom.connRetry)', start));
+  assert.match(block, /state\.view === 'conversations'/);
+  assert.match(block, /conversationsPanel\.refresh\(\)/);
+});
+
+test('the workspace bar only offers a manual resync where auto-sync cannot finish alone', () => {
+  assert.match(htmlSource, /id="workspace-resync"/);
+  assert.match(htmlSource, /id="workspace-resync"[^>]*data-action="connect-kimi"|data-action="connect-kimi"[^>]*id="workspace-resync"/);
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+
+  render({ integrationMode: 'gateway', models, integration: { imported: false },
+    operation: { action: 'disconnect-models', state: 'removed' } });
+  assert.equal(nodes['workspace-resync'].hidden, false);
+  assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
+
+  render({ integrationMode: 'direct', models, integration: { mode: 'gateway' } });
+  assert.equal(nodes['workspace-resync'].hidden, false);
+
+  render({ integrationMode: 'direct', models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true, eligibleModels: 1, eligibleModelIds: ['conn/resp/model-a'] },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
+  assert.equal(nodes['workspace-resync'].hidden, true, 'a settled direct import needs no manual resync');
+
+  render({ integrationMode: 'gateway', models,
+    directMode: { mode: 'gateway', supported: true, routeCleanupPending: true },
+    integration: { mode: 'gateway', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '切换收尾未完成');
+  assert.equal(nodes['workspace-resync'].hidden, false);
+
+  render({ integrationMode: 'gateway', models,
+    compatibility: { guards: { modelSyncWriteBlocked: true } },
+    integration: { mode: 'gateway', imported: true } });
+  assert.equal(nodes['workspace-resync'].hidden, true, 'a compatibility gate cannot be bypassed by resync');
+
+  render({ integrationMode: 'direct', models, directMode: { mode: 'direct', supported: false },
+    integration: { mode: 'gateway' } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '当前官方 Kimi 不支持直连');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  render({ integrationMode: 'direct', models, directMode: { mode: 'direct', supported: true, eligibleModels: 0 },
+    integration: { mode: 'gateway' } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '没有可直连的模型');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+});
+
+test('the batch migrate action follows the model selected in the toolbar, not the first one', async () => {
+  const first = makeConversationModel({ alias: 'byok-kth-kimi/kimi-a', displayName: '模型 A', previousAlias: 'byok-kth-kimi/group/a' });
+  const second = makeConversationModel({ alias: 'byok-kth-kimi/kimi-b', displayName: '模型 B', previousAlias: 'byok-kth-kimi/group/b' });
+  const rows = [
+    { conversationKey: 'k1', title: 'A', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/a', isByok: true },
+    { conversationKey: 'k2', title: 'B', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
+  ];
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [first, second], conversations: rows });
+  env.setReply({ conversationKeys: ['k2'], kimiRestarted: false });
+  await env.page.refresh();
+  assert.equal(env.ui.batchMigrate.disabled, false, 'the default first model also has a match');
+
+  /* 选中第二个模型后，批量迁移必须迁移第二个模型的旧别名会话。 */
+  env.ui.batchModel.value = second.alias;
+  await env.ui.batchModel.fire('change');
+  env.ui.batchEffort.value = 'high';
+  await env.ui.batchEffort.fire('change');
+  await env.ui.batchMigrate.fire('click');
+  await flushConversation();
+  const post = env.calls.find(call => call[1]?.method === 'POST');
+  assert.equal(post[1].body.targetModelAlias, second.alias);
+  assert.equal(post[1].body.thinkingLevel, 'high');
+  assert.equal(post[1].body.migratePreviousAlias, true);
+
+  /* 选中没有 previousAlias 的模型时迁移按钮必须禁用。 */
+  env.state.conversations.batchModel = '';
+  env.setList({ conversations: rows, models: [makeConversationModel({ alias: 'byok-kth-kimi/kimi-c' })], application: 'not_running', kimiRunning: false });
+  await env.page.refresh();
+  assert.equal(env.ui.batchMigrate.disabled, true);
+});
+
+test('a restart failure is translated instead of exposing the raw reason code', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: true });
+  env.setReply({ conversationKeys: ['recent'], kimiRestarted: false, restartReason: 'conversation_kimi_restart_failed' });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'recent');
+  await switchButton.fire('click');
+  const submit = findNode(row, node => node.dataset?.convConfirmSubmit === 'recent');
+  await submit.fire('click');
+  await flushConversation();
+  assert.match(env.ui.result.textContent, /Kimi 未能自动重启/);
+  assert.doesNotMatch(env.ui.result.textContent, /conversation_kimi_restart_failed/);
+});
+
+test('polling never rebuilds the conversations page while a confirmation is open', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: true });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'recent');
+  await switchButton.fire('click');
+  assert.equal(findNode(row, node => node.dataset?.convConfirm === 'recent').hidden, false);
+
+  /* 轮询带来新 revision：展开中的确认条必须留着，只标记 stale。 */
+  env.page.onState({ revision: 'rev-1', kimiProcess: { running: true, state: 'checked' } });
+  env.page.onState({ revision: 'rev-2', kimiProcess: { running: true, state: 'checked' } });
+  assert.equal(env.state.conversations.stale, true);
+  assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 1, 'no reload while confirming');
+  assert.equal(findNode(env.ui.list.children[0], node => node.dataset?.convConfirm === 'recent').hidden, false);
+
+  /* 轮询还会调用 show()：只要确认条还开着，就必须继续等。 */
+  env.page.show();
+  await flushConversation();
+  assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 1, 'show() must not rebuild the open confirm either');
+  assert.equal(findNode(env.ui.list.children[0], node => node.dataset?.convConfirm === 'recent').hidden, false);
+});
+
+test('a known Kimi state releases the switch guard that an unknown state set', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  env.page.onState({ revision: 'rev-1', kimiProcess: { running: false, state: 'checked' } });
+  env.page.onState({ revision: 'rev-2', kimiProcess: { running: false, state: 'unknown' } });
+  assert.equal(env.state.conversations.list.application, 'unknown');
+  env.page.onState({ revision: 'rev-3', kimiProcess: { running: false, state: 'checked' } });
+  assert.equal(env.state.conversations.list.application, 'not_running');
+  env.page.onState({ revision: 'rev-4', kimiProcess: { running: true, state: 'checked' } });
+  assert.equal(env.state.conversations.list.kimiRunning, true);
+  await flushConversation();
 });
