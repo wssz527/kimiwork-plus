@@ -51,6 +51,22 @@ type accountTrayClient struct {
 	client *http.Client
 }
 
+func trayErrorCode(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, trayResponseLimit))
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Error.Code)
+}
+
 func (c accountTrayClient) request(ctx context.Context, method, path string, input any, output any) error {
 	endpoint, err := bridge.ReadEndpoint(c.dir)
 	if err != nil {
@@ -78,6 +94,9 @@ func (c accountTrayClient) request(ctx context.Context, method, path string, inp
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if code := trayErrorCode(res.Body); code != "" {
+			return errors.New(code)
+		}
 		return errors.New("account_action_rejected")
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, trayResponseLimit+1))

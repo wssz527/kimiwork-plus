@@ -90,24 +90,21 @@ func TestTrayReadableModelNames(t *testing.T) {
 func TestTrayTargetThinkingLevel(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		current  string
 		defaults string
 		efforts  []string
 		want     string
 	}{
-		{"keep supported", "HIGH", "", []string{"off", "low", "high"}, "high"},
-		{"default effort", "xhigh", "medium", []string{"off", "low", "medium", "high"}, "medium"},
-		{"first non-off", "", "", []string{"off", "low", "high"}, "low"},
-		{"only off", "", "", []string{"off"}, "off"},
-		{"unsupported default", "", "ultra", []string{"off", "low"}, "low"},
-		{"no efforts", "", "", nil, ""},
-		{"invalid default without support", "", "high", nil, ""},
+		{"default effort", "high", []string{"off", "low", "high"}, "high"},
+		{"old conversation off uses default", "medium", []string{"off", "low", "medium", "high"}, "medium"},
+		{"first non-off", "", []string{"off", "low", "high"}, "low"},
+		{"skips empty and off", "", []string{"", "off", "xhigh"}, "xhigh"},
+		{"only off", "", []string{"off"}, "off"},
+		{"unsupported default", "ultra", []string{"off", "low"}, "low"},
+		{"no efforts", "", nil, ""},
+		{"invalid default without support", "high", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := trayTargetThinkingLevel(
-				kimi.WorkConversation{ThinkingLevel: tc.current},
-				kimi.ConversationModel{DefaultEffort: tc.defaults, SupportEfforts: tc.efforts},
-			)
+			got := trayTargetThinkingLevel(kimi.ConversationModel{DefaultEffort: tc.defaults, SupportEfforts: tc.efforts})
 			if got != tc.want {
 				t.Fatalf("thinking level = %q, want %q", got, tc.want)
 			}
@@ -255,6 +252,75 @@ func TestTrayConversationsMenu(t *testing.T) {
 	}
 }
 
+func TestTrayConversationsMenuDegradesUnknownStateAndBusyRebind(t *testing.T) {
+	unknown := application.NewMenu()
+	(&trayConversationsView{menu: unknown}).refresh(kimi.ConversationList{
+		Application:   kimi.RunningStateUnknown,
+		Conversations: []kimi.WorkConversation{{ConversationKey: "k", Title: "会话"}},
+		Models:        []kimi.ConversationModel{{Alias: "byok-kth-kimi/a", DisplayName: "A"}},
+	}, nil)
+	if item := unknown.ItemAt(0); item == nil || item.Enabled() || item.Label() != "无法确认 Kimi 运行状态，请稍后重试" {
+		t.Fatalf("unknown Kimi state must degrade to a disabled row: %+v", item)
+	}
+	if unknown.ItemAt(1) == nil || !unknown.ItemAt(1).IsSeparator() || unknown.ItemAt(2) == nil || unknown.ItemAt(2).Label() != "在面板查看全部会话…" {
+		t.Fatalf("unknown Kimi state must keep the view-all entry: %+v", unknown.ItemAt(2))
+	}
+
+	busy := application.NewMenu()
+	view := &trayConversationsView{menu: busy}
+	view.rebind.Store(true)
+	view.refresh(kimi.ConversationList{
+		Application:   kimi.NotRunning,
+		Conversations: []kimi.WorkConversation{{ConversationKey: "k", Title: "会话"}},
+		Models:        []kimi.ConversationModel{{Alias: "byok-kth-kimi/a", DisplayName: "A"}},
+	}, nil)
+	if item := busy.ItemAt(0); item == nil || item.Enabled() || item.Label() != "正在切换会话模型…" {
+		t.Fatalf("busy rebind must replace the conversation list: %+v", item)
+	}
+	if busy.ItemAt(3) != nil {
+		t.Fatal("busy rebind must not expose a second conversation entry")
+	}
+	view.confirmRebind(kimi.WorkConversation{ConversationKey: "k"}, kimi.ConversationModel{Alias: "byok-kth-kimi/a"}, "A", false)
+	if !view.rebind.Load() {
+		t.Fatal("confirmRebind must not start a second rebind while one is running")
+	}
+}
+
+func TestTrayConversationsSubmenusRetireOneGeneration(t *testing.T) {
+	menu := application.NewMenu()
+	view := &trayConversationsView{menu: menu}
+	list := kimi.ConversationList{
+		Application: kimi.NotRunning,
+		Conversations: []kimi.WorkConversation{
+			{ConversationKey: "k1", Title: "第一会话"},
+			{ConversationKey: "k2", Title: "第二会话"},
+		},
+	}
+	view.refresh(list, nil)
+	first := append([]*application.Menu(nil), view.submenus...)
+	if len(first) != 2 || len(view.retiredSubmenus) != 0 {
+		t.Fatalf("first generation = %d submenus, retired = %d", len(first), len(view.retiredSubmenus))
+	}
+	view.refresh(list, nil)
+	second := append([]*application.Menu(nil), view.submenus...)
+	if len(second) != 2 || len(view.retiredSubmenus) != 2 {
+		t.Fatalf("second generation = %d submenus, retired = %d", len(second), len(view.retiredSubmenus))
+	}
+	if view.submenus[0] == first[0] || view.retiredSubmenus[0] != first[0] {
+		t.Fatal("the previous generation must be retired instead of leaked or reused")
+	}
+	view.refresh(list, nil)
+	if len(view.retiredSubmenus) != 2 || view.retiredSubmenus[0] != second[0] {
+		t.Fatal("retired submenus must rotate one generation behind the current menu")
+	}
+	if menu.ItemAt(0) == nil || !menu.ItemAt(0).IsSubmenu() {
+		t.Fatalf("menu structure broke after repeated refreshes: %+v", menu.ItemAt(0))
+	}
+	if menu.ItemAt(2) == nil || !menu.ItemAt(2).IsSeparator() || menu.ItemAt(3) == nil || menu.ItemAt(3).Label() != "在面板查看全部会话…" {
+		t.Fatal("view-all entry disappeared after repeated refreshes")
+	}
+}
+
 func TestTraySnapshotFetchAllSources(t *testing.T) {
 	key := strings.Repeat("a", 64)
 	var requests atomic.Int32
@@ -375,6 +441,36 @@ func TestAccountTrayRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+func TestAccountTrayPreservesServerErrorCodes(t *testing.T) {
+	key := strings.Repeat("h", 64)
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"restart required", http.StatusConflict, `{"error":{"code":"conversation_kimi_restart_required","message":"需要重开"}}`, "conversation_kimi_restart_required"},
+		{"state unknown", http.StatusServiceUnavailable, `{"error":{"code":"conversation_kimi_state_unknown","message":"未知"}}`, "conversation_kimi_state_unknown"},
+		{"rollback failed", http.StatusInternalServerError, `{"error":{"code":"conversation_rollback_failed","message":"回滚失败"}}`, "conversation_rollback_failed"},
+		{"operation busy", http.StatusConflict, `{"error":{"code":"operation_busy","message":"忙"}}`, "operation_busy"},
+		{"malformed", http.StatusInternalServerError, `not-json`, "account_action_rejected"},
+		{"missing code", http.StatusInternalServerError, `{"error":{"message":"无代码"}}`, "account_action_rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := accountTrayClient{dir: trayTestStateDir(t, server.URL, key), client: server.Client()}
+			err := client.request(context.Background(), http.MethodPost, "/api/actions", map[string]string{"action": "test"}, nil)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestTrayRebindSendsSelection(t *testing.T) {
 	key := strings.Repeat("f", 64)
 	var got kimi.ConversationRebindRequest
@@ -424,13 +520,46 @@ func TestTrayRebindWithoutRunningKimi(t *testing.T) {
 }
 
 func TestTrayRebindFailureMessages(t *testing.T) {
-	for _, code := range []string{"conversation_kimi_restart_required", "conversation_kimi_stop_failed", "conversation_rollback_failed", "invalid_conversation_thinking_level", "invalid_conversation_target_model", "account_service_unavailable"} {
-		message := trayRebindFailureMessage(errors.New(code))
-		if !strings.Contains(message, "会话页面") {
-			t.Fatalf("%s: failure message must point at the conversations page: %q", code, message)
+	for _, tc := range []struct{ code, want string }{
+		{"conversation_kimi_restart_required", "关闭并重开"},
+		{"conversation_kimi_stop_failed", "未能关闭 Kimi"},
+		{"conversation_rollback_failed", "回滚"},
+		{"invalid_conversation_thinking_level", "思考档位"},
+		{"invalid_conversation_target_model", "已不在已导入列表"},
+		{"account_service_unavailable", "本机后台暂不可用"},
+		{"operation_busy", "正在处理另一项操作"},
+		{"conversation_kimi_state_unknown", "无法确认 Kimi 运行状态"},
+	} {
+		message := trayRebindFailureMessage(errors.New(tc.code))
+		if !strings.Contains(message, tc.want) || !strings.Contains(message, "会话页面") {
+			t.Fatalf("%s: failure message = %q", tc.code, message)
 		}
 	}
 	if message := trayRebindFailureMessage(nil); !strings.Contains(message, "会话页面") {
 		t.Fatalf("nil failure message = %q", message)
+	}
+}
+
+func TestTrayRebindNotice(t *testing.T) {
+	if notice := trayRebindNotice(kimi.ConversationRebindResult{KimiRestarted: true}, true); notice != "" {
+		t.Fatalf("successful restart must stay quiet: %q", notice)
+	}
+	refused := trayRebindNotice(kimi.ConversationRebindResult{RestartReason: "conversation_kimi_restart_failed"}, true)
+	if !strings.Contains(refused, "未能自动重开") || !strings.Contains(refused, "手动打开 Kimi Work") {
+		t.Fatalf("restart failure notice = %q", refused)
+	}
+	if notice := trayRebindNotice(kimi.ConversationRebindResult{}, false); notice != "" {
+		t.Fatalf("non-restarting rebind must stay quiet: %q", notice)
+	}
+	warning := trayRebindNotice(kimi.ConversationRebindResult{DirectAnthropicHistoryWarning: true}, false)
+	if !strings.Contains(warning, "Anthropic") || !strings.Contains(warning, "历史对话") {
+		t.Fatalf("direct history warning = %q", warning)
+	}
+	both := trayRebindNotice(kimi.ConversationRebindResult{RestartReason: "conversation_kimi_restart_failed", DirectAnthropicHistoryWarning: true}, true)
+	if !strings.Contains(both, "未能自动重开") || !strings.Contains(both, "Anthropic") {
+		t.Fatalf("combined notice = %q", both)
+	}
+	if trayCancelButtonFirst("windows") || !trayCancelButtonFirst("darwin") {
+		t.Fatal("macOS must add the cancel button first so the default sits on the right")
 	}
 }

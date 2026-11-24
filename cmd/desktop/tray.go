@@ -135,10 +135,7 @@ func trayMatchEffort(level string, efforts []string) (string, bool) {
 	return "", false
 }
 
-func trayTargetThinkingLevel(conversation kimi.WorkConversation, model kimi.ConversationModel) string {
-	if level, ok := trayMatchEffort(conversation.ThinkingLevel, model.SupportEfforts); ok {
-		return level
-	}
+func trayTargetThinkingLevel(model kimi.ConversationModel) string {
 	if level, ok := trayMatchEffort(model.DefaultEffort, model.SupportEfforts); ok {
 		return level
 	}
@@ -161,6 +158,10 @@ func trayRebindFailureMessage(err error) string {
 			reason = "本机后台暂不可用。"
 		case "account_action_rejected":
 			reason = "本机后台拒绝了这次换模请求。"
+		case "operation_busy":
+			reason = "本机后台正在处理另一项操作，请稍后再试。"
+		case "conversation_kimi_state_unknown":
+			reason = "无法确认 Kimi 运行状态，请稍后再试。"
 		case "conversation_kimi_restart_required":
 			reason = "Kimi 正在运行，需要关闭并重开后才能换模。"
 		case "conversation_kimi_stop_failed":
@@ -176,6 +177,24 @@ func trayRebindFailureMessage(err error) string {
 		}
 	}
 	return reason + "请在面板的会话页面查看当前模型与 Kimi 运行状态后重试。"
+}
+
+func trayRebindNotice(result kimi.ConversationRebindResult, restart bool) string {
+	restartFailed := restart && (!result.KimiRestarted || result.RestartReason != "")
+	warning := "该模型使用 Anthropic 原生协议，历史对话可能无法完整保留，建议在新会话中继续。"
+	switch {
+	case restartFailed && result.DirectAnthropicHistoryWarning:
+		return "会话模型已切换，但 Kimi Work 未能自动重开，请手动打开 Kimi Work。\n\n" + warning
+	case restartFailed:
+		return "会话模型已切换，但 Kimi Work 未能自动重开，请手动打开 Kimi Work。"
+	case result.DirectAnthropicHistoryWarning:
+		return "会话模型已切换。" + warning
+	}
+	return ""
+}
+
+func trayCancelButtonFirst(goos string) bool {
+	return goos == "darwin"
 }
 
 type trayUpdateView struct {
@@ -207,19 +226,30 @@ type trayRebindTarget struct {
 }
 
 type trayConversationsView struct {
-	app    *application.App
-	menu   *application.Menu
-	client accountTrayClient
-	open   func()
-	nav    *windowNavController
-	rebind atomic.Bool
+	app             *application.App
+	menu            *application.Menu
+	client          accountTrayClient
+	open            func()
+	nav             *windowNavController
+	rebind          atomic.Bool
+	submenus        []*application.Menu
+	retiredSubmenus []*application.Menu
 }
 
 func (v *trayConversationsView) refresh(list kimi.ConversationList, err error) {
+	for _, submenu := range v.retiredSubmenus {
+		submenu.Destroy()
+	}
+	v.retiredSubmenus = v.submenus
+	v.submenus = nil
 	v.menu.Clear()
 	switch {
 	case err != nil || list.Reason != "":
 		v.menu.Add("会话列表暂不可读").SetEnabled(false)
+	case list.Application == kimi.RunningStateUnknown:
+		v.menu.Add("无法确认 Kimi 运行状态，请稍后重试").SetEnabled(false)
+	case v.rebind.Load():
+		v.menu.Add("正在切换会话模型…").SetEnabled(false)
 	case len(list.Conversations) == 0:
 		v.menu.Add("暂无历史会话").SetEnabled(false)
 	default:
@@ -244,6 +274,7 @@ func (v *trayConversationsView) refresh(list kimi.ConversationList, err error) {
 func (v *trayConversationsView) addConversation(conversation kimi.WorkConversation, models []kimi.ConversationModel, kimiRunning bool) {
 	title := trayConversationTitle(conversation)
 	submenu := v.menu.AddSubmenu(title + "（" + trayReadableModelName(conversation.ModelAlias, models) + "）")
+	v.submenus = append(v.submenus, submenu)
 	if len(models) == 0 {
 		submenu.Add("暂无已导入的第三方模型").SetEnabled(false)
 		return
@@ -263,12 +294,15 @@ func (v *trayConversationsView) addConversation(conversation kimi.WorkConversati
 }
 
 func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation, model kimi.ConversationModel, modelName string, kimiRunning bool) {
+	if v.rebind.Load() {
+		return
+	}
 	target := trayRebindTarget{
 		key:     conversation.ConversationKey,
 		title:   trayConversationTitle(conversation),
 		alias:   model.Alias,
 		model:   modelName,
-		effort:  trayTargetThinkingLevel(conversation, model),
+		effort:  trayTargetThinkingLevel(model),
 		restart: kimiRunning,
 	}
 	application.InvokeAsync(func() {
@@ -278,8 +312,14 @@ func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation
 		}
 		message := "切换会话《" + target.title + "》到 " + target.model + " 需要自动关闭并重开 Kimi Work（约 2–3 秒），请确认当前没有正在回复的任务。是否立即切换？"
 		dialog := v.app.Dialog.Question().SetTitle("切换最近会话模型").SetMessage(message)
-		dialog.AddButton("立即切换").SetAsDefault().OnClick(func() { go v.runRebind(target) })
-		dialog.AddButton("取消").SetAsCancel()
+		confirm := func() { go v.runRebind(target) }
+		if trayCancelButtonFirst(runtime.GOOS) {
+			dialog.AddButton("取消").SetAsCancel()
+			dialog.AddButton("立即切换").SetAsDefault().OnClick(confirm)
+		} else {
+			dialog.AddButton("立即切换").SetAsDefault().OnClick(confirm)
+			dialog.AddButton("取消").SetAsCancel()
+		}
 		dialog.Show()
 	})
 }
@@ -297,9 +337,16 @@ func (v *trayConversationsView) runRebind(target trayRebindTarget) {
 		ThinkingLevel:    target.effort,
 		RestartKimi:      target.restart,
 	}
-	if err := v.client.request(ctx, http.MethodPost, "/api/work/conversations/rebind", request, nil); err != nil {
+	var result kimi.ConversationRebindResult
+	if err := v.client.request(ctx, http.MethodPost, "/api/work/conversations/rebind", request, &result); err != nil {
 		application.InvokeAsync(func() {
 			v.app.Dialog.Error().SetTitle("会话换模未完成").SetMessage(trayRebindFailureMessage(err)).Show()
+		})
+		return
+	}
+	if message := trayRebindNotice(result, target.restart); message != "" {
+		application.InvokeAsync(func() {
+			v.app.Dialog.Info().SetTitle("会话模型已切换").SetMessage(message).Show()
 		})
 	}
 }

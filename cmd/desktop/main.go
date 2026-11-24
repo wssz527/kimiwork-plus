@@ -55,11 +55,13 @@ const openUpdatesJS = `(() => {
     }
     document.getElementById('nav-maintenance')?.click();
     document.getElementById('settings-tab-connection')?.click();
+    const main = document.getElementById('main');
     const panel = document.getElementById('update-panel');
-    if (panel) {
-      panel.scrollIntoView({ block: 'start' });
-      document.getElementById('upd-check')?.focus({ preventScroll: true });
+    if (main && panel && typeof main.getBoundingClientRect === 'function' && typeof panel.getBoundingClientRect === 'function') {
+      const top = Math.max(0, (main.scrollTop || 0) + (panel.getBoundingClientRect().top - main.getBoundingClientRect().top) - 16);
+      main.scrollTop = top;
     }
+    document.getElementById('upd-check')?.focus({ preventScroll: true });
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', open, { once: true });
