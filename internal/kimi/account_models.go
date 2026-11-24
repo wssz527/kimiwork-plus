@@ -26,38 +26,66 @@ type accountCatalogEntry struct {
 	model    map[string]any
 }
 
-func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurface, home, user string) (string, string) {
+// accountModelsSnapshot is one attempt's view of the configuration the runtime
+// is being checked against. It is taken under mu at the top of each attempt so a
+// Configure that lands mid-loop cannot leave the page check validating an older
+// catalog than the one reconcile then verifies.
+type accountModelsSnapshot struct {
+	settings ControllerSettings
+	native   *NativeIntegration
+	gen      uint64
+	child    *Child
+	bridge   *BridgeHost
+}
+
+// accountModelsSkip says why an attempt has nothing to verify.
+type accountModelsSkip string
+
+const (
+	accountModelsNone     accountModelsSkip = ""
+	accountModelsInactive accountModelsSkip = "inactive"
+	accountModelsInvalid  accountModelsSkip = "invalid_integration_path"
+)
+
+func (c *Controller) snapshotAccountModels(home string) (accountModelsSnapshot, accountModelsSkip) {
 	c.mu.Lock()
 	settings := c.settings
+	gen := c.settingsGen
+	child := c.child
+	bridge := c.bridge
 	c.mu.Unlock()
 	mode := settings.integrationMode()
 	if mode == IntegrationModeDirect {
 		if settings.DirectSpec == nil || len(settings.DirectSpec.Models) == 0 {
-			return "", ""
+			return accountModelsSnapshot{}, accountModelsInactive
 		}
 	} else if settings.GatewayURL == "" || len(settings.Models) == 0 {
-		return "", ""
+		return accountModelsSnapshot{}, accountModelsInactive
 	}
 	native, err := NewNativeIntegration(settings.StateDir, home, mode)
 	if err != nil {
-		return "failed", "invalid_integration_path"
+		return accountModelsSnapshot{}, accountModelsInvalid
 	}
 	intent, err := native.readIntent()
 	if err != nil || intent == nil || !intent.Active {
-		return "", ""
+		return accountModelsSnapshot{}, accountModelsInactive
 	}
 	if mode == IntegrationModeDirect {
 		if intent.Mode != IntegrationModeDirect {
-			return "", ""
+			return accountModelsSnapshot{}, accountModelsInactive
 		}
 	} else if normalizeNativeURL(intent.URL) != normalizeNativeURL(settings.GatewayURL) {
-		return "", ""
+		return accountModelsSnapshot{}, accountModelsInactive
 	}
-	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
-	defer cancel()
+	return accountModelsSnapshot{settings: settings, native: native, gen: gen, child: child, bridge: bridge}, accountModelsNone
+}
+
+func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurface, home, user string) (string, string) {
 	scope := sha256Hex(user)
 	imported := false
 	reason := "account_models_runtime_unverified"
+	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	defer cancel()
 	for attempt := 0; attempt < accountRuntimeRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -69,6 +97,17 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 		if ctx.Err() != nil {
 			return "pending", reason
 		}
+		// Every attempt starts from the configuration that is live now. A format
+		// change mid-loop must invalidate the attempt, not silently validate the
+		// page against the catalog the previous configuration had.
+		snapshot, skip := c.snapshotAccountModels(home)
+		switch skip {
+		case accountModelsInactive:
+			return "", ""
+		case accountModelsInvalid:
+			return "failed", string(accountModelsInvalid)
+		}
+		settings, native, mode := snapshot.settings, snapshot.native, snapshot.settings.integrationMode()
 		if ok, retry := accountStillTheirs(ctx, surface, home, user); !ok {
 			if retry {
 				if ctx.Err() != nil {
@@ -125,7 +164,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			return "failed", NativeAccountChanged
 		}
 		integration, gen, stale := c.reconcileChecked(true, scope)
-		if stale || !integration.Applied || integration.Changed {
+		if stale || gen != snapshot.gen || !integration.Applied || integration.Changed {
 			reason = firstNonEmpty(integration.Reason, "account_models_not_verified")
 			continue
 		}
@@ -138,7 +177,7 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 			}
 			return "failed", NativeAccountChanged
 		}
-		if !c.adoptVerifiedCatalog(gen, integration) {
+		if !c.adoptVerifiedCatalog(snapshot, integration) {
 			reason = "account_models_not_verified"
 			continue
 		}
@@ -147,23 +186,51 @@ func (c *Controller) syncAccountModels(ctx context.Context, surface accountSurfa
 	return "pending", reason
 }
 
-// adoptVerifiedCatalog records a catalog the runtime answered for, under the
-// same lock a reconcile commits with. It never starts a new generation: this is
-// evidence about the configuration the caller already reconciled, so bumping
-// the generation here would make the result it just wrote stale.
-func (c *Controller) adoptVerifiedCatalog(gen uint64, integration IntegrationResult) bool {
-	if integration.Readback == nil {
+// adoptVerifiedCatalog records a catalog the runtime answered for. It never
+// starts a new generation: this is evidence about the configuration the caller
+// already reconciled, so bumping the generation here would make the result it
+// just wrote stale.
+//
+// It also refuses to adopt evidence that no longer belongs to the attempt that
+// produced it. The page and runtime reads between the reconcile and this call
+// take time, and in it a later reconcile can commit its own result, an import
+// can record a deferred restart, or the child can exit. Writing `Adopted` over
+// any of those would claim a startup that never read this catalog.
+func (c *Controller) adoptVerifiedCatalog(snapshot accountModelsSnapshot, integration IntegrationResult) bool {
+	if integration.Readback == nil || integration.Readback.Generation <= 0 {
 		return false
 	}
 	c.reconcileMu.Lock()
 	defer c.reconcileMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.settingsGen != gen {
+	if c.settingsGen != snapshot.gen {
+		return false
+	}
+	// Identity, not mere presence: the child and bridge this attempt observed must
+	// still be the ones the controller holds. A nil child (nothing managed yet)
+	// is a valid identity too, so it is compared like any other value.
+	if c.child != snapshot.child || c.bridge != snapshot.bridge {
+		return false
+	}
+	if snapshot.child != nil {
+		select {
+		case <-snapshot.child.Exit():
+			return false
+		default:
+		}
+	}
+	// The readback identity, not only the generation, must still be the one this
+	// call reconciled: a background reconcile of the same generation can commit a
+	// different readback, and adopting this one would replace it with older
+	// evidence.
+	if c.integration == nil || c.integration.Readback != integration.Readback || !c.integration.Applied {
 		return false
 	}
 	c.deferredChild = nil
 	c.loadedKnown, c.loadedGeneration = true, integration.Readback.Generation
+	// The page answered with this catalog under this child, so the running
+	// runtime is what read it. `Adopted` is that fact, not a startup guess.
 	integration.Adopted = true
 	c.integration = &integration
 	return true
@@ -211,6 +278,12 @@ func (c *Controller) confirmRunningCatalog(ctx context.Context, result Integrati
 	if !verified || current != user || !accountConfigMatches(home, user) || c.currentGeneration() != result.Readback.Generation {
 		return result
 	}
+	// The commit takes reconcileMu before mu, so a configuration write that began
+	// after the readback above cannot be answered with an adoption of the
+	// configuration it replaced. Order stays reconcileMu -> mu; the caller
+	// already holds accountSessionMu.
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.settingsGen != gen || c.child != child || c.bridge != bridge || c.deferredChild == child || c.integration == nil || c.integration.Readback != result.Readback {

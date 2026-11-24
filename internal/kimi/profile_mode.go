@@ -156,19 +156,26 @@ func (c *Controller) startOfficial(ctx context.Context) error {
 		return err
 	}
 	c.reapChildLocked()
+	c.reconcileMu.Lock()
 	c.mu.Lock()
 	if c.isolation != nil && c.child == nil {
 		c.mu.Unlock()
+		c.reconcileMu.Unlock()
 		return errWorkStorageConflict
 	}
 	if c.child != nil && c.settings.profileMode() != ProfileModeOfficial {
 		c.mu.Unlock()
+		c.reconcileMu.Unlock()
 		return errors.New("profile_mode_change_requires_exit")
 	}
 	c.settings.ProfileMode = ProfileModeOfficial
 	c.settings.UserDataDir = profile
 	c.settings.LoginDataDir = profile
+	// The profile directory changed, so every reconcile that read the previous
+	// one is now about the wrong tree.
+	c.settingsGen++
 	c.mu.Unlock()
+	c.reconcileMu.Unlock()
 	return c.start(ctx)
 }
 
@@ -180,19 +187,26 @@ func (c *Controller) StartWithExistingLogin(ctx context.Context) error {
 		return err
 	}
 	c.reapChildLocked()
+	c.reconcileMu.Lock()
 	c.mu.Lock()
 	if c.isolation != nil && c.child == nil {
 		c.mu.Unlock()
+		c.reconcileMu.Unlock()
 		return errWorkStorageConflict
 	}
 	if c.child != nil && c.settings.profileMode() != ProfileModeExistingAuthorized {
 		c.mu.Unlock()
+		c.reconcileMu.Unlock()
 		return errors.New("profile_mode_change_requires_exit")
 	}
 	c.settings.ProfileMode = ProfileModeExistingAuthorized
 	c.settings.LoginDataDir = profile
 	c.settings.UserDataDir = ProfileDirectoryForManagedChild(c.settings.StateDir)
+	// The profile directory changed, so every reconcile that read the previous
+	// one is now about the wrong tree.
+	c.settingsGen++
 	c.mu.Unlock()
+	c.reconcileMu.Unlock()
 	return c.start(ctx)
 }
 

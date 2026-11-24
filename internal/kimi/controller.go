@@ -240,8 +240,11 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 		return errors.New("profile_mode_change_requires_exit")
 	}
 	c.mu.Unlock()
-	sourceID := c.directSourceID(settings)
 	c.reconcileMu.Lock()
+	// The source id is read here, not before the lock: a reconcile that is
+	// finishing now may have just discovered it, and computing it earlier would
+	// write that older value back over the route it just published.
+	sourceID := c.directSourceID(settings)
 	c.mu.Lock()
 	previousEnabled := c.settings.Translation.Enabled
 	c.settings = settings
@@ -249,7 +252,12 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 	actions := c.actions
 	host := c.host
 	c.mu.Unlock()
-	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
+	// An unknown Direct Mode source is not information, and writing it would
+	// erase a source a reconcile has already published. The route is left as it
+	// is until a reconcile names the source.
+	if settings.integrationMode() != IntegrationModeDirect || sourceID != "" {
+		updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
+	}
 	c.reconcileMu.Unlock()
 	if host != nil {
 		// Configure takes the host's own lock and invalidates the sessions whose
@@ -282,6 +290,20 @@ func (c *Controller) beginConfigWrite() {
 	c.mu.Lock()
 	c.settingsGen++
 	c.mu.Unlock()
+}
+
+// configWrite runs one write to the official profile with the generation ended
+// and the reconcile critical section held, so neither a reconcile that started
+// earlier nor one that starts during the write can interleave with it. It is
+// deliberately narrow: the caller must not hold any other state lock across it,
+// and the write is expected to be a file operation, not a page round trip.
+func (c *Controller) configWrite(write func() error) error {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	c.mu.Lock()
+	c.settingsGen++
+	c.mu.Unlock()
+	return write()
 }
 
 // Status is a read-only snapshot. It never starts or stops anything.
@@ -656,14 +678,32 @@ func (c *Controller) attachChild(ctx context.Context, child *Child, translation 
 	}
 	_ = asset
 
-	host := NewHost(child.Pipe(), InjectionOptions{
-		Payload:  string(payload),
-		Revision: translation.Revision(),
-		Settings: translationPublic(translation),
-		OnReply:  c.onReply,
-	})
+	// The host is built and published under the same lock Tick uses. Building it
+	// outside the lock lets a concurrent Tick create one first, and the
+	// unconditional assignment here would then replace it without ever detaching
+	// its event loop — two readers on one pipe for the life of the child.
 	c.mu.Lock()
-	c.host = host
+	if c.child != nil && c.child != child {
+		// A child this controller does not hold must not be given a host: the
+		// pipe would then be read by two owners. `start` publishes the child
+		// before calling here, so this only refuses a genuinely foreign one.
+		c.mu.Unlock()
+		return errors.New("managed_child_changed")
+	}
+	// The settings snapshot is the one this controller holds now, which is the
+	// configuration the child was started with. Using the caller's argument
+	// would publish a scope a concurrent Configure already replaced.
+	translation = c.settings.Translation
+	host := c.host
+	if host == nil {
+		host = NewHost(child.Pipe(), InjectionOptions{
+			Payload:  string(payload),
+			Revision: translation.Revision(),
+			Settings: translationPublic(translation),
+			OnReply:  c.onReply,
+		})
+		c.host = host
+	}
 	c.mu.Unlock()
 
 	if !translation.Enabled {
@@ -946,11 +986,19 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 		stillSameChild := c.child == child
 		stillEnabled := stillSameChild && c.settings.Translation.Enabled
 		c.mu.Unlock()
-		if !stillSameChild || host == nil {
+		if !stillSameChild {
 			return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
 		}
+		// The child is still the one this Tick started with, so a disabled
+		// translation is the answer even when a concurrent Configure also cleared
+		// the host: reporting `no_managed_child` would claim the opposite.
 		if !stillEnabled {
 			return TranslationStatus{State: "inactive", Reason: "translation_disabled"}
+		}
+		if host == nil {
+			// A concurrent retire cleared the host for this child. There is
+			// nothing to sync, and the next Tick builds the replacement.
+			return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
 		}
 	}
 	sessions, err := host.Sync(ctx)
@@ -1170,9 +1218,16 @@ func (c *Controller) reconcileChecked(withReadback bool, confirmedAccount string
 	return committed, gen, stale
 }
 
+// recordImportReload notes that the child that answered an import will (or must)
+// reload before it can have read the new catalog. The generation moves in the
+// same critical section: a reconcile that read the previous one must not commit
+// a result about a child whose baseline this write just invalidated.
 func (c *Controller) recordImportReload(child *Child, deferred bool) {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.settingsGen++
 	if child == nil || c.child != child {
 		return
 	}

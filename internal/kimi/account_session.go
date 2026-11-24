@@ -546,12 +546,14 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	accountSessionMu.Lock()
 	defer accountSessionMu.Unlock()
 	result, err := c.activateAccount(ctx, session)
+	// The attempt may have written another account's credentials and then failed
+	// to verify, or rolled back to the previous one. Either way the tree a
+	// reconcile was reading is no longer the tree it is now, so the generation is
+	// ended before this call returns -- not only on the success path.
+	c.beginConfigWrite()
 	if err != nil || !result.Verified {
 		return result, err
 	}
-	// The switch wrote another account's profile, so any reconcile that read the
-	// previous generation must not commit over it.
-	c.beginConfigWrite()
 	home, homeErr := c.WorkHome()
 	surface, surfaceErr := c.accountSurface()
 	if homeErr != nil || surfaceErr != nil {
@@ -601,7 +603,12 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	if pagePrepared && ctx.Err() == nil {
 		configOK = watching && accountConfigMatches(home, session.UserID)
 		if !configOK {
-			configOK = c.applyAccountConfig(home, session) == nil && accountConfigMatches(home, session.UserID)
+			// The config write is the one step that races a reconcile, so it runs
+			// with the generation ended and the write serialized. It is a plain
+			// file operation; nothing here waits on a page.
+			configOK = c.configWrite(func() error {
+				return c.applyAccountConfig(home, session)
+			}) == nil && accountConfigMatches(home, session.UserID)
 		}
 		if configOK {
 			restarted = restartAccountProcess(c, ctx) == nil
@@ -657,8 +664,9 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 			pageReadable = true
 		}
 		pageRestored := c.applyPageState(rollbackCtx, surface, original) == nil
-		configRestored := c.applyAccountConfig(home, original) == nil &&
-			accountConfigMatches(home, original.UserID)
+		configRestored := c.configWrite(func() error {
+			return c.applyAccountConfig(home, original)
+		}) == nil && accountConfigMatches(home, original.UserID)
 		rolledBack = pageRestored && configRestored
 	}
 	result.RolledBack = rolledBack
@@ -743,7 +751,10 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 			return errors.New(AccountErrWriteFailed)
 		}
 	}
-	return clearAccountCredentials(home)
+	// The sign-out cleared the page and is about to clear the config. The
+	// generation ends first, so a reconcile that read the signed-in tree cannot
+	// commit it back as the current state.
+	return c.configWrite(func() error { return clearAccountCredentials(home) })
 }
 
 // ---------------------------------------------------------------------------

@@ -245,6 +245,14 @@ func (h *Host) eventLoop() {
 	events := h.pipe.Events()
 	done := h.pipe.Done()
 	for {
+		// A stop is checked before the event is taken, not only in the same
+		// select: when both are ready Go picks randomly, and a retired host that
+		// steals an event has dropped it for the host that replaced it.
+		select {
+		case <-h.stopCh:
+			return
+		default:
+		}
 		select {
 		case <-h.stopCh:
 			return
@@ -659,6 +667,11 @@ func (h *Host) waitForMainContext(ctx context.Context, session *SurfaceSession) 
 		return 0, ErrRendererUnconfirmed
 	case <-h.pipe.Done():
 		return 0, ErrPipeClosed
+	case <-h.stopCh:
+		// The host was retired while this call waited. The event loop that would
+		// release the waiter has exited, so waiting out the deadline would only
+		// delay the caller's own shutdown.
+		return 0, ErrPipeClosed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -877,8 +890,16 @@ func (h *Host) WithdrawAll(ctx context.Context) {
 
 // DetachAll withdraws translation from every attached view and marks the host
 // stopped so no later replies or syncs run against a retired child.
+//
+// It returns only after the event loop has exited. A caller that builds the
+// replacement host on the same pipe immediately after this call would otherwise
+// race a reader that is still parked on the shared event channel.
 func (h *Host) DetachAll(ctx context.Context) {
 	h.withdraw(ctx, true)
+	// A zero-value Host never started a loop, and there is nothing to wait for.
+	if h.loopDone != nil {
+		<-h.loopDone
+	}
 }
 
 // ---------------------------------------------------------------------------
