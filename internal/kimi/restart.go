@@ -26,6 +26,8 @@ func (c *Controller) RestartOfficial(ctx context.Context) error {
 		c.setState(StateFailed, err.Error())
 		return err
 	}
+	c.awaitManagedChildExit(ctx)
+	c.reapChildLocked()
 	return c.startOfficial(ctx)
 }
 

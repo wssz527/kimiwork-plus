@@ -557,7 +557,7 @@ func TestDisconnectedStatusRejectedByRuntimeAndDirectCatalog(t *testing.T) {
 	account["sources"].([]any)[0].(map[string]any)["status"] = "disconnected"
 	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
 	integration := fixture.integration(t)
-	_, reason, needsImport := integration.directCatalog(ControllerSettings{IntegrationMode: IntegrationModeDirect, DirectSpec: spec}, sha256Hex(sha256Hex("user-1")))
+	_, reason, needsImport := integration.directCatalog(ControllerSettings{IntegrationMode: IntegrationModeDirect, DirectSpec: spec}, sha256Hex("user-1"))
 	if reason != "profile_delisted" || !needsImport {
 		t.Fatalf("directCatalog accepted disconnected source: reason=%q needsImport=%v", reason, needsImport)
 	}

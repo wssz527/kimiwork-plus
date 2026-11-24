@@ -93,9 +93,13 @@ type TranslationSettings struct {
 	View           string `json:"view"`
 }
 
-// Revision is the settings scope digest. A change re-injects the renderer.
+// Revision is the settings scope digest. A change re-injects or withdraws the renderer.
 func (t TranslationSettings) Revision() string {
-	return sha256Hex(stableJSON(map[string]any{"provider": t.Provider, "targetLanguage": t.TargetLanguage}))
+	return sha256Hex(stableJSON(map[string]any{
+		"enabled":        t.Enabled,
+		"provider":       t.Provider,
+		"targetLanguage": t.TargetLanguage,
+	}))
 }
 
 // TranslationReply is one renderer request handed to the caller's provider.
@@ -142,10 +146,19 @@ type SurfaceSummary struct {
 }
 
 // Controller manages one Kimi install.
+//
+// Lock order is accountSessionMu -> lifecycle -> reconcileMu -> mu. Nothing
+// takes mu and then reconcileMu: a reconcile reads its generation and settings
+// under mu, releases it, and only then enters the critical section. reconcileMu
+// covers every write this package makes to the official profile and to the page
+// route, so a Configure that changes the mode cannot interleave with a reconcile
+// that is writing the previous one.
 type Controller struct {
 	lifecycle   sync.Mutex
+	reconcileMu sync.Mutex
 	mu          sync.Mutex
 	settings    ControllerSettings
+	settingsGen uint64
 	state       ControllerState
 	reason      string
 	child       *Child
@@ -158,6 +171,10 @@ type Controller struct {
 	integration *IntegrationResult
 	translation *TranslationStatus
 	startedAt   time.Time
+	// beforeReconcileHook runs between reading the generation and entering the
+	// reconcile critical section. It is a test seam for the window a Configure
+	// must be able to win; production leaves it nil.
+	beforeReconcileHook func()
 	// importGranted is held only while the one authorised import runs. It is
 	// what makes the authorisation one-shot: a second call waits rather than
 	// opening a second overlay.
@@ -218,24 +235,67 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 		c.mu.Unlock()
 		return ErrImportBusy
 	}
-	if (c.child != nil || c.isolation != nil) && (settings.profileMode() != c.settings.profileMode() || settings.LoginDataDir != c.settings.LoginDataDir || settings.UserDataDir != c.settings.UserDataDir || settings.StateDir != c.settings.StateDir) {
+	if (c.child != nil || c.isolation != nil) && (settings.profileMode() != c.settings.profileMode() || !equalPath(settings.LoginDataDir, c.settings.LoginDataDir) || !equalPath(settings.UserDataDir, c.settings.UserDataDir) || !equalPath(settings.StateDir, c.settings.StateDir)) {
 		c.mu.Unlock()
 		return errors.New("profile_mode_change_requires_exit")
 	}
 	c.mu.Unlock()
-	sourceID := c.directSourceID(settings)
+	c.reconcileMu.Lock()
 	c.mu.Lock()
+	previousEnabled := c.settings.Translation.Enabled
 	c.settings = settings
+	c.settingsGen++
 	actions := c.actions
 	host := c.host
 	c.mu.Unlock()
+	sourceID := c.directSourceID(settings)
 	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
+	c.reconcileMu.Unlock()
 	if host != nil {
 		// Configure takes the host's own lock and invalidates the sessions whose
 		// scope changed, so this cannot race a concurrent Sync.
 		host.Configure(translationPublic(settings.Translation), settings.Translation.Revision())
+		if !settings.Translation.Enabled && (previousEnabled || host.HasSessions()) {
+			withdrawCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			host.WithdrawAll(withdrawCtx)
+			cancel()
+			status := TranslationStatus{State: "inactive", Reason: "translation_disabled"}
+			c.mu.Lock()
+			c.translation = &status
+			c.mu.Unlock()
+		}
 	}
 	return nil
+}
+
+// beginConfigWrite ends the previous configuration generation and waits for any
+// reconcile that is already inside its critical section to finish. A caller that
+// is about to change the mode, the catalog or the intent uses it so that an
+// older reconcile cannot write the previous configuration back over the new
+// one: the reconcile aborts on the generation it no longer owns.
+//
+// It takes reconcileMu for the bump only. The caller does not hold it across its
+// own work, because the reconcile that follows must be able to take it again.
+func (c *Controller) beginConfigWrite() {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	c.mu.Lock()
+	c.settingsGen++
+	c.mu.Unlock()
+}
+
+// configWrite runs one write to the official profile with the generation ended
+// and the reconcile critical section held, so neither a reconcile that started
+// earlier nor one that starts during the write can interleave with it. It is
+// deliberately narrow: the caller must not hold any other state lock across it,
+// and the write is expected to be a file operation, not a page round trip.
+func (c *Controller) configWrite(write func() error) error {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	c.mu.Lock()
+	c.settingsGen++
+	c.mu.Unlock()
+	return write()
 }
 
 // Status is a read-only snapshot. It never starts or stops anything.
@@ -381,8 +441,9 @@ func (c *Controller) start(ctx context.Context) error {
 	}
 
 	if err := c.restoreWorkIsolation(); err != nil {
-		c.setState(StateFailed, err.Error())
-		return err
+		reason := stableErrorCode(err, "work_storage_restore_failed")
+		c.setState(StateFailed, reason)
+		return errors.New(reason)
 	}
 	launchProfile := settings.UserDataDir
 	if settings.profileMode() == ProfileModeExistingAuthorized {
@@ -392,19 +453,22 @@ func (c *Controller) start(ctx context.Context) error {
 		}
 		lease, err := beginWorkIsolation(settings.LoginDataDir, settings.UserDataDir, filepath.Dir(home))
 		if err != nil {
-			c.setState(StateFailed, err.Error())
-			return err
+			reason := stableErrorCode(err, "work_storage_isolation_failed")
+			c.setState(StateFailed, reason)
+			return errors.New(reason)
 		}
 		c.mu.Lock()
 		c.isolation = lease
 		c.mu.Unlock()
 		if err := verifyExistingLoginStorage(settings.Installation); err != nil {
 			if restoreErr := c.restoreWorkIsolation(); restoreErr != nil {
-				c.setState(StateFailed, restoreErr.Error())
-				return restoreErr
+				reason := stableErrorCode(restoreErr, "work_storage_restore_failed")
+				c.setState(StateFailed, reason)
+				return errors.New(reason)
 			}
-			c.setState(StateFailed, err.Error())
-			return err
+			reason := stableErrorCode(err, "work_storage_contract_unverified")
+			c.setState(StateFailed, reason)
+			return errors.New(reason)
 		}
 		launchProfile = settings.LoginDataDir
 	}
@@ -413,8 +477,9 @@ func (c *Controller) start(ctx context.Context) error {
 		UserDataDir: launchProfile})
 	if err != nil {
 		if restoreErr := c.restoreWorkIsolation(); restoreErr != nil {
-			c.setState(StateFailed, restoreErr.Error())
-			return restoreErr
+			reason := stableErrorCode(restoreErr, "work_storage_restore_failed")
+			c.setState(StateFailed, reason)
+			return errors.New(reason)
 		}
 		reason := startErrorCode(err)
 		c.setState(StateFailed, reason)
@@ -579,7 +644,7 @@ func (c *Controller) reapChildLocked() bool {
 	c.translation = &status
 	c.mu.Unlock()
 	if err := c.restoreWorkIsolation(); err != nil {
-		c.setState(StateFailed, err.Error())
+		c.setState(StateFailed, stableErrorCode(err, "work_storage_restore_failed"))
 		return true
 	}
 	c.setState(StateStopped, reason)
@@ -593,42 +658,63 @@ func (c *Controller) reapChildLocked() bool {
 func (c *Controller) attachChild(ctx context.Context, child *Child, translation TranslationSettings) error {
 	// The host is built even when translation is off: it owns the pipe the
 	// native bridge shares, and enabling translation later must not require a
-	// restart. What changes is that nothing is injected and no surface is
-	// attached.
+	// restart. Page-enhancement failures stay isolated from launch and bridge.
 	payload, asset, err := translationPayload()
 	if err != nil {
-		return c.abortStart(child, "injection_payload_unavailable", err)
+		status := TranslationStatus{State: "failed", Reason: "injection_payload_unavailable"}
+		c.mu.Lock()
+		c.translation = &status
+		c.mu.Unlock()
+		c.setState(StateReady, c.startNativeBridge(child))
+		return nil
 	}
 	_ = asset
 
-	host := NewHost(child.Pipe(), InjectionOptions{
-		Payload:  string(payload),
-		Revision: translation.Revision(),
-		Settings: translationPublic(translation),
-		OnReply:  c.onReply,
-	})
+	// The host is built and published under the same lock Tick uses. Building it
+	// outside the lock lets a concurrent Tick create one first, and the
+	// unconditional assignment here would then replace it without ever detaching
+	// its event loop — two readers on one pipe for the life of the child.
 	c.mu.Lock()
-	c.host = host
+	if c.child != nil && c.child != child {
+		// A child this controller does not hold must not be given a host: the
+		// pipe would then be read by two owners. `start` publishes the child
+		// before calling here, so this only refuses a genuinely foreign one.
+		c.mu.Unlock()
+		return errors.New("managed_child_changed")
+	}
+	// The settings snapshot is the one this controller holds now, which is the
+	// configuration the child was started with. Using the caller's argument
+	// would publish a scope a concurrent Configure already replaced.
+	translation = c.settings.Translation
+	host := c.host
+	if host == nil {
+		host = NewHost(child.Pipe(), InjectionOptions{
+			Payload:  string(payload),
+			Revision: translation.Revision(),
+			Settings: translationPublic(translation),
+			OnReply:  c.onReply,
+		})
+		c.host = host
+	}
 	c.mu.Unlock()
 
 	if !translation.Enabled {
-		// The released build's control-only behaviour: with translation off the
-		// host keeps the pipe and injects nothing, and reports inactive rather
-		// than attaching to a surface it would not translate.
-		host.DetachAll(ctx)
+		// Control-only launch keeps the host alive (not stopped) so enabling
+		// translation at runtime can attach and deliver replies without restart.
 		status := TranslationStatus{State: "inactive", Reason: "translation_disabled"}
 		c.mu.Lock()
 		c.translation = &status
 		c.mu.Unlock()
-		// The native bridge is not part of translation: it is how the panel
-		// imports models into this child. Leaving it out whenever translation is
-		// off would ship a managed Kimi with no import bridge at all, so it is
-		// started on both paths.
 		c.setState(StateReady, c.startNativeBridge(child))
 		return nil
 	}
 	if _, err := host.Sync(ctx); err != nil {
-		return c.abortStart(child, "translation_attach_failed", err)
+		status := TranslationStatus{State: "failed", Reason: firstNonEmpty(safeReason(err), "translation_attach_failed")}
+		c.mu.Lock()
+		c.translation = &status
+		c.mu.Unlock()
+		c.setState(StateReady, c.startNativeBridge(child))
+		return nil
 	}
 	c.setState(StateReady, c.startNativeBridge(child))
 	return nil
@@ -663,14 +749,38 @@ func (c *Controller) abortStart(child *Child, reason string, cause error) error 
 		return errors.New("kimi_stop_failed")
 	}
 	if err := c.restoreWorkIsolation(); err != nil {
-		c.setState(StateFailed, err.Error())
-		return err
+		reason := stableErrorCode(err, "work_storage_restore_failed")
+		c.setState(StateFailed, reason)
+		return errors.New(reason)
 	}
 	c.setState(StateFailed, reason)
 	if reason != "" {
 		return errors.New(reason)
 	}
 	return cause
+}
+
+func isStableErrorCode(value string) bool {
+	if len(value) < 2 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		ch := value[i]
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func stableErrorCode(err error, fallback string) string {
+	if err == nil {
+		return ""
+	}
+	if text := err.Error(); isStableErrorCode(text) {
+		return text
+	}
+	return fallback
 }
 
 func startErrorCode(err error) string {
@@ -806,8 +916,9 @@ func (c *Controller) Stop(ctx context.Context) error {
 		}
 	}
 	if err := c.restoreWorkIsolation(); err != nil {
-		c.setState(StateFailed, err.Error())
-		return err
+		reason := stableErrorCode(err, "work_storage_restore_failed")
+		c.setState(StateFailed, reason)
+		return errors.New(reason)
 	}
 	c.setState(StateStopped, "")
 	return nil
@@ -819,27 +930,81 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 	c.mu.Lock()
 	host := c.host
 	child := c.child
-	enabled := c.settings.Translation.Enabled
+	translation := c.settings.Translation
 	c.mu.Unlock()
 
-	if host == nil || child == nil {
+	if child == nil {
 		return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
 	}
-	if !enabled {
+	if !translation.Enabled {
+		if host != nil && host.HasSessions() {
+			host.WithdrawAll(ctx)
+		}
 		// Nothing is injected while translation is off, and the surface report
 		// must not claim a translation that was never applied.
 		status := TranslationStatus{State: "inactive", Reason: "translation_disabled"}
 		c.mu.Lock()
-		c.translation = &status
+		if c.child == child && !c.settings.Translation.Enabled {
+			c.translation = &status
+		}
 		c.mu.Unlock()
 		return status
+	}
+	if host == nil {
+		payload, _, err := translationPayload()
+		if err != nil {
+			status := TranslationStatus{State: "failed", Reason: "injection_payload_unavailable"}
+			c.mu.Lock()
+			if c.child == child && c.settings.Translation.Enabled {
+				c.translation = &status
+			}
+			c.mu.Unlock()
+			return status
+		}
+		c.mu.Lock()
+		if c.child == child && c.host == nil && c.settings.Translation.Enabled {
+			liveTranslation := c.settings.Translation
+			// NewHost must be built under the same lock that publishes it: two
+			// concurrent Ticks would otherwise both see host == nil and the loser
+			// would leave a detached host whose event loop still reads the pipe.
+			c.host = NewHost(child.Pipe(), InjectionOptions{
+				Payload:  string(payload),
+				Revision: liveTranslation.Revision(),
+				Settings: translationPublic(liveTranslation),
+				OnReply:  c.onReply,
+			})
+		}
+		host = c.host
+		stillSameChild := c.child == child
+		stillEnabled := stillSameChild && c.settings.Translation.Enabled
+		c.mu.Unlock()
+		if !stillSameChild {
+			return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
+		}
+		// The child is still the one this Tick started with, so a disabled
+		// translation is the answer even when a concurrent Configure also cleared
+		// the host: reporting `no_managed_child` would claim the opposite.
+		if !stillEnabled {
+			return TranslationStatus{State: "inactive", Reason: "translation_disabled"}
+		}
+		if host == nil {
+			// A concurrent retire cleared the host for this child. There is
+			// nothing to sync, and the next Tick builds the replacement.
+			return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
+		}
 	}
 	sessions, err := host.Sync(ctx)
 	if err != nil {
 		status := TranslationStatus{State: "failed", Reason: safeReason(err)}
 		c.mu.Lock()
-		c.translation = &status
+		stillActive := c.child == child && c.host == host && c.settings.Translation.Enabled
+		if stillActive {
+			c.translation = &status
+		}
 		c.mu.Unlock()
+		if !stillActive {
+			return TranslationStatus{State: "inactive", Reason: "translation_disabled"}
+		}
 		return status
 	}
 	status := TranslationStatus{Surfaces: map[string]SurfaceSummary{}}
@@ -871,8 +1036,25 @@ func (c *Controller) Tick(ctx context.Context) TranslationStatus {
 		status.Reason = "translation_waiting_view"
 	}
 	c.mu.Lock()
-	c.translation = &status
+	childMatch := c.child == child && c.host == host
+	enabledNow := c.settings.Translation.Enabled
+	if childMatch && enabledNow {
+		c.translation = &status
+	}
 	c.mu.Unlock()
+	if !childMatch {
+		return TranslationStatus{State: "inactive", Reason: "no_managed_child"}
+	}
+	if !enabledNow {
+		host.WithdrawAll(ctx)
+		disabled := TranslationStatus{State: "inactive", Reason: "translation_disabled"}
+		c.mu.Lock()
+		if c.child == child && c.host == host && !c.settings.Translation.Enabled {
+			c.translation = &disabled
+		}
+		c.mu.Unlock()
+		return disabled
+	}
 	return status
 }
 
@@ -893,32 +1075,80 @@ func (c *Controller) Reconcile() IntegrationResult {
 // The account is always taken from this controller's selected profile, never
 // from the caller's configuration and never from a directory outside it.
 func (c *Controller) ReconcileWithReadback(ctx context.Context) IntegrationResult {
-	result := c.reconcile(true, "")
+	result, gen, stale := c.reconcileChecked(true, "")
+	if stale {
+		return result
+	}
 	if result.Applied && !result.Adopted && !result.Changed && accountSessionMu.TryLock() {
 		defer accountSessionMu.Unlock()
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		result = c.confirmRunningCatalog(ctx, result)
+		result = c.confirmRunningCatalog(ctx, result, gen)
 	}
 	return result
 }
 
 func (c *Controller) reconcile(withReadback bool, confirmedAccount string) IntegrationResult {
+	result, _, _ := c.reconcileChecked(withReadback, confirmedAccount)
+	return result
+}
+
+func (c *Controller) staleReconcileResult(gen uint64) (bool, IntegrationResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settingsGen == gen {
+		return false, IntegrationResult{}
+	}
+	if c.integration != nil {
+		return true, *c.integration
+	}
+	return true, IntegrationResult{State: IntegrationNeedsImport, Mode: c.settings.integrationMode()}
+}
+
+func (c *Controller) commitReconcileResult(gen uint64, result IntegrationResult, withReadback bool) (IntegrationResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settingsGen != gen {
+		if c.integration != nil {
+			return *c.integration, true
+		}
+		return IntegrationResult{State: IntegrationNeedsImport, Mode: c.settings.integrationMode()}, true
+	}
+	if withReadback && result.Applied && result.Readback != nil {
+		result.Adopted = c.runtimeLoadedLocked(result.Readback.Generation)
+	}
+	c.integration = &result
+	return result, false
+}
+
+func (c *Controller) reconcileChecked(withReadback bool, confirmedAccount string) (IntegrationResult, uint64, bool) {
 	c.mu.Lock()
 	settings := c.settings
+	gen := c.settingsGen
+	hook := c.beforeReconcileHook
 	c.mu.Unlock()
 
 	// A child that exited is recorded before anything is written for it.
 	c.reapChild()
 
+	if hook != nil {
+		hook()
+	}
+
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
+
 	account, verified := c.profileAccount()
 	scope := account
 	if confirmedAccount != "" && (!verified || confirmedAccount != account) {
-		result := IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed", Readback: c.readback(account)}
-		c.mu.Lock()
-		c.integration = &result
-		c.mu.Unlock()
-		return result
+		result := IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed",
+			AccountDigest: sha256If(account), Readback: c.readback(account)}
+		committed, stale := c.commitReconcileResult(gen, result, false)
+		return committed, gen, stale
 	}
 	if !verified {
 		// Nothing is read from a profile without an identity, and no reconcile
@@ -926,10 +1156,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		if withReadback {
 			result := IntegrationResult{State: IntegrationAccountUnknown, Reason: "waiting-login",
 				Readback: c.readback("")}
-			c.mu.Lock()
-			c.integration = &result
-			c.mu.Unlock()
-			return result
+			committed, stale := c.commitReconcileResult(gen, result, false)
+			return committed, gen, stale
 		}
 		scope = settings.AccountScope
 	}
@@ -939,10 +1167,8 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 	integration, err := NewNativeIntegration(settings.StateDir, kimiDir, mode)
 	if err != nil {
 		result := IntegrationResult{State: IntegrationConflict, Reason: "invalid_integration_path", Mode: mode}
-		c.mu.Lock()
-		c.integration = &result
-		c.mu.Unlock()
-		return result
+		committed, stale := c.commitReconcileResult(gen, result, false)
+		return committed, gen, stale
 	}
 	options := ReconcileOptions{AccountScope: scope, AllowAccountRebind: confirmedAccount != "", Mode: mode}
 	if mode == IntegrationModeDirect {
@@ -953,15 +1179,22 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		options.URL = settings.GatewayURL
 		options.Models = settings.Models
 	}
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
 	result := integration.Reconcile(options)
+	if stale, current := c.staleReconcileResult(gen); stale {
+		return current, gen, true
+	}
 	c.syncActionsIntegrationRoute(settings, result.DirectSourceID)
 	if withReadback {
 		readback := integration.ReadbackMode(account, mode, result.DirectSourceID)
 		result.Readback = &readback
 		if readback.AccountDigest != "" {
-			// The digest is the profile's own identity, so the result says which
-			// account this evidence belongs to without naming it.
-			result.AccountDigest = readback.AccountDigest
+			// IntegrationResult.AccountDigest uses the intent-level scope digest
+			// sha256(store key), whereas ImportReadback.AccountDigest carries the
+			// store key sha256(uid) itself.
+			result.AccountDigest = sha256Hex(readback.AccountDigest)
 		}
 		// `Applied` is the readback's answer, not the reconcile's: the profile and
 		// the generated config must both hold the models. In Direct Mode the
@@ -973,18 +1206,20 @@ func (c *Controller) reconcile(withReadback bool, confirmedAccount string) Integ
 		}
 		result.Applied = result.Applied && (result.State == IntegrationReady || result.State == IntegrationRepaired)
 	}
-	c.mu.Lock()
-	if withReadback && result.Applied {
-		result.Adopted = c.runtimeLoadedLocked(result.Readback.Generation)
-	}
-	c.integration = &result
-	c.mu.Unlock()
-	return result
+	committed, stale := c.commitReconcileResult(gen, result, withReadback)
+	return committed, gen, stale
 }
 
+// recordImportReload notes that the child that answered an import will (or must)
+// reload before it can have read the new catalog. The generation moves in the
+// same critical section: a reconcile that read the previous one must not commit
+// a result about a child whose baseline this write just invalidated.
 func (c *Controller) recordImportReload(child *Child, deferred bool) {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.settingsGen++
 	if child == nil || c.child != child {
 		return
 	}
@@ -1096,7 +1331,7 @@ func (c *Controller) validateOfficialProfile(candidate string) (string, error) {
 		return "", errors.New("user_data_dir_invalid")
 	}
 	official, err := resolveAllowMissing(expected)
-	if err != nil || resolved != official {
+	if err != nil || !equalPath(resolved, official) {
 		return "", errors.New("official_profile_mismatch")
 	}
 	if _, err := os.Lstat(expected); !errors.Is(err, os.ErrNotExist) {
@@ -1130,7 +1365,7 @@ func (c *Controller) validateProfile(candidate string) (string, error) {
 	if err != nil {
 		return "", errors.New("user_data_dir_invalid")
 	}
-	if resolved != realState && !strings.HasPrefix(resolved, realState+string(filepath.Separator)) {
+	if !pathWithinDir(resolved, realState) {
 		return "", errors.New("user_data_dir_outside_state")
 	}
 	// Return the caller's own path shape: only the containment test needs the

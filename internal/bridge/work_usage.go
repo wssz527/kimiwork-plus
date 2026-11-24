@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,16 +66,18 @@ type wireUsageEvent struct {
 }
 
 type workUsageCollector struct {
-	mu         sync.Mutex
-	stateDir   string
-	kimiHome   string
-	cursorPath string
-	ledger     *ledger.Ledger
-	store      *core.Store
-	budget     *budgetGate
-	now        func() int64
-	cursor     workWireCursorState
-	loaded     bool
+	mu              sync.Mutex
+	stateDir        string
+	kimiHome        string
+	cursorPath      string
+	ledger          *ledger.Ledger
+	store           *core.Store
+	budget          *budgetGate
+	now             func() int64
+	maxFiles        int
+	snapshotGateway func(*ledger.Ledger) []gatewayDedupRecord
+	cursor          workWireCursorState
+	loaded          bool
 }
 
 func newWorkUsageCollector(stateDir, kimiHome string, usage *ledger.Ledger, store *core.Store, budget *budgetGate) *workUsageCollector {
@@ -414,8 +417,46 @@ func matchGatewayDuplicate(existing []gatewayDedupRecord, atMS int64, candidates
 }
 
 func shortHomeTag(kimiHome string) string {
-	digest := sha256.Sum256([]byte(filepath.Clean(kimiHome)))
+	return shortHomeTagForOS(runtime.GOOS, kimiHome)
+}
+
+func shortHomeTagForOS(goos, kimiHome string) string {
+	cleaned := filepath.Clean(kimiHome)
+	if goos == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	digest := sha256.Sum256([]byte(cleaned))
 	return hex.EncodeToString(digest[:6])
+}
+
+type workUsageSyncContext struct {
+	c          *workUsageCollector
+	loaded     bool
+	resolver   workModelResolver
+	prices     *protocol.PriceTable
+	existingGW []gatewayDedupRecord
+}
+
+func (s *workUsageSyncContext) ensure() (workModelResolver, *protocol.PriceTable, []gatewayDedupRecord) {
+	if !s.loaded {
+		s.loaded = true
+		var doc core.Document
+		if s.c.store != nil {
+			if d, _, readErr := s.c.store.Read(); readErr == nil {
+				doc = d
+			}
+		}
+		s.resolver = buildWorkModelResolver(s.c.stateDir, s.c.kimiHome, doc)
+		if s.c.budget != nil {
+			s.prices = s.c.budget.Prices()
+		}
+		snapshot := s.c.snapshotGateway
+		if snapshot == nil {
+			snapshot = snapshotGatewayRecords
+		}
+		s.existingGW = snapshot(s.c.ledger)
+	}
+	return s.resolver, s.prices, s.existingGW
 }
 
 func (c *workUsageCollector) Sync() int {
@@ -436,7 +477,11 @@ func (c *workUsageCollector) Sync() int {
 
 	homeTag := shortHomeTag(c.kimiHome)
 	homePrefix := homeTag + ":"
-	files := discoverWireFiles(sessionsDir, workUsageMaxFiles, workUsageMaxDepth)
+	maxFiles := c.maxFiles
+	if maxFiles <= 0 {
+		maxFiles = workUsageMaxFiles
+	}
+	files, truncated := discoverWireFiles(sessionsDir, maxFiles, workUsageMaxDepth)
 	present := make(map[string]bool, len(files))
 	var changedFiles []wireFileEntry
 	for _, f := range files {
@@ -450,10 +495,12 @@ func (c *workUsageCollector) Sync() int {
 	}
 
 	cursorDirty := false
-	for key := range c.cursor.Files {
-		if strings.HasPrefix(key, homePrefix) && !present[key] {
-			delete(c.cursor.Files, key)
-			cursorDirty = true
+	if !truncated {
+		for key := range c.cursor.Files {
+			if strings.HasPrefix(key, homePrefix) && !present[key] {
+				delete(c.cursor.Files, key)
+				cursorDirty = true
+			}
 		}
 	}
 	if len(changedFiles) == 0 {
@@ -463,23 +510,12 @@ func (c *workUsageCollector) Sync() int {
 		return 0
 	}
 
-	var doc core.Document
-	if c.store != nil {
-		if d, _, readErr := c.store.Read(); readErr == nil {
-			doc = d
-		}
-	}
-	resolver := buildWorkModelResolver(c.stateDir, c.kimiHome, doc)
-	var prices *protocol.PriceTable
-	if c.budget != nil {
-		prices = c.budget.Prices()
-	}
-	existingGW := snapshotGatewayRecords(c.ledger)
 	nowMS := c.now()
 	minAtMS := nowMS - workUsageRetentionMS
 	if c.cursor.ClearedBeforeMS > minAtMS {
 		minAtMS = c.cursor.ClearedBeforeMS
 	}
+	syncCtx := &workUsageSyncContext{c: c}
 
 	imported := 0
 	for _, f := range changedFiles {
@@ -488,7 +524,7 @@ func (c *workUsageCollector) Sync() int {
 		if mark, ok := c.cursor.Files[key]; ok && mark.Offset <= f.size {
 			startOffset = mark.Offset
 		}
-		newOffset, count := c.scanWireFile(homeTag, f, startOffset, nowMS, minAtMS, resolver, prices, existingGW)
+		newOffset, count := c.scanWireFile(homeTag, f, startOffset, nowMS, minAtMS, syncCtx)
 		imported += count
 		c.cursor.Files[key] = workWireFileMark{
 			Size:      f.size,
@@ -510,11 +546,16 @@ type wireFileEntry struct {
 	modTimeNS int64
 }
 
-func discoverWireFiles(root string, maxFiles, maxDepth int) []wireFileEntry {
+func discoverWireFiles(root string, maxFiles, maxDepth int) ([]wireFileEntry, bool) {
 	var out []wireFileEntry
+	truncated := false
 	var walk func(dir, relPrefix string, depth int)
 	walk = func(dir, relPrefix string, depth int) {
-		if depth > maxDepth || len(out) >= maxFiles {
+		if depth > maxDepth {
+			return
+		}
+		if len(out) >= maxFiles {
+			truncated = true
 			return
 		}
 		entries, err := os.ReadDir(dir)
@@ -523,6 +564,7 @@ func discoverWireFiles(root string, maxFiles, maxDepth int) []wireFileEntry {
 		}
 		for _, entry := range entries {
 			if len(out) >= maxFiles {
+				truncated = true
 				return
 			}
 			name := entry.Name()
@@ -553,7 +595,7 @@ func discoverWireFiles(root string, maxFiles, maxDepth int) []wireFileEntry {
 		}
 	}
 	walk(root, "", 0)
-	return out
+	return out, truncated
 }
 
 func (c *workUsageCollector) scanWireFile(
@@ -562,9 +604,7 @@ func (c *workUsageCollector) scanWireFile(
 	startOffset int64,
 	nowMS int64,
 	minAtMS int64,
-	resolver workModelResolver,
-	prices *protocol.PriceTable,
-	existingGW []gatewayDedupRecord,
+	syncCtx *workUsageSyncContext,
 ) (int64, int) {
 	file, err := os.Open(f.fullPath)
 	if err != nil {
@@ -590,6 +630,7 @@ func (c *workUsageCollector) scanWireFile(
 			break
 		}
 		if !oversized && bytes.Contains(line, []byte(`"usage.record"`)) {
+			resolver, prices, existingGW := syncCtx.ensure()
 			entry, ok, deferLine := buildWireLedgerEntry(homeTag, f.rel, lineStart, convID, line, nowMS, minAtMS, resolver, prices, existingGW)
 			if deferLine {
 				break

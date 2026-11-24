@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -219,39 +221,49 @@ func (n *Native) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.maybeRecheckCompatibility(ctx)
-			modelBlocked := n.modelSyncWriteBlocked()
-			accountBlocked := n.accountSwitchWriteBlocked()
-			n.mu.Lock()
-			settings := n.controller.Settings()
-			if settings.Installation.Application != "" {
-				pids, known, reason := kimi.WithIdentityTimeout(settings.Installation.Application)
-				if !known {
-					n.process = core.Document{"running": nil, "state": "unknown", "reason": reason}
-				} else {
-					n.process = core.Document{"running": len(pids) > 0, "state": "checked"}
-				}
-			}
-			n.controller.Tick(ctx)
-			var integration kimi.IntegrationResult
-			if !modelBlocked {
-				integration = n.controller.ReconcileWithReadback(ctx)
-			}
-			n.mu.Unlock()
-			if !modelBlocked {
-				n.controller.RepairIntegration(ctx, integration)
-			}
-			if err := n.syncWorkHome(); err == nil {
-				configObserved = n.reconcile(configObserved)
-			}
-			if n.workUsage != nil {
-				n.workUsage.Sync()
-			}
-			if !accountBlocked {
-				n.observeAccounts(ctx)
-			}
+			configObserved = n.watchStep(ctx, configObserved)
 		}
 	}
+}
+
+func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.FileInfo {
+	n.maybeRecheckCompatibility(ctx)
+	modelBlocked := n.modelSyncWriteBlocked()
+	accountBlocked := n.accountSwitchWriteBlocked()
+	n.mu.Lock()
+	settings := n.controller.Settings()
+	n.mu.Unlock()
+
+	var checkedProcess core.Document
+	if settings.Installation.Application != "" {
+		pids, known, reason := kimi.WithIdentityTimeout(settings.Installation.Application)
+		if !known {
+			checkedProcess = core.Document{"running": nil, "state": "unknown", "reason": reason}
+		} else {
+			checkedProcess = core.Document{"running": len(pids) > 0, "state": "checked"}
+		}
+	}
+	if checkedProcess != nil {
+		n.mu.Lock()
+		n.process = checkedProcess
+		n.mu.Unlock()
+	}
+
+	n.controller.Tick(ctx)
+	if !modelBlocked {
+		integration := n.controller.ReconcileWithReadback(ctx)
+		n.controller.RepairIntegration(ctx, integration)
+	}
+	if err := n.syncWorkHome(); err == nil {
+		configObserved = n.reconcile(configObserved)
+	}
+	if n.workUsage != nil {
+		n.workUsage.Sync()
+	}
+	if !accountBlocked {
+		n.observeAccounts(ctx)
+	}
+	return configObserved
 }
 func processView(state kimi.RunningState) core.Document {
 	if state == kimi.Running {
@@ -459,7 +471,7 @@ func (n *Native) publishedNativeImport(current *kimi.IntegrationResult) (kimi.Im
 		// the receipt against.
 		return settledNativeImportReceipt(nil, record.result), true
 	}
-	if record.account != "" && current.AccountDigest != "" && record.account != current.AccountDigest {
+	if record.account != "" && !sameIntegrationAccount(record.account, current) {
 		// Another account is signed in: the old profile's import is not evidence
 		// about this one, including unfinished cleanup.
 		return kimi.ImportResult{}, false
@@ -475,6 +487,23 @@ func (n *Native) publishedNativeImport(current *kimi.IntegrationResult) (kimi.Im
 		return kimi.ImportResult{}, false
 	}
 	return settledNativeImportReceipt(current, record.result), true
+}
+
+func sameIntegrationAccount(receiptAccount string, current *kimi.IntegrationResult) bool {
+	if current == nil || receiptAccount == "" {
+		return true
+	}
+	if current.Readback != nil && current.Readback.AccountDigest != "" {
+		return receiptAccount == current.Readback.AccountDigest
+	}
+	if current.AccountDigest == "" {
+		return true
+	}
+	if receiptAccount == current.AccountDigest {
+		return true
+	}
+	sum := sha256.Sum256([]byte(receiptAccount))
+	return hex.EncodeToString(sum[:]) == current.AccountDigest
 }
 
 func (n *Native) integrationForState(current *kimi.IntegrationResult) *kimi.IntegrationResult {

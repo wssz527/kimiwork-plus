@@ -195,7 +195,8 @@ func TestDiagnosticsCodeListKeepsReasonsButNotPaths(t *testing.T) {
 }
 
 func TestDiagnosticsExportRouteUsesTheNativeExtraHandler(t *testing.T) {
-	s := &Service{StateDir: t.TempDir()}
+	exportDir := t.TempDir()
+	s := &Service{StateDir: t.TempDir(), ExportDir: exportDir}
 	called := 0
 	s.Extra = func(_ context.Context, path string, _ core.Document) (any, error) {
 		called++
@@ -211,12 +212,23 @@ func TestDiagnosticsExportRouteUsesTheNativeExtraHandler(t *testing.T) {
 	if called != 1 || out.(core.Document)["schemaVersion"] != diagnosticsSchemaVersion {
 		t.Fatalf("export was not routed to the native handler: %+v", out)
 	}
-	if _, err := s.action(context.Background(), "POST", "/api/diagnostics/export", core.Document{}); err == nil {
-		t.Fatal("POST to the export path was accepted")
+	postOut, err := s.action(context.Background(), "POST", "/api/diagnostics/export", core.Document{})
+	if err != nil {
+		t.Fatalf("POST diagnostics export failed: %v", err)
+	}
+	doc := postOut.(core.Document)
+	if doc["ok"] != true || !strings.HasPrefix(core.String(doc["path"]), exportDir) {
+		t.Fatalf("unexpected POST diagnostics export response: %+v", doc)
+	}
+	if _, err := s.action(context.Background(), "PUT", "/api/diagnostics/export", core.Document{}); err == nil {
+		t.Fatal("PUT to the export path was accepted")
 	}
 
 	s.Extra = nil
 	if _, err := s.action(context.Background(), "GET", "/api/diagnostics/export", nil); err == nil || err.Error() != "native_preview_unavailable" {
 		t.Fatalf("export without a native handler: %v", err)
+	}
+	if _, err := s.action(context.Background(), "POST", "/api/diagnostics/export", core.Document{}); err == nil || err.Error() != "native_preview_unavailable" {
+		t.Fatalf("POST export without a native handler: %v", err)
 	}
 }

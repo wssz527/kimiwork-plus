@@ -62,6 +62,7 @@ type Pipe struct {
 	writable io.WriteCloser
 
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	pending map[int]*call
 	nextID  int
 	closed  bool
@@ -123,8 +124,8 @@ type Event struct {
 	SessionID string         `json:"sessionId"`
 }
 
-// NewPipe starts reading from readable and writes to writable. The caller owns
-// the descriptors and must keep them open for the pipe's lifetime.
+// NewPipe starts reading from readable and writes to writable. Dispose closes
+// both streams and releases the reader goroutine.
 func NewPipe(readable io.ReadCloser, writable io.WriteCloser) *Pipe {
 	pipe := &Pipe{
 		readable: readable,
@@ -158,6 +159,7 @@ func (p *Pipe) Closed() (bool, string) {
 }
 
 func (p *Pipe) readLoop() {
+	defer close(p.events)
 	reader := bufio.NewReaderSize(p.readable, 64<<10)
 	for {
 		// Frames are NUL-terminated. ReadString returns the terminator, so a
@@ -208,6 +210,12 @@ func (p *Pipe) dispatch(payload string) {
 		return
 	}
 	select {
+	case <-p.done:
+		return
+	default:
+	}
+	select {
+	case <-p.done:
 	case p.events <- Event{Method: message.Method, Params: message.Params, SessionID: message.SessionID}:
 	default:
 		// The event channel is a notification path, not a queue of record. A
@@ -250,7 +258,16 @@ func (p *Pipe) Send(ctx context.Context, method string, params map[string]any, s
 		p.drop(id)
 		return Result{}, ErrMessageTooLarge
 	}
-	if _, err := p.writable.Write(append(encoded, 0)); err != nil {
+	frame := append(encoded, 0)
+	p.writeMu.Lock()
+	if closed, reason := p.Closed(); closed {
+		p.writeMu.Unlock()
+		p.drop(id)
+		return Result{}, fmt.Errorf("%w: %s", ErrPipeClosed, reason)
+	}
+	_, err = p.writable.Write(frame)
+	p.writeMu.Unlock()
+	if err != nil {
 		p.drop(id)
 		p.dispose(ErrPipeClosed.Error())
 		return Result{}, fmt.Errorf("%w: write failed", ErrPipeClosed)
@@ -303,7 +320,8 @@ func protocolError(detail map[string]any) error {
 	return fmt.Errorf("%w: %s", ErrProtocolError, message)
 }
 
-// dispose ends the transport once, rejecting every waiter.
+// dispose ends the transport once, rejecting every waiter and closing the
+// underlying streams so readLoop exits and closes the events channel.
 func (p *Pipe) dispose(reason string) {
 	p.closeOne.Do(func() {
 		p.mu.Lock()
@@ -317,7 +335,12 @@ func (p *Pipe) dispose(reason string) {
 			close(waiter.resolve)
 		}
 		close(p.done)
-		close(p.events)
+		if p.readable != nil {
+			_ = p.readable.Close()
+		}
+		if p.writable != nil {
+			_ = p.writable.Close()
+		}
 	})
 }
 

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
@@ -214,9 +213,5 @@ func storagePathsDisjoint(first, second string) bool {
 	if errA != nil || errB != nil {
 		return false
 	}
-	within := func(parent, child string) bool {
-		relative, err := filepath.Rel(parent, child)
-		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
-	}
-	return !within(a, b) && !within(b, a)
+	return !pathWithinDir(b, a) && !pathWithinDir(a, b)
 }

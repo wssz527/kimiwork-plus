@@ -57,6 +57,7 @@ type fakeAccountPage struct {
 	runtimeUnready    bool
 	runtimeBlocking   bool
 	onActivation      func()
+	onBeginLogin      func()
 	reloads           int
 	calls             []string
 }
@@ -239,6 +240,9 @@ func (f *fakeAccountPage) accountBeginLogin(context.Context, accountPage) error 
 		}
 	}
 	f.user = map[string]string{}
+	if f.onBeginLogin != nil {
+		f.onBeginLogin()
+	}
 	return nil
 }
 

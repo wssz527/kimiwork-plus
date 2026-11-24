@@ -36,7 +36,9 @@ func (n *Native) initAccounts(gateway *Runtime) error {
 			if !result.Verified || result.UserID != session.UserID {
 				return accountCapture{}, errors.New("account_identity_mismatch")
 			}
-			fresh, err := n.captureAccount(ctx)
+			captureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			fresh, err := n.captureAccount(captureCtx)
 			if err == nil && fresh.UserID != session.UserID {
 				err = errors.New("account_identity_mismatch")
 			}

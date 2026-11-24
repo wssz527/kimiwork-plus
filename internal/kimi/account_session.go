@@ -582,6 +582,8 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	// attempt has something real to go back to.
 	original, originalErr := c.captureAccount(ctx, surface, home)
 	result := AccountActivation{UserID: session.UserID, Digest: sha256Hex(session.UserID)}
+	c.beginConfigWrite()
+	defer c.beginConfigWrite()
 
 	runtime, runtimePage, watching := watchAccountRuntime(ctx, surface)
 	if watching {
@@ -598,7 +600,12 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	if pagePrepared && ctx.Err() == nil {
 		configOK = watching && accountConfigMatches(home, session.UserID)
 		if !configOK {
-			configOK = c.applyAccountConfig(home, session) == nil && accountConfigMatches(home, session.UserID)
+			// The config write is the one step that races a reconcile, so it runs
+			// with the generation ended and the write serialized. It is a plain
+			// file operation; nothing here waits on a page.
+			configOK = c.configWrite(func() error {
+				return c.applyAccountConfig(home, session)
+			}) == nil && accountConfigMatches(home, session.UserID)
 		}
 		if configOK {
 			restarted = restartAccountProcess(c, ctx) == nil
@@ -610,7 +617,11 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 		if fresh, err := c.accountSurface(); err == nil {
 			surface = fresh
 			pageReadable = true
-			pageOK = waitAccountIdentity(ctx, surface, session.UserID)
+			restartRetries := accountRuntimeRetries
+			if restartRetries < accountVerifyRetries {
+				restartRetries = accountVerifyRetries
+			}
+			pageOK = waitAccountIdentityRetries(ctx, surface, session.UserID, restartRetries)
 			if probe, page, ok := accountRuntimeTarget(ctx, surface); ok {
 				defer probe.accountStopRuntimeWatch(context.WithoutCancel(ctx), page)
 				pageOK = waitAccountRuntime(ctx, surface, probe, page, home, session.UserID, false)
@@ -640,15 +651,19 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 		reason = AccountErrRestartFailed
 	}
 
+	rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancelRollback()
+
 	rolledBack := false
 	if originalErr == nil {
 		if fresh, err := c.accountSurface(); err == nil {
 			surface = fresh
 			pageReadable = true
 		}
-		pageRestored := c.applyPageState(ctx, surface, original) == nil
-		configRestored := c.applyAccountConfig(home, original) == nil &&
-			accountConfigMatches(home, original.UserID)
+		pageRestored := c.applyPageState(rollbackCtx, surface, original) == nil
+		configRestored := c.configWrite(func() error {
+			return c.applyAccountConfig(home, original)
+		}) == nil && accountConfigMatches(home, original.UserID)
 		rolledBack = pageRestored && configRestored
 	}
 	result.RolledBack = rolledBack
@@ -666,14 +681,14 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	// A page that is readable and reports nobody is the one case where only the
 	// target account signing in again can help. An unreadable page (no restart,
 	// or the app came back without a bridge) is a plain failure.
-	if pageReadable && accountPageSignedOut(ctx, surface) {
+	if pageReadable && accountPageSignedOut(rollbackCtx, surface) {
 		result.State, result.RequiresLogin = AccountStateNeedsLogin, true
 		return result, nil
 	}
 	// A build whose page does not answer the official profile read cannot verify
 	// either direction. That is a capability gap, and reporting it as a failed
 	// rollback would send the user after the wrong problem.
-	if restarted && !accountOfficialReadable(ctx, surface) {
+	if restarted && !accountOfficialReadable(rollbackCtx, surface) {
 		result.State, result.Reason = AccountStateFailed, AccountErrUnsupported
 		return result, errors.New(AccountErrUnsupported)
 	}
@@ -715,6 +730,8 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 	if shell == nil {
 		return errors.New(AccountErrUnsupported)
 	}
+	c.beginConfigWrite()
+	defer c.beginConfigWrite()
 	if err := surface.accountBeginLogin(ctx, *shell); err != nil {
 		return err
 	}
@@ -733,7 +750,10 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 			return errors.New(AccountErrWriteFailed)
 		}
 	}
-	return clearAccountCredentials(home)
+	// The sign-out cleared the page and is about to clear the config. The
+	// generation ends first, so a reconcile that read the signed-in tree cannot
+	// commit it back as the current state.
+	return c.configWrite(func() error { return clearAccountCredentials(home) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,10 +1223,17 @@ func waitAccountRuntime(ctx context.Context, surface accountSurface, runtime acc
 // only a verified read: the token store alone is a copy of what this process
 // wrote, not evidence the page bound that account.
 func waitAccountIdentity(ctx context.Context, surface accountSurface, want string) bool {
+	return waitAccountIdentityRetries(ctx, surface, want, accountVerifyRetries)
+}
+
+func waitAccountIdentityRetries(ctx context.Context, surface accountSurface, want string, retries int) bool {
 	if want == "" {
 		return false
 	}
-	for attempt := 0; attempt < accountVerifyRetries; attempt++ {
+	if retries <= 0 {
+		retries = 1
+	}
+	for attempt := 0; attempt < retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():

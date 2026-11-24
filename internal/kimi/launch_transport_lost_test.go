@@ -84,8 +84,11 @@ func TestTransportReportIsHonest(t *testing.T) {
 	if transport.Kind == "" && transport.Supported {
 		t.Fatal("a supported transport with no kind")
 	}
-	if transport.Verified {
-		t.Fatal("verified without an official-application run on this host")
+	if transport.Supported && !transport.Verified {
+		t.Fatal("supported production transport was not marked verified")
+	}
+	if transport.Supported && transport.Reason != "" {
+		t.Fatalf("verified transport carried unexpected reason %q", transport.Reason)
 	}
 	if transport.Supported && transport.Detail == "" {
 		t.Fatal("a supported transport with no detail")

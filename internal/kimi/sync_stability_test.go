@@ -852,7 +852,7 @@ func TestControllerStartReturnsNormalizedErrorCodes(t *testing.T) {
 		}
 	})
 
-	t.Run("failed attach returns injection_payload_unavailable code", func(t *testing.T) {
+	t.Run("failed translation payload keeps child ready and records translation reason", func(t *testing.T) {
 		child, profile := startFakeChild(t)
 		controller, err := NewController(ControllerSettings{StateDir: filepath.Dir(profile), UserDataDir: profile})
 		if err != nil {
@@ -866,8 +866,16 @@ func TestControllerStartReturnsNormalizedErrorCodes(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := controller.attachChild(ctx, child, TranslationSettings{Enabled: false}); err == nil || err.Error() != "injection_payload_unavailable" {
-			t.Fatalf("attachChild() = %v, want injection_payload_unavailable", err)
+		if err := controller.attachChild(ctx, child, TranslationSettings{Enabled: false}); err != nil {
+			t.Fatalf("attachChild() = %v, want nil", err)
+		}
+		t.Cleanup(func() { _ = controller.Stop(context.Background()) })
+		status := controller.Status(context.Background())
+		if status.State != StateReady {
+			t.Fatalf("state = %s, want ready", status.State)
+		}
+		if status.Translation == nil || status.Translation.State != "failed" || status.Translation.Reason != "injection_payload_unavailable" {
+			t.Fatalf("translation = %+v", status.Translation)
 		}
 	})
 

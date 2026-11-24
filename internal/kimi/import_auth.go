@@ -67,6 +67,9 @@ var ErrImportBusy = errors.New("native_import_busy")
 const (
 	importBusyWait = 3 * time.Second
 	importBusyPoll = 25 * time.Millisecond
+	// importReconcileAttempts bounds how often the readback after an import is
+	// re-run when a configuration write ended the generation it started in.
+	importReconcileAttempts = 3
 )
 
 func (c *Controller) waitForImport(ctx context.Context) error {
@@ -353,7 +356,7 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string, ch
 		return result
 	}
 	c.recordImportReload(child, result.RequiresRestart)
-	integration := c.reconcile(true, expectedAccount)
+	integration := c.reconcileAfterImport(expectedAccount)
 	result.Readback = integration.Readback
 	result.Adopted = integration.Adopted
 	if integration.Reason == "account_changed" {
@@ -388,6 +391,25 @@ func (c *Controller) gradeImport(result ImportResult, expectedAccount string, ch
 	result.Applied = false
 	result.Reason = firstNonEmpty(integration.Reason, result.Reason, "native_import_not_verified")
 	return result
+}
+
+// reconcileAfterImport is the readback half of an import. The page answer alone
+// is not evidence: the profile and the generated config decide.
+//
+// A configuration write that lands between the import and this call ends the
+// generation the caller started in, and a reconcile of that older generation
+// answers with the result it already had — which says nothing about this
+// import. Retrying takes the new generation; if the configuration keeps moving,
+// the honest answer is an unverified result, never another import's cached
+// `Applied`.
+func (c *Controller) reconcileAfterImport(expectedAccount string) IntegrationResult {
+	for attempt := 0; attempt < importReconcileAttempts; attempt++ {
+		reconciled, _, stale := c.reconcileChecked(true, expectedAccount)
+		if !stale {
+			return reconciled
+		}
+	}
+	return IntegrationResult{State: IntegrationNeedsImport, Reason: "import_not_verified"}
 }
 
 // importState maps a page answer onto the coarse vocabulary. It is used by the

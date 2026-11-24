@@ -323,7 +323,7 @@ func (a *cdpActions) WorkSurface(ctx context.Context) (WorkSurface, error) {
 	settingsVisible := false
 	for _, target := range targets {
 		surface.Pages++
-		value, err := a.evaluate(ctx, target.sessionID, surfaceProbe)
+		value, err := a.evaluateTarget(ctx, &target, surfaceProbe)
 		if err != nil {
 			// A page that cannot be read is unknown, not a failure and not a
 			// proof of absence.
@@ -595,8 +595,8 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings, acti
 				return actionTarget{}, false, &ImportResult{State: ImportStateWaitingWork, Reason: NativeWaitingWork}, nil
 			}
 		}
-		settingsDeadline := time.Now().Add(settingsReadyWindow)
-		asked, mounted, err := a.openSettingsWhenReady(ctx, work, settingsDeadline)
+		openDeadline := time.Now().Add(settingsReadyWindow)
+		asked, mounted, err := a.openSettingsWhenReady(ctx, work, openDeadline)
 		if err != nil {
 			return actionTarget{}, false, nil, err
 		}
@@ -608,6 +608,7 @@ func (a *cdpActions) resolveImportTarget(ctx context.Context, openSettings, acti
 			return actionTarget{}, false, &ImportResult{State: ImportStateWaitingSettings, Reason: reason}, nil
 		}
 		opened = true
+		settingsDeadline := time.Now().Add(settingsReadyWindow)
 		for !found {
 			fresh, err := a.targets(ctx)
 			if err != nil {

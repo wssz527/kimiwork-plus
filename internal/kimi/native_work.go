@@ -198,6 +198,9 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 		selected = chosen
 	}
 	if profile == nil {
+		if intent != nil && intent.AccountDigest != "" && scopeDigest != "" && intent.AccountDigest != scopeDigest && !options.AllowAccountRebind {
+			return IntegrationResult{State: IntegrationNeedsImport, Reason: "account_changed"}
+		}
 		reason := "profile_missing"
 		if storeKind == "absent" {
 			reason = "profile_store_missing"
@@ -939,6 +942,7 @@ func selectProfile(candidates []profileCandidate, scopeDigest string, intent *na
 				return candidate, false
 			}
 		}
+		return profileCandidate{}, false
 	}
 	if intent != nil && intent.ProfileKeyDigest != "" {
 		for _, candidate := range candidates {

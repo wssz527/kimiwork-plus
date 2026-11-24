@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
@@ -14,41 +15,71 @@ import (
 type webService = webtools.Service
 
 type webKey struct {
+	mu          sync.RWMutex
 	keys        KeyStore
 	ref         string
 	previousRef string
 }
 
 func (k *webKey) Get() (string, error) {
-	if k.keys == nil || k.ref == "" {
+	k.mu.RLock()
+	keys := k.keys
+	ref := k.ref
+	k.mu.RUnlock()
+	if keys == nil || ref == "" {
 		return "", nil
 	}
-	return k.keys.Get(k.ref)
+	return keys.Get(ref)
+}
+
+func (k *webKey) currentRef() string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.ref
 }
 
 func (k *webKey) Set(value string) error {
-	if k.keys == nil {
+	k.mu.RLock()
+	keys := k.keys
+	k.mu.RUnlock()
+	if keys == nil {
 		return errors.New("credentials_unavailable")
 	}
 	ref := "tavily-" + RandomKey()
-	if err := stageCredential(k.keys, ref, value); err != nil {
-		_ = k.keys.Delete(ref)
+	if err := stageCredential(keys, ref, value); err != nil {
+		_ = keys.Delete(ref)
 		return err
 	}
+	k.mu.Lock()
 	k.previousRef = k.ref
 	k.ref = ref
+	k.mu.Unlock()
 	return nil
 }
 
+func (k *webKey) commit() {
+	k.mu.Lock()
+	k.previousRef = ""
+	k.mu.Unlock()
+}
+
 func (k *webKey) rollback() {
+	k.mu.Lock()
 	if k.previousRef == "" && k.ref == "" {
+		k.mu.Unlock()
 		return
 	}
+	keys := k.keys
+	var toDelete string
 	if k.previousRef != k.ref {
-		_ = k.keys.Delete(k.ref)
+		toDelete = k.ref
 	}
 	k.ref = k.previousRef
 	k.previousRef = ""
+	k.mu.Unlock()
+	if toDelete != "" && keys != nil {
+		_ = keys.Delete(toDelete)
+	}
 }
 
 type webCredentialSettings struct {
@@ -66,8 +97,10 @@ func (s webCredentialSettings) Write(body []byte) error {
 	}
 	value := map[string]any{"schemaVersion": document.SchemaVersion, "provider": document.Provider}
 	ref := currentWebCredentialRef(s.path)
-	if s.credential != nil && s.credential.ref != "" {
-		ref = s.credential.ref
+	if s.credential != nil {
+		if current := s.credential.currentRef(); current != "" {
+			ref = current
+		}
 	}
 	if ref != "" {
 		value["credentialRef"] = ref
@@ -219,7 +252,7 @@ func (n *Native) webAction(in core.Document) (any, error) {
 	if err = n.web.Commit(provider); err != nil {
 		return nil, err
 	}
-	n.webKeys.previousRef = ""
+	n.webKeys.commit()
 	committed = true
 	return core.Document{"state": n.web.State(n.policies.servicesView())}, nil
 }

@@ -64,7 +64,7 @@ func seedNativeProfile(t *testing.T, kimiHome, baseURL, credentialRef string) {
 		},
 	}
 	store, err := json.Marshal(map[string]any{"v": 1,
-		"profiles": map[string]any{"profile-key": map[string]any{"byok-kth": profile}}})
+		"profiles": map[string]any{sha256Hex("user-1"): map[string]any{"byok-kth": profile}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestReadbackHoldsIsStrict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readback := integration.Readback("user-1")
+	readback := integration.Readback(sha256Hex("user-1"))
 	if !readback.Holds("http://127.0.0.1:9999/v1") {
 		t.Fatalf("a complete profile was not held: %+v", readback)
 	}
