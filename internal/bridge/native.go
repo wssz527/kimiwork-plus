@@ -62,6 +62,13 @@ type Native struct {
 	importModels       func(context.Context) (kimi.ImportResult, error)
 	importDirectModels func(context.Context, kimi.DirectImportRequest) (kimi.ImportResult, error)
 	disconnectModels   func(context.Context) (kimi.DisconnectResult, error)
+	// The probes below exist so a test can place the process and the readback
+	// without starting or touching a real Kimi.
+	managedProbe      func() bool
+	runningProbe      func() bool
+	staticHostsProbe  func() bool
+	autoSyncReconcile func(context.Context) kimi.IntegrationResult
+	autoSync          *autoSyncCoordinator
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -105,6 +112,7 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 		n.accountReason = core.ErrorCode(err)
 	}
 	n.initBYOK()
+	n.autoSync = newAutoSyncCoordinator(ctx, n)
 	controller.SetTranslationHandler(n.translate)
 	d, _, e := s.Store.Read()
 	if e != nil {
@@ -120,6 +128,8 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 		return n.Configure(d)
 	}
 	s.NativeState = n.State
+	s.ScheduleAutoSync = n.ScheduleAutoSync
+	s.autoSync = n.autoSync
 	s.Extra = func(ctx context.Context, path string, in core.Document) (any, error) {
 		switch path {
 		case "/api/actions":
@@ -204,6 +214,7 @@ func (n *Native) Configure(d core.Document) error {
 	return n.policies.Configure(d)
 }
 func (n *Native) watch(ctx context.Context) {
+	defer n.autoSync.stop()
 	defer n.closeBYOK()
 	defer n.web.Close()
 	defer func() {
@@ -263,6 +274,10 @@ func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.F
 	if !modelBlocked {
 		integration := n.controller.ReconcileWithReadback(ctx)
 		n.controller.RepairIntegration(ctx, integration)
+		if d, _, err := n.service.Store.Read(); err == nil {
+			n.autoSync.observe(&integration, d)
+		}
+		n.autoSync.kickIfReady()
 	}
 	if err := n.syncWorkHome(); err == nil {
 		configObserved = n.reconcile(configObserved)
@@ -401,7 +416,7 @@ type nativeImportReceipt struct {
 // nativeImportAction reports whether action runs a model import. Only those
 // operations produce a receipt.
 func nativeImportAction(action string) bool {
-	return action == "connect-kimi" || action == "prepare-native"
+	return action == "connect-kimi" || action == "prepare-native" || action == "auto-sync"
 }
 
 func importResultValue(value any) (kimi.ImportResult, bool) {
@@ -557,6 +572,7 @@ func (n *Native) State() core.Document {
 			operation[k] = v
 		}
 	}
+	integration["autoSync"] = n.autoSync.status()
 	if receipt, ok := n.publishedNativeImport(currentIntegration); ok {
 		raw, _ := json.Marshal(receipt)
 		var published core.Document
@@ -992,6 +1008,7 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		}
 	}
 	n.logOperationFinished(id, action, stage, state, reason, duration, result)
+	n.autoSync.operationFinished(action, err)
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }

@@ -52,12 +52,16 @@ type Service struct {
 	Extra       func(context.Context, string, core.Document) (any, error)
 	NativeState func() core.Document
 	OnConfig    func(core.Document) error
-	mutation    sync.Mutex
-	mu          sync.RWMutex
-	discoveries map[string]core.Document
-	http        *http.Server
-	stop        context.CancelFunc
-	stopOnce    sync.Once
+	// ScheduleAutoSync is set when the native layer is attached. It is told the
+	// document before and after every save that can change the Kimi catalog.
+	ScheduleAutoSync func(path string, prev, next core.Document)
+	autoSync         *autoSyncCoordinator
+	mutation         sync.Mutex
+	mu               sync.RWMutex
+	discoveries      map[string]core.Document
+	http             *http.Server
+	stop             context.CancelFunc
+	stopOnce         sync.Once
 }
 
 func (s *Service) SetStop(stop context.CancelFunc) { s.stop = stop }
@@ -115,6 +119,12 @@ func (s *Service) Start(port string, setup ...func() error) error {
 func (s *Service) Close(ctx context.Context) error {
 	if s.Updates != nil {
 		s.Updates.Close()
+	}
+	if s.autoSync != nil {
+		s.autoSync.stop()
+	}
+	if s.http == nil {
+		return nil
 	}
 	return s.http.Shutdown(ctx)
 }
@@ -611,7 +621,9 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	// configuration is durable. A failure after the commit leaves them active,
 	// because the committed document already refers to them.
 	var pending []string
+	var previous core.Document
 	d, rev, e := s.Store.Prepare(core.String(in["revision"]), func(d core.Document) error {
+		previous = cloneDocument(d)
 		switch path {
 		case "/api/workspace":
 			if _, ok := in["models"].([]any); !ok {
@@ -699,9 +711,29 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 			return nil, e
 		}
 	}
+	if s.ScheduleAutoSync != nil {
+		// A save that only touches a gateway-side field leaves the Kimi catalog
+		// alone; the coordinator compares the two documents itself.
+		s.ScheduleAutoSync(path, previous, d)
+	}
 	state, e := s.State()
 	return core.Document{"ok": true, "state": state}, e
 }
+
+// cloneDocument is the document as it was before a save: the merge helpers only
+// replace the rows they own, but a caller must never see a mutated history.
+func cloneDocument(d core.Document) core.Document {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return nil
+	}
+	var copy core.Document
+	if json.Unmarshal(raw, &copy) != nil {
+		return nil
+	}
+	return copy
+}
+
 func (s *Service) writeExportJSON(prefix string, value any) (string, error) {
 	data, err := marshalExportJSON(value)
 	if err != nil {
@@ -821,7 +853,7 @@ func (s *Service) State() (core.Document, error) {
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},
 		"subagents":   core.Document{"configured": core.Document{"mode": "inherit"}, "policy": core.Document{"mode": "inherit"}, "runtime": core.Document{"state": "inherit", "mode": "inherit"}},
 		"translation": core.Document{"configured": trans, "revision": rev, "environment": core.Document{"keySet": false}, "runtime": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}},
-		"integration": core.Document{"state": "unchecked", "imported": false, "reason": "native_preview_unavailable", "desktop": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}},
+		"integration": core.Document{"state": "unchecked", "imported": false, "reason": "native_preview_unavailable", "desktop": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}, "autoSync": core.Document{"state": autoSyncIdle, "reason": "", "updatedAt": int64(0), "pending": false}},
 		"kimiProcess": core.Document{"running": nil, "state": "unknown"}, "context": core.Document{"policy": core.Document{"mode": "inherit"}, "status": "unavailable"},
 		"tools": core.Document{"available": false, "reason": "native_preview_unavailable", "servers": []any{}}, "search": core.Document{"status": "unavailable"},
 		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{"operationLog": core.Document{"available": false, "retained": 0, "limit": diagnosticsEventLimit, "lastAt": int64(0), "reason": "diagnostics_unconfigured"}}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,

@@ -470,6 +470,9 @@ func (n *Native) darwinHostsPath() string {
 // product's DNS listener. Only macOS can answer that from a file; Windows always
 // uses its hosts file, so its answer needs the entry and a passing lookup.
 func (n *Native) staticHostsReady() bool {
+	if n.staticHostsProbe != nil {
+		return n.staticHostsProbe()
+	}
 	hostsPath := n.hostsPath
 	if hostsPath == "" {
 		if runtime.GOOS == "windows" {
