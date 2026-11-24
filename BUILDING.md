@@ -93,9 +93,37 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 
 以上是代码路径与实际写入规则。直连模式的真机验收结论不写在本文档里，以对应版本的交接记录和发布说明为准。
 
+## 网关兼容目录、自动同步与导航（2026-11-25）
+
+### 网关兼容目录与 Chat ↔ Responses 桥接
+
+网关模式默认开启 K3 兼容目录（`core.KimiK3Compatibility`）：只有文档显式写入 `kimiK3Compatibility: false` 才关闭，供兼容回归测试使用；直连模式不参与。`protocol.NativeCatalogCompatible` 把全部已保存模型（上游为 OpenAI Chat、OpenAI Responses 或 Anthropic Messages）按原切片顺序写进唯一的 `"kimi"` 组，键名由 `protocol.KimiCompatibleModelID` 生成 `kimi-k3-kwp-<sha256>`，展示名保持用户配置；旧的双组 `NativeCatalog` 继续保留给冻结对照测试。
+
+`(*bridge.Native).Configure` 对所有网关模型写入同一个 `CatalogID`。`internal/kimi/native_work.go:normalizeCatalog` 在 `CatalogID` 非空时按 `protocol.ModelFamily(model.CatalogID)` 选择 Kimi 侧分组，因此兼容 ID 会去 `byok-providers.json` 的 `kimi` 家族对账，而不是被误判到 `"responses"` 组并永久报告 `models_missing`。`internal/bridge/kimi_k3.go` 与 `work_usage.go` 的模型解析同样覆盖全部模型，`internal/kimi/conversation_rebind.go` 的 `models()` 为兼容 ID 填充 `PreviousAlias`：`ProtocolChat` 使用 `byok-kth-kimi/<id>`，`ProtocolResponses` 使用 `byok-kth-resp/<id>`，旧会话可一键迁移。
+
+`internal/protocol/responses_bridge.go` 提供 `ToResponsesFromChat`、`FromResponsesToChat` 与 `NewResponsesChatTranslator`：请求侧把 system/developer 提取为 `instructions`，把 message、tool call、tool 输出、图片与工具定义映射为 Responses 输入项，并把 `reasoning_effort` 映射为 `reasoning`；响应侧把 `output` 聚合回单条 Chat message，把 `reasoning.summary` 写入 `reasoning_content`，把 usage 映射回 `prompt_tokens` / `completion_tokens` 与缓存明细。流式翻译只在收到上游终态事件时发出 `finish_reason` 与 usage chunk，再发 `[DONE]`；断流或 `response.failed` 标记失败，绝不伪造正常结束。入站 `POST /v1/chat/completions` 命中 `ProtocolResponses` 模型时，网关不再返回 `409 model_protocol_mismatch`，而是转发上游 `/responses`；Anthropic 上游继续由 `HTTPBackend.anthropic` 做 Chat ↔ Messages 双向转换。`byok-kth-resp/<id>`、`byok-kth-kimi/<id>`、`byok-<uuid>/<id>` 与 `/v1/responses` 原路径都保持可路由。
+
+### 保存即自动同步（`internal/bridge/autosync.go`）
+
+`/api/workspace`、`/api/models`、`/api/connections`、`/api/integration-mode`、`/api/kimi-k3-compatibility` 保存成功后，服务端调用 `Native.ScheduleAutoSync(path, prev, next)`。`autoSyncCoordinator` 用 800ms 去抖合并连续保存，并占用 `Native.operation` 的同一单槽，不与其他手动操作并发。
+
+`catalogSurfaceDigest` 只摘要 Kimi 菜单实际渲染的内容：网关模式为接入模式、每个模型的兼容 ID、显示名、上下文、输出上限、工具、思考、模态与默认档位；直连模式为连接摘要（ID、名称、地址与凭据引用）与 `DirectSpec`。网关模式下的 API Key、BaseURL、备注、定价与备用连接不进入摘要，因此这类保存只触发网关 `OnConfig` 内存热更新，不重导 Kimi 目录、不提示重启。摘要变化才会排队写回官方 profile。
+
+状态经 `GET /api/state` 的 `integration.autoSync` 暴露为 `idle`、`scheduled`、`syncing`、`synced`、`deferred_offline`、`waiting_unmanaged`、`requires_restart`、`waiting_login`、`failed`。边界：受管 Kimi 直接导入，导入成功但未被运行中的应用采用时停在 `requires_restart`，只显示「立即重启 Kimi 生效」；非受管 Kimi 只停在 `waiting_unmanaged`，不写入也不强杀；Kimi 未运行时停在 `deferred_offline`，待 `launch-kimi` / `restart-kimi` 成功或下次受管启动时补跑。后台协调器从不启动或重启 Kimi，也不会为直连首次静态 hosts 授权静默提权；需要授权时以 `failed` 状态和 `direct_prepare_required` 原因结束，由用户点「重新同步模型目录」完成。
+
+### 导航、托盘与自动更新
+
+顶栏六个一级入口对应 `frontend/index.html` 的 `#nav-overview`、`#nav-models`、`#nav-conversations`、`#nav-subagents`、`#nav-usage`、`#nav-maintenance`，页面模块分别为 `app-overview.js`、`app-models.js` + `app-connections.js`、`app-conversations.js`、`app-work.js`、`usage.js` 与设置视图（`app-overview.js`、`growth.js`、`plus.js`）。`app-conversations.js` 负责把 `k3-agent`、`k3d1-agent`、`k2d8-preview` 和兼容别名翻译为可读名称，提供单行换模、批量换模与旧别名迁移，并通过 `/api/work/conversations` 与 `/api/work/conversations/rebind` 读取和切换会话。
+
+`cmd/desktop/tray.go` 在托盘打开时并行读取账号、更新与最近会话，构建「切换最近会话模型」子菜单：最多 3 条最近会话，标题截断到 28 字符，当前模型勾选并禁用；点击目标模型后，若 Kimi 正在运行则用原生确认框提示将重启约 2–3 秒，确认后调用同一 rebind 接口。任一接口失败独立降级，不阻塞菜单。发现新版本时，菜单顶部显示「发现新版本 … · 前往更新…」。
+
+`internal/appupdate/manager.go` 的 `startupCheckDelay` 为 5 秒，`defaultCheckPeriod` 为 2 小时。面板打开或窗口重新聚焦时，`frontend/app.js` 在距上次成功检查超过 30 分钟时静默调用 `POST /api/updates/check`，并以 60 秒最小间隔节流；`available` 状态同时驱动顶栏 `#nav-update-dot`、总览 `#update-banner` 与托盘更新入口。下载、校验、等待空闲与回滚仍按原有代次隔离逻辑执行。
+
+以上描述的是代码路径和边界，不包含任何真机验收结论；实际验收状态以工作区交接记录为准。
+
 ## 阶段 2–6 集成候选
 
-导航为「总览 / 模型 / 子代理 / 用量 / 设置」。服务商与模型共用一次保存事务；保存本机目录与同步到 Work 是不同操作，新增/删除模型后按同步状态重新导入，必要时正常重启 Kimi。
+导航为「总览 / 模型与服务商 / 会话 / 子代理 / 用量 / 设置」六个一级入口。服务商连接与已启用模型合并为同一页，保存后立即写入本机网关并在 800ms 防抖后由后台自动同步到 Kimi Work；只有 Kimi 需要刷新模型菜单时才提示用户点击「立即重启 Kimi 生效」。独立「会话」页负责可读模型名、单行换模与旧别名迁移。
 
 - 用量页包含真实请求、Kimi Code 三来源、显式配置后可用的 Magpie 余额和预算。Work 来源随当前官方凭据重新读取。本机 Kimi Code 登录只有显式采用后才使用，手填 Key 保存在本产品的加密凭据存储中。未显式配置 Magpie 时不展示其卡片，也不请求默认地址。读取失败保留错误和过期标记，不能解释为额度为 0。
 - 账号库把可恢复会话保存在本产品的加密凭据存储（macOS 应用内 AES-GCM，Windows DPAPI），窗口顶部、菜单栏和设置共用后台状态。先捕获当前最新凭据，再通过官方 TokenStore 完整写入目标 Cookie 和令牌，优先由官方协调器切换账号与内核。免桌面重启成功要求切换前安装的监听观察到非就绪态，再读回协调器就绪、内核只读模型查询成功、官方 Work shell 和配置身份一致。成功时保留官方轮换后的令牌与 Code Key。内核核验总等待最多 12 秒，无法核实时最多正常重启桌面一次；写入不完整不重启，失败尝试恢复原账号，上层不会重复自动切换。任务在跑或忙状态未知时拒绝切换。开发候选已完成两真实账号五次往返、额度跟随及添加/取消恢复，全程桌面 PID 不变。最终产物与 GUI 验收状态以工作区交接记录为准。

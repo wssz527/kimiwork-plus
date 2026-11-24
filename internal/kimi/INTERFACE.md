@@ -1256,3 +1256,87 @@ These requests share a conversation identifier. Their verified task sequence doe
 not establish a reliable per-request caller-role field or an independent Swarm
 model pool. This evidence belongs to the tested candidate, not automatically to
 any later signed build.
+
+# Gateway compatibility catalog and auto-sync (2026-11-25)
+
+## 43. Compatible catalog reconciliation and the auto-sync boundary
+
+Gateway mode offers every saved model from a single `kimi` group.
+`core.KimiK3Compatibility` is on by default; only an explicit
+`kimiK3Compatibility: false` turns it off, and that switch exists for compatibility
+regression tests. Direct mode never uses it. `protocol.NativeCatalogCompatible`
+writes all rows, whatever upstream protocol they speak, in their saved order under
+that group, keyed by `protocol.KimiCompatibleModelID` (`kimi-k3-kwp-<sha256>`)
+while the display name stays what the user saved. `protocol.NativeCatalog` keeps
+the old two-group shape for the frozen comparison tests.
+
+The reconciliation contract that keeps the generated id from drifting:
+
+- `(*bridge.Native).Configure` assigns the generated id to `CatalogID` for every
+  gateway model.
+- `internal/kimi/native_work.go:normalizeCatalog` resolves the Kimi-side family
+  from `protocol.ModelFamily(model.CatalogID)` when `CatalogID` is set. A
+  compatible id always starts with `kimi-k3`, so checking it against the upstream
+  protocol would look in the `responses` group and report a synced model as
+  `models_missing` forever.
+- `NativeIntegration.Reconcile` compares each entry against that family's row
+  (`kimi` for chat-family ids, `responses` otherwise) and continues to return
+  `models_missing` with the logical ids when the row is absent. The two sides
+  therefore agree on one key per model even though the upstream speaks
+  `/responses` or `/messages`.
+- `conversationStore.models()` derives `PreviousAlias` for every catalog model. A
+  model already keyed by its compatible id points back to
+  `byok-kth-kimi/<id>` for `ProtocolChat` and `byok-kth-resp/<id>` for
+  `ProtocolResponses`; a model still keyed by its own id points at
+  `byok-kth-kimi/<compatibleID>`. Only rows whose `SourceKind` is `kth` receive
+  it, so direct-mode `byok-<uuid>/...` conversations keep their own alias.
+
+The inference route follows the same key. `POST /v1/chat/completions` may address
+a `ProtocolResponses` model: when the compatibility opt-in is on, or the request
+named the model by its generated id, the gateway accepts it and serves the
+upstream `/responses` endpoint through `internal/protocol/responses_bridge.go`.
+The reverse direction (`/v1/responses` with a Chat model) remains
+`model_protocol_mismatch`, because that route has no translation. The legacy names
+`byok-kth-kimi/<id>`, `byok-kth-resp/<id>`, `byok-<uuid>/<id>` and the
+`/v1/responses` path remain routable.
+
+`internal/bridge/autosync.go` coordinates a save with the catalog Kimi reads. The
+hook fires after `/api/workspace`, `/api/models`, `/api/connections`,
+`/api/integration-mode` and `/api/kimi-k3-compatibility` commit. Saves are merged
+behind an 800 ms debounce and run in the same single `Native.operation` slot as
+manual actions.
+
+`catalogSurfaceDigest` is the boundary between a gateway-only change and a
+profile write. It hashes only what Kimi renders: in gateway mode the integration
+mode and each model's compatible id, display name, context window, output limit,
+tools, reasoning, input modalities, efforts and default effort; in direct mode
+the connection summaries (ID, name, base URL and credential reference) plus the
+`DirectSpec`. In gateway mode, API keys, base URLs, remarks, pricing and standby
+routes are deliberately absent, so those saves are hot in the gateway's memory
+and never touch the official profile or require a restart.
+
+Published as `integration.autoSync` on `GET /api/state`, the states are `idle`,
+`scheduled`, `syncing`, `synced`, `deferred_offline`, `waiting_unmanaged`,
+`requires_restart`, `waiting_login` and `failed`. The boundaries:
+
+- Managed Kimi: the coordinator imports the catalog itself. If the write lands but
+  the running application has not adopted it, the state settles at
+  `requires_restart`; the panel offers the single restart action, and the
+  coordinator never calls `RestartOfficial`.
+- Unmanaged Kimi: nothing is written into a process this build does not own, and
+  a background timer never kills it. The generation stays queued and the state is
+  `waiting_unmanaged`; a later `restart-kimi` makes the process managed and
+  releases the queue.
+- Kimi not running: the state is `deferred_offline` and the generation stays
+  pending. A successful `launch-kimi`, `restart-kimi`, or the next managed launch
+  runs the import without requiring another save.
+- A write blocked by the compatibility gate, or a deliberate `disconnect-models`,
+  is not retried automatically.
+- Direct mode's first static hosts authorization is never requested from the
+  background. Without it the run ends `failed` with reason
+  `direct_prepare_required`; only the explicit resync action can complete the
+  authorization.
+
+No real-device acceptance result is implied here. These are the implemented state
+transitions, covered by unit and race tests; signed-build GUI behavior belongs to
+the workspace handoff and release notes for the build actually tested.
