@@ -95,7 +95,7 @@ func TestTrayTargetThinkingLevel(t *testing.T) {
 		want     string
 	}{
 		{"default effort", "high", []string{"off", "low", "high"}, "high"},
-		{"old conversation off uses default", "medium", []string{"off", "low", "medium", "high"}, "medium"},
+		{"default effort wins over first non-off", "medium", []string{"off", "low", "medium", "high"}, "medium"},
 		{"first non-off", "", []string{"off", "low", "high"}, "low"},
 		{"skips empty and off", "", []string{"", "off", "xhigh"}, "xhigh"},
 		{"only off", "", []string{"off"}, "off"},
@@ -109,6 +109,21 @@ func TestTrayTargetThinkingLevel(t *testing.T) {
 				t.Fatalf("thinking level = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTrayRebindTargetIgnoresOldConversationLevel(t *testing.T) {
+	target := trayRebindTargetFor(
+		kimi.WorkConversation{ConversationKey: "k", Title: "旧会话", ThinkingLevel: "off"},
+		kimi.ConversationModel{Alias: "byok-kth-kimi/reasoning", DisplayName: "推理模型", DefaultEffort: "high", SupportEfforts: []string{"off", "low", "high"}},
+		"推理模型",
+		true,
+	)
+	if target.effort != "high" {
+		t.Fatalf("old conversation level must not override the target default, got %q", target.effort)
+	}
+	if target.key != "k" || target.title != "旧会话" || target.alias != "byok-kth-kimi/reasoning" || target.model != "推理模型" || !target.restart {
+		t.Fatalf("unexpected rebind target: %+v", target)
 	}
 }
 

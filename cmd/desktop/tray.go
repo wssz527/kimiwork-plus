@@ -293,11 +293,8 @@ func (v *trayConversationsView) addConversation(conversation kimi.WorkConversati
 	}
 }
 
-func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation, model kimi.ConversationModel, modelName string, kimiRunning bool) {
-	if v.rebind.Load() {
-		return
-	}
-	target := trayRebindTarget{
+func trayRebindTargetFor(conversation kimi.WorkConversation, model kimi.ConversationModel, modelName string, kimiRunning bool) trayRebindTarget {
+	return trayRebindTarget{
 		key:     conversation.ConversationKey,
 		title:   trayConversationTitle(conversation),
 		alias:   model.Alias,
@@ -305,6 +302,13 @@ func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation
 		effort:  trayTargetThinkingLevel(model),
 		restart: kimiRunning,
 	}
+}
+
+func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation, model kimi.ConversationModel, modelName string, kimiRunning bool) {
+	if v.rebind.Load() {
+		return
+	}
+	target := trayRebindTargetFor(conversation, model, modelName, kimiRunning)
 	application.InvokeAsync(func() {
 		if !target.restart {
 			go v.runRebind(target)
