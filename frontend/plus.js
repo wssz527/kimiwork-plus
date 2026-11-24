@@ -586,15 +586,30 @@
     const slot = $('plus-account-bar');
     if (!slot) return;
     const book = accountsOf(data);
+    const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+    const barSig = JSON.stringify([
+      book ? book.state : null,
+      book ? book.reason : '',
+      book ? book.currentId : '',
+      book ? book.adding : false,
+      book ? book.restoreAccountId : '',
+      book ? book.accounts.map(row => [textOf(row.id), accountName(row)]) : [],
+      accountCompatBlocked,
+      account.busy,
+    ]);
+    if (slot.dataset.signature === barSig) return;
+    slot.dataset.signature = barSig;
     if (!book || book.state !== 'ready') {
       slot.replaceChildren(node('span', 'plus-account-bar__label', '账号'));
-      slot.append(node('span', 'plus-account-bar__hint', book && book.reason ? '账号切换不可用（' + book.reason + '）' : '账号切换不可用'));
+      const reasonWord = book && book.reason ? accountReasonText(book.reason) : '';
+      slot.append(node('span', 'plus-account-bar__hint', reasonWord ? '账号切换不可用（' + reasonWord + '）' : '账号切换不可用'));
       slot.append(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
       return;
     }
     const current = book.accounts.find(row => textOf(row.id) === book.currentId);
     const parts = [node('span', 'plus-account-bar__label', '账号')];
     if (book.accounts.length) {
+      const wrap = node('span', 'plus-account-bar__select');
       const select = doc().createElement('select');
       select.id = 'plus-account-select';
       select.setAttribute('aria-label', '切换当前账号');
@@ -611,14 +626,14 @@
         select.append(option);
       }
       select.value = current ? textOf(current.id) : '';
-      const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
       select.disabled = Boolean(account.busy || book.adding || book.restoreAccountId || accountCompatBlocked);
       select.addEventListener('change', () => requestSwitch(select.value));
-      parts.push(select);
+      wrap.append(select);
+      parts.push(wrap);
     } else {
       parts.push(node('span', 'plus-account-bar__hint', '尚未保存任何账号'));
     }
-    if (data?.compatibility?.guards?.accountSwitchWriteBlocked === true) {
+    if (accountCompatBlocked) {
       parts.push(node('span', 'plus-account-bar__hint', '账号切换已暂停'));
     } else if (book.adding) {
       parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在处理…' : '等待完成新账号登录'));
@@ -652,13 +667,18 @@
       const result = await request('/api/actions', { method: 'POST', body: { action, ...extra } });
       const operation = result && result.operation ? result.operation : null;
       if (operation && operation.id) return await followAccountOperation(operation.id, action);
+      if (operation && !['running', 'pending'].includes(textOf(operation.state))) {
+        reportAccountResult(action, operation);
+      }
+      return operation;
     } catch (error) {
       account.error = { action, reason: textOf(error.code), message: error.message || '账号操作失败，请刷新状态后重试。' };
       notify(account.error.message, 'error');
+      return null;
+    } finally {
       account.busy = null;
       renderAccountsAll();
     }
-    return null;
   }
 
   async function restartAndContinueAccount() {
@@ -673,26 +693,29 @@
      而不是自己起一个独立的轮询循环。 */
   async function followAccountOperation(id, action) {
     const deadline = Date.now() + 100000;
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 900));
-      let data = null;
-      try {
-        data = await request('/api/state');
-      } catch { /* 一次读取失败不终止等待 */ }
-      if (data) stateSet(data);
-      const op = data && data.operation;
-      if (!op || op.id !== id) continue;
-      if (op.state === 'running' || op.state === 'pending') continue;
+    try {
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 900));
+        let data = null;
+        try {
+          data = await request('/api/state');
+        } catch { /* 一次读取失败不终止等待 */ }
+        if (data) stateSet(data, { external: true });
+        const op = data && data.operation;
+        if (!op || op.id !== id) continue;
+        if (op.state === 'running' || op.state === 'pending') continue;
+        account.busy = null;
+        reportAccountResult(action, op);
+        renderAccountsAll();
+        return op;
+      }
+      account.error = { action, reason: 'account_operation_timeout', message: '账号操作仍未返回结果；请刷新状态确认，不要重复提交。' };
+      notify(account.error.message, 'error');
+      return null;
+    } finally {
       account.busy = null;
-      reportAccountResult(action, op);
       renderAccountsAll();
-      return op;
     }
-    account.busy = null;
-    account.error = { action, reason: 'account_operation_timeout', message: '账号操作仍未返回结果；请刷新状态确认，不要重复提交。' };
-    renderAccountsAll();
-    notify(account.error.message, 'error');
-    return null;
   }
 
   function reportAccountResult(action, op) {
@@ -742,7 +765,17 @@
     credentials_unavailable: '加密凭据存储不可用',
     credential_master_key_invalid: '本机凭据主密钥缺失或无效，请保留应用数据并从备份恢复。',
     compat_account_switch_blocked: '当前官方 Kimi 版本未通过账号接口检查，已停止账号切换写入；其余功能照常运行。',
+    account_operation_timeout: '账号操作超时，请刷新状态确认。',
+    account_service_unavailable: '本机账号服务暂时不可用，请刷新状态后重试。',
+    account_action_rejected: '本机后台拒绝了此次账号操作，请刷新状态后重试。',
+    unavailable: '账号切换接口当前不可用。',
   };
+
+  function accountReasonText(reason) {
+    const code = textOf(reason);
+    if (!code) return '';
+    return ACCOUNT_REASON[code] || '请查看账号管理或诊断信息';
+  }
 
   function renderAccountsAll() {
     const data = stateData();
@@ -757,7 +790,7 @@
     const book = accountsOf(data);
     if (!book) { slot.replaceChildren(node('p', 'hint', '账号状态尚未读取。')); return; }
     if (book.state !== 'ready') {
-      slot.replaceChildren(node('p', 'hint', '账号切换不可用' + (book.reason ? '（' + (ACCOUNT_REASON[book.reason] || book.reason) + '）' : '') + '。'));
+      slot.replaceChildren(node('p', 'hint', '账号切换不可用' + (book.reason ? '（' + accountReasonText(book.reason) + '）' : '') + '。'));
       return;
     }
     const current = book.accounts.find(row => textOf(row.id) === book.currentId);
@@ -834,17 +867,34 @@
     const slot = $('plus-accounts-body');
     if (!slot) return;
     const book = accountsOf(data);
+    const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+    const mgmtSig = JSON.stringify([
+      book ? book.state : null,
+      book ? book.reason : '',
+      book ? book.currentId : '',
+      book ? book.adding : false,
+      book ? book.restoreAccountId : '',
+      book ? book.accounts.map(row => [
+        textOf(row.id), accountName(row), row.capturedAt || 0, row.lastUsedAt || 0,
+        row.needsLogin === true, accountTokenNotice(row),
+      ]) : [],
+      accountCompatBlocked,
+      account.busy,
+      account.confirm,
+      account.error,
+    ]);
+    if (slot.dataset.signature === mgmtSig) return;
+    slot.dataset.signature = mgmtSig;
     if (!book) { slot.replaceChildren(node('p', 'hint', '账号状态尚未读取。')); return; }
     if (book.state !== 'ready') {
       const wrap = node('div');
-      wrap.append(node('p', 'note note--warn', '账号切换不可用' + (book.reason ? '：' + (ACCOUNT_REASON[book.reason] || book.reason) : '') + '。'));
+      wrap.append(node('p', 'note note--warn', '账号切换不可用' + (book.reason ? '：' + accountReasonText(book.reason) : '') + '。'));
       appendAccountError(wrap);
       wrap.append(accountActionLine(book));
       slot.replaceChildren(wrap);
       return;
     }
     const wrap = node('div');
-    const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
     if (accountCompatBlocked) {
       wrap.append(node('p', 'note note--warn', '当前官方 Kimi 版本未通过账号接口检查，账号切换与写入已暂停；本机网关与其他功能照常运行。'));
     }
@@ -961,7 +1011,7 @@
   async function refreshAccounts() {
     try {
       const result = await request('/api/accounts');
-      stateSet({ ...stateData(), accounts: result.accounts });
+      stateSet({ ...stateData(), accounts: result.accounts }, { external: true });
       renderAccountsAll();
     } catch (error) {
       notify(error.message || '刷新账号列表失败', 'error');
@@ -1409,10 +1459,13 @@
 
     if (!$('plus-usage-panel') && !$('plus-account-bar')) return { render() {}, refresh() {} };
     return {
-      render(data) {
-        renderAccountsAll();
-        if (data) renderCapabilities(data);
-        if (data?.budget && budget.view?.status?.state !== 'error') renderBudgetSummary(data.budget);
+      render(data, { view } = {}) {
+        const current = data || stateData();
+        renderAccountsBar(current);
+        if (!view || view === 'overview') renderAccountsOverview(current);
+        if (!view || view === 'maintenance') renderAccountsManagement(current);
+        if (data && (!view || view === 'subagents' || view === 'maintenance')) renderCapabilities(data);
+        if (data?.budget && (!view || view === 'usage') && budget.view?.status?.state !== 'error') renderBudgetSummary(data.budget);
       },
       async refresh(options = {}) {
         const { live = false } = options;
@@ -1463,7 +1516,7 @@
     const budgetHead = node('div', 'band__head');
     budgetHead.append(node('div'));
     budgetHead.firstChild.append(node('h2', null, '预算保护'));
-    budgetHead.firstChild.append(node('p', null, '按本机账本和模型定价估算费用。达到上限时，可在 Work+ 面板提醒或拒绝新请求。实际费用以供应商账单为准。'));
+    budgetHead.firstChild.append(node('p', null, '按本机账本和模型定价估算费用。达到上限时，可在 KimiWork + 面板提醒或拒绝新请求。实际费用以供应商账单为准。'));
     budgetSection.append(budgetHead);
     const budgetBody = node('div');
     budgetBody.id = 'plus-budget-body';

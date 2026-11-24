@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,126 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wssz527/kimiwork-plus/internal/bridge"
 )
+
+const openAccountsJS = `(() => {
+  const open = () => {
+    if (typeof window.__kwpOpenAccounts === 'function') {
+      window.__kwpOpenAccounts();
+      return;
+    }
+    document.getElementById('nav-maintenance')?.click();
+    document.getElementById('settings-tab-accounts')?.click();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open, { once: true });
+  } else {
+    open();
+  }
+})();`
+
+func singleInstanceEncryptionKey(stateDir string) [32]byte {
+	clean := filepath.Clean(strings.TrimSpace(stateDir))
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = resolved
+	}
+	return sha256.Sum256([]byte(bridge.AppIdentifier + "\x00single-instance\x00" + clean))
+}
+
+type windowNavController struct {
+	mu                  sync.Mutex
+	waitForNavFinish    bool
+	navLoaded           bool
+	loadedOriginURL     string
+	loadedKey           string
+	pendingOpenAccounts bool
+	setURL              func(string)
+	execJS              func(string)
+}
+
+func newWindowNavController(waitForNavFinish bool, initialOriginURL, initialKey string, setURL, execJS func(string)) *windowNavController {
+	return &windowNavController{
+		waitForNavFinish: waitForNavFinish,
+		loadedOriginURL:  initialOriginURL,
+		loadedKey:        initialKey,
+		setURL:           setURL,
+		execJS:           execJS,
+	}
+}
+
+func (c *windowNavController) OnNavigationFinished() {
+	c.mu.Lock()
+	c.navLoaded = true
+	run := c.pendingOpenAccounts
+	c.pendingOpenAccounts = false
+	execJS := c.execJS
+	c.mu.Unlock()
+	if run && execJS != nil {
+		execJS(openAccountsJS)
+	}
+}
+
+func (c *windowNavController) prepareApplyEndpoint(next bridge.Endpoint) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	crossOrigin := next.URL != c.loadedOriginURL
+	keyChanged := next.Key != c.loadedKey
+	if crossOrigin {
+		c.navLoaded = false
+		c.loadedOriginURL = next.URL
+		c.loadedKey = next.Key
+		return next.URL + "/#key=" + next.Key
+	}
+	if keyChanged {
+		c.loadedKey = next.Key
+		return next.URL + "/#key=" + next.Key
+	}
+	return ""
+}
+
+func (c *windowNavController) ApplyEndpoint(next bridge.Endpoint) {
+	if targetURL := c.prepareApplyEndpoint(next); targetURL != "" && c.setURL != nil {
+		c.setURL(targetURL)
+	}
+}
+
+func (c *windowNavController) RequestOpenAccounts() {
+	c.mu.Lock()
+	if c.waitForNavFinish && !c.navLoaded {
+		c.pendingOpenAccounts = true
+		c.mu.Unlock()
+		return
+	}
+	c.pendingOpenAccounts = false
+	execJS := c.execJS
+	c.mu.Unlock()
+	if execJS != nil {
+		execJS(openAccountsJS)
+	}
+}
+
+func windowDiagnosticMessage(goos, status string) string {
+	terminated := status == "web_content_process_terminated"
+	switch goos {
+	case "windows":
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从托盘菜单导出窗口诊断，确认当前 Windows 用户目录和 WebView2 运行时可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请确认当前 Windows 用户目录和 WebView2 运行时可用，并从托盘重新打开窗口。"
+	case "darwin":
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
+	default:
+		if terminated {
+			return "系统页面进程已终止，页面脚本无法提供诊断。请从托盘菜单导出窗口诊断，确认当前用户目录可用后重新打开应用；不要反复刷新。"
+		}
+		return "窗口已创建。如果内容没有显示，请确认当前用户目录可用，并从托盘重新打开窗口。"
+	}
+}
 
 func main() {
 	defaultDir, startupErr := bridge.DefaultStateDir()
@@ -36,10 +157,7 @@ func main() {
 
 	var window *application.WebviewWindow
 	var openWindow func()
-	encryptionKey := sha256.Sum256([]byte("startup"))
-	if startupErr == nil {
-		encryptionKey = sha256.Sum256([]byte(ep.Key))
-	}
+	encryptionKey := singleInstanceEncryptionKey(*dir)
 	app := application.New(application.Options{Name: "KimiWork +", Description: "Kimi Work local gateway and enhancement suite", Icon: platformAppIcon(), SingleInstance: &application.SingleInstanceOptions{UniqueID: bridge.AppIdentifier, EncryptionKey: encryptionKey, OnSecondInstanceLaunch: func(application.SecondInstanceData) {
 		if openWindow != nil {
 			openWindow()
@@ -65,7 +183,14 @@ func main() {
 		URL:                  ep.URL + "/#key=" + ep.Key,
 		AllowSimpleEventEmit: true,
 	}))
-	attachWindowAppearance(app, window)
+	nav := newWindowNavController(
+		runtime.GOOS == "darwin" || runtime.GOOS == "windows",
+		ep.URL,
+		ep.Key,
+		func(target string) { window.SetURL(target) },
+		func(js string) { window.ExecJS(js) },
+	)
+	attachWindowAppearance(app, window, nav.OnNavigationFinished)
 	var epMu sync.Mutex
 	currentEndpoint := func() bridge.Endpoint {
 		epMu.Lock()
@@ -96,11 +221,15 @@ func main() {
 	applyEndpoint := func(next bridge.Endpoint) {
 		application.InvokeAsync(func() {
 			epMu.Lock()
-			defer epMu.Unlock()
 			if ep != next {
+				epMu.Unlock()
 				return
 			}
-			window.SetURL(next.URL + "/#key=" + next.Key)
+			targetURL := nav.prepareApplyEndpoint(next)
+			epMu.Unlock()
+			if targetURL != "" {
+				window.SetURL(targetURL)
+			}
 		})
 	}
 	openWindow = func() {
@@ -145,10 +274,7 @@ func main() {
 	trayMenu := app.NewMenu()
 	trayMenu.Add("打开 KimiWork +").OnClick(func(*application.Context) { openWindow() })
 	trayMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
-		message := "窗口已创建。如果内容没有显示，请保持 macOS 用户目录可用，并从托盘重新打开窗口。"
-		if diagnostics.Status() == "web_content_process_terminated" {
-			message = "系统页面进程已终止，页面脚本无法提供诊断。请从原生菜单导出窗口诊断，保持 macOS 用户目录可用后重新打开应用；不要反复刷新。"
-		}
+		message := windowDiagnosticMessage(runtime.GOOS, diagnostics.Status())
 		app.Dialog.Info().SetTitle("KimiWork + 窗口诊断").SetMessage(message).Show()
 	})
 	trayMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
@@ -161,7 +287,9 @@ func main() {
 	})
 	installAccountTray(app, tray, trayMenu, *dir, func() {
 		openWindow()
-		window.ExecJS("document.getElementById('nav-maintenance')?.click()")
+		application.InvokeAsync(func() {
+			nav.RequestOpenAccounts()
+		})
 	})
 	trayMenu.AddSeparator()
 	trayMenu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })

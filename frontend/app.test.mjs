@@ -95,7 +95,9 @@ test('a completed model-source disconnect offers a real re-takeover path', () =>
   });
   assert.notEqual(synced.code, 'restored');
   assert.equal((htmlSource.match(/data-action="disconnect-models"/g) || []).length, 2);
-  assert.match(source, /window\.confirm\('确定移除 KimiWork \+ 接管的模型来源吗？/);
+  assert.equal(source.includes('window.confirm'), false, 'production JS must not call window.confirm');
+  assert.match(htmlSource, /id="workspace-disconnect-confirm"/);
+  assert.match(htmlSource, /id="native-disconnect-confirm"/);
 });
 
 test('unreadable connection credentials expose explicit system authorization even with no config changes', () => {
@@ -251,7 +253,7 @@ function makeOnboardEnv(savedConnections, { touched = true } = {}) {
     onboard: { discovery: { models: [] }, touched },
   };
   const code = [
-    ...['connectionRowsOf', 'savedOnboardTarget', 'onboardTouched', 'fillOnboardForm'].map(sourceFunction),
+    ...['isInputActive', 'connectionRowsOf', 'savedOnboardTarget', 'onboardTouched', 'fillOnboardForm'].map(sourceFunction),
     'const fillOnboardPresets = () => {};',
     'const setText = () => {};',
     'const fmtCount = (value) => String(value);',
@@ -1016,7 +1018,7 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   calls.length = 0;
   state.editor = { dirty: true };
   open();
-  assert.deepEqual(calls, ['models', 'models:connections', '请先保存或取消正在编辑的模型，再打开添加向导。']);
+  assert.deepEqual(calls, ['请先保存或取消正在编辑的模型，再打开添加向导。']);
 });
 
 test('a successful onboarding save closes the form and shows the saved model catalogue', async () => {
@@ -1137,7 +1139,7 @@ test('switching the private panel session clears the visible catalogue query and
   const state = { key: 'old-session', onboard: { advanced: false, query: 'vision' } };
   const dom = { onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const code = [
-    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {};',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {}, clearDisconnectConfirm = () => {}, refreshServiceStatus = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -1157,7 +1159,7 @@ function rotatedKeyHarness(loadState, calls) {
   const dom = { conn: {}, onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
   const usagePanel = { reset() { calls.push('reset'); }, show() { calls.push('show'); }, reload: async () => {} };
   const code = [
-    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {};',
+    'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {}, clearDisconnectConfirm = () => {}, refreshServiceStatus = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
@@ -1328,29 +1330,28 @@ test('mountUsageRequests is idempotent and keeps one recent-requests table', () 
   assert.equal(records.children.length, 0);
 });
 
-test('diagnostics export uses GET, downloads the exact filename, and surfaces failures', async () => {
+test('diagnostics export uses POST, reports the saved file path, and surfaces failures', async () => {
   const calls = [];
-  const downloads = [];
-  const state = { diagnosticsExporting: false, diagnosticsExportError: '', data: {} };
-  const documentStub = {
-    createElement: (tag) => ({
-      tag, href: '', download: '',
-      click() { downloads.push({ href: this.href, download: this.download }); },
-    }),
-  };
-  const URLStub = { createObjectURL: () => 'blob:diagnostics', revokeObjectURL: () => {} };
+  const toasts = [];
+  const state = { diagnosticsExporting: false, diagnosticsExportError: '', diagnosticsExportPath: '', data: {} };
   const code = [sourceFunction('exportDiagnostics'), 'return exportDiagnostics;'].join('\n');
   const make = (requestImpl) => new Function(
-    'state', 'API', 'request', 'showToast', 'renderDiagnosticsExport', 'document', 'URL', 'Blob', 'setTimeout', code,
+    'state', 'API', 'request', 'showToast', 'renderDiagnosticsExport', code,
   )(
-    state, { diagnosticsExport: '/api/diagnostics/export' }, requestImpl, () => {}, () => {},
-    documentStub, URLStub, Blob, () => {},
+    state, { diagnosticsExport: '/api/diagnostics/export' }, requestImpl,
+    (message, tone) => toasts.push({ message, tone }), () => {},
   );
-  const ok = make(async (path, options) => { calls.push([path, options]); return { schemaVersion: 1 }; });
+  const ok = make(async (path, options) => {
+    calls.push([path, options]);
+    return { ok: true, path: '/tmp/diagnostics/report-20261124.json', report: { schemaVersion: 1 } };
+  });
   assert.equal(await ok(), true);
-  assert.deepEqual(calls, [['/api/diagnostics/export', undefined]]);
-  assert.equal(downloads.length, 1);
-  assert.equal(downloads[0].download, 'kimi-work-plus-diagnostics.json');
+  assert.deepEqual(calls, [['/api/diagnostics/export', { method: 'POST', body: {} }]]);
+  assert.equal(state.diagnosticsExportPath, '/tmp/diagnostics/report-20261124.json');
+  assert.match(toasts.at(-1).message, /\/tmp\/diagnostics\/report-20261124\.json/);
+  const missingPath = make(async () => ({ ok: true }));
+  assert.equal(await missingPath(), false);
+  assert.match(state.diagnosticsExportError, /未返回导出文件路径/);
   const failing = make(async () => { throw new Error('boom'); });
   assert.equal(await failing(), false);
   assert.match(state.diagnosticsExportError, /^导出失败：boom/);
@@ -2938,6 +2939,8 @@ function makeIntegrationModeEnv() {
     'const state = { actionButtons: [dom.nativeSync, dom.nativeRecover], pendingAction: null, modelsSaving: false, connsSaving: false };',
     'const onboardBusy = () => false;',
     'const renderOnboard = () => {};',
+    'const renderOnboardOverview = () => {};',
+    'const clearDisconnectConfirm = () => {};',
     'const configReady = () => true;',
     'const ACTION_LABEL = {};',
     'const setText = (element, text) => { if (element) element.textContent = text; };',
@@ -3943,6 +3946,7 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
     const loadState = async () => {};
     const actionUUID = () => 'uuid-1';
     const clearKey = () => {};
+    const clearDisconnectConfirm = () => {};
     const stopPolling = () => {};
     const showGate = () => {};
     const setHidden = () => {};
@@ -3980,4 +3984,751 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
     assert.match(toasts[0].message, expectedPattern);
     assert.doesNotMatch(toasts[0].message, /kimi_start_failed|operation_failed|unmanaged_kimi_running/);
   }
+});
+
+test('disconnect-models uses inline confirmation without window.confirm', () => {
+  const actions = [];
+  const timers = [];
+  const makeEl = (tag = 'div') => ({
+    tag, hidden: true, className: '', textContent: '', dataset: {}, attrs: {}, children: [], listeners: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; },
+    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+    focus() {},
+  });
+  const boxes = {
+    'workspace-disconnect-confirm': makeEl('div'),
+    'native-disconnect-confirm': makeEl('div'),
+  };
+  const trigger = makeEl('button');
+  trigger.dataset = { action: 'disconnect-models', confirmTarget: 'workspace-disconnect-confirm' };
+  const documentStub = {
+    createElement: (tag) => makeEl(tag),
+    querySelectorAll: () => [trigger],
+  };
+  const windowStub = {
+    setTimeout: (fn, ms) => { timers.push({ fn, ms, cleared: false }); return timers.length; },
+    clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].cleared = true; },
+  };
+  const state = { data: { integrationMode: 'direct' }, disconnectConfirm: null };
+  const api = new Function('state', '$', 'document', 'window', 'setHidden', 'runAction', `
+    ${sourceFunction('clearDisconnectConfirm')}
+    ${sourceFunction('requestDisconnectConfirm')}
+    return { clearDisconnectConfirm, requestDisconnectConfirm };
+  `)(state, id => boxes[id] || null, documentStub, windowStub, (el, h) => { if (el) el.hidden = Boolean(h); },
+    (action, mode) => actions.push({ action, mode }));
+
+  assert.equal(api.requestDisconnectConfirm(trigger), true);
+  const box = boxes['workspace-disconnect-confirm'];
+  assert.equal(box.hidden, false);
+  assert.equal(trigger.attrs['aria-expanded'], 'true');
+  assert.match(box.children[0].textContent, /确定移除 KimiWork \+ 接管的模型来源吗/);
+  assert.match(box.children[0].textContent, /静态 hosts 也会保留/);
+  const [confirmBtn, cancelBtn] = box.children[1].children;
+  cancelBtn.listeners.click[0]();
+  assert.equal(box.hidden, true);
+  assert.equal(actions.length, 0);
+
+  api.requestDisconnectConfirm(trigger);
+  const [confirmBtn2] = box.children[1].children;
+  confirmBtn2.listeners.click[0]();
+  assert.equal(box.hidden, true);
+  assert.deepEqual(actions, [{ action: 'disconnect-models', mode: undefined }]);
+
+  api.requestDisconnectConfirm(trigger);
+  assert.equal(box.hidden, false);
+  timers.at(-1).fn();
+  assert.equal(box.hidden, true);
+});
+
+test('connectionDraftFrom preserves credentialError through connection row rendering while connectionPayload omits it', () => {
+  const makeEl = (tag = 'div') => ({
+    tag, className: '', textContent: '', dataset: {}, attrs: {}, children: [], disabled: false, type: '',
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    append(...nodes) { this.children.push(...nodes); },
+  });
+  const textOf = (node) => (node.textContent || '') + (node.children || []).map(textOf).join(' ');
+  const api = new Function('document', 'state', `
+    const CREDENTIAL_VAULT_BLOCKED = ['credential_keychain_locked', 'credential_keychain_unavailable',
+      'credential_session_unavailable', 'credential_authorization_required', 'credential_authorization_failed'];
+    const DIAG_REASON = {};
+    const UPSTREAM_REASON = {};
+    const fmtCount = n => String(n);
+    const fmtMs = n => n + 'ms';
+    const providerPreset = () => null;
+    ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('connectionDraftRow')}
+    ${sourceFunction('connectionDraftFrom')}
+    ${sourceFunction('connectionsSignature')}
+    ${sourceFunction('connectionPayload')}
+    ${sourceFunction('protocolLabel')}
+    ${sourceFunction('upstreamReasonText')}
+    ${sourceFunction('connectionKeyText')}
+    ${sourceFunction('buildConnectionRow')}
+    return { connectionDraftFrom, connectionsSignature, connectionPayload, buildConnectionRow };
+  `)({ createElement: (tag) => makeEl(tag) }, { connsSaving: false, connChecks: {}, data: { configuration: { state: 'ready' } } });
+
+  const blockedData = {
+    connections: {
+      saved: [{ id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', apiKeySet: false, credentialError: 'credential_authorization_required' }],
+    },
+  };
+  const clearedData = {
+    connections: {
+      saved: [{ id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', apiKeySet: false, credentialError: '' }],
+    },
+  };
+  const draftBlocked = api.connectionDraftFrom(blockedData);
+  const draftCleared = api.connectionDraftFrom(clearedData);
+  assert.equal(draftBlocked[0].credentialError, 'credential_authorization_required');
+  assert.notEqual(api.connectionsSignature(draftBlocked), api.connectionsSignature(draftCleared));
+  const payload = api.connectionPayload(draftBlocked);
+  assert.equal('credentialError' in payload[0], false);
+  const rowEl = api.buildConnectionRow(draftBlocked[0], 0);
+  assert.match(textOf(rowEl), /已保存 Key 待系统授权/);
+});
+
+test('cold-start /api/state failure hides fullscreen gate so connection banner and retry stay accessible', () => {
+  const dom = {
+    conn: { hidden: true },
+    connText: { textContent: '' },
+    sync: { textContent: '' },
+    shell: { hidden: true },
+    gate: { hidden: false },
+  };
+  const state = { data: null, started: false, lastSync: null };
+  const calls = [];
+  const handleApiFailure = new Function('state', 'dom', 'calls', `
+    const clearKey = () => calls.push('clearKey');
+    const stopPolling = () => calls.push('stopPolling');
+    const showGate = (kind) => { dom.gate.hidden = false; calls.push('gate:' + kind); };
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setText = (el, v) => { if (el) el.textContent = v; };
+    const fmtTime = () => '12:00';
+    const renderLoading = () => calls.push('loading');
+    ${sourceFunction('handleApiFailure')}
+    return handleApiFailure;
+  `)(state, dom, calls);
+
+  handleApiFailure({ code: 'NETWORK', message: 'offline' });
+  assert.equal(dom.conn.hidden, false);
+  assert.equal(dom.shell.hidden, false);
+  assert.equal(dom.gate.hidden, true);
+  assert.match(dom.connText.textContent, /无法连接本机面板服务/);
+
+  dom.gate.hidden = false;
+  handleApiFailure({ code: 'SERVER_ERROR', status: 502, message: '上游重启中' });
+  assert.equal(dom.gate.hidden, true);
+  assert.equal(dom.shell.hidden, false);
+
+  handleApiFailure({ code: 'unauthorized' });
+  assert.equal(dom.gate.hidden, false);
+  assert.ok(calls.includes('gate:expired'));
+});
+
+test('direct mode renderLaunch avoids unnecessary restart and renderOnboardSteps accepts ready', () => {
+  const launch = { dataset: {}, setAttribute() {} };
+  const steps = ['connection', 'catalogue', 'apply', 'sync'].map((step) => ({ dataset: { step, done: 'false' } }));
+  const dom = {
+    onboardLaunch: launch,
+    onboardLaunchHint: { hidden: true, textContent: '' },
+    onboardSteps: { querySelectorAll: () => steps },
+  };
+  const api = new Function('dom', `
+    const ACTION_LABEL = { 'open-work': '打开 Kimi Work', 'launch-kimi': '启动 Kimi Work', 'restart-kimi': '重启 Kimi' };
+    const state = { data: { connections: { saved: [{ id: 'ds', baseURL: 'https://api.deepseek.com/v1' }] } } };
+    const isInFlight = () => false;
+    const syncState = data => ({ code: data.sync });
+    const connectionsChanged = () => false;
+    const connectionRowsOf = (data) => data?.connections?.saved || [];
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    ${sourceFunction('savedOnboardTarget')}
+    ${sourceFunction('mountedSavedModels')}
+    ${sourceFunction('recoveryCopy')}
+    ${sourceFunction('renderLaunch')}
+    ${sourceFunction('renderOnboardSteps')}
+    return { renderLaunch, renderOnboardSteps };
+  `)(dom);
+
+  api.renderLaunch({ integrationMode: 'direct', kimiProcess: { running: true }, integration: { desktop: { managed: false } }, sync: 'ready' });
+  assert.equal(launch.dataset.action, 'open-work');
+  api.renderLaunch({ integrationMode: 'direct', kimiProcess: { running: true }, integration: { desktop: { managed: false } }, sync: 'restart' });
+  assert.equal(launch.dataset.action, 'restart-kimi');
+
+  const done = api.renderOnboardSteps(
+    { integrationMode: 'direct', sync: 'ready', models: [{ id: 'ds/chat/r1', connectionId: 'ds' }], connections: { saved: [{ id: 'ds' }] } },
+    { selected: 1, rows: 1 },
+  );
+  assert.equal(done.sync, true);
+  assert.equal(steps.find((s) => s.dataset.step === 'sync').dataset.done, 'true');
+});
+
+test('renderConnectionEditor protects active or composing inputs, respects managed providerFlow, and applyProviderPreset clears ceKey', () => {
+  const dispatched = [];
+  const syncCalls = [];
+  const dom = {
+    connEditor: { hidden: true },
+    connEditorTitle: { textContent: '' },
+    ceName: { value: '正在输入中' },
+    ceId: { value: 'ds', disabled: false },
+    ceBase: { value: 'https://api.deepseek.com/v1' },
+    ceKeyEnv: { value: '' },
+    ceKey: { value: 'sk-old-secret', placeholder: '' },
+    ceChat: { checked: false },
+    ceResponses: { checked: false },
+    cePreset: { value: '', dataset: { providerFlow: 'managed' }, dispatchEvent(ev) { dispatched.push(ev.type); } },
+    cePresetHint: { textContent: '' },
+    ceKeyHint: { textContent: '' },
+    connEditorTest: { disabled: false, hidden: false, textContent: '' },
+  };
+  const documentStub = { activeElement: dom.ceName };
+  const state = {
+    composing: false,
+    providers: { presets: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'] }] },
+    conns: {
+      editing: {
+        originalId: null,
+        keyEdited: true,
+        discovering: false,
+        draft: { id: 'ds', name: 'DeepSeek 官方', providerPresetId: 'deepseek', baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: '', protocols: ['chat'], apiKey: 'sk-old-secret' },
+      },
+    },
+  };
+  const api = new Function('state', 'dom', 'document', 'syncCalls', `
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    const syncSelectOptions = (...args) => syncCalls.push(args);
+    const renderConnections = () => {};
+    ${sourceFunction('isInputActive')}
+    ${sourceFunction('providerPresets')}
+    ${sourceFunction('providerPreset')}
+    ${sourceFunction('providerPresetLabel')}
+    ${sourceFunction('providerPresetOptions')}
+    ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('renderConnectionEditor')}
+    ${sourceFunction('applyProviderPreset')}
+    return { renderConnectionEditor, applyProviderPreset };
+  `)(state, dom, documentStub, syncCalls);
+
+  api.renderConnectionEditor();
+  assert.equal(dom.ceName.value, '正在输入中', 'focused input must not be overwritten');
+  assert.equal(syncCalls.length, 0, 'managed providerFlow select options must not be overwritten');
+  assert.equal(dom.cePreset.dataset.desiredPreset, 'deepseek');
+  assert.deepEqual(dispatched, ['kwp:sync-provider-flow']);
+
+  documentStub.activeElement = null;
+  state.composing = true;
+  api.renderConnectionEditor();
+  assert.equal(dom.ceName.value, '正在输入中', 'IME composing must protect inputs');
+
+  state.composing = false;
+  api.applyProviderPreset('deepseek');
+  assert.equal(state.conns.editing.keyEdited, false);
+  assert.equal(state.conns.editing.draft.apiKey, '');
+  assert.equal(dom.ceKey.value, '');
+});
+
+test('search service 400 error persists across renderServices until input changes, and adoptState syncs services & pendingService', async () => {
+  const renderedErrors = [];
+  const dom = {
+    svcPanel: {}, svcUnavailable: {}, svcSave: {}, svcReset: {}, svcDraft: {},
+    svcSearchOn: { checked: true }, svcFetchOn: { checked: false },
+    svcSearchUrl: { value: 'https://search.example.com' }, svcFetchUrl: { value: '' },
+    svcSearchKey: { value: 'secret-token' }, svcFetchKey: { value: '' },
+    svcSearchSaved: {}, svcSearchSavedSub: {}, svcFetchSaved: {}, svcFetchSavedSub: {},
+    svcSearchKeyHint: {}, svcVerdictDot: {}, svcVerdictWord: {}, svcVerdictNote: {}, svcVerdict: { dataset: {} },
+    svcErrors: {},
+  };
+  const state = {
+    composing: false,
+    data: {
+      configuration: { state: 'ready' },
+      search: { services: { search: { enabled: false, endpoint: '', hasKey: false }, fetch: { enabled: false, endpoint: '', hasKey: false } } },
+    },
+    services: {
+      base: '',
+      baseRow: { search: { enabled: false, endpoint: '', hasKey: false }, fetch: { enabled: false, endpoint: '', hasKey: false } },
+      draft: { searchOn: true, searchUrl: 'https://search.example.com', fetchOn: false, fetchUrl: '' },
+      dirty: true, saving: false, searchKey: 'secret-token', fetchKey: '', serverErrors: [],
+    },
+    draft: null, draftDirty: false, conns: { dirty: false, editing: null, draft: null },
+    pendingService: { enabled: true, state: 'running', registered: true },
+  };
+  const svcFns = new Function('state', 'dom', 'renderedErrors', 'request', `
+    const API = { context: '/api/context' };
+    const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+    const SVC_STATUS = { inherit: { tone: 'neutral', word: '官方', note: '' } };
+    const SVC_REASON = {};
+    const setHidden = () => {};
+    const setText = () => {};
+    const setDot = () => {};
+    const showToast = () => {};
+    const loadState = async () => {};
+    const handleSaveFailure = async () => {};
+    const renderErrorList = (_el, list) => renderedErrors.push(list.slice());
+    const draftFromSaved = () => ({ mode: 'inherit' });
+    const recomputeDraftDirty = () => {};
+    const savedConnectionsSignature = () => '';
+    const connectionDraftFrom = () => [];
+    const connectionsDirty = () => false;
+    const onboardTouched = () => true;
+    const fillOnboardForm = () => {};
+    const settlePending = () => {};
+    ${sourceFunction('isInputActive')}
+    ${sourceFunction('normalizeBaseURL')}
+    ${sourceFunction('searchStateOf')}
+    ${sourceFunction('searchAvailable')}
+    ${sourceFunction('serviceRowOf')}
+    ${sourceFunction('serviceDraftFrom')}
+    ${sourceFunction('serviceSignature')}
+    ${sourceFunction('servicesDirty')}
+    ${sourceFunction('validateServiceDraft')}
+    ${sourceFunction('servicePayload')}
+    ${sourceFunction('evaluateServices')}
+    ${sourceFunction('serviceRowText')}
+    ${sourceFunction('servicesObservedText')}
+    ${sourceFunction('renderServices')}
+    ${sourceFunction('readServiceForm')}
+    ${sourceFunction('fillServiceForm')}
+    ${sourceFunction('saveSearchServices')}
+    ${sourceFunction('adoptState')}
+    return { saveSearchServices, renderServices, readServiceForm, adoptState };
+  `)(state, dom, renderedErrors, async () => {
+    const err = new Error('后端拒绝：端点不可达');
+    err.status = 400;
+    throw err;
+  });
+
+  await svcFns.saveSearchServices();
+  assert.deepEqual(state.services.serverErrors, ['后端拒绝：端点不可达']);
+  assert.deepEqual(renderedErrors.at(-1), ['后端拒绝：端点不可达']);
+  svcFns.renderServices(state.data);
+  assert.deepEqual(renderedErrors.at(-1), ['后端拒绝：端点不可达'], '400 error must survive subsequent renders');
+  svcFns.readServiceForm();
+  assert.deepEqual(state.services.serverErrors, [], 'editing input clears server error');
+
+  state.services.dirty = false;
+  const nextState = {
+    revision: 'rev-2',
+    search: { services: { search: { enabled: true, endpoint: 'https://new.example.com', hasKey: true }, fetch: { enabled: false, endpoint: '', hasKey: false } } },
+  };
+  svcFns.adoptState(nextState);
+  assert.equal(state.services.draft.searchUrl, 'https://new.example.com');
+  assert.equal(state.services.baseRow.search.hasKey, true);
+  assert.equal(state.data.service.loginStartup, 'enabled');
+  assert.equal(state.pendingService, null);
+});
+
+test('setText preserves button SVG icons via .btn__label, fmtTokens(0) returns 0, and applyConnections limits Keychain copy to legacy migration', async () => {
+  const label = { textContent: '旧文案' };
+  const btn = { textContent: '不应改整个按钮', querySelector: (sel) => sel === '.btn__label' ? label : null };
+  const { setText, fmtTokens } = new Function(`
+    ${sourceFunction('setText')}
+    ${sourceFunction('fmtTokens')}
+    return { setText, fmtTokens };
+  `)();
+  setText(btn, '新文案');
+  assert.equal(label.textContent, '新文案');
+  assert.equal(btn.textContent, '不应改整个按钮');
+  assert.equal(fmtTokens(0), '0');
+  assert.equal(fmtTokens(-1), '未知');
+  assert.match(fmtTokens(128000), /128,000 tokens/);
+
+  const toasts = [];
+  const runApply = (platform, pending) => {
+    const state = { data: { connections: { saved: [] } }, pendingAction: null, pendingOpId: null };
+    const fn = new Function('state', 'document', 'toasts', 'pending', `
+      const API = { actions: '/api/actions' };
+      const dom = { applyButton: {} };
+      const APPLY_COPY = { unsupported: { tone: 'bad', word: '', note: '' } };
+      const APPLY_REFUSAL = {};
+      const isInFlight = () => false;
+      const actionUUID = () => 'u1';
+      const renderApply = () => {};
+      const adoptState = () => {};
+      const request = async () => ({ operation: { id: 'op1', state: 'requested' } });
+      const loadState = async () => {};
+      const showToast = (message, tone) => toasts.push({ message, tone });
+      const credentialAuthPending = () => pending;
+      ${sourceFunction('applyConnections')}
+      return applyConnections;
+    `)(state, { documentElement: { dataset: { platform } } }, toasts, pending);
+    return fn();
+  };
+  await runApply('mac', false);
+  assert.doesNotMatch(toasts.at(-1).message, /始终允许|钥匙串/);
+  await runApply('windows', true);
+  assert.doesNotMatch(toasts.at(-1).message, /macOS|钥匙串|始终允许/);
+  await runApply('mac', true);
+  assert.match(toasts.at(-1).message, /待迁移.*登录钥匙串.*始终允许/);
+});
+
+test('app.js enforces single visibilitychange listener, external adoptState on migration-resume, updated copy, and safe finally blocks', () => {
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const workText = readFileSync(new URL('./app-work.js', import.meta.url), 'utf8');
+  assert.equal((appText.match(/addEventListener\('visibilitychange'/g) || []).length, 1);
+  assert.match(appText, /adoptState\(result\.state,\s*\{\s*external:\s*true\s*\}\)/);
+  assert.equal(appText.includes('finally { button.disabled = false; }'), false);
+  assert.equal(appText.includes('finally { updDownload.disabled = false; }'), false);
+  assert.match(htmlSource, /联网搜索、调用 Kimi 资料库，以及 PPT、3D、图片生成、视频生成等能力仍走 Kimi Work 官方自身额度；KimiWork \+ 仅接管对话与子代理模型请求/);
+  assert.match(htmlSource, /角色分配写入 <code>config\.toml<\/code> 模型池用途说明，供主模型派发子代理时参考选用/);
+  assert.match(workText, /角色分配已写入 config\.toml 模型池用途说明，供主模型派发 plan \/ coder \/ explore 子代理时参考选用，新建会话后生效/);
+  assert.equal(htmlSource.includes('连接与工具'), false);
+  assert.equal(source.includes('MCP_NAME_PATTERN'), false);
+  assert.equal(source.includes('dom.legacyPanel'), false);
+});
+
+test('growth.js replaces MCP window.confirm with inline confirm, opens https links via POST /api/open-url, and preserves ctxDraft on save error', async () => {
+  const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
+  assert.equal(growthSource.includes('window.confirm'), false);
+  assert.equal(growthSource.includes("target = '_blank'"), false);
+  assert.equal(growthSource.includes('target="_blank"'), false);
+
+  const elements = new Map();
+  const makeNode = (tag = 'div', id = '') => {
+    const el = {
+      tag, id, className: '', textContent: '', value: '', checked: false, hidden: false, disabled: false,
+      href: '', rel: '', title: '', dataset: {}, children: [], listeners: {}, parentNode: null,
+      append(...nodes) { for (const n of nodes) { if (n && typeof n === 'object') { n.parentNode = this; if (n.id) elements.set(n.id, n); } this.children.push(n); } },
+      replaceChildren(...nodes) { this.children = []; this.append(...nodes); },
+      before(...nodes) { for (const n of nodes) { if (n && typeof n === 'object' && n.id) elements.set(n.id, n); } },
+      after(...nodes) { for (const n of nodes) { if (n && typeof n === 'object' && n.id) elements.set(n.id, n); } },
+      insertBefore(n) { if (n && typeof n === 'object' && n.id) elements.set(n.id, n); },
+      addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+      setAttribute() {},
+      closest() { return makeNode('label'); },
+      querySelector() { return null; },
+      focus() {},
+    };
+    if (id) elements.set(id, el);
+    return el;
+  };
+  const getEl = (id) => {
+    if (elements.has(id)) return elements.get(id);
+    if (String(id).startsWith('provider-document-')) return null;
+    return makeNode('div', id);
+  };
+  getEl('ob-preset').value = 'deepseek';
+  getEl('context-inherit').checked = true;
+
+  const prevDoc = globalThis.document;
+  const prevWin = globalThis.window;
+  const calls = [];
+  const toasts = [];
+  let failContext = true;
+  globalThis.document = {
+    getElementById: getEl,
+    createElement: (tag) => makeNode(tag),
+    createTextNode: (text) => ({ textContent: text }),
+  };
+  globalThis.window = { setTimeout: () => 1, clearTimeout: () => {} };
+  try {
+    const mod = {};
+    new Function('globalThis', growthSource)(mod);
+    const data = {
+      models: [],
+      translation: { enabled: false },
+      context: { status: 'inherit', policy: { mode: 'inherit' } },
+      tools: { available: true, servers: [{ name: 'fs', transport: 'stdio', enabled: true, command: 'npx' }] },
+      webTools: { provider: 'official' },
+    };
+    const providers = {
+      presets: [{ id: 'deepseek', name: 'DeepSeek', models: [], keyUrl: 'https://platform.deepseek.com/api_keys' }],
+    };
+    const render = mod.KimiWorkGrowth.mountGrowth({
+      request: async (path, opts) => {
+        calls.push({ path, opts });
+        if (path === '/api/context' && failContext) throw { message: '写入失败' };
+        if (path === '/api/tools') return { tools: { available: true, servers: [] }, result: { state: 'removed' } };
+        return { ok: true };
+      },
+      getState: () => data,
+      getProviders: () => providers,
+      refresh: async () => {},
+      notify: (msg, tone) => toasts.push({ msg, tone }),
+      runAction: async () => {},
+    });
+
+    render(data);
+    // MCP inline remove flow: first click opens confirm bar without calling /api/tools.
+    const findBy = (root, pred) => {
+      if (!root) return null;
+      if (pred(root)) return root;
+      for (const c of root.children || []) { const hit = findBy(c, pred); if (hit) return hit; }
+      return null;
+    };
+    const removeBtn = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove');
+    assert.ok(removeBtn);
+    await elements.get('mcp-list').listeners.click[0]({ target: { closest: () => removeBtn } });
+    assert.equal(calls.some(c => c.path === '/api/tools'), false);
+    const confirmBtn = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm');
+    assert.ok(confirmBtn);
+    assert.match(confirmBtn.className, /btn--danger/);
+    await elements.get('mcp-list').listeners.click[0]({ target: { closest: () => confirmBtn } });
+    assert.equal(calls.some(c => c.path === '/api/tools' && c.opts?.body?.action === 'remove'), true);
+
+    // Re-entrant clicks while MCP request is in flight must be ignored and confirm bar must collapse immediately.
+    data.tools = { available: true, servers: [{ name: 'git', transport: 'stdio', enabled: true, command: 'npx' }] };
+    let resolveInFlight;
+    const prevToolsCount = calls.filter(c => c.path === '/api/tools').length;
+    let blockTools = true;
+    const guardedRender = mod.KimiWorkGrowth.mountGrowth({
+      request: (path, opts) => {
+        calls.push({ path, opts });
+        if (path === '/api/tools' && blockTools) {
+          return new Promise((resolve) => {
+            resolveInFlight = () => resolve({ tools: { available: true, servers: [] }, result: { state: 'removed' } });
+          });
+        }
+        return Promise.resolve({ ok: true });
+      },
+      getState: () => data,
+      getProviders: () => providers,
+      refresh: async () => {},
+      notify: (msg, tone) => toasts.push({ msg, tone }),
+      runAction: async () => {},
+    });
+    guardedRender(data);
+    const rmBtn2 = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove' && n.dataset?.mcpName === 'git');
+    assert.ok(rmBtn2);
+    await elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => rmBtn2 } });
+    const cfBtn2 = findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm' && n.dataset?.mcpName === 'git');
+    assert.ok(cfBtn2);
+    const pendingPromise = elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => cfBtn2 } });
+    // Before request resolves, confirm bar must already be collapsed and duplicate clicks ignored.
+    assert.equal(findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove-confirm'), null);
+    assert.equal(findBy(elements.get('mcp-list'), n => n.dataset?.mcpAction === 'remove').disabled, true);
+    await elements.get('mcp-list').listeners.click.at(-1)({ target: { closest: () => cfBtn2 } });
+    assert.equal(calls.filter(c => c.path === '/api/tools').length, prevToolsCount + 1);
+    blockTools = false;
+    resolveInFlight();
+    await pendingPromise;
+
+    // External API key link calls POST /api/open-url instead of target="_blank".
+    const docNote = elements.get('provider-document-ob-preset');
+    const link = findBy(docNote, n => n.tag === 'a');
+    assert.ok(link);
+    assert.equal(link.href, 'https://platform.deepseek.com/api_keys');
+    let prevented = false;
+    await link.listeners.click[0]({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.deepEqual(calls.find(c => c.path === '/api/open-url'), {
+      path: '/api/open-url',
+      opts: { method: 'POST', body: { url: 'https://platform.deepseek.com/api_keys' } },
+    });
+
+    // Context save failure must keep draft dirty (not overwrite local.ctxDraft).
+    elements.get('context-inherit').checked = false;
+    elements.get('context-custom').checked = true;
+    elements.get('context-ratio').value = '0.85';
+    elements.get('context-reserved').value = '16000';
+    await elements.get('context-save').listeners.click[0]();
+    render(data);
+    assert.equal(elements.get('context-draft').textContent, '有未保存的修改');
+  } finally {
+    globalThis.document = prevDoc;
+    globalThis.window = prevWin;
+  }
+});
+
+test('renderAll and setView render services on maintenance, onboard overview on overview, and pass view to plusPanel', () => {
+  const calls = [];
+  const state = { data: { revision: 'r1' }, view: 'overview', key: 'k', composing: true, onboard: {} };
+  const dom = { viewTitle: {}, viewLede: {} };
+  const VIEW_ALIASES = {};
+  const VIEW_COPY = {
+    overview: { title: '总览', lede: '' },
+    models: { title: '模型', lede: '' },
+    subagents: { title: '子代理', lede: '' },
+    usage: { title: '用量', lede: '' },
+    maintenance: { title: '设置', lede: '' },
+  };
+  const api = new Function('state', 'dom', 'calls', 'VIEW_ALIASES', 'VIEW_COPY', `
+    const VIEW_STORE = 'v';
+    const document = { body: { dataset: {} } };
+    const sessionStorage = { setItem() {} };
+    const $ = () => null;
+    const clearDisconnectConfirm = () => calls.push('clearDisconnect');
+    const renderShell = () => calls.push('shell');
+    const renderOperation = () => calls.push('op');
+    const renderActions = () => calls.push('actions');
+    const renderPreviewLifecycle = () => calls.push('lifecycle');
+    const renderOverview = (_d, opts) => calls.push('overview:' + opts?.view);
+    const renderOnboardOverview = () => calls.push('onboardOverview');
+    const renderWorkspaceSync = () => calls.push('workspaceSync');
+    const renderOnboard = () => calls.push('onboard');
+    const renderModels = () => calls.push('models');
+    const renderConnection = () => calls.push('connection');
+    const renderPicker = () => calls.push('picker');
+    const renderSubagents = () => calls.push('subagents');
+    const renderIntegrationMode = () => calls.push('integrationMode');
+    const renderServices = () => calls.push('services');
+    const renderGrowth = (_d, opts) => calls.push('growth:' + opts?.view);
+    const renderUpdates = () => calls.push('updates');
+    const usagePanel = { show() { calls.push('usageShow'); } };
+    const plusPanel = {
+      render(_d, opts) { calls.push('plus:' + opts?.view); },
+      refresh() { calls.push('plusRefresh'); },
+    };
+    ${sourceFunction('setView')}
+    ${sourceFunction('renderAll')}
+    return { setView, renderAll };
+  `)(state, dom, calls, VIEW_ALIASES, VIEW_COPY);
+
+  api.renderAll();
+  assert.ok(calls.includes('overview:overview'));
+  assert.ok(calls.includes('onboardOverview'));
+  assert.ok(calls.includes('plus:overview'));
+  assert.equal(calls.includes('services'), false);
+
+  calls.length = 0;
+  state.composing = true;
+  api.setView('maintenance', { persist: false });
+  assert.equal(state.composing, false, 'setView must reset state.composing');
+  assert.ok(calls.includes('services'), 'setView(maintenance) must render search services');
+  assert.ok(calls.includes('plus:maintenance'));
+
+  calls.length = 0;
+  api.renderAll();
+  assert.ok(calls.includes('services'), 'renderAll on maintenance must refresh search services');
+  assert.ok(calls.includes('plus:maintenance'));
+});
+
+test('openConnectionEditor forces field populate even when an input is focused or composing, and applyProviderPreset resets secretSet', () => {
+  const dom = {
+    connEditor: { hidden: true },
+    connEditorTitle: { textContent: '' },
+    ceName: { value: '残留旧名', focus() {} },
+    ceId: { value: 'old-id', disabled: false },
+    ceBase: { value: 'https://old.example.com/v1' },
+    ceKeyEnv: { value: 'OLD_ENV' },
+    ceKey: { value: 'sk-stale-secret', placeholder: '' },
+    ceChat: { checked: false },
+    ceResponses: { checked: false },
+    cePreset: { value: 'old', dataset: {} },
+    cePresetHint: { textContent: '' },
+    ceKeyHint: { textContent: '' },
+    connEditorTest: { disabled: false, hidden: false, textContent: '' },
+  };
+  const documentStub = { activeElement: dom.ceName };
+  const state = {
+    composing: true,
+    data: { revision: 'rev-1' },
+    providers: { presets: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'] }] },
+    conns: {
+      baseRevision: 'rev-1',
+      editing: null,
+      draft: [
+        { id: 'conn-a', name: '连接 A', baseURL: 'https://a.example.com/v1', apiKeySet: true, protocols: ['chat'] },
+        { id: 'conn-b', name: '连接 B', baseURL: 'https://b.example.com/v1', apiKeySet: false, protocols: ['responses'] },
+      ],
+    },
+  };
+  const api = new Function('state', 'dom', 'document', `
+    const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const CONNECTION_ID_HINT = 'bad id';
+    const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const setText = (el, t) => { if (el) el.textContent = t; };
+    const syncSelectOptions = (sel, _opts, val) => { sel.value = val; };
+    const renderConnections = () => renderConnectionEditor();
+    ${sourceFunction('isInputActive')}
+    ${sourceFunction('normalizeBaseURL')}
+    ${sourceFunction('connectionDraftRow')}
+    ${sourceFunction('providerPresets')}
+    ${sourceFunction('providerPreset')}
+    ${sourceFunction('providerPresetLabel')}
+    ${sourceFunction('providerPresetOptions')}
+    ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('validateConnectionDraft')}
+    ${sourceFunction('openConnectionEditor')}
+    ${sourceFunction('closeConnectionEditor')}
+    ${sourceFunction('readConnectionEditor')}
+    ${sourceFunction('applyProviderPreset')}
+    ${sourceFunction('renderConnectionEditor')}
+    return { openConnectionEditor, closeConnectionEditor, readConnectionEditor, applyProviderPreset, validateConnectionDraft };
+  `)(state, dom, documentStub);
+
+  // Switching to conn-b while ceName is focused and composing=true must overwrite stale values & clear ceKey.
+  api.openConnectionEditor(state.conns.draft[1]);
+  assert.equal(state.composing, false);
+  assert.equal(dom.ceName.value, '连接 B');
+  assert.equal(dom.ceId.value, 'conn-b');
+  assert.equal(dom.ceBase.value, 'https://b.example.com/v1');
+  assert.equal(dom.ceKey.value, '');
+
+  // New connection: typing a key sets secretSet=true; switching preset must reset secretSet=false so empty key fails validation.
+  api.openConnectionEditor(null);
+  dom.ceName.value = '新建连接';
+  dom.ceId.value = 'new-conn';
+  dom.ceBase.value = 'https://api.example.com/v1';
+  dom.ceKey.value = 'sk-typed-before-switch';
+  api.readConnectionEditor();
+  assert.equal(state.conns.editing.draft.secretSet, true);
+  api.applyProviderPreset('deepseek');
+  assert.equal(state.conns.editing.draft.apiKey, '');
+  assert.equal(state.conns.editing.draft.secretSet, false);
+  assert.equal(dom.ceKey.value, '');
+  const checkNew = api.validateConnectionDraft(state.conns.editing.draft, state.conns.draft, { originalId: null });
+  assert.ok(checkNew.errors.some(msg => msg.includes('API Key')), 'new connection must require API Key after preset switch');
+
+  // Existing connection with saved key keeps secretSet=true after switching preset.
+  api.openConnectionEditor(state.conns.draft[0]);
+  api.applyProviderPreset('deepseek');
+  assert.equal(state.conns.editing.draft.secretSet, true);
+
+  state.composing = true;
+  api.closeConnectionEditor();
+  assert.equal(state.composing, false);
+
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  assert.match(appText, /addEventListener\('focusout',\s*\(\)\s*=>\s*\{\s*state\.composing\s*=\s*false;\s*\}\)/);
+  assert.match(appText, /addEventListener\('blur',\s*\(\)\s*=>\s*\{\s*state\.composing\s*=\s*false;\s*\}\)/);
+});
+
+test('inline disconnect confirm is cleared by runAction, chooseIntegrationMode, and in-flight renderActions', async () => {
+  const cleared = [];
+  const state = {
+    data: { revision: 'rev-1', integrationMode: 'gateway', operation: null, configuration: { state: 'ready' } },
+    pendingAction: null, pendingOpId: null, modelsSaving: false, connsSaving: false, actionButtons: [], view: 'maintenance',
+  };
+  const api = new Function('state', 'cleared', `
+    let integrationModeSaving = false;
+    const INTEGRATION_MODES = ['gateway', 'direct'];
+    const API = { actions: '/api/actions', integrationMode: '/api/integration-mode' };
+    const ACTION_LABEL = {};
+    const dom = { conn: {}, connText: {} };
+    const clearDisconnectConfirm = () => cleared.push('cleared');
+    const onboardBusy = () => true;
+    const renderOnboard = () => {};
+    const renderOnboardOverview = () => {};
+    const configReady = () => true;
+    const savedIntegrationMode = (d) => d?.integrationMode || 'gateway';
+    const directRestartRequired = () => false;
+    const integrationModeBusy = () => integrationModeSaving;
+    const renderIntegrationMode = () => {};
+    const renderOperation = () => {};
+    const adoptState = (next) => { state.data = next; };
+    const loadState = async () => {};
+    const handleSaveFailure = async () => {};
+    const showToast = () => {};
+    const actionUUID = () => 'u1';
+    const request = async (_path, opts) => opts.body.mode ? { state: { ...state.data, integrationMode: opts.body.mode } } : { operation: { id: 'op1', action: opts.body.action, state: 'running' } };
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('renderActions')}
+    ${sourceFunction('chooseIntegrationMode')}
+    ${sourceFunction('runAction')}
+    return { renderActions, chooseIntegrationMode, runAction };
+  `)(state, cleared);
+
+  api.renderActions({ ...state.data, operation: { state: 'running' } });
+  assert.equal(cleared.length, 1, 'renderActions must clear confirm when operation is in flight');
+
+  await api.chooseIntegrationMode('direct');
+  assert.equal(cleared.length, 2, 'chooseIntegrationMode must clear confirm when mode changes');
+
+  await api.runAction('connect-kimi');
+  assert.ok(cleared.length >= 3, 'runAction must clear confirm at entry');
 });

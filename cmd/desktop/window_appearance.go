@@ -18,6 +18,13 @@ var (
 	themeDarkBG  = application.NewRGB(0x17, 0x15, 0x12)
 )
 
+func initialWindowBackground(dark bool) application.RGBA {
+	if dark {
+		return themeDarkBG
+	}
+	return themeLightBG
+}
+
 func normalizeThemeMode(raw string) string {
 	switch raw {
 	case themeModeLight:
@@ -35,7 +42,7 @@ type windowAppearanceController struct {
 	window *application.WebviewWindow
 }
 
-func attachWindowAppearance(app *application.App, window *application.WebviewWindow) *windowAppearanceController {
+func attachWindowAppearance(app *application.App, window *application.WebviewWindow, onNavigationComplete func()) *windowAppearanceController {
 	ctrl := &windowAppearanceController{
 		mode:   themeModeAuto,
 		window: window,
@@ -54,7 +61,7 @@ func attachWindowAppearance(app *application.App, window *application.WebviewWin
 	app.Event.OnApplicationEvent(events.Common.ThemeChanged, func(*application.ApplicationEvent) {
 		ctrl.onSystemThemeChanged()
 	})
-	attachPlatformWindowHooks(app, window, ctrl)
+	attachPlatformWindowHooks(app, window, ctrl, onNavigationComplete)
 	return ctrl
 }
 

@@ -23,14 +23,15 @@ static void kwpSetWindowAppearance(void *winPtr, int mode) {
 
 static int kwpIsSystemDarkMode(void) {
 	NSAppearance *appearance = [NSApp effectiveAppearance];
-	if (appearance == nil) {
-		return 0;
+	if (appearance != nil) {
+		NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
+			NSAppearanceNameAqua,
+			NSAppearanceNameDarkAqua
+		]];
+		return [match isEqualToString:NSAppearanceNameDarkAqua] ? 1 : 0;
 	}
-	NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
-		NSAppearanceNameAqua,
-		NSAppearanceNameDarkAqua
-	]];
-	return [match isEqualToString:NSAppearanceNameDarkAqua] ? 1 : 0;
+	NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
+	return (style != nil && [style caseInsensitiveCompare:@"Dark"] == NSOrderedSame) ? 1 : 0;
 }
 */
 import "C"
@@ -49,7 +50,7 @@ func configurePlatformTray(tray *application.SystemTray) {
 }
 
 func platformWindowOptions(opts application.WebviewWindowOptions) application.WebviewWindowOptions {
-	opts.BackgroundColour = themeLightBG
+	opts.BackgroundColour = initialWindowBackground(C.kwpIsSystemDarkMode() != 0)
 	opts.Mac = application.MacWindow{
 		TitleBar: application.MacTitleBarHiddenInset,
 	}
@@ -78,7 +79,7 @@ func applyPlatformWindowTheme(window *application.WebviewWindow, mode string) {
 	}
 }
 
-func attachPlatformWindowHooks(app *application.App, window *application.WebviewWindow, ctrl *windowAppearanceController) {
+func attachPlatformWindowHooks(app *application.App, window *application.WebviewWindow, ctrl *windowAppearanceController, onNavigationComplete func()) {
 	setFullscreenAttr := func(full bool) {
 		val := "false"
 		if full {
@@ -112,6 +113,9 @@ func attachPlatformWindowHooks(app *application.App, window *application.Webview
 			full = "true"
 		}
 		window.ExecJS(`document.documentElement.dataset.platform = "mac"; document.documentElement.dataset.fullscreen = "` + full + `"; if (window.__kwpSyncTheme) window.__kwpSyncTheme();`)
+		if onNavigationComplete != nil {
+			onNavigationComplete()
+		}
 	})
 	app.Event.OnApplicationEvent(events.Mac.ApplicationDidChangeEffectiveAppearance, func(*application.ApplicationEvent) {
 		ctrl.onSystemThemeChanged()

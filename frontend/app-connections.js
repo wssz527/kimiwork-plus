@@ -1,4 +1,4 @@
-import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
@@ -205,8 +205,12 @@ function renderServices(data) {
   state.services.dirty = dirty;
   if (dom.svcSearchOn) dom.svcSearchOn.checked = draft.searchOn === true;
   if (dom.svcFetchOn) dom.svcFetchOn.checked = draft.fetchOn === true;
-  if (dom.svcSearchUrl && !state.services.urlEditing?.search) dom.svcSearchUrl.value = draft.searchUrl;
-  if (dom.svcFetchUrl && !state.services.urlEditing?.fetch) dom.svcFetchUrl.value = draft.fetchUrl;
+  if (dom.svcSearchUrl && !state.services.urlEditing?.search && !isInputActive(dom.svcSearchUrl) && dom.svcSearchUrl.value !== draft.searchUrl) {
+    dom.svcSearchUrl.value = draft.searchUrl;
+  }
+  if (dom.svcFetchUrl && !state.services.urlEditing?.fetch && !isInputActive(dom.svcFetchUrl) && dom.svcFetchUrl.value !== draft.fetchUrl) {
+    dom.svcFetchUrl.value = draft.fetchUrl;
+  }
   const config = data.configuration || {};
   const blocked = config.state === 'unavailable';
   if (dom.svcSearchUrl) dom.svcSearchUrl.disabled = draft.searchOn !== true || state.services.saving || blocked;
@@ -225,8 +229,8 @@ function renderServices(data) {
   /* 已有密钥不回显：只提示「留空即沿用」，避免把密钥写进页面。 */
   setText(dom.svcSearchKeyHint, searchRow?.hasKey
     ? '已保存密钥；留空表示沿用，填写则替换。' : '该服务需要密钥；内核用它发送 Authorization: Bearer。');
-  if (dom.svcSearchKey && !state.services.searchKey) dom.svcSearchKey.value = '';
-  if (dom.svcFetchKey && !state.services.fetchKey) dom.svcFetchKey.value = '';
+  if (dom.svcSearchKey && !state.services.searchKey && !isInputActive(dom.svcSearchKey)) dom.svcSearchKey.value = '';
+  if (dom.svcFetchKey && !state.services.fetchKey && !isInputActive(dom.svcFetchKey)) dom.svcFetchKey.value = '';
 
   const verdict = evaluateServices(data);
   setDot(dom.svcVerdictDot, verdict.tone);
@@ -235,7 +239,8 @@ function renderServices(data) {
   if (dom.svcVerdict) dom.svcVerdict.dataset.status = verdict.status || '';
 
   const { errors } = validateServiceDraft(draft);
-  renderErrorList(dom.svcErrors, errors.slice(0, 2));
+  const serverErrors = Array.isArray(state.services.serverErrors) ? state.services.serverErrors : [];
+  renderErrorList(dom.svcErrors, (errors.length ? errors : serverErrors).slice(0, 2));
   if (dom.svcSave) {
     dom.svcSave.disabled = !dirty || errors.length > 0 || state.services.saving || blocked;
     setText(dom.svcSave, state.services.saving ? '正在保存…' : '保存搜索与抓取');
@@ -254,6 +259,7 @@ function readServiceForm() {
   if (dom.svcFetchUrl) draft.fetchUrl = dom.svcFetchUrl.value;
   if (dom.svcSearchKey) state.services.searchKey = dom.svcSearchKey.value;
   if (dom.svcFetchKey) state.services.fetchKey = dom.svcFetchKey.value;
+  state.services.serverErrors = [];
   state.services.dirty = servicesDirty();
 }
 
@@ -281,6 +287,7 @@ async function saveSearchServices() {
     return;
   }
   state.services.saving = true;
+  state.services.serverErrors = [];
   renderServices(data);
   try {
     const res = await request(API.context, { method: 'POST', body: { services: payload } });
@@ -290,6 +297,7 @@ async function saveSearchServices() {
       state.services.saving = false;
       state.services.searchKey = '';
       state.services.fetchKey = '';
+      state.services.serverErrors = [];
       state.services.baseRow = {
         search: serviceRowOf(state.data, 'search'),
         fetch: serviceRowOf(state.data, 'fetch'),
@@ -312,8 +320,7 @@ async function saveSearchServices() {
   } catch (error) {
     state.services.saving = false;
     if (error.status === 400) {
-      renderErrorList(dom.svcErrors, [error.message]);
-      renderServices(state.data);
+      state.services.serverErrors = [error.message];
       return;
     }
     await handleSaveFailure(error, 'services');
@@ -325,8 +332,9 @@ async function saveSearchServices() {
 
 /* ---------- named connections ---------- */
 
-/* 草稿只保存可回传的字段。apiKey 只在用户本次输入时存在，且不会回填到任何
-   输入框；签名比较同样排除它，避免把「刚输入但未保存的 key」当成未变更。 */
+/* 草稿只保存可回传的字段与只读诊断状态 credentialError；connectionPayload 会过滤掉诊断字段。
+   apiKey 只在用户本次输入时存在，且不会回填到任何输入框；签名比较同样排除它，
+   避免把「刚输入但未保存的 key」当成未变更。 */
 function connectionDraftRow(row) {
   return {
     id: typeof row.id === 'string' ? row.id : '',
@@ -338,6 +346,7 @@ function connectionDraftRow(row) {
     legacy: row.legacy === true,
     modelCount: Number.isInteger(row.modelCount) ? row.modelCount : null,
     apiKeySet: row.apiKeySet === true,
+    credentialError: typeof row.credentialError === 'string' ? row.credentialError : '',
     apiKey: '',
     secretSet: false,
   };
@@ -353,7 +362,7 @@ function connectionsSignature(rows) {
   if (!Array.isArray(rows)) return '';
   return JSON.stringify(rows.map((row) => [row.legacy ? 'legacy' : 'named', row.id, row.name,
     row.providerPresetId || '', row.baseURL, row.apiKeyEnv || '',
-    (row.protocols || []).slice().sort().join(','), row.apiKey ? 'with-key' : '']));
+    (row.protocols || []).slice().sort().join(','), row.credentialError || '', row.apiKey ? 'with-key' : '']));
 }
 
 function savedConnectionsSignature(data) {
@@ -426,20 +435,24 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
 /* 每次打开抽屉都从草稿副本开始，取消不会留下半个编辑。 */
 function openConnectionEditor(row) {
   const rows = state.conns.draft || [];
+  state.composing = false;
   state.conns.editing = {
     originalId: row && !row.legacy ? row.id : null,
     baseRevision: state.conns.baseRevision ?? state.data?.revision ?? null,
     baseRow: row ? connectionDraftRow(row) : null,
     draft: row ? { ...connectionDraftRow(row), apiKey: '', secretSet: row.apiKeySet === true }
       : { id: '', name: '', providerPresetId: '', baseURL: '', apiKeyEnv: '', protocols: null,
-        legacy: false, modelCount: null, apiKeySet: false, apiKey: '', secretSet: false },
+        legacy: false, modelCount: null, apiKeySet: false, credentialError: '', apiKey: '', secretSet: false },
+    keyEdited: false,
     errors: [],
   };
   renderConnections();
+  renderConnectionEditor({ force: true });
   if (dom.ceName && dom.ceName.focus) dom.ceName.focus();
 }
 
 function closeConnectionEditor() {
+  state.composing = false;
   state.conns.editing = null;
   renderConnections();
 }
@@ -484,6 +497,7 @@ function applyConnectionEditor() {
     ...value,
     modelCount: index >= 0 ? next[index].modelCount : 0,
     apiKeySet: index >= 0 ? next[index].apiKeySet : false,
+    credentialError: value.apiKey ? '' : (index >= 0 ? (next[index].credentialError || '') : ''),
     secretSet: Boolean(value.apiKey) || (index >= 0 && next[index].secretSet),
   };
   if (index >= 0) next[index] = stored;
@@ -502,6 +516,7 @@ function applyProviderPreset(presetId) {
   if (!preset) return;
   editing.draft.providerPresetId = preset.id;
   editing.draft.apiKey = '';
+  editing.draft.secretSet = Boolean(editing.baseRow?.apiKeySet);
   editing.keyEdited = false;
   editing.draft.baseURL = typeof preset.baseURL === 'string' ? preset.baseURL : editing.draft.baseURL;
   if (Array.isArray(preset.protocols) && preset.protocols.length) {
@@ -510,6 +525,7 @@ function applyProviderPreset(presetId) {
   if (!editing.draft.name) editing.draft.name = preset.name || '';
   if (!editing.draft.id) editing.draft.id = presetsSuggestedId(preset);
   if (dom.ceBase) dom.ceBase.value = editing.draft.baseURL;
+  if (dom.ceKey) dom.ceKey.value = '';
   if (dom.ceChat) dom.ceChat.checked = (editing.draft.protocols || []).includes('chat');
   if (dom.ceResponses) dom.ceResponses.checked = (editing.draft.protocols || []).includes('responses');
   if (dom.ceId && editing.originalId === null) dom.ceId.value = editing.draft.id;
@@ -646,68 +662,6 @@ function discoveryReasonText(code) {
   return '操作未完成（' + code + '）；请重试或查看诊断。';
 }
 
-/* update 的 patch 只能包含用户真正改过的字段：省略的秘密字段由后端保留，
-   因此未填写的 env/headers 绝不能被序列化成空对象而把已存值清空。 */
-function mcpServerPayload(draft) {
-  const errors = [];
-  const name = String(draft.name || '');
-  if (!MCP_NAME_PATTERN.test(name)) errors.push('名称需以字母或数字开头，可用点、下划线与连字符，最长 64 字符。');
-  const transport = ['stdio', 'http', 'sse'].includes(draft.transport) ? draft.transport : null;
-  if (!transport) errors.push('请选择传输方式。');
-  const server = { name, transport, enabled: draft.enabled !== false };
-  if (transport === 'stdio') {
-    const command = String(draft.command || '').trim();
-    if (!command) errors.push('stdio 服务器需要填写命令。');
-    if (command.length > 1024) errors.push('命令最长 1024 字符。');
-    server.command = command;
-    const args = (draft.args || []).filter((value) => typeof value === 'string');
-    if (args.length > 64) errors.push('参数最多 64 个。');
-    if (args.length) server.args = args;
-    if (draft.env && Object.keys(draft.env).length) server.env = { ...draft.env };
-  } else if (transport) {
-    const url = String(draft.url || '').trim();
-    let parsed;
-    try { parsed = new URL(url); } catch { errors.push('服务地址不是合法的 URL。'); }
-    if (parsed && !['http:', 'https:'].includes(parsed.protocol)) errors.push('服务地址只接受 http 或 https。');
-    if (parsed && (parsed.username || parsed.password)) errors.push('服务地址不能包含账号或密码。');
-    if (!url) errors.push('远程服务器需要填写服务地址。');
-    server.url = url;
-    if (draft.headers && Object.keys(draft.headers).length) server.headers = { ...draft.headers };
-  }
-  return { errors, server };
-}
-
-function parseLines(text) {
-  return String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-}
-
-function parseEnvLines(text) {
-  const env = {};
-  const invalid = [];
-  for (const line of parseLines(text)) {
-    const index = line.indexOf('=');
-    if (index <= 0) { invalid.push(line); continue; }
-    const key = line.slice(0, index).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) { invalid.push(line); continue; }
-    env[key] = line.slice(index + 1);
-  }
-  return { env, invalid };
-}
-
-function parseHeaderLines(text) {
-  const headers = {};
-  const invalid = [];
-  for (const line of parseLines(text)) {
-    const index = line.indexOf(':');
-    if (index <= 0) { invalid.push(line); continue; }
-    const key = line.slice(0, index).trim();
-    if (!/^[A-Za-z0-9-]+$/.test(key)) { invalid.push(line); continue; }
-    headers[key] = line.slice(index + 1).trim();
-  }
-  return { headers, invalid };
-}
-
-
 function configInfo(data) {
   const config = (data && data.configuration) || {};
   return CONFIG_STATE[config.state] || { tone: 'neutral', word: '未知', note: '' };
@@ -751,10 +705,19 @@ function fillOnboardForm() {
   if (!dom.onboardId) return;
   const target = savedOnboardTarget();
   if (target) {
-    dom.onboardId.value = target.id || '';
-    dom.onboardName.value = target.name || '';
-    dom.onboardBase.value = target.baseURL || '';
-    if (dom.onboardPreset && target.providerPresetId) dom.onboardPreset.value = target.providerPresetId;
+    if (!isInputActive(dom.onboardId)) dom.onboardId.value = target.id || '';
+    if (!isInputActive(dom.onboardName)) dom.onboardName.value = target.name || '';
+    if (!isInputActive(dom.onboardBase)) dom.onboardBase.value = target.baseURL || '';
+    if (dom.onboardPreset && target.providerPresetId && !isInputActive(dom.onboardPreset)) {
+      if (dom.onboardPreset.dataset?.providerFlow === 'managed') {
+        dom.onboardPreset.dataset.desiredPreset = target.providerPresetId;
+        if (typeof Event === 'function' && typeof dom.onboardPreset.dispatchEvent === 'function') {
+          dom.onboardPreset.dispatchEvent(new Event('kwp:sync-provider-flow'));
+        }
+      } else {
+        dom.onboardPreset.value = target.providerPresetId;
+      }
+    }
     if (dom.onboardKeyHint) {
       setText(dom.onboardKeyHint, target.apiKeySet
         ? '已保存的 Key 不会显示；留空表示保持现有值。'
@@ -1591,31 +1554,12 @@ function renderOnboard() {
 
   refreshOnboardSaveState({ selected });
 
-  const canApply = Boolean(connectionsChanged(data));
-  if (dom.onboardRetryApply) {
-    setHidden(dom.onboardRetryApply, !(canApply && applyAvailability(data) === 'pending'));
-    dom.onboardRetryApply.disabled = !canApply || busy;
-  }
-  const sync = syncState(data);
-  if (dom.onboardVerdict) {
-    setDot(dom.onboardVerdictDot, sync.tone);
-    setText(dom.onboardVerdictWord, sync.word);
-    setText(dom.onboardVerdictNote, sync.note);
-  }
+  renderOnboardOverview(data);
+  const stepsDone = renderOnboardSteps(data, { selected: selected.length, rows: rows.length });
   if (dom.onboardDisclosure && dom.onboardDisclosure.dataset.initialized !== 'true') {
-    dom.onboardDisclosure.open = !savedOnboardTarget() || !(data.models || []).length;
+    const allDone = Boolean(stepsDone && stepsDone.connection && stepsDone.catalogue && stepsDone.apply && stepsDone.sync);
+    dom.onboardDisclosure.open = !allDone && (!savedOnboardTarget() || !(data.models || []).length);
     dom.onboardDisclosure.dataset.initialized = 'true';
-  }
-  if (dom.handoff) {
-    const operation = data.operation;
-    const activeAction = operation && ['launch-kimi', 'restart-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
-    dom.handoff.dataset.state = (activeAction && isInFlight(operation)) || ['authorizing', 'busy', 'importing'].includes(sync.code) ? 'running' : 'idle';
-    dom.handoff.dataset.tone = sync.tone;
-  }
-  renderOnboardSteps(data, { selected: selected.length, rows: rows.length });
-  if (dom.onboardRetryApply) {
-    setHidden(dom.onboardRetryApply, !(canApply && applyAvailability(data) === 'pending'));
-    dom.onboardRetryApply.disabled = !canApply || busy;
   }
   if (dom.onboardDiscover) {
     dom.onboardDiscover.disabled = !ready || busy;
@@ -1636,6 +1580,29 @@ function renderOnboard() {
         : '自定义连接没有内置推荐目录，请填写地址和 Key 后读取模型。');
     }
   }
+}
+
+function renderOnboardOverview(data = state.data) {
+  if (!data) return;
+  const draft = state.onboard || {};
+  const busy = Boolean(draft.busy || draft.saving);
+  const canApply = Boolean(connectionsChanged(data));
+  if (dom.onboardRetryApply) {
+    setHidden(dom.onboardRetryApply, !(canApply && applyAvailability(data) === 'pending'));
+    dom.onboardRetryApply.disabled = !canApply || busy;
+  }
+  const sync = syncState(data);
+  if (dom.onboardVerdict) {
+    setDot(dom.onboardVerdictDot, sync.tone);
+    setText(dom.onboardVerdictWord, sync.word);
+    setText(dom.onboardVerdictNote, sync.note);
+  }
+  if (dom.handoff) {
+    const operation = data.operation;
+    const activeAction = operation && ['launch-kimi', 'restart-kimi', 'apply-connections', 'connect-kimi', 'prepare-native'].includes(operation.action);
+    dom.handoff.dataset.state = (activeAction && isInFlight(operation)) || ['authorizing', 'busy', 'importing'].includes(sync.code) ? 'running' : 'idle';
+    dom.handoff.dataset.tone = sync.tone;
+  }
   renderLaunch(data);
 }
 
@@ -1647,7 +1614,8 @@ function renderLaunch(data) {
   const sync = syncState(data);
   const alreadyRunning = data?.kimiProcess?.running === true;
   const integration = data?.integration;
-  const needsRestart = integration?.desktop?.managed === false || ['manual-exit', 'restart'].includes(sync.code);
+  const isDirect = data?.integrationMode === 'direct';
+  const needsRestart = (!isDirect && integration?.desktop?.managed === false) || ['manual-exit', 'restart'].includes(sync.code);
   const action = !alreadyRunning ? 'launch-kimi' : needsRestart ? 'restart-kimi' : 'open-work';
   dom.onboardLaunch.dataset.action = action;
   dom.onboardLaunch.dataset.profileMode = '';
@@ -1680,7 +1648,6 @@ function recoveryCopy(sync) {
 /* 四步进度只表达“已经真的发生了什么”，不根据按钮是否被点过来推进：
    连接已保存、目录已读回、应用已排队、原生目录已核对。 */
 function renderOnboardSteps(data, { selected, rows }) {
-  if (!dom.onboardSteps) return;
   const saved = savedOnboardTarget();
   const applied = !connectionsChanged(data);
   const sync = syncState(data);
@@ -1688,14 +1655,16 @@ function renderOnboardSteps(data, { selected, rows }) {
     connection: Boolean(saved),
     catalogue: mountedSavedModels(data, saved) || (rows > 0 && selected > 0),
     apply: Boolean(saved) && applied,
-    sync: sync.code === 'synced',
+    sync: sync.code === 'synced' || (data?.integrationMode === 'direct' && sync.code === 'ready'),
   };
+  if (!dom.onboardSteps) return done;
   const items = dom.onboardSteps.querySelectorAll ? dom.onboardSteps.querySelectorAll('[data-step]') : [];
   for (const item of items) {
     const step = item.dataset ? item.dataset.step : null;
     if (!step) continue;
     item.dataset.done = String(done[step] === true);
   }
+  return done;
 }
 
 function mountedSavedModels(data, connection) {
@@ -1705,12 +1674,12 @@ function mountedSavedModels(data, connection) {
 }
 
 function openOnboardWizard() {
-  setView('models');
-  setSubtab('models', 'connections');
   if (state.editor && editorDirty()) {
     showToast('请先保存或取消正在编辑的模型，再打开添加向导。', 'error');
     return;
   }
+  setView('models');
+  setSubtab('models', 'connections');
   closeEditor(true);
   if (dom.onboardDisclosure) {
     dom.onboardDisclosure.open = true;
@@ -2038,8 +2007,10 @@ function providerPresetOptions() {
 function fillOnboardPresets() {
   if (!dom.onboardPreset) return;
   const presets = providerPresets();
-  const current = dom.onboardPreset.value || '';
-  syncSelectOptions(dom.onboardPreset, providerPresetOptions(), current);
+  if (dom.onboardPreset.dataset?.providerFlow !== 'managed') {
+    const current = dom.onboardPreset.value || '';
+    syncSelectOptions(dom.onboardPreset, providerPresetOptions(), current);
+  }
   if (dom.onboardPresetHint) {
     setText(dom.onboardPresetHint, presets.length
       ? '共 ' + fmtCount(presets.length) + ' 个供应商预设；选择后填入官方地址与已知协议。'
@@ -2244,10 +2215,12 @@ async function applyConnections() {
       adoptState({ ...state.data, operation: op });
       renderApply(state.data);
     }
-    /* 这一步会逐条弹出 macOS「登录钥匙串」授权框，提前说明才不会让人以为卡住。 */
+    const isWindows = typeof document !== 'undefined' && document.documentElement?.dataset?.platform === 'windows';
     showToast(credentialAuthPending(data)
-      ? '正在向系统申请读取已保存的 Key：请在 macOS「登录钥匙串」窗口选择「始终允许」；窗口会为每条连接各弹一次。'
-      : '应用请求已提交；若系统要求授权读取已保存的 Key，请在弹窗中选择「始终允许」。', 'ok');
+      ? (isWindows
+        ? '正在向系统申请读取待迁移的旧版连接 Key，请按系统提示完成授权。'
+        : '正在向系统申请读取待迁移的旧版连接 Key：如弹出 macOS「登录钥匙串」窗口，请选择「始终允许」以完成一次迁移。')
+      : '应用请求已提交，后台服务正在按已保存连接安全应用。', 'ok');
     await loadState({ silent: true });
     return op;
   } catch (error) {
@@ -2307,7 +2280,6 @@ function renderConnection() {
   setText(dom.restartFile, (config.file || '—') + ' · 修订 ' + shortRev(data.revision));
 
   renderConnections();
-  renderServices(data);
 }
 
 /* ---------- render: named connections ---------- */
@@ -2317,7 +2289,6 @@ function renderConnections() {
   if (!data) return;
   const available = connectionsAvailable(data);
   setHidden(dom.connsUnavailable, available);
-  setHidden(dom.legacyPanel, available);
   if (!available) {
     setHidden(dom.connsList, true);
     setHidden(dom.connsEmpty, true);
@@ -2498,7 +2469,7 @@ function upstreamReasonText(code) {
   return UPSTREAM_REASON[code] || DIAG_REASON[code] || code;
 }
 
-function renderConnectionEditor() {
+function renderConnectionEditor({ force = false } = {}) {
   const editing = state.conns.editing;
   if (!editing) {
     setHidden(dom.connEditor, true);
@@ -2507,17 +2478,27 @@ function renderConnectionEditor() {
   setHidden(dom.connEditor, false);
   setText(dom.connEditorTitle, editing.originalId ? '编辑连接' : '添加连接');
   const draft = editing.draft;
-  if (dom.ceName) dom.ceName.value = draft.name || '';
+  if (dom.ceName && (force || !isInputActive(dom.ceName)) && dom.ceName.value !== (draft.name || '')) dom.ceName.value = draft.name || '';
   if (dom.ceId) {
-    dom.ceId.value = draft.id || '';
+    if ((force || !isInputActive(dom.ceId)) && dom.ceId.value !== (draft.id || '')) dom.ceId.value = draft.id || '';
     dom.ceId.disabled = Boolean(editing.originalId);
   }
-  if (dom.ceBase) dom.ceBase.value = draft.baseURL || '';
-  if (dom.ceKeyEnv) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
+  if (dom.ceBase && (force || !isInputActive(dom.ceBase)) && dom.ceBase.value !== (draft.baseURL || '')) dom.ceBase.value = draft.baseURL || '';
+  if (dom.ceKeyEnv && (force || !isInputActive(dom.ceKeyEnv)) && dom.ceKeyEnv.value !== (draft.apiKeyEnv || '')) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
   if (dom.ceChat) dom.ceChat.checked = (draft.protocols || []).includes('chat');
   if (dom.ceResponses) dom.ceResponses.checked = (draft.protocols || []).includes('responses');
   if (dom.cePreset) {
-    syncSelectOptions(dom.cePreset, providerPresetOptions(), draft.providerPresetId || '');
+    const desired = draft.providerPresetId || '';
+    if (dom.cePreset.dataset?.providerFlow === 'managed') {
+      if (force || (!isInputActive(dom.cePreset) && dom.cePreset.value !== desired)) {
+        dom.cePreset.dataset.desiredPreset = desired;
+        if (typeof Event === 'function' && typeof dom.cePreset.dispatchEvent === 'function') {
+          dom.cePreset.dispatchEvent(new Event('kwp:sync-provider-flow'));
+        }
+      }
+    } else {
+      syncSelectOptions(dom.cePreset, providerPresetOptions(), desired);
+    }
   }
   if (dom.cePresetHint) {
     const preset = providerPreset(draft.providerPresetId);
@@ -2532,7 +2513,7 @@ function renderConnectionEditor() {
       : '新连接必须填写 API Key；只写入本机私有凭据文件，不回显。');
   }
   if (dom.ceKey) {
-    if (!editing.keyEdited) dom.ceKey.value = '';
+    if (force || (!editing.keyEdited && !isInputActive(dom.ceKey))) dom.ceKey.value = '';
     dom.ceKey.placeholder = editing.originalId ? '留空保持现有 Key' : 'sk-…';
   }
   if (dom.connEditorTest) {
@@ -2746,6 +2727,7 @@ export {
   renderConnectionEditor,
   renderConnections,
   renderOnboard,
+  renderOnboardOverview,
   renderServices,
   saveConnections,
   saveOnboard,

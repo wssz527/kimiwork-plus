@@ -1039,3 +1039,58 @@ test('account cards show calm token health hints only for expired or expiring to
     assert.equal(overviewHints.length, 0);
   } finally { env.restore(); }
 });
+
+test('accounts bar and management short-circuit unchanged DOM and runAccount resets busy when operation id is absent', async () => {
+  const env = makePlus({
+    data: {
+      accounts: {
+        state: 'ready',
+        currentId: 'acct-a',
+        accounts: [
+          { id: 'acct-a', name: '主账号' },
+          { id: 'acct-b', name: '备账号' },
+        ],
+      },
+    },
+    routes: {
+      '/api/actions': () => ({ operation: { state: 'done' } }),
+      '/api/state': () => env.getState(),
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const selectFirst = env.byId('plus-account-select');
+    const bodyFirst = env.byId('plus-accounts-body').children[0];
+    assert.ok(selectFirst);
+    assert.ok(bodyFirst);
+
+    env.panel.render(env.getState());
+    assert.strictEqual(env.byId('plus-account-select'), selectFirst, 'unchanged poll must not replace active select');
+    assert.strictEqual(env.byId('plus-accounts-body').children[0], bodyFirst, 'unchanged poll must not rebuild accounts management DOM');
+
+    // Triggering an account switch whose response omits operation.id must reset busy in finally.
+    selectFirst.value = 'acct-b';
+    await selectFirst.listeners.change[0]();
+    assert.equal(env.byId('plus-account-select').disabled, false, 'busy must reset after response without operation.id');
+  } finally { env.restore(); }
+});
+
+test('unavailable accounts book maps raw reason codes to Chinese copy instead of exposing English codes', () => {
+  const env = makePlus({
+    data: {
+      accounts: {
+        state: 'unavailable',
+        reason: 'account_switch_unavailable',
+        accounts: [],
+      },
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const barText = textOf(env.byId('plus-account-slot'));
+    const bodyText = textOf(env.byId('plus-accounts-body'));
+    assert.doesNotMatch(barText, /account_switch_unavailable/);
+    assert.doesNotMatch(bodyText, /account_switch_unavailable/);
+    assert.match(bodyText, /这台机器上没有可用的账号切换接口/);
+  } finally { env.restore(); }
+});

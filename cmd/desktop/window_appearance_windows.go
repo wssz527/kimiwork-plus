@@ -69,7 +69,7 @@ func applyPlatformWindowIcon(hwnd uintptr) {
 }
 
 func platformWindowOptions(opts application.WebviewWindowOptions) application.WebviewWindowOptions {
-	opts.BackgroundColour = themeLightBG
+	opts.BackgroundColour = initialWindowBackground(w32.IsCurrentlyDarkMode())
 	opts.Windows = application.WindowsWindow{
 		Theme: application.SystemDefault,
 	}
@@ -115,12 +115,15 @@ func applyPlatformWindowTheme(window *application.WebviewWindow, mode string) {
 	}
 }
 
-func attachPlatformWindowHooks(app *application.App, window *application.WebviewWindow, ctrl *windowAppearanceController) {
+func attachPlatformWindowHooks(app *application.App, window *application.WebviewWindow, ctrl *windowAppearanceController, onNavigationComplete func()) {
 	app.Event.OnApplicationEvent(events.Windows.SystemThemeChanged, func(*application.ApplicationEvent) {
 		ctrl.onSystemThemeChanged()
 	})
 	window.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) {
 		ctrl.apply()
 		window.ExecJS(`document.documentElement.dataset.platform = "windows"; if (window.__kwpSyncTheme) window.__kwpSyncTheme();`)
+		if onNavigationComplete != nil {
+			onNavigationComplete()
+		}
 	})
 }

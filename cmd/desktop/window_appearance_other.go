@@ -28,4 +28,4 @@ func applyPlatformWindowTheme(window *application.WebviewWindow, mode string) {
 	}
 }
 
-func attachPlatformWindowHooks(_ *application.App, _ *application.WebviewWindow, _ *windowAppearanceController) {}
+func attachPlatformWindowHooks(_ *application.App, _ *application.WebviewWindow, _ *windowAppearanceController, _ func()) {}

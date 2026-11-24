@@ -14,6 +14,7 @@ const API = {
   tools: '/api/tools',
   integrationMode: '/api/integration-mode',
   diagnosticsExport: '/api/diagnostics/export',
+  openUrl: '/api/open-url',
 };
 
 const POLL_MS = 2000;
@@ -785,7 +786,7 @@ const state = {
   editor: null,
   deleteId: null,
   conns: { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] },
-  services: { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '' },
+  services: { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '', serverErrors: [] },
   connChecks: {},
   picker: { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null },
@@ -813,6 +814,10 @@ const state = {
   lastSync: null,
   diagnosticsExporting: false,
   diagnosticsExportError: '',
+  diagnosticsExportPath: '',
+  pendingService: null,
+  composing: false,
+  disconnectConfirm: null,
   timer: null,
   stateReadSeq: 0,
   stateReadEpoch: 0,
@@ -1028,8 +1033,17 @@ function initTheme() {
 
 /* ---------- format ---------- */
 
+function isInputActive(el) {
+  if (!el) return false;
+  if (state.composing) return true;
+  return typeof document !== 'undefined' && document.activeElement === el;
+}
+
 function setText(el, value) {
-  if (el && el.textContent !== value) el.textContent = value;
+  if (!el) return;
+  const label = typeof el.querySelector === 'function' ? el.querySelector('.btn__label') : null;
+  const target = label || el;
+  if (target.textContent !== value) target.textContent = value;
 }
 
 function setDot(el, tone) {
@@ -1074,7 +1088,8 @@ function fmtK(n) {
 /* token 预算按真实数值展示；不四舍五入到「看起来像整 K」的数，
    避免把一个手填的 262000 显示成 262K 而掩盖实际值。 */
 function fmtTokens(n) {
-  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return '未知';
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '未知';
+  if (n === 0) return '0';
   return n.toLocaleString('zh-CN') + ' tokens';
 }
 
@@ -1300,6 +1315,7 @@ export {
   iconUse,
   initTheme,
   initWindowChrome,
+  isInputActive,
   modelLabel,
   mountUsageRequests,
   observeMasthead,

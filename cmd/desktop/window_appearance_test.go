@@ -16,3 +16,12 @@ func TestNormalizeThemeMode(t *testing.T) {
 		}
 	}
 }
+
+func TestInitialWindowBackground(t *testing.T) {
+	if got := initialWindowBackground(false); got != themeLightBG {
+		t.Fatalf("initialWindowBackground(false) = %+v, want %+v", got, themeLightBG)
+	}
+	if got := initialWindowBackground(true); got != themeDarkBG {
+		t.Fatalf("initialWindowBackground(true) = %+v, want %+v", got, themeDarkBG)
+	}
+}

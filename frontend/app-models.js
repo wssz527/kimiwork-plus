@@ -701,7 +701,9 @@ function renderPicker() {
       + '输入关键词由服务端按别名与片段检索，点选后才会写入模型。'
     : '未选择命名连接：候选来自所选供应商预设的目录。选择一个连接可同时看到它上次读取到的模型。');
 
-  if (dom.pickerQ) dom.pickerQ.value = picker.query;
+  if (dom.pickerQ && !state.composing && (typeof document === 'undefined' || document.activeElement !== dom.pickerQ) && dom.pickerQ.value !== picker.query) {
+    dom.pickerQ.value = picker.query;
+  }
   if (dom.pickerScan) {
     /* The explicit read only makes sense for a saved connection; the catalog
        itself never depends on it. */
@@ -970,7 +972,7 @@ async function searchCandidates(query, { connectionId = pickerScope(), keepReaso
     picker.models = models;
     picker.state = 'searched';
     picker.hint = models.length ? null : 'no-match';
-    picker.reason = null;
+    if (!keepReason) picker.reason = null;
     return res;
   } catch (error) {
     if (seq !== state.picker.seq) return null;
@@ -1058,12 +1060,15 @@ async function runDiscovery(connectionId) {
   const seq = ++state.picker.seq;
   state.picker.busy = true;
   state.picker.reason = null;
+  let failedReason = null;
   renderPicker();
   try {
     const res = await request(API.discovery, { method: 'POST', body: { revision: data.revision, connectionId } });
     const discovery = res && res.discovery;
     if (seq !== state.picker.seq) return null;
     if (!discovery || !Array.isArray(discovery.models)) {
+      failedReason = 'discovery_invalid_catalog';
+      state.picker.reason = failedReason;
       showToast('上游目录读取结果格式不被接受。', 'error');
       return null;
     }
@@ -1072,7 +1077,8 @@ async function runDiscovery(connectionId) {
     if (discovery.state !== 'passed') {
       /* A failed read is reported, not turned into an empty catalog: whatever the
          preset-backed search already showed stays on screen. */
-      state.picker.reason = discovery.reason || null;
+      failedReason = discovery.reason || 'discovery_unavailable';
+      state.picker.reason = failedReason;
       showToast(discoveryReasonText(discovery.reason) || '读取上游目录失败。', 'error');
       return discovery;
     }
@@ -1080,7 +1086,8 @@ async function runDiscovery(connectionId) {
     return discovery;
   } catch (error) {
     if (seq !== state.picker.seq) return null;
-    state.picker.reason = error.code || null;
+    failedReason = error.code || 'discovery_unavailable';
+    state.picker.reason = failedReason;
     showToast(discoveryReasonText(error.code) || error.message || '读取上游目录失败。', 'error');
     return null;
   } finally {
@@ -1090,7 +1097,7 @@ async function runDiscovery(connectionId) {
     }
     /* Either way the catalog now comes from the unified search, which merges the
        fresh discovery with the preset and keeps aliases and provenance. */
-    if (state.picker.open) await searchCandidates(state.picker.query);
+    if (state.picker.open) await searchCandidates(state.picker.query, { keepReason: Boolean(failedReason) });
   }
 }
 
@@ -1112,6 +1119,7 @@ function openPicker() {
 }
 
 function closePicker() {
+  state.composing = false;
   state.picker.open = false;
   renderPicker();
 }
@@ -1207,6 +1215,7 @@ function closeEditor(force) {
     renderEditor();
     return;
   }
+  state.composing = false;
   state.editor = null;
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
@@ -1760,7 +1769,7 @@ function renderEditorRouting(editor) {
   if (dom.mConnectionHint) {
     setText(dom.mConnectionHint, rows.length
       ? '连接决定请求发往哪个上游；上游模型 ID 决定上游看到的 model 值。'
-      : '还没有命名连接。先在「连接与工具」添加连接，或使用旧版单上游设置。');
+      : '还没有命名连接。先在「服务商连接」页签添加连接，或使用旧版单上游设置。');
   }
 }
 
