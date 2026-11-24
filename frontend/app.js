@@ -1,8 +1,8 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderOnboardOverview, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, routeIdPreservingProtocol, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
-import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
+import { chooseIntegrationMode, chooseKimiK3Compatibility, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { appendPoolModel, discardDraft, draftFromSaved, mountConversationRebind, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 
 let renderGrowth = () => {};
 let usagePanel = { show() {}, reload: async () => {}, reset() {} };
@@ -112,6 +112,7 @@ function adoptState(next, { initial = false, external = false } = {}) {
     state.pendingService = null;
   }
   state.data = next;
+  state.conversationRebindStateChanged?.(next);
 
   /* 子代理草稿同一规则：默认继承只用于展示，绝不自动提交；轮询不覆盖
      正在编辑的草稿，非脏时才用已保存值回填。 */
@@ -607,6 +608,7 @@ function refreshServiceStatus() {
 }
 
 function bindEvents() {
+  state.conversationRebindStateChanged = mountConversationRebind();
   Object.keys(VIEW_COPY).forEach(view => {
     const button = $('nav-' + view);
     if (button) button.addEventListener('click', () => setView(view));
@@ -829,6 +831,15 @@ function bindEvents() {
     void chooseIntegrationMode(target.value, {
       onSaved: (next) => {
         /* 成功回执就是最新状态：直接采纳，避免轮询把模式与提示短暂改回旧值。 */
+        adoptState(next, { external: true });
+        renderAll();
+      },
+    });
+  });
+
+  if (dom.kimiK3Enabled) dom.kimiK3Enabled.addEventListener('change', () => {
+    void chooseKimiK3Compatibility(dom.kimiK3Enabled.checked, {
+      onSaved: (next) => {
         adoptState(next, { external: true });
         renderAll();
       },

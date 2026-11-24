@@ -370,6 +370,11 @@
     </label>
   </fieldset>
   <p class="note" id="integration-mode-state" role="status" hidden></p>
+  <div class="field field--group" id="kimi-k3-setting" hidden>
+    <label class="check"><input type="checkbox" id="kimi-k3-enabled" aria-describedby="kimi-k3-note"><span>K3 原会话切换</span></label>
+    <p class="field__hint" id="kimi-k3-note">适用于本机网关的 Chat 模型。更改后请同步到 Work，再从 K3 会话的模型菜单切换。</p>
+    <p class="note" id="kimi-k3-status" role="status" hidden></p>
+  </div>
   <div class="direct-notice" id="direct-mode-notice" hidden>
     <p class="direct-notice__head">直连模式说明</p>
     <p class="direct-notice__line" id="direct-mode-support"></p>
@@ -385,6 +390,32 @@
   <div class="inline-confirm" id="native-disconnect-confirm" role="region" aria-label="确认移除模型接管" hidden></div>
   <p class="hint">默认沿用官方登录、对话、技能和已导入模型。诊断隔离模式才把模型、工具与任务临时放入独立目录，并在退出后恢复原数据位置。</p>
 </section>
+<details class="growth-disclosure" id="conversation-rebind">
+  <summary>旧会话改绑模型</summary>
+  <div class="growth-disclosure__body">
+    <p class="field__hint">选择旧会话和已同步的第三方模型，改绑后在原会话继续使用。</p>
+    <p class="note" id="rebind-status" role="status" aria-live="polite"></p>
+    <fieldset class="field field--group" id="rebind-form" hidden disabled>
+      <legend class="sr-only">选择要改绑的会话与目标模型</legend>
+      <label class="check"><input type="checkbox" id="rebind-all"><span>全选列表中的会话</span></label>
+      <ul class="rebind-list" id="rebind-list" aria-label="最近的 Work 会话"></ul>
+      <div class="field-row">
+        <label class="field" for="rebind-model"><span class="field__label">目标第三方模型</span><select id="rebind-model"></select></label>
+        <label class="field" for="rebind-effort"><span class="field__label">思考档位</span><select id="rebind-effort"></select></label>
+      </div>
+    </fieldset>
+    <p class="note note--warn" id="rebind-warning" hidden>所选会话含有 Kimi 官方模型的历史。直连 Anthropic 时，服务商可能因旧思考块拒绝继续对话。</p>
+    <div class="action-line action-line--start"><button class="btn btn--outline btn--sm" id="rebind-refresh" type="button">刷新会话</button><button class="btn btn--primary" id="rebind-review" type="button" hidden disabled>改绑所选会话</button><button class="btn btn--outline btn--sm" id="rebind-migrate" type="button" hidden disabled>迁移旧别名会话</button></div>
+    <div class="inline-confirm" id="rebind-confirm" role="region" aria-label="确认改绑会话" hidden>
+      <p class="inline-confirm__text" id="rebind-confirm-text"></p>
+      <div class="inline-confirm__actions">
+        <button class="btn btn--primary btn--sm" id="rebind-submit" type="button">确认改绑</button>
+        <button class="btn btn--quiet btn--sm" id="rebind-cancel" type="button">取消</button>
+      </div>
+    </div>
+    <p class="note" id="rebind-result" role="status" aria-live="polite" hidden></p>
+  </div>
+</details>
         <div class="takeover__foot"><button class="btn btn--quiet" id="ob-advanced-toggle" type="button" aria-expanded="false" aria-controls="ob-advanced">高级恢复选项</button></div>
         <div id="ob-advanced" class="advanced-body" hidden><div class="actions-grid"><button class="btn btn--outline" data-action="connect-kimi" type="button">重新准备本地接入</button><button class="btn btn--outline" data-action="prepare-native" type="button">准备原生入口</button><button class="btn btn--quiet" data-action="remove-dns" type="button">移除单域名 DNS</button></div></div>
 <section class="band" id="update-panel">

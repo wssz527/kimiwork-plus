@@ -53,7 +53,8 @@ type ControllerSettings struct {
 	LoginDataDir string
 	// KimiHome optionally names the Work data directory. It is honoured only
 	// when it resolves inside UserDataDir.
-	KimiHome string
+	KimiHome             string
+	ConversationNodePath string
 	// GatewayURL and GatewayToken are what Kimi's import is pointed at. The
 	// token is the gateway's own local token.
 	GatewayURL   string

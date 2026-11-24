@@ -301,7 +301,7 @@ func (n *NativeIntegration) Reconcile(options ReconcileOptions) IntegrationResul
 		if entry.protocol == "chat" {
 			wanted = "kimi"
 		}
-		row, found := findRow(rows, entry.id, wanted)
+		row, found := findRow(rows, entry.modelID, wanted)
 		if found {
 			matched = append(matched, matchedRow{catalog: entry, row: row})
 		} else {
@@ -455,6 +455,7 @@ type matchedRow struct {
 
 type catalogEntry struct {
 	id       string
+	modelID  string
 	protocol string
 }
 
@@ -894,6 +895,10 @@ func kthProfiles(store map[string]any) []profileCandidate {
 }
 
 func legacyProfiles(store map[string]any) []profileCandidate {
+	return legacyProfilesOfKind(store, "kth")
+}
+
+func legacyProfilesOfKind(store map[string]any, wantedKind string) []profileCandidate {
 	profiles, ok := store["profiles"].(map[string]any)
 	if !ok {
 		return nil
@@ -917,9 +922,11 @@ func legacyProfiles(store map[string]any) []profileCandidate {
 			kind, _ := profile["kind"].(string)
 			id, _ := profile["id"].(string)
 			_, hasBaseURL := profile["baseUrl"].(string)
-			if kind == "kth" || id == "byok-kth" || (slot == "byok-kth" && hasBaseURL) {
+			if kind == wantedKind || (wantedKind == "kth" && (id == "byok-kth" || (slot == "byok-kth" && hasBaseURL))) {
 				found = append(found, profileCandidate{key: key, profile: profile})
-				break
+				if wantedKind == "kth" {
+					break
+				}
 			}
 		}
 	}
@@ -1129,7 +1136,7 @@ func normalizeCatalog(models []Model) ([]catalogEntry, bool) {
 			return nil, false
 		}
 		seen[model.ID] = true
-		out = append(out, catalogEntry{id: model.ID, protocol: protocol})
+		out = append(out, catalogEntry{id: model.ID, modelID: firstNonEmpty(model.CatalogID, model.ID), protocol: protocol})
 	}
 	return out, true
 }

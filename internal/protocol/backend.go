@@ -177,6 +177,7 @@ func (b *HTTPBackend) Request(ctx context.Context, route string, payload []byte,
 	if route == ProtocolResponses {
 		path = "/responses"
 	}
+	payload = cleanOpenAIHistory(payload, route)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err

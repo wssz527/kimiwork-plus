@@ -24,6 +24,7 @@ import (
 // credential references.
 
 type nativeProviderV3 struct {
+	sourceID   string
 	protocol   string
 	baseURL    string
 	credential string
@@ -252,7 +253,7 @@ func providerFacts(active, pending map[string]any) map[string]nativeProviderV3 {
 			if _, seen := facts[id]; seen {
 				continue
 			}
-			facts[id] = nativeProviderV3{protocol: stringField(provider, "protocol"),
+			facts[id] = nativeProviderV3{sourceID: stringField(provider, "sourceId"), protocol: stringField(provider, "protocol"),
 				baseURL: stringField(provider, "baseUrl"), credential: stringField(provider, "credentialRef")}
 		}
 	}
@@ -361,7 +362,7 @@ func (n *NativeIntegration) verifyAccount(account profileCandidate, target strin
 		if entry.protocol == "chat" {
 			wanted = "kimi"
 		}
-		row, found := findRow(rows, entry.id, wanted)
+		row, found := findRow(rows, entry.modelID, wanted)
 		if found {
 			matched = append(matched, matchedRow{catalog: entry, row: row})
 		} else {

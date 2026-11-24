@@ -133,6 +133,10 @@ func fail(w http.ResponseWriter, e error) {
 	switch code {
 	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
 		status = 409
+	case "conversation_kimi_restart_required", "conversation_database_busy":
+		status = 409
+	case "conversation_not_found":
+		status = 404
 	case "direct_preview_refused":
 		status = 503
 	case "direct_catalog_too_large":
@@ -180,6 +184,34 @@ func message(code string) string {
 		return "加密凭据存储不可用，密钥未保存。"
 	case "account_work_busy":
 		return "Work 仍有任务运行，请等待任务结束后再切换账号。"
+	case "invalid_conversation_rebind":
+		return "请选择至少一个会话和一个目标模型。"
+	case "invalid_conversation_target_model":
+		return "目标模型当前不可用，请刷新列表并重新选择。"
+	case "invalid_conversation_migration_target":
+		return "找不到此模型的旧别名，请先同步模型再刷新会话列表。"
+	case "invalid_conversation_thinking_level":
+		return "目标模型不支持所选思考档位，请重新选择。"
+	case "conversation_rebind_cancelled":
+		return "改绑已取消，未写入会话。请刷新后重试。"
+	case "conversation_kimi_restart_required":
+		return "Kimi 正在运行。请刷新状态并确认重启后再改绑。"
+	case "conversation_kimi_state_unknown":
+		return "无法确认 Kimi 的运行状态，请刷新后重试。"
+	case "conversation_profile_unsupported":
+		return "诊断隔离模式不可改绑会话，请使用默认方式打开 Kimi。"
+	case "conversation_kimi_stop_failed":
+		return "未能确认 Kimi 已安全退出，请手动退出 Kimi 后重试。"
+	case "conversation_not_found":
+		return "部分所选会话已不可用，请刷新列表。"
+	case "conversation_database_busy":
+		return "Kimi 会话库正在使用，请退出 Kimi 后重试。"
+	case "conversation_database_missing", "conversation_database_unavailable", "conversation_database_schema_unsupported", "conversation_node_unavailable":
+		return "当前无法访问 Kimi 会话库，请刷新状态后重试。"
+	case "conversation_bindings_invalid", "conversation_preferences_invalid":
+		return "会话绑定数据格式异常，改绑已中止。"
+	case "conversation_rollback_failed":
+		return "改绑失败，部分会话绑定未能恢复。请检查会话状态后再操作。"
 	case "account_work_state_unavailable":
 		return "无法确认 Work 是否空闲。请打开官方 Work 并刷新状态后重试。"
 	case "account_login_pending":
@@ -234,6 +266,10 @@ func message(code string) string {
 		return "更新设置参数无效，请确认渠道为稳定版或预览版。"
 	case "invalid_integration_mode":
 		return "接入模式无效，请选择网关或直连。"
+	case "invalid_kimi_k3_compatibility":
+		return "请在本机网关模式下调整 K3 原会话切换设置。"
+	case "kimi_k3_model_id_conflict":
+		return "有模型 ID 与 K3 兼容别名冲突，请修改对应模型 ID。"
 	case "direct_no_eligible_models":
 		return "当前没有可直连导入的模型，请确认连接地址、上下文长度和工具调用支持。"
 	case "direct_duplicate_endpoint":
@@ -319,8 +355,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(w, errors.New("invalid_content_type"))
 			return
 		}
-		b, e := io.ReadAll(io.LimitReader(r.Body, 32769))
-		if e != nil || len(b) > 32768 || json.Unmarshal(b, &input) != nil || input == nil {
+		bodyLimit := 32 << 10
+		if r.URL.Path == "/api/work/conversations/rebind" {
+			bodyLimit = 2 << 20
+		}
+		b, e := io.ReadAll(io.LimitReader(r.Body, int64(bodyLimit)+1))
+		if e != nil || len(b) > bodyLimit || json.Unmarshal(b, &input) != nil || input == nil {
 			fail(w, errors.New("invalid_json"))
 			return
 		}
@@ -493,9 +533,9 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return nil, err
 			}
 			return core.Document{"ok": true, "updates": st}, nil
-		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode":
+		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode", "/api/kimi-k3-compatibility":
 			return s.configure(path, in)
-		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie":
+		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie", "/api/work/conversations/rebind":
 			if s.Extra != nil {
 				return s.Extra(ctx, path, in)
 			}
@@ -543,7 +583,7 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 			return core.Document{"operation": core.Document{"action": "stop-daemon", "state": "stopping"}}, nil
 		}
 	}
-	if method == "GET" && (path == "/api/quota/code" || path == "/api/quota/magpie" || path == "/api/accounts" || path == "/api/work/swarm") && s.Extra != nil {
+	if method == "GET" && (path == "/api/quota/code" || path == "/api/quota/magpie" || path == "/api/accounts" || path == "/api/work/swarm" || path == "/api/work/conversations") && s.Extra != nil {
 		return s.Extra(ctx, path, nil)
 	}
 	expected := map[string]string{"/api/usage/query": "POST", "/api/usage/export": "GET", "/api/usage/clear": "POST", "/api/quota": "GET", "/api/quota/refresh": "POST", "/api/quota/sources": "POST", "/api/budget": "GET"}
@@ -628,6 +668,15 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				return core.ErrConflict
 			}
 			return core.SetIntegrationMode(d, core.String(in["mode"]))
+		case "/api/kimi-k3-compatibility":
+			if core.String(in["revision"]) == "" {
+				return core.ErrConflict
+			}
+			enabled, ok := in["enabled"].(bool)
+			if !ok || core.IntegrationMode(d) != core.IntegrationModeGateway {
+				return errors.New("invalid_kimi_k3_compatibility")
+			}
+			d[core.KimiK3CompatibilityKey] = enabled
 		}
 		return nil
 	})
@@ -773,6 +822,7 @@ func (s *Service) State() (core.Document, error) {
 		"tools": core.Document{"available": false, "reason": "native_preview_unavailable", "servers": []any{}}, "search": core.Document{"status": "unavailable"},
 		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{"operationLog": core.Document{"available": false, "retained": 0, "limit": diagnosticsEventLimit, "lastAt": int64(0), "reason": "diagnostics_unconfigured"}}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
 		"integrationMode": core.IntegrationMode(d), "directMode": directModeBase(d),
+		"kimiK3Compatibility": core.KimiK3Compatibility(d),
 	}
 	for k, v := range gatewayState {
 		state[k] = v

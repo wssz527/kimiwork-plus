@@ -218,12 +218,21 @@ func (m *messageBuilder) flushResults() {
 	m.append("user", pending)
 }
 
-func isThinkingBlock(part any) bool {
+func isSignedThinkingBlock(part any) bool {
 	object, ok := part.(map[string]any)
 	if !ok {
 		return false
 	}
-	return object["type"] == "thinking" || object["type"] == "redacted_thinking"
+	switch object["type"] {
+	case "thinking":
+		signature, _ := object["signature"].(string)
+		return strings.TrimSpace(signature) != ""
+	case "redacted_thinking":
+		data, _ := object["data"].(string)
+		return strings.TrimSpace(data) != ""
+	default:
+		return false
+	}
 }
 
 // fromChat builds one ordered Messages list from a Chat payload. Order is what
@@ -249,35 +258,9 @@ func fromChat(payload map[string]any) (*messageBuilder, error) {
 				"tool_use_id": id, "content": textOfBlocks(chatParts(message["content"]))})
 		case "assistant":
 			builder.flushResults()
-			raw, _ := message["content"].([]any)
-			calls, _ := message["tool_calls"].([]any)
-			if len(calls) > 0 {
-				for _, part := range raw {
-					if isThinkingBlock(part) {
-						return nil, ErrThinkingToolRoundtrip
-					}
-				}
-			}
-			blocks := chatParts(message["content"])
-			for _, call := range calls {
-				entry, ok := call.(map[string]any)
-				if !ok {
-					continue
-				}
-				fn, ok := entry["function"].(map[string]any)
-				if !ok {
-					continue
-				}
-				name, _ := fn["name"].(string)
-				if name == "" {
-					continue
-				}
-				id, _ := entry["id"].(string)
-				if id == "" {
-					id = name
-				}
-				blocks = append(blocks, map[string]any{"type": "tool_use", "id": id, "name": name,
-					"input": toolInput(fn["arguments"])})
+			blocks, err := assistantBlocks(message)
+			if err != nil {
+				return nil, err
 			}
 			builder.append("assistant", blocks)
 		case "user":
@@ -287,6 +270,35 @@ func fromChat(payload map[string]any) (*messageBuilder, error) {
 	}
 	builder.flushResults()
 	return builder, nil
+}
+
+func assistantBlocks(message map[string]any) ([]map[string]any, error) {
+	calls, _ := message["tool_calls"].([]any)
+	if len(calls) > 0 && hasSignedThinking(message) {
+		return nil, ErrThinkingToolRoundtrip
+	}
+	blocks := chatParts(message["content"])
+	for _, call := range calls {
+		entry, _ := call.(map[string]any)
+		fn, _ := entry["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if name == "" {
+			continue
+		}
+		blocks = append(blocks, map[string]any{"type": "tool_use", "id": firstString(entry["id"], name),
+			"name": name, "input": toolInput(fn["arguments"])})
+	}
+	return blocks, nil
+}
+
+func hasSignedThinking(message map[string]any) bool {
+	parts, _ := message["content"].([]any)
+	for _, part := range parts {
+		if isSignedThinkingBlock(part) {
+			return true
+		}
+	}
+	return false
 }
 
 // fromResponses builds the same list from a Responses payload. Responses
@@ -303,9 +315,11 @@ func fromResponses(payload map[string]any) (*messageBuilder, error) {
 	case []any:
 		input = value
 	}
+	signedThinking := false
 	for _, row := range input {
 		switch item := row.(type) {
 		case string:
+			signedThinking = false
 			builder.flushResults()
 			if item != "" {
 				builder.append("user", []map[string]any{{"type": "text", "text": item}})
@@ -313,7 +327,15 @@ func fromResponses(payload map[string]any) (*messageBuilder, error) {
 			continue
 		case map[string]any:
 			switch item["type"] {
+			case "thinking", "redacted_thinking":
+				signedThinking = signedThinking || isSignedThinkingBlock(item)
+				continue
+			case "reasoning":
+				continue
 			case "function_call":
+				if signedThinking {
+					return nil, ErrThinkingToolRoundtrip
+				}
 				builder.flushResults()
 				id := firstString(item["call_id"], item["id"], item["name"])
 				name, _ := item["name"].(string)
@@ -321,6 +343,7 @@ func fromResponses(payload map[string]any) (*messageBuilder, error) {
 					"name": name, "input": toolInput(item["arguments"])}})
 				continue
 			case "function_call_output":
+				signedThinking = false
 				output := ""
 				switch value := item["output"].(type) {
 				case string:
@@ -344,8 +367,18 @@ func fromResponses(payload map[string]any) (*messageBuilder, error) {
 				}
 			case "assistant":
 				builder.flushResults()
-				builder.append("assistant", chatParts(item["content"]))
+				signedThinking = signedThinking || hasSignedThinking(item)
+				calls, _ := item["tool_calls"].([]any)
+				if signedThinking && len(calls) > 0 {
+					return nil, ErrThinkingToolRoundtrip
+				}
+				blocks, err := assistantBlocks(item)
+				if err != nil {
+					return nil, err
+				}
+				builder.append("assistant", blocks)
 			default:
+				signedThinking = false
 				builder.flushResults()
 				builder.append("user", chatParts(item["content"]))
 			}

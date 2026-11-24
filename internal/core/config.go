@@ -53,6 +53,22 @@ func SetIntegrationMode(d Document, mode string) error {
 	d["integrationMode"] = mode
 	return nil
 }
+
+// KimiK3CompatibilityKey is the stored opt-in that offers Chat models under a
+// Kimi-compatible id, so an existing K3 conversation can be switched to them.
+const KimiK3CompatibilityKey = "kimiK3Compatibility"
+
+// KimiK3Compatibility reads the effective opt-in. It applies only in gateway
+// mode: Direct Mode has no local catalog to rename, and a stored `true` left
+// behind by a mode change must not leak into a path that cannot honour it. An
+// absent value is off, which keeps an older document byte-identical in effect.
+func KimiK3Compatibility(d Document) bool {
+	if IntegrationMode(d) != IntegrationModeGateway {
+		return false
+	}
+	enabled, ok := d[KimiK3CompatibilityKey].(bool)
+	return ok && enabled
+}
 func Rows(v any) []any { r, _ := v.([]any); return r }
 func Object(v any) map[string]any {
 	switch m := v.(type) {
@@ -83,6 +99,11 @@ func Validate(d Document) error {
 	if raw, exists := d["integrationMode"]; exists && raw != nil {
 		if mode := String(raw); mode != IntegrationModeGateway && mode != IntegrationModeDirect {
 			return errors.New("invalid_integration_mode")
+		}
+	}
+	if raw, exists := d[KimiK3CompatibilityKey]; exists && raw != nil {
+		if _, ok := raw.(bool); !ok {
+			return errors.New("invalid_kimi_k3_compatibility")
 		}
 	}
 	if _, ok := d["connections"].([]any); !ok {
@@ -161,6 +182,31 @@ func Validate(d Document) error {
 	}
 	if err := validateBudgetDocument(d["budget"]); err != nil {
 		return err
+	}
+	if err := validateCompatibleModelIDs(models); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateCompatibleModelIDs refuses a catalog where a saved model id is
+// exactly the generated compatible id of a different Chat model. The generated
+// id is a fixed function of the logical id, so such a pair would make the Kimi
+// catalog emit one key twice and would let one model shadow the other on the
+// inference route. It is refused whether or not the opt-in is on, because
+// turning it off must not silently reinterpret a name a saved alias already
+// used.
+func validateCompatibleModelIDs(models []protocol.Model) error {
+	owner := map[string]string{}
+	for _, model := range models {
+		if model.Protocol == protocol.ProtocolChat {
+			owner[protocol.KimiCompatibleModelID(model.ID)] = model.ID
+		}
+	}
+	for _, model := range models {
+		if generatedBy, taken := owner[model.ID]; taken && generatedBy != model.ID {
+			return errors.New("kimi_k3_model_id_conflict")
+		}
 	}
 	return nil
 }

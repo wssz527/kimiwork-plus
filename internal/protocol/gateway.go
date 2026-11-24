@@ -221,6 +221,12 @@ type Config struct {
 	// gate keeps the behaviour of every release before budget support: nothing
 	// is refused and no cost is written.
 	Budget BudgetGate
+	// KimiK3Compatibility offers each Chat model under its generated
+	// Kimi-compatible id so an existing K3 conversation can be switched to it.
+	// The generated id is accepted as a request name whether or not this is on,
+	// because a conversation bound while it was on must stay routable after the
+	// opt-in is turned off.
+	KimiK3Compatibility bool
 	// Now is injectable for tests.
 	Now func() time.Time
 }
@@ -236,11 +242,52 @@ type inflightEntry struct{}
 // Gateway is the local HTTP endpoint Kimi's own client talks to.
 type Gateway struct {
 	config      Config
+	catalog     catalogIndex
 	inflight    map[*inflightEntry]struct{}
 	mu          sync.Mutex
 	metrics     Metrics
 	lastCatalog *CatalogAttempt
 	handler     http.Handler
+}
+
+// catalogIndex resolves a request's model name to a catalog row without hashing
+// the whole catalog per request. It is built once with the gateway, and a
+// configuration change swaps a whole new gateway, so it never goes stale.
+type catalogIndex struct {
+	// byID maps the saved logical id, which is what Kimi sends when a model is
+	// imported normally.
+	byID map[string]int
+	// compatible maps the generated Kimi-compatible id to the same row. It is
+	// filled for Chat rows regardless of the opt-in, because a conversation
+	// bound while the opt-in was on must keep routing after it is turned off.
+	compatible map[string]int
+}
+
+func newCatalogIndex(models []Model) catalogIndex {
+	index := catalogIndex{byID: make(map[string]int, len(models)), compatible: map[string]int{}}
+	for i := range models {
+		index.byID[models[i].ID] = i
+		if models[i].Protocol == ProtocolChat {
+			generated := KimiCompatibleModelID(models[i].ID)
+			if _, exists := index.compatible[generated]; !exists {
+				index.compatible[generated] = i
+			}
+		}
+	}
+	return index
+}
+
+// selectModel resolves a request name. The saved id wins over a generated one,
+// so a name the user chose keeps working; a configuration where the two collide
+// is refused at validation time.
+func (c catalogIndex) selectModel(models []Model, name string) *Model {
+	if i, ok := c.byID[name]; ok {
+		return &models[i]
+	}
+	if i, ok := c.compatible[name]; ok {
+		return &models[i]
+	}
+	return nil
 }
 
 // Metrics is the panel's short window over what just happened.
@@ -286,6 +333,9 @@ func NewGateway(config Config) (*Gateway, error) {
 	}
 	g := &Gateway{config: config, inflight: map[*inflightEntry]struct{}{},
 		metrics: Metrics{StartedAt: config.Now().UnixMilli(), Recent: []*Record{}}}
+	if config.Backend != nil {
+		g.catalog = newCatalogIndex(config.Backend.Models())
+	}
 	g.handler = http.HandlerFunc(g.serveHTTP)
 	return g, nil
 }
@@ -636,6 +686,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 				return nil
 			}
 			body = NativeCatalog(models, "http://"+local.String()+"/v1")
+			if g.config.KimiK3Compatibility {
+				body = NativeCatalogCompatible(models, "http://"+local.String()+"/v1")
+			}
 		} else {
 			body = OpenAIModels(models)
 		}
@@ -670,13 +723,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		return nil
 	}
 	modelName = stripModelAliasPrefix(modelName)
-	var selected *Model
-	for i := range models {
-		if models[i].ID == modelName {
-			selected = &models[i]
-			break
-		}
-	}
+	selected := g.catalog.selectModel(models, modelName)
 	if selected == nil {
 		refuse(http.StatusConflict, "model_not_enabled_for_kimi")
 		return nil

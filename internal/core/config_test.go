@@ -1,8 +1,11 @@
 package core
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 func TestPanelModelConstraints(t *testing.T) {
@@ -91,5 +94,75 @@ func TestTranslationTimeoutCompatibility(t *testing.T) {
 		if translator.timeout(false) != tc.normal*time.Second || translator.timeout(true) != tc.custom*time.Second {
 			t.Fatal(tc.raw, translator)
 		}
+	}
+}
+
+func TestKimiK3CompatibilityIsAnEffectiveGatewayOptIn(t *testing.T) {
+	for name, tc := range map[string]struct {
+		document Document
+		want     bool
+	}{
+		"absent":              {Document{}, false},
+		"false":               {Document{"kimiK3Compatibility": false}, false},
+		"true":                {Document{"kimiK3Compatibility": true}, true},
+		"null":                {Document{"kimiK3Compatibility": nil}, false},
+		"string":              {Document{"kimiK3Compatibility": "true"}, false},
+		"direct ignores true": {Document{"integrationMode": IntegrationModeDirect, "kimiK3Compatibility": true}, false},
+		"gateway keeps true":  {Document{"integrationMode": IntegrationModeGateway, "kimiK3Compatibility": true}, true},
+	} {
+		if got := KimiK3Compatibility(tc.document); got != tc.want {
+			t.Fatalf("%s: %v", name, got)
+		}
+	}
+}
+
+func TestValidateKimiK3Compatibility(t *testing.T) {
+	base := func() Document { return Document{"connections": []any{}, "models": []any{}} }
+	for _, value := range []any{true, false, nil} {
+		d := base()
+		d[KimiK3CompatibilityKey] = value
+		if err := Validate(d); err != nil {
+			t.Fatalf("%#v: %v", value, err)
+		}
+	}
+	for _, value := range []any{"true", "on", float64(1), []any{true}, Document{}} {
+		d := base()
+		d[KimiK3CompatibilityKey] = value
+		if err := Validate(d); err == nil || err.Error() != "invalid_kimi_k3_compatibility" {
+			t.Fatalf("accepted %#v: %v", value, err)
+		}
+	}
+}
+
+func TestValidateRefusesKimiCompatibleIDCollision(t *testing.T) {
+	chat := func(id string) Document {
+		return Document{"id": id, "protocol": "chat", "contextWindow": float64(32000)}
+	}
+	shadow := protocol.KimiCompatibleModelID("kimi-alpha")
+	if shadow == "kimi-alpha" {
+		t.Fatal("the generated id equals its logical id")
+	}
+	// The shadowing row is legitimate on its own: the name starts with "kimi-"
+	// and is a short, control-free id.
+	models := []any{chat("kimi-alpha"), chat("vendor/kimi-beta"), chat(shadow)}
+	// It is refused with the opt-in off, on and absent alike: turning the
+	// option on later must not reinterpret a name an old alias already used.
+	for name, flag := range map[string]any{"absent": nil, "off": false, "on": true} {
+		d := Document{"connections": []any{}, "models": models}
+		if flag != nil {
+			d[KimiK3CompatibilityKey] = flag
+		}
+		if err := Validate(d); err == nil || err.Error() != "kimi_k3_model_id_conflict" {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// Without the shadowing row the same catalog is accepted, including long
+	// and nested ids whose generated forms stay legal.
+	long := Document{"connections": []any{}, "models": []any{
+		chat("kimi-alpha"),
+		chat("vendor/subgroup/kimi-" + strings.Repeat("n", 480)),
+	}}
+	if err := Validate(long); err != nil {
+		t.Fatal(err)
 	}
 }

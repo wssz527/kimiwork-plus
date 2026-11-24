@@ -906,6 +906,17 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 .plus-swarm { margin-top: 20px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--r-control); }
 .plus-swarm .field__hint { margin-top: 8px; }
 .plus-swarm .action-line { padding-top: 12px; border-top: 0; }
+.rebind-list { max-height: 280px; overflow: auto; list-style: none; margin: 0 0 12px; padding: 0; border-top: 1px solid var(--rule); }
+.rebind-list .check { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--rule); }
+.rebind-list .check span { min-width: 0; overflow-wrap: anywhere; }
+.rebind-list .check strong, .rebind-list .check small { display: block; }
+.rebind-list small, .rebind-list time { color: var(--ink-3); font-size: 12px; }
+#rebind-all:indeterminate { border-color: var(--accent); background: var(--accent-fill); }
+#rebind-all:indeterminate::after { content: ''; width: 8px; border-bottom: 1.7px solid var(--on-accent); }
+@media (max-width: 640px) {
+  .rebind-list .check { grid-template-columns: auto minmax(0, 1fr); }
+  .rebind-list time { grid-column: 2; }
+}
 .failover-rows { display: grid; gap: 12px; }
 .failover-row { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, .9fr) auto; align-items: end; gap: 10px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--r-control); }
 .failover-row .iconbtn { margin-bottom: 2px; }

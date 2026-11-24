@@ -127,7 +127,7 @@ func (r *Runtime) Apply(d core.Document) error {
 	if e != nil {
 		return e
 	}
-	g, e := protocol.NewGateway(protocol.Config{Backend: backend, Key: r.token, InstructionsProvider: func() (string, error) { return core.ReadInstructions(r.instructionsPath) }, RecordRequests: true, UsageSink: protocol.UsageSinkFunc(r.record), Budget: r.budget, ResolveUsageContext: func(q protocol.UsageContextRequest) (protocol.UsageContext, error) {
+	g, e := protocol.NewGateway(protocol.Config{Backend: backend, Key: r.token, KimiK3Compatibility: core.KimiK3Compatibility(d), InstructionsProvider: func() (string, error) { return core.ReadInstructions(r.instructionsPath) }, RecordRequests: true, UsageSink: protocol.UsageSinkFunc(r.record), Budget: r.budget, ResolveUsageContext: func(q protocol.UsageContextRequest) (protocol.UsageContext, error) {
 		c := protocol.UsageContext{}
 		if q.ConnectionID != nil {
 			c = contexts[*q.ConnectionID]

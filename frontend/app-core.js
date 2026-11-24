@@ -7,12 +7,15 @@ const API = {
   subagents: '/api/subagents',
   translation: '/api/translation',
   actions: '/api/actions',
+  workConversations: '/api/work/conversations',
+  rebindConversations: '/api/work/conversations/rebind',
   providers: '/api/providers',
   modelSearch: '/api/model-search',
   discovery: '/api/discovery',
   context: '/api/context',
   tools: '/api/tools',
   integrationMode: '/api/integration-mode',
+  kimiK3Compatibility: '/api/kimi-k3-compatibility',
   diagnosticsExport: '/api/diagnostics/export',
   openUrl: '/api/open-url',
 };
@@ -192,6 +195,7 @@ const ACTION_LABEL = {
   'account-switch': '切换账号',
   'account-remove': '移除账号',
   'set-swarm': '设置并行模式',
+  'rebind-conversations': '改绑旧会话模型',
   'check-compatibility': '官方版本自检',
 };
 
@@ -759,6 +763,9 @@ const dom = {
   modeGateway: $('mode-gateway'),
   modeDirect: $('mode-direct'),
   integrationModeState: $('integration-mode-state'),
+  kimiK3Setting: $('kimi-k3-setting'),
+  kimiK3Enabled: $('kimi-k3-enabled'),
+  kimiK3Status: $('kimi-k3-status'),
   directModeNotice: $('direct-mode-notice'),
   directModeSupport: $('direct-mode-support'),
   directModeHosts: $('direct-mode-hosts'),

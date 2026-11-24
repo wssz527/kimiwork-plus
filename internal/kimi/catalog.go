@@ -12,6 +12,7 @@ import (
 // the Kimi-facing api.json shape.
 type Model struct {
 	ID              string
+	CatalogID       string `json:"-"`
 	Name            string
 	Protocol        string
 	ContextWindow   int64

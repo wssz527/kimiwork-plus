@@ -216,6 +216,9 @@ func buildWorkModelResolver(stateDir, kimiHome string, d core.Document) workMode
 		res.byID[id] = meta
 		res.byAlias["byok-kth-kimi/"+id] = meta
 		res.byAlias["byok-kth-resp/"+id] = meta
+		if meta.Protocol == protocol.ProtocolChat {
+			res.byAlias["byok-kth-kimi/"+protocol.KimiCompatibleModelID(id)] = meta
+		}
 		if upstream != "" {
 			if existing, exists := res.byUpstream[upstream]; exists && existing.ModelID != id {
 				res.ambiguous[upstream] = true
@@ -261,6 +264,9 @@ func (r workModelResolver) resolve(raw string) (workModelMeta, string) {
 		if meta, ok := r.byID[suffix]; ok {
 			return meta, trimmed
 		}
+		if meta, ok := r.byAlias["byok-kth-kimi/"+suffix]; ok {
+			return meta, trimmed
+		}
 		if !r.ambiguous[suffix] {
 			if meta, ok := r.byUpstream[suffix]; ok {
 				return meta, trimmed
@@ -269,6 +275,9 @@ func (r workModelResolver) resolve(raw string) (workModelMeta, string) {
 		return workModelMeta{ModelID: suffix}, trimmed
 	}
 	if meta, ok := r.byID[trimmed]; ok {
+		return meta, trimmed
+	}
+	if meta, ok := r.byAlias["byok-kth-kimi/"+trimmed]; ok {
 		return meta, trimmed
 	}
 	if !strings.HasPrefix(trimmed, "byok-") {

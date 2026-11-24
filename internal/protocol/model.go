@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -307,6 +309,21 @@ func ModelFamily(id string) string {
 		return ProtocolChat
 	}
 	return ProtocolResponses
+}
+
+// kimiCompatibleModelPrefix makes a generated id satisfy both rules Kimi's own
+// model menu applies: the final segment must start with `kimi-` to be a Chat
+// model, and with `kimi-k3` to be offered as a K3-compatible target.
+const kimiCompatibleModelPrefix = "kimi-k3-kwp-"
+
+// KimiCompatibleModelID derives the id Kimi's own model menu may use for a saved
+// Chat model when the K3 compatibility opt-in is on. It is a pure function of
+// the saved logical id, so it stays stable across restarts and machines and
+// survives nested ids, provider prefixes and the 2048-character id bound: the
+// digest fixes the length at 76 characters whatever the input.
+func KimiCompatibleModelID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return kimiCompatibleModelPrefix + hex.EncodeToString(sum[:])
 }
 
 // ValidateModelsAny accepts rows that already went through a JSON decode.
@@ -652,6 +669,19 @@ func equalStringPtr(left, right *string) bool {
 // the rows is the order the menu shows them, so it is preserved by emitting
 // JSON directly instead of going through a map.
 func NativeCatalog(models []Model, api string) []byte {
+	return nativeCatalog(models, api, false)
+}
+
+// NativeCatalogCompatible renders the same catalog with the K3 compatibility
+// opt-in on: every Chat row is keyed by its generated Kimi-compatible id so it
+// can be offered for existing K3 conversations, while the display name stays
+// the one the user saved. Responses rows are untouched, because Kimi resolves
+// those from their own id.
+func NativeCatalogCompatible(models []Model, api string) []byte {
+	return nativeCatalog(models, api, true)
+}
+
+func nativeCatalog(models []Model, api string, compatible bool) []byte {
 	var kimi, responses []Model
 	for _, model := range models {
 		if model.Protocol == ProtocolChat {
@@ -681,7 +711,11 @@ func NativeCatalog(models []Model, api string) []byte {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			b.WriteString(quote(model.ID))
+			key := model.ID
+			if compatible && model.Protocol == ProtocolChat {
+				key = KimiCompatibleModelID(model.ID)
+			}
+			b.WriteString(quote(key))
 			b.WriteByte(':')
 			b.Write(nativeModel(model))
 		}

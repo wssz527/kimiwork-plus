@@ -4732,3 +4732,330 @@ test('inline disconnect confirm is cleared by runAction, chooseIntegrationMode, 
   await api.runAction('connect-kimi');
   assert.ok(cleared.length >= 3, 'runAction must clear confirm at entry');
 });
+
+function conversationPanelTest(initial, rebindReply) {
+  class Element {
+    constructor(tag) {
+      this.tag = tag;
+      this.children = [];
+      this.listeners = new Map();
+      this.classList = { toggle() {} };
+      this.value = '';
+    }
+    addEventListener(name, fn) { this.listeners.set(name, fn); }
+    async fire(name, target = this) { await this.listeners.get(name)?.({ target }); }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) {
+      this.children = children;
+      if (children[0]?.tag === 'option') this.value = children[0].value;
+    }
+    querySelectorAll() {
+      return this.children.flatMap(child => child.tag === 'input' && child.type === 'checkbox' ? [child] : child.querySelectorAll());
+    }
+    focus() { this.focused = true; }
+  }
+  const ids = new Map();
+  const element = id => {
+    if (!ids.has(id)) ids.set(id, new Element(id));
+    return ids.get(id);
+  };
+  const api = { workConversations: '/api/work/conversations', rebindConversations: '/api/work/conversations/rebind' };
+  const calls = [];
+  let next = initial;
+  const request = async (path, options) => {
+    calls.push([path, options]);
+    const reply = path === api.workConversations ? next : rebindReply;
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
+  const code = ['conversationListStatus', 'conversationModelLabel', 'conversationRow', 'conversationRebindPayload',
+    'conversationPanelSignature', 'mountConversationRebind'].map(sourceFunction).join('\n');
+  const updatePanel = new Function('$', 'API', 'document', 'state', 'request', 'setHidden', 'setText', code + '\nreturn mountConversationRebind();')(
+    element, api, { createElement: tag => new Element(tag) }, { key: 'local-test' }, request,
+    (el, value) => { el.hidden = value; }, (el, value) => { el.textContent = value; });
+  return { calls, panel: element('conversation-rebind'), get: id => element('rebind-' + id), setNext: value => { next = value; }, updatePanel };
+}
+
+const oldConversationRows = [
+  { conversationKey: 'official-1', title: 'Existing conversation', modelAlias: 'kimi-k3', updatedAtMs: 10, isByok: false },
+  { conversationKey: 'third-party-2', title: 'Other conversation', modelAlias: 'byok-kth/example', updatedAtMs: 8, isByok: true },
+];
+const rebindTarget = { alias: 'byok-custom/claude', displayName: 'Claude', protocol: 'anthropic', sourceKind: 'custom',
+  supportEfforts: ['low', 'high'], defaultEffort: 'low', directAnthropicHistoryWarning: true };
+
+async function openConversationTestPanel(env) {
+  env.panel.open = true;
+  await env.panel.fire('toggle');
+  await Promise.resolve();
+}
+
+test('old conversations render in Kimi access settings with model, date and distinct empty states', async () => {
+  assert.match(htmlSource, /id="native-panel"[\s\S]+id="conversation-rebind"[\s\S]+id="update-panel"/);
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false });
+  env.panel.open = true;
+  const loading = env.panel.fire('toggle');
+  assert.match(env.get('status').textContent, /正在读取/);
+  await loading;
+  assert.equal(env.get('form').hidden, false);
+  const label = env.get('list').children[0].children[0];
+  assert.deepEqual(label.children[1].children.map(el => el.textContent), ['Existing conversation', 'kimi-k3']);
+  assert.equal(label.children[2].dateTime, new Date(10).toISOString());
+  assert.match(label.children[2].textContent, /1970|1969/);
+  assert.equal(env.get('model').children[1].textContent, 'Claude · Anthropic Messages · 直连');
+
+  for (const [data, message] of [
+    [{ reason: 'conversation_database_missing', conversations: [], models: [] }, /还没有 Kimi Work 会话库/],
+    [{ conversations: [], models: [rebindTarget], application: 'not_running' }, /没有可改绑/],
+    [{ conversations: oldConversationRows, models: [], application: 'not_running' }, /没有可用的第三方模型/],
+    [{ conversations: oldConversationRows, models: [rebindTarget], application: 'unknown' }, /无法确认 Kimi 的运行状态/],
+    [new Error('读取失败'), /读取失败/],
+  ]) {
+    env.setNext(data);
+    await env.get('refresh').fire('click');
+    assert.match(env.get('status').textContent, message);
+    assert.equal(env.get('review').hidden, true);
+  }
+});
+
+test('a single old conversation shows the direct Anthropic warning and submits only after confirmation', async () => {
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false },
+    { conversationKeys: ['official-1'], kimiRestarted: false, directAnthropicHistoryWarning: true });
+  await openConversationTestPanel(env);
+  const [first, second] = env.get('list').querySelectorAll();
+  env.get('model').value = rebindTarget.alias;
+  await env.get('model').fire('change');
+  assert.equal(env.get('warning').hidden, true);
+  first.checked = true;
+  await env.get('list').fire('change', first);
+  assert.equal(env.get('warning').hidden, false);
+  assert.equal(second.checked, false);
+  assert.equal(env.get('all').indeterminate, true);
+  assert.equal(env.get('review').textContent, '改绑所选会话');
+  assert.deepEqual(env.get('effort').children.map(option => option.textContent), ['模型默认（low）', 'low', 'high']);
+  env.get('effort').value = 'high';
+  await env.get('review').fire('click');
+  assert.equal(env.calls.length, 1);
+  assert.match(env.get('confirm-text').textContent, /将 1 个会话改绑/);
+  await env.get('submit').fire('click');
+  assert.deepEqual(env.calls[1], ['/api/work/conversations/rebind', { method: 'POST', body: {
+    conversationKeys: ['official-1'], targetModelAlias: rebindTarget.alias, thinkingLevel: 'high', restartKimi: false,
+  } }]);
+  assert.match(env.get('result').textContent, /已改绑 1 个会话.*直连 Anthropic/);
+});
+
+test('batch selection confirms Kimi restart and displays a restart failure after committed changes', async () => {
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true },
+    { conversationKeys: ['official-1', 'third-party-2'], kimiRestarted: false, restartReason: 'restart failed' });
+  await openConversationTestPanel(env);
+  env.get('model').value = rebindTarget.alias;
+  await env.get('model').fire('change');
+  env.get('all').checked = true;
+  await env.get('all').fire('change');
+  assert.deepEqual(env.get('list').querySelectorAll().map(input => input.checked), [true, true]);
+  assert.equal(env.get('review').textContent, '改绑并重启 Kimi');
+  await env.get('review').fire('click');
+  assert.match(env.get('confirm-text').textContent, /退出后重新打开 Kimi/);
+  await env.get('cancel').fire('click');
+  await env.get('submit').fire('click');
+  assert.equal(env.calls.length, 1);
+  await env.get('review').fire('click');
+  await env.get('submit').fire('click');
+  assert.deepEqual(env.calls[1][1].body, {
+    conversationKeys: ['official-1', 'third-party-2'], targetModelAlias: rebindTarget.alias, thinkingLevel: '', restartKimi: true,
+  });
+  assert.match(env.get('result').textContent, /已改绑 2 个会话。Kimi 未能重启，请手动打开 Kimi/);
+});
+
+test('conversation rebind defaults to the first supported effort when the model has no default', async () => {
+  const target = { ...rebindTarget, protocol: 'google-genai', defaultEffort: '',
+    supportEfforts: ['zeta', 'max', 'high', 'low', 'off', 'alpha', 'medium', 'xhigh'] };
+  const chat = { ...target, alias: 'byok-custom/chat', protocol: 'openai', supportEfforts: [] };
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [target, chat], application: 'not_running', kimiRunning: false },
+    { conversationKeys: ['official-1'], kimiRestarted: false });
+  await openConversationTestPanel(env);
+  assert.deepEqual(env.get('model').children.slice(1).map(option => option.textContent),
+    ['Claude · Google GenAI · 直连', 'Claude · OpenAI Chat · 直连']);
+  env.get('model').value = target.alias;
+  await env.get('model').fire('change');
+  assert.deepEqual(env.get('effort').children.map(option => option.value), ['off', 'low', 'medium', 'high', 'xhigh', 'max', 'alpha', 'zeta']);
+  assert.equal(env.get('effort').value, 'off');
+  const [first] = env.get('list').querySelectorAll();
+  first.checked = true;
+  await env.get('list').fire('change', first);
+  await env.get('review').fire('click');
+  await env.get('submit').fire('click');
+  assert.equal(env.calls[1][1].body.thinkingLevel, 'off');
+  env.get('model').value = chat.alias;
+  await env.get('model').fire('change');
+  assert.equal(env.get('effort').disabled, true);
+  assert.equal(env.get('effort').value, '');
+});
+
+test('failed rebind with restart consent refreshes process state and keeps the original error', async () => {
+  const list = { conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true };
+  const error = Object.assign(new Error('会话库写入失败'), { code: 'conversation_database_unavailable' });
+  const env = conversationPanelTest(list, error);
+  await openConversationTestPanel(env);
+  env.get('model').value = rebindTarget.alias;
+  await env.get('model').fire('change');
+  env.get('all').checked = true;
+  await env.get('all').fire('change');
+  await env.get('review').fire('click');
+  env.setNext({ ...list, application: 'not_running', kimiRunning: false });
+  await env.get('submit').fire('click');
+  assert.deepEqual(env.calls.map(call => call[0]), ['/api/work/conversations', '/api/work/conversations/rebind', '/api/work/conversations']);
+  assert.equal(env.calls[1][1].body.restartKimi, true);
+  assert.match(env.get('result').textContent, /会话库写入失败/);
+  assert.match(env.get('status').textContent, /Kimi 已退出/);
+  assert.equal(env.get('review').textContent, '改绑所选会话');
+});
+
+test('an open rebind panel invalidates its confirmation when account, config or process changes', async () => {
+  const list = { conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true };
+  const env = conversationPanelTest(list);
+  assert.match(sourceFunction('adoptState'), /state\.conversationRebindStateChanged\?\.\(next\)/);
+  const data = { accounts: { currentId: 'a', state: 'ready' }, revision: 'r1', kimiProcess: { running: true, state: 'running' } };
+  env.updatePanel(data);
+  await openConversationTestPanel(env);
+  const updates = [
+    { ...data, accounts: { currentId: 'b', state: 'ready' } },
+    { ...data, revision: 'r2' },
+    { ...data, revision: 'r2', kimiProcess: { running: false, state: 'not_running' } },
+  ];
+  for (const update of updates) {
+    env.get('model').value = rebindTarget.alias;
+    await env.get('model').fire('change');
+    env.get('all').checked = true;
+    await env.get('all').fire('change');
+    await env.get('review').fire('click');
+    assert.equal(env.get('confirm').hidden, false);
+    env.updatePanel(update);
+    assert.match(env.get('status').textContent, /已变化，请刷新会话/);
+    assert.equal(env.get('review').disabled, true);
+    assert.equal(env.get('confirm').hidden, true);
+    await env.get('submit').fire('click');
+    assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
+    await env.get('refresh').fire('click');
+    assert.equal(env.get('form').disabled, false);
+  }
+  env.updatePanel({ ...updates.at(-1), updates: { state: 'checking' } });
+  assert.doesNotMatch(env.get('status').textContent, /已变化/);
+});
+
+test('a pending conversation query is marked stale even if the account changes back', async () => {
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const env = conversationPanelTest(pending);
+  const original = { accounts: { currentId: 'a' } };
+  env.updatePanel(original);
+  env.panel.open = true;
+  const loading = env.panel.fire('toggle');
+  env.updatePanel({ accounts: { currentId: 'b' } });
+  env.updatePanel(original);
+  finish({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false });
+  await loading;
+  await Promise.resolve();
+  assert.match(env.get('status').textContent, /已变化，请刷新会话/);
+  assert.equal(env.get('form').disabled, true);
+});
+
+test('K3 alias migration asks for confirmation and sends the model instead of recent conversation IDs', async () => {
+  const model = { ...rebindTarget, alias: 'byok-kth-kimi/kimi-k3-kwp-example',
+    previousAlias: 'byok-kth-kimi/group/kimi-example', protocol: 'kimi', sourceKind: 'kth' };
+  const env = conversationPanelTest({ conversations: oldConversationRows, models: [model], application: 'running', kimiRunning: true },
+    { conversationKeys: ['older-than-recent-list'], kimiRestarted: true, hasMore: true });
+  await openConversationTestPanel(env);
+  env.get('model').value = model.alias;
+  await env.get('model').fire('change');
+  assert.equal(env.get('migrate').hidden, false);
+  assert.equal(env.get('review').disabled, true);
+  await env.get('migrate').fire('click');
+  assert.match(env.get('confirm-text').textContent, /旧别名.*退出后重新打开 Kimi/);
+  assert.equal(env.calls.length, 1);
+  await env.get('submit').fire('click');
+  assert.deepEqual(env.calls[1][1].body, { targetModelAlias: model.alias, thinkingLevel: '', restartKimi: true, migratePreviousAlias: true });
+  assert.match(env.get('result').textContent, /已迁移 1 个会话.*还有会话待迁移/);
+});
+
+test('K3 compatibility setting renders gateway-only state copy and saves or restores on failure', async () => {
+  const makeNode = id => ({ id, textContent: '', hidden: false, disabled: false, checked: false, dataset: {}, setAttribute() {}, classList: { add() {}, toggle() {} } });
+  const dom = {
+    modeGateway: { value: 'gateway', checked: false, disabled: false },
+    modeDirect: { value: 'direct', checked: false, disabled: false },
+    integrationModeGroup: null,
+    integrationModeState: makeNode('integration-mode-state'),
+    kimiK3Setting: makeNode('kimi-k3-setting'),
+    kimiK3Enabled: makeNode('kimi-k3-enabled'),
+    kimiK3Status: makeNode('kimi-k3-status'),
+    nativeSyncLabel: makeNode('native-sync-label'),
+    nativeSync: makeNode('native-sync'),
+    nativeRecover: makeNode('native-recover'),
+    directModeNotice: makeNode('direct-mode-notice'),
+    directModeSupport: makeNode('direct-mode-support'),
+    directModeHosts: makeNode('direct-mode-hosts'),
+    directModeBypassed: null,
+    directModeSkipped: null,
+  };
+  const calls = [];
+  const toasts = [];
+  const errors = [];
+  let nextReply = { ok: true, state: { revision: 'r2', integrationMode: 'gateway', kimiK3Compatibility: true, kimiK3State: 'needs_sync', models: [] } };
+  const state = {
+    data: { revision: 'r1', integrationMode: 'gateway', kimiK3Compatibility: false, kimiK3State: '', models: [] },
+    actionButtons: [dom.nativeSync, dom.nativeRecover],
+    pendingAction: null,
+    modelsSaving: false,
+    connsSaving: false,
+  };
+  const api = new Function('dom', 'state', 'request', 'showToast', 'handleSaveFailure', `
+    ${INTEGRATION_HELPERS.join('\n')}
+    const API = { kimiK3Compatibility: '/api/kimi-k3-compatibility' };
+    let integrationModeSaving = false;
+    const integrationModeBusy = data => integrationModeSaving || data?.operation?.state === 'running';
+    const onboardBusy = () => false;
+    const renderOnboard = () => {};
+    const renderOnboardOverview = () => {};
+    const clearDisconnectConfirm = () => {};
+    const configReady = () => true;
+    const ACTION_LABEL = {};
+    const setText = (el, text) => { if (el) el.textContent = text; };
+    const setHidden = (el, hidden) => { if (el) el.hidden = Boolean(hidden); };
+    const displayModelId = id => id;
+    const DIRECT_BYPASS_WORD = {};
+    const DIRECT_SKIP_REASON = {};
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('renderIntegrationMode')}
+    ${sourceFunction('renderActions')}
+    ${sourceFunction('chooseKimiK3Compatibility')}
+    return { renderIntegrationMode, chooseKimiK3Compatibility };
+  `)(dom, state, async (path, options) => {
+    calls.push([path, options]);
+    if (nextReply instanceof Error) throw nextReply;
+    return nextReply;
+  }, (msg, tone) => toasts.push([msg, tone]), async (err, scope) => errors.push([err.message, scope]));
+
+  api.renderIntegrationMode(state.data);
+  assert.equal(dom.kimiK3Setting.hidden, false);
+  assert.equal(dom.kimiK3Enabled.checked, false);
+  assert.equal(dom.kimiK3Status.hidden, true);
+
+  dom.kimiK3Enabled.checked = true;
+  await api.chooseKimiK3Compatibility(true, { onSaved: next => { state.data = next; } });
+  assert.deepEqual(calls[0], ['/api/kimi-k3-compatibility', { method: 'POST', body: { revision: 'r1', enabled: true } }]);
+  assert.equal(dom.kimiK3Enabled.checked, true);
+  assert.equal(dom.kimiK3Status.hidden, false);
+  assert.match(dom.kimiK3Status.textContent, /同步到 Work/);
+  assert.equal(toasts.length, 1);
+
+  api.renderIntegrationMode({ ...state.data, kimiK3State: 'ready' });
+  assert.match(dom.kimiK3Status.textContent, /切到官方 K3/);
+
+  api.renderIntegrationMode({ ...state.data, integrationMode: 'direct', kimiK3Compatibility: false });
+  assert.equal(dom.kimiK3Setting.hidden, true);
+
+  nextReply = new Error('save_failed');
+  dom.kimiK3Enabled.checked = false;
+  await api.chooseKimiK3Compatibility(false);
+  assert.deepEqual(errors, [['save_failed', 'integration-mode']]);
+  assert.equal(dom.kimiK3Enabled.checked, true);
+});

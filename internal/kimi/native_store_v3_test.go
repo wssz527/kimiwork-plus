@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 // The 3.2.28 store is a different shape from the one this package grew up with:
@@ -512,5 +514,46 @@ func TestNativeAccountStoreIgnoresUnreferencedProvidersAfterPortMigration(t *tes
 	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), cfg)
 	if _, reason, needsImport := fixture.integration(t).accountCatalog(settings, key); reason != "credential_changed" || !needsImport {
 		t.Fatalf("mismatched second active credential: reason=%q needsImport=%v", reason, needsImport)
+	}
+}
+
+func TestNativeKimiK3ReadbackKeepsLogicalModelIdentity(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const url = "http://127.0.0.1:9999/v1"
+	key := sha256Hex("account-new")
+	fixture.seedV3Store(t, key, url, "cred-1")
+	catalog := testCatalog()
+	logical := catalog[0].ID
+	catalog[0].CatalogID = protocol.KimiCompatibleModelID(logical)
+	alias := "byok-kth-kimi/" + catalog[0].CatalogID
+	original := "byok-kth-kimi/" + logical
+	options := ReconcileOptions{Enabled: true, URL: url, Models: catalog, AccountScope: key}
+	integration := fixture.integration(t)
+	if got := integration.Reconcile(options); got.Reason != "models_missing" || len(got.MissingModels) != 1 || got.MissingModels[0] != logical {
+		t.Fatalf("waiting for explicit sync = %+v", got)
+	}
+	storePath := filepath.Join(fixture.dir, NativeWorkStore)
+	store := fixture.readJSON(t, storePath)
+	row := store["accounts"].(map[string]any)[key].(map[string]any)["active"].(map[string]any)["models"].([]any)[0].(map[string]any)
+	row["alias"], row["model"] = alias, catalog[0].CatalogID
+	fixture.writeJSON(t, storePath, store)
+	configPath := filepath.Join(fixture.dir, NativeWorkConfig)
+	config := fixture.readJSON(t, configPath)
+	models := config["model"].(map[string]any)["models"].(map[string]any)
+	model := models[original].(map[string]any)
+	model["model"] = catalog[0].CatalogID
+	delete(models, original)
+	models[alias] = model
+	fixture.writeJSON(t, configPath, config)
+	if got := integration.Reconcile(options); got.State != IntegrationReady || got.Aliases[logical] != alias || got.Aliases[catalog[0].CatalogID] != "" {
+		t.Fatalf("K3 readback = %+v", got)
+	}
+	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models(); len(got) != 0 {
+		t.Fatalf("signed-out profile returned targets: %+v", got)
+	}
+	config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-new"}
+	fixture.writeJSON(t, configPath, config)
+	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models(); len(got) != 2 || got[0].Alias != alias || got[0].PreviousAlias != original {
+		t.Fatalf("K3 targets = %+v", got)
 	}
 }

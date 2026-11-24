@@ -10,6 +10,7 @@ import (
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/ledger"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 func TestWorkUsageCollectorIncrementalDirectOfficialAndGatewayDedup(t *testing.T) {
@@ -319,6 +320,30 @@ func TestWorkUsageRealGatewayDedupBudgetIsolationAndHomeCursors(t *testing.T) {
 	collector.SetHome(kimiHome1)
 	if got := collector.Sync(); got != 0 {
 		t.Fatalf("returning to home1 re-imported %d records", got)
+	}
+}
+
+func TestWorkModelResolverMapsCompatibleK3Aliases(t *testing.T) {
+	const logicalID = "magpie/kimi-group%2Fdeepseek-v4-1-flash"
+	compatibleID := protocol.KimiCompatibleModelID(logicalID)
+	d := core.Document{
+		"connections": []any{
+			core.Document{"id": "magpie", "name": "Magpie", "providerPresetId": "custom-magpie", "baseURL": "http://127.0.0.1:3425/v1"},
+		},
+		"models": []any{
+			core.Document{"id": logicalID, "connectionId": "magpie", "upstreamModelId": "group/deepseek-v4-1-flash", "protocol": "chat", "contextWindow": float64(300000), "tools": true},
+		},
+	}
+	resolver := buildWorkModelResolver(t.TempDir(), t.TempDir(), d)
+	for _, raw := range []string{
+		"byok-kth-kimi/" + compatibleID,
+		"byok-603d1804-6650-453a-9e1c-a475a1050d27/" + compatibleID,
+		compatibleID,
+	} {
+		meta, alias := resolver.resolve(raw)
+		if meta.ModelID != logicalID || meta.ConnectionID != "magpie" || meta.ProviderID != "custom-magpie" || alias != raw {
+			t.Fatalf("resolve(%q) = %+v, %q", raw, meta, alias)
+		}
 	}
 }
 

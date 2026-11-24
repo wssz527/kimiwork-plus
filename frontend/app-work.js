@@ -1,5 +1,5 @@
 import { configInfo, configReady } from './app-connections.js';
-import { API, POLICY_MODE_WORD, POLICY_TRANSPORT_WORD, RUNTIME_STATE, displayModelId, dom, fmtCount, fmtTime, iconUse, modelLabel, renderErrorList, request, setDot, setHidden, setText, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, API, POLICY_MODE_WORD, POLICY_TRANSPORT_WORD, RUNTIME_STATE, displayModelId, dom, fmtCount, fmtTime, iconUse, modelLabel, renderErrorList, request, setDot, setHidden, setText, showToast, state, syncSelectOptions } from './app-core.js';
 import { declaredEfforts, findModel, isCapable, modelIdFromAlias, modelSignature, resolveAlias } from './app-models.js';
 import { isInFlight } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
@@ -806,7 +806,289 @@ async function saveSubagentTarget() {
 
 function resetSubagentSignatures() { saModelSignature = ''; saEffortSignature = ''; }
 
+function conversationListStatus(list) {
+  if (list.reason) {
+    const messages = {
+      conversation_database_missing: '还没有 Kimi Work 会话库。请先在 Kimi Work 中创建会话。',
+      conversation_database_schema_unsupported: '当前 Kimi Work 会话库格式暂不支持。',
+      conversation_node_unavailable: '当前找不到支持读取会话库的 Kimi Node 运行时。',
+      conversation_database_busy: 'Kimi 会话库正在使用，请稍后刷新。',
+      conversation_profile_unsupported: '诊断隔离模式不可改绑会话，请使用默认方式打开 Kimi。',
+    };
+    return messages[list.reason] || '无法读取 Kimi Work 会话库，请刷新后重试。';
+  }
+  if (list.application === 'unknown') return '无法确认 Kimi 的运行状态，请刷新后再改绑。';
+  if (!list.conversations.length) return '当前没有可改绑的 Kimi Work 会话。';
+  if (!list.models.length) return '当前账号没有可用的第三方模型。请先在「模型」页同步到 Work。';
+  if (list.kimiRunning) return 'Kimi 正在运行，确认改绑前请先保存手头的工作。';
+  return 'Kimi 已退出，改绑完成后可以打开 Kimi 继续对话。';
+}
+
+function conversationModelLabel(model) {
+  const protocols = { kimi: 'Chat Completions', openai_chat_completions: 'Chat Completions', openai_responses: 'Responses',
+    openai: 'OpenAI Chat', 'google-genai': 'Google GenAI', anthropic: 'Anthropic Messages' };
+  const source = model.sourceKind === 'kth' ? '网关' : '直连';
+  return `${model.displayName} · ${protocols[model.protocol] || model.protocol} · ${source}`;
+}
+
+function conversationRow(row) {
+  const entry = document.createElement('li');
+  const label = document.createElement('label');
+  label.className = 'check';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.value = row.conversationKey;
+  const detail = document.createElement('span');
+  const title = document.createElement('strong');
+  title.textContent = row.title || '未命名会话';
+  const model = document.createElement('small');
+  model.textContent = row.modelAlias || 'Kimi 官方模型';
+  detail.append(title, model);
+  const time = document.createElement('time');
+  const updated = new Date(row.updatedAtMs);
+  if (Number.isFinite(row.updatedAtMs) && row.updatedAtMs > 0 && !Number.isNaN(updated.getTime())) {
+    time.dateTime = updated.toISOString();
+    time.textContent = updated.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short', hour12: false });
+  } else {
+    time.textContent = '—';
+  }
+  label.append(input, detail, time);
+  entry.append(label);
+  return entry;
+}
+
+function conversationRebindPayload(list, selected, model, thinkingLevel) {
+  return {
+    conversationKeys: list.conversations.filter(row => selected.has(row.conversationKey)).map(row => row.conversationKey),
+    targetModelAlias: model.alias,
+    thinkingLevel,
+    restartKimi: list.kimiRunning,
+  };
+}
+
+function conversationPanelSignature(data) {
+  const integration = data?.integration;
+  const operation = data?.operation;
+  const changesModels = ['connect-kimi', 'disconnect-models', 'apply-connections'].includes(operation?.action);
+  return JSON.stringify([data?.revision, data?.accounts?.currentId, data?.accounts?.state, data?.profile?.mode,
+    data?.kimiProcess?.running, data?.kimiProcess?.state, data?.integrationMode, integration?.state, integration?.imported,
+    changesModels && operation.id, changesModels && operation.state]);
+}
+
+function mountConversationRebind() {
+  const panel = $('conversation-rebind');
+  if (!panel) return;
+  const ui = Object.fromEntries(['status', 'form', 'all', 'list', 'model', 'effort', 'warning', 'review',
+    'refresh', 'migrate', 'confirm', 'confirm-text', 'submit', 'cancel', 'result'].map(name => [name, $('rebind-' + name)]));
+  let list = null;
+  let selected = new Set();
+  let pending = false;
+  let confirmed = null;
+  let loadedKey;
+  let observedPanel = conversationPanelSignature(state.data);
+  let panelRevision = 0;
+  let stale = false;
+  let rows = [];
+
+  function selectedModel() {
+    return list?.models.find(model => model.alias === ui.model.value);
+  }
+
+  function clearConfirmation() {
+    confirmed = null;
+    setHidden(ui.confirm, true);
+  }
+
+  function options(control, rows) {
+    control.replaceChildren(...rows.map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+  }
+
+  function renderSelection() {
+    const model = selectedModel();
+    const ready = Boolean(list && !list.reason && list.application !== 'unknown' && list.conversations.length && list.models.length);
+    setHidden(ui.review, !ready);
+    ui.review.disabled = pending || stale || !model || selected.size === 0;
+    setText(ui.review, list?.kimiRunning ? '改绑并重启 Kimi' : '改绑所选会话');
+    if (ui.migrate) {
+      const available = Boolean(ready && model?.previousAlias);
+      setHidden(ui.migrate, !available);
+      ui.migrate.disabled = !available || pending || stale;
+    }
+    ui.all.checked = rows.length > 0 && selected.size === rows.length;
+    ui.all.indeterminate = selected.size > 0 && selected.size < rows.length;
+    for (const checkbox of rows) checkbox.checked = selected.has(checkbox.value);
+    const warning = model?.directAnthropicHistoryWarning && list.conversations.some(row => !row.isByok && selected.has(row.conversationKey));
+    setHidden(ui.warning, !warning);
+  }
+
+  function renderEfforts() {
+    const model = selectedModel();
+    const order = ['off', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const supported = model?.supportEfforts || [];
+    const efforts = [...order.filter(level => supported.includes(level)), ...supported.filter(level => !order.includes(level)).sort()];
+    const choices = efforts.map(level => [level, level]);
+    if (model?.defaultEffort) choices.unshift(['', '模型默认（' + model.defaultEffort + '）']);
+    else if (!efforts.length) choices.push(['', '自动']);
+    options(ui.effort, choices);
+    ui.effort.value = choices[0][0];
+    ui.effort.disabled = !efforts.length;
+  }
+
+  function renderList() {
+    ui.list.replaceChildren(...(list?.conversations || []).map(conversationRow));
+    rows = Array.from(ui.list.querySelectorAll('input[type="checkbox"]'));
+    options(ui.model, [['', '选择模型'], ...(list?.models || []).map(model => [model.alias, conversationModelLabel(model)])]);
+    renderEfforts();
+    const hasRows = Boolean(rows.length && !list.reason);
+    setHidden(ui.form, !hasRows);
+    ui.form.disabled = !hasRows || pending || stale || list.application === 'unknown' || !list.models.length;
+    renderSelection();
+  }
+
+  function markStale() {
+    stale = true;
+    clearConfirmation();
+    setText(ui.status, '账号、接入配置或 Kimi 状态已变化，请刷新会话后再改绑。');
+    ui.form.disabled = true;
+    renderSelection();
+  }
+
+  function result(text, tone) {
+    setText(ui.result, text);
+    ui.result.classList.toggle('note--warn', tone === 'warn');
+    setHidden(ui.result, !text);
+  }
+
+  async function load({ preserveResult = false } = {}) {
+    if (pending || !state.key) return;
+    const key = state.key;
+    const panelAtRequest = panelRevision;
+    loadedKey = undefined;
+    pending = true;
+    stale = false;
+    list = null;
+    selected = new Set();
+    clearConfirmation();
+    if (!preserveResult) result('', '');
+    ui.refresh.disabled = true;
+    setText(ui.status, '正在读取 Kimi Work 会话…');
+    renderList();
+    try {
+      const next = await request(API.workConversations);
+      if (state.key !== key) return;
+      if (!Array.isArray(next?.conversations) || !Array.isArray(next?.models)) throw new Error('无法读取 Kimi Work 会话。');
+      loadedKey = key;
+      list = next;
+      if (panelAtRequest !== panelRevision) markStale();
+      else setText(ui.status, conversationListStatus(list));
+    } catch (error) {
+      if (state.key === key) setText(ui.status, error.message || '无法读取 Kimi Work 会话，请刷新后重试。');
+    } finally {
+      pending = false;
+      ui.refresh.disabled = false;
+      renderList();
+    }
+  }
+
+  panel.addEventListener('toggle', () => { if (panel.open) void load(); });
+  ui.refresh.addEventListener('click', () => { void load(); });
+  ui.list.addEventListener('change', ({ target }) => {
+    if (!rows.includes(target)) return;
+    if (target.checked) selected.add(target.value);
+    else selected.delete(target.value);
+    clearConfirmation();
+    renderSelection();
+  });
+  ui.all.addEventListener('change', () => {
+    selected = new Set(ui.all.checked ? rows.map(row => row.value) : []);
+    clearConfirmation();
+    renderSelection();
+  });
+  ui.model.addEventListener('change', () => {
+    clearConfirmation();
+    renderEfforts();
+    renderSelection();
+  });
+  ui.effort.addEventListener('change', clearConfirmation);
+  function review(migrate) {
+    const button = migrate ? ui.migrate : ui.review;
+    if (button.disabled) return;
+    if (loadedKey !== state.key) { void load(); return; }
+    const model = selectedModel();
+    confirmed = conversationRebindPayload(list, selected, model, ui.effort.value);
+    const suffix = confirmed.restartKimi ? '，并退出后重新打开 Kimi' : '';
+    if (migrate) {
+      delete confirmed.conversationKeys;
+      confirmed.migratePreviousAlias = true;
+      setText(ui['confirm-text'], `将使用旧别名的「${model.displayName}」会话迁移到当前别名${suffix}。`);
+    } else {
+      setText(ui['confirm-text'], `将 ${confirmed.conversationKeys.length} 个会话改绑到「${model.displayName}」${suffix}。`);
+    }
+    setText(ui.submit, migrate ? '确认迁移' : confirmed.restartKimi ? '确认改绑并重启' : '确认改绑');
+    setHidden(ui.confirm, false);
+    ui.submit.focus();
+  }
+  ui.review.addEventListener('click', () => review(false));
+  ui.migrate?.addEventListener('click', () => review(true));
+  ui.cancel.addEventListener('click', () => {
+    const button = confirmed?.migratePreviousAlias ? ui.migrate : ui.review;
+    clearConfirmation();
+    button?.focus();
+  });
+  ui.submit.addEventListener('click', async () => {
+    if (!confirmed || pending) return;
+    if (loadedKey !== state.key) { void load(); return; }
+    const payload = confirmed;
+    const key = state.key;
+    clearConfirmation();
+    pending = true;
+    ui.form.disabled = true;
+    ui.refresh.disabled = true;
+    renderSelection();
+    result(payload.restartKimi ? '正在退出 Kimi 并改绑会话…' : '正在改绑会话…', '');
+    let refresh = true;
+    try {
+      const reply = await request(API.rebindConversations, { method: 'POST', body: payload });
+      if (state.key !== key) return;
+      const count = (reply.conversationKeys || []).length;
+      const action = reply.kimiRestarted ? 'Kimi 已重启。' : reply.restartReason ? 'Kimi 未能重启，请手动打开 Kimi。' : '打开 Kimi 后可继续原会话。';
+      const warning = reply.directAnthropicHistoryWarning ? '直连 Anthropic 可能拒绝旧思考块。' : '';
+      const summary = payload.migratePreviousAlias
+        ? count ? `已迁移 ${count} 个会话。` : '没有找到使用旧别名的会话。'
+        : `已改绑 ${count} 个会话。`;
+      const remaining = reply.hasMore ? '还有会话待迁移，请再次选择此模型并继续。' : '';
+      result(summary + action + warning + remaining, reply.restartReason || warning ? 'warn' : '');
+    } catch (error) {
+      if (state.key !== key) return;
+      result(error.message || '改绑状态未能确认，请刷新会话后再试。', 'warn');
+      refresh = payload.restartKimi || error.code === 'conversation_kimi_restart_required' || error.code === 'NETWORK' || error.code === 'conversation_rollback_failed';
+    } finally {
+      pending = false;
+      ui.refresh.disabled = false;
+      if (state.key !== key || refresh) void load({ preserveResult: state.key === key });
+      else {
+        ui.form.disabled = stale;
+        renderSelection();
+      }
+    }
+  });
+
+  return next => {
+    const signature = conversationPanelSignature(next);
+    if (signature === observedPanel) return;
+    observedPanel = signature;
+    panelRevision++;
+    if (panel.open && list) markStale();
+  };
+}
+
 export {
+  mountConversationRebind,
   appendPoolModel,
   discardDraft,
   draftFromSaved,

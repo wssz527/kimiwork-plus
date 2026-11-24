@@ -1389,6 +1389,21 @@ function renderIntegrationMode(data) {
 
   const direct = directModeOf(data);
   const directSaved = saved === 'direct';
+  if (dom.kimiK3Enabled) {
+    const enabled = data?.kimiK3Compatibility === true;
+    setHidden(dom.kimiK3Setting, directSaved || typeof data?.kimiK3Compatibility !== 'boolean');
+    if (!integrationModeSaving) dom.kimiK3Enabled.checked = enabled;
+    dom.kimiK3Enabled.disabled = busy;
+    const text = {
+      no_chat_models: '添加 Chat 模型后再同步到 Work。',
+      needs_sync: '请点「同步到 Work」应用此设置。切换前已有的第三方会话可在「旧会话改绑模型」中迁移。',
+      requires_restart: '模型已同步。请重启 Kimi 以载入新的模型菜单。',
+      provider_mismatch: '当前模型来源不支持在菜单内原位切换。可使用「旧会话改绑模型」，或移除接管后重新同步再检查。',
+      ready: '已同步。K2 会话可先在原会话切到官方 K3，再选择第三方模型。',
+    }[data?.kimiK3State] || '';
+    setText(dom.kimiK3Status, text);
+    setHidden(dom.kimiK3Status, !text);
+  }
   const directChecking = data?.compatibility?.status === 'checking' && direct?.supported !== true;
   const directUnsupported = !directChecking && direct?.supported === false;
   const cleanupPending = directRouteCleanupPending(data);
@@ -1505,6 +1520,28 @@ async function chooseIntegrationMode(mode, { onSaved } = {}) {
   } catch (error) {
     await handleSaveFailure(error, 'integration-mode');
     return false;
+  } finally {
+    integrationModeSaving = false;
+    if (state.data) {
+      renderIntegrationMode(state.data);
+      renderActions(state.data);
+    }
+  }
+}
+
+async function chooseKimiK3Compatibility(enabled, { onSaved } = {}) {
+  const data = state.data;
+  if (!data || integrationModeBusy(data) || savedIntegrationMode(data) !== 'gateway') return;
+  clearDisconnectConfirm();
+  integrationModeSaving = true;
+  renderIntegrationMode(data);
+  renderActions(data);
+  try {
+    const result = await request(API.kimiK3Compatibility, { method: 'POST', body: { revision: data.revision, enabled } });
+    if (result?.state) onSaved?.(result.state);
+    showToast('设置已保存，请同步到 Work。', 'ok');
+  } catch (error) {
+    await handleSaveFailure(error, 'integration-mode');
   } finally {
     integrationModeSaving = false;
     if (state.data) {
@@ -1979,6 +2016,7 @@ function resetRecentSignature() { recentSignature = ''; }
 
 export {
   chooseIntegrationMode,
+  chooseKimiK3Compatibility,
   exportDiagnostics,
   directImportComplete,
   directModeState,

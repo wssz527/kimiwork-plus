@@ -17,6 +17,7 @@ import (
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
 	"github.com/wssz527/kimiwork-plus/internal/ledger"
 	"github.com/wssz527/kimiwork-plus/internal/platform"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 type Native struct {
@@ -137,6 +138,10 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 			return core.Document{"accounts": n.accountsState()}, nil
 		case "/api/work/swarm":
 			return n.readSwarm(ctx)
+		case "/api/work/conversations":
+			return n.readWorkConversations(ctx)
+		case "/api/work/conversations/rebind":
+			return n.rebindWorkConversations(ctx, in)
 		case "/api/usage/query", "/api/usage/export":
 			if n.workUsage != nil {
 				n.workUsage.Sync()
@@ -171,6 +176,13 @@ func (n *Native) Configure(d core.Document) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	settings := n.controller.Settings()
+	if core.KimiK3Compatibility(d) {
+		for i := range models {
+			if models[i].Protocol == protocol.ProtocolChat {
+				models[i].CatalogID = protocol.KimiCompatibleModelID(models[i].ID)
+			}
+		}
+	}
 	settings.Models = models
 	mode := core.IntegrationMode(d)
 	settings.IntegrationMode = mode
@@ -575,6 +587,7 @@ func (n *Native) State() core.Document {
 			out[k] = v
 		}
 		out["directMode"] = n.directModeState(d, integration, core.Object(policies["search"]))
+		out["kimiK3State"] = kimiK3State(d, currentIntegration, process["running"] == true)
 	}
 	out["tools"] = n.toolsState(context.Background())
 	out["webTools"] = n.web.State(core.Object(out["search"]))

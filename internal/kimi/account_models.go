@@ -463,7 +463,7 @@ func (n *NativeIntegration) accountCatalog(settings ControllerSettings, scope st
 		if entry.protocol == "chat" {
 			family = "kimi"
 		}
-		row, found := findRow(rows, entry.id, family)
+		row, found := findRow(rows, entry.modelID, family)
 		if !found || rowFamily(row) != family {
 			return nil, "models_missing", true
 		}
