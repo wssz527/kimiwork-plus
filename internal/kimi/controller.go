@@ -446,6 +446,10 @@ func (c *Controller) start(ctx context.Context) error {
 		c.setState(StateFailed, reason)
 		return errors.New(reason)
 	}
+	if err := c.recoverConversationBindingsBeforeStart(ctx); err != nil {
+		c.setState(StateFailed, err.Error())
+		return err
+	}
 	launchProfile := settings.UserDataDir
 	if settings.profileMode() == ProfileModeExistingAuthorized {
 		home := c.kimiHome()

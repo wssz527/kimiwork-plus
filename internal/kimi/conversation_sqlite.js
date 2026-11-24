@@ -108,6 +108,7 @@ function snapshotFile(filename) {
     throw error;
   }
   if (!info.isFile() || info.size > 32 * 1024 * 1024) fail('conversation_bindings_invalid');
+  if (process.platform === 'win32' && (info.mode & 0o200) === 0) fail('conversation_bindings_read_only');
   const data = fs.readFileSync(filename);
   let document;
   try {
@@ -178,6 +179,7 @@ function recoverPendingJournal(db, agentDirectory, visibleWhere) {
   const journalPath = path.join(agentDirectory, JOURNAL_NAME);
   let raw;
   try {
+    if (!fs.lstatSync(journalPath).isFile()) fail('conversation_rollback_failed');
     raw = fs.readFileSync(journalPath, 'utf8');
   } catch (error) {
     if (error.code === 'ENOENT') return { recovered: 'none' };

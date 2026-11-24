@@ -596,6 +596,97 @@ func TestConversationVisibilityScopeSchemaVersionAndNullPreferences(t *testing.T
 	}
 }
 
+func TestConversationRecoveryFailureBlocksListAndRestart(t *testing.T) {
+	store, selection, bindings := conversationFixture(t)
+	controller := &Controller{settings: ControllerSettings{UserDataDir: store.profile, ProfileMode: ProfileModeIsolated,
+		Installation: Installation{Application: "fixture"}, ConversationNodePath: store.nodePath}}
+	previousExec := execCommandContext
+	previousList, previousIdentity, previousTargets, previousQuit, previousStart := listOfficialProcesses, officialProcessIdentity, selectQuitTargets, requestOfficialQuit, restartConversationKimi
+	t.Cleanup(func() {
+		execCommandContext = previousExec
+		listOfficialProcesses, officialProcessIdentity, selectQuitTargets, requestOfficialQuit, restartConversationKimi = previousList, previousIdentity, previousTargets, previousQuit, previousStart
+	})
+	const fault = `{const fs = require('node:fs'); const rename = fs.renameSync;
+		fs.renameSync = (source, target) => {
+			if (!target.endsWith('byok-applied-model-bindings.json')) return rename(source, target);
+			throw Object.assign(new Error('binding file unavailable'), {code: 'EPERM'});
+		};}`
+	execCommandContext = func(ctx context.Context, node string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, node, "-e", fault+args[1])
+	}
+	running := true
+	var restarts int
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) {
+		if running {
+			return []int{101}, true, ""
+		}
+		return nil, true, ""
+	}
+	officialProcessIdentity = func(context.Context, int) ProcessIdentity {
+		if running {
+			return ProcessIdentity{Kind: "fixture", Value: "pid-101"}
+		}
+		return ProcessIdentity{Kind: IdentityNotFound}
+	}
+	selectQuitTargets = func(pids []int) []int { return pids }
+	requestOfficialQuit = func(context.Context, int) error { running = false; return nil }
+	restartConversationKimi = func(*Controller, context.Context) error { restarts++; return nil }
+
+	ctx := context.Background()
+	request := ConversationRebindRequest{ConversationKeys: []string{conversationFixtureKey}, TargetModelAlias: conversationFixtureAlias, RestartKimi: true}
+	for _, attempt := range []string{"initial", "retry"} {
+		running = true
+		result, err := controller.RebindWorkConversations(ctx, request)
+		if !errors.Is(err, errConversationRollbackFailed) || result.KimiRestarted || restarts != 0 || !store.hasPendingJournal() {
+			t.Fatalf("%s: result=%+v error=%v restarts=%d pending=%t", attempt, result, err, restarts, store.hasPendingJournal())
+		}
+		list := controller.WorkConversations(ctx)
+		if list.Reason != errConversationRollbackFailed.Error() || len(list.Conversations) != 0 {
+			t.Fatalf("%s: list must report pending recovery, got %+v", attempt, list)
+		}
+	}
+	if !strings.Contains(conversationTestRead(t, selection), conversationFixtureAlias) || conversationTestRead(t, bindings) != conversationFixtureBindings {
+		t.Fatal("fixture did not reproduce a partially applied binding")
+	}
+	if err := controller.recoverConversationBindingsBeforeStart(ctx); !errors.Is(err, errConversationRollbackFailed) {
+		t.Fatalf("managed startup did not report failed recovery: %v", err)
+	}
+
+	execCommandContext = previousExec
+	if err := controller.recoverConversationBindingsBeforeStart(ctx); err != nil || store.hasPendingJournal() {
+		t.Fatalf("managed startup recovery = %v, pending=%t", err, store.hasPendingJournal())
+	}
+	list := controller.WorkConversations(ctx)
+	if list.Reason != "" || len(list.Conversations) == 0 || list.Conversations[0].ModelAlias != conversationFixtureAlias ||
+		!strings.Contains(conversationTestRead(t, bindings), conversationFixtureAlias) {
+		t.Fatalf("bindings did not converge: %+v", list)
+	}
+}
+
+func TestConversationRebindRefusesReadOnlyWindowsBindingsBeforeCommit(t *testing.T) {
+	store, selection, bindings := conversationFixture(t)
+	previousExec := execCommandContext
+	t.Cleanup(func() { execCommandContext = previousExec })
+	if err := os.Chmod(bindings, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bindings, 0o600) })
+	execCommandContext = func(ctx context.Context, node string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, node, "-e", `Object.defineProperty(process, 'platform', {value: 'win32'});`+args[1])
+	}
+	ctx := context.Background()
+	_, err := store.run(ctx, conversationSQLiteRequest{Operation: "rebind", ConversationKeys: []string{conversationFixtureKey}, ModelAlias: conversationFixtureAlias})
+	if err == nil || err.Error() != "conversation_bindings_read_only" || store.hasPendingJournal() {
+		t.Fatalf("read-only rebind = %v, pending=%t", err, store.hasPendingJournal())
+	}
+	if conversationTestRead(t, selection) != conversationFixtureSelection || conversationTestRead(t, bindings) != conversationFixtureBindings {
+		t.Fatal("read-only rejection changed a binding")
+	}
+	if list, err := store.run(ctx, conversationSQLiteRequest{Operation: "list", Limit: 10}); err != nil || len(list.Conversations) == 0 || list.Conversations[0].ModelAlias != "kimi-k3" {
+		t.Fatalf("read-only rejection changed SQLite: %+v, %v", list, err)
+	}
+}
+
 func TestConversationIntentJournalCrashRecoveryAndCancellationErrors(t *testing.T) {
 	t.Run("crash after commit converges JSON on WorkConversations when Kimi stopped", func(t *testing.T) {
 		store, selection, bindings := conversationFixture(t)

@@ -814,6 +814,9 @@ function conversationListStatus(list) {
       conversation_node_unavailable: '当前找不到支持读取会话库的 Kimi Node 运行时。',
       conversation_database_busy: 'Kimi 会话库正在使用，请稍后刷新。',
       conversation_profile_unsupported: '诊断隔离模式不可改绑会话，请使用默认方式打开 Kimi。',
+      conversation_rollback_failed: list.application === 'not_running'
+        ? '会话绑定恢复尚未完成。请检查绑定文件的写入权限后刷新。'
+        : '会话绑定恢复尚未完成。请完全退出 Kimi 后刷新。',
     };
     return messages[list.reason] || '无法读取 Kimi Work 会话库，请刷新后重试。';
   }

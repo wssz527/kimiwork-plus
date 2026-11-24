@@ -4805,6 +4805,8 @@ test('old conversations render in Kimi access settings with model, date and dist
 
   for (const [data, message] of [
     [{ reason: 'conversation_database_missing', conversations: [], models: [] }, /还没有 Kimi Work 会话库/],
+    [{ reason: 'conversation_rollback_failed', conversations: [], models: [], application: 'running' }, /恢复尚未完成.*退出 Kimi/],
+    [{ reason: 'conversation_rollback_failed', conversations: [], models: [], application: 'not_running' }, /恢复尚未完成.*写入权限/],
     [{ conversations: [], models: [rebindTarget], application: 'not_running' }, /没有可改绑/],
     [{ conversations: oldConversationRows, models: [], application: 'not_running' }, /没有可用的第三方模型/],
     [{ conversations: oldConversationRows, models: [rebindTarget], application: 'unknown' }, /无法确认 Kimi 的运行状态/],

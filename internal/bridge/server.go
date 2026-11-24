@@ -212,8 +212,10 @@ func message(code string) string {
 		return "当前无法访问 Kimi 会话库，请刷新状态后重试。"
 	case "conversation_bindings_invalid", "conversation_preferences_invalid":
 		return "会话绑定数据格式异常，改绑已中止。"
+	case "conversation_bindings_read_only":
+		return "会话绑定文件是只读的，改绑已中止。请取消文件的只读属性后重试。"
 	case "conversation_rollback_failed":
-		return "改绑失败，部分会话绑定未能恢复。请检查会话状态后再操作。"
+		return "会话绑定恢复尚未完成。请完全退出 Kimi，在「旧会话改绑模型」中刷新。"
 	case "account_work_state_unavailable":
 		return "无法确认 Work 是否空闲。请打开官方 Work 并刷新状态后重试。"
 	case "account_login_pending":

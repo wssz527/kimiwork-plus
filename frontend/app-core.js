@@ -328,6 +328,7 @@ const DIAG_REASON = {
   native_import_requires_restart: '模型配置已写入，请等当前任务结束后正常重启 Kimi 以生效。',
   kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
   kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
+  conversation_rollback_failed: '会话绑定恢复尚未完成。请在「旧会话改绑模型」中刷新。',
   kimi_start_cancelled: '自动启动官方 Kimi 已取消。',
   kimi_stop_failed: '未能正常停止当前受管 Kimi 进程，请先在官方窗口退出后再试。',
   kimi_user_data_dir_invalid: '官方 Kimi 数据目录路径无效，请检查诊断信息。',

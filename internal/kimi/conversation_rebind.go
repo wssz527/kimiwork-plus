@@ -130,19 +130,33 @@ func (c *Controller) WorkConversations(ctx context.Context) ConversationList {
 		result.Reason = stableErrorCode(err, "conversation_database_unavailable")
 		return result
 	}
-	if result.Application == NotRunning && store.hasPendingJournal() {
+	if store.hasPendingJournal() {
 		c.lifecycle.Lock()
-		if conversationApplication(ctx, settings.Installation.Application) == NotRunning && !c.managedChildAlive() {
-			recoverCtx, cancel := context.WithTimeout(ctx, conversationRecoverTimeout)
-			_, _ = store.run(recoverCtx, conversationSQLiteRequest{Operation: "recover"})
-			cancel()
+		store, err = c.conversationStore()
+		if err == nil {
+			result.Application = conversationApplication(ctx, store.install.Application)
+			result.KimiRunning = result.Application == Running
+			if store.hasPendingJournal() {
+				err = errConversationRollbackFailed
+				if result.Application == NotRunning && !c.managedChildAlive() {
+					err = store.recoverBindings(ctx)
+				}
+			}
 		}
 		c.lifecycle.Unlock()
+		if err != nil {
+			result.Reason = stableErrorCode(err, "conversation_database_unavailable")
+			return result
+		}
 	}
 	result.Models = store.models()
 	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	reply, err := store.run(readCtx, conversationSQLiteRequest{Operation: "list", Limit: conversationListLimit})
+	if store.hasPendingJournal() {
+		result.Reason = errConversationRollbackFailed.Error()
+		return result
+	}
 	if err != nil {
 		result.Reason = stableErrorCode(err, "conversation_database_unavailable")
 		return result
@@ -234,6 +248,9 @@ func (c *Controller) RebindWorkConversations(ctx context.Context, request Conver
 		reply, err = store.run(writeCtx, mutation)
 		return err
 	})
+	if store.hasPendingJournal() {
+		writeErr = errConversationRollbackFailed
+	}
 	keys := request.ConversationKeys
 	if request.MigratePreviousAlias {
 		keys = reply.ConversationKeys
@@ -406,8 +423,28 @@ func (s conversationStore) hasPendingJournal() bool {
 	if s.profile == "" {
 		return false
 	}
-	info, err := os.Stat(s.journalPath())
-	return err == nil && info.Mode().IsRegular()
+	_, err := os.Lstat(s.journalPath())
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+func (s conversationStore) recoverBindings(ctx context.Context) error {
+	recoverCtx, cancel := context.WithTimeout(ctx, conversationRecoverTimeout)
+	defer cancel()
+	if _, err := s.run(recoverCtx, conversationSQLiteRequest{Operation: "recover"}); err != nil || s.hasPendingJournal() {
+		return errConversationRollbackFailed
+	}
+	return nil
+}
+
+func (c *Controller) recoverConversationBindingsBeforeStart(ctx context.Context) error {
+	store, err := c.conversationStore()
+	if !store.hasPendingJournal() {
+		return nil
+	}
+	if err != nil || conversationApplication(ctx, store.install.Application) != NotRunning {
+		return errConversationRollbackFailed
+	}
+	return store.recoverBindings(ctx)
 }
 
 func (s conversationStore) run(ctx context.Context, request conversationSQLiteRequest) (conversationSQLiteResult, error) {

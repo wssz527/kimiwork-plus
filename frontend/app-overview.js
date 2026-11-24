@@ -434,6 +434,7 @@ function nativeConnectionText(data) {
     work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
     work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
     work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
+    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「旧会话改绑模型」中刷新。',
     work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
     native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧版本或其他接入实例，再重新准备。',
     native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
