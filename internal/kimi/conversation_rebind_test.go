@@ -755,6 +755,13 @@ func TestConversationIntentJournalCrashRecoveryAndCancellationErrors(t *testing.
 				"modelAlias":    conversationFixtureAlias,
 				"thinkingLevel": "low",
 				"byok":          true,
+			}, {
+				"key":           "second",
+				"oldAlias":      "byok-kth-resp/prior",
+				"oldLevel":      "high",
+				"modelAlias":    "byok-kth-resp/prior",
+				"thinkingLevel": "high",
+				"byok":          true,
 			}},
 		}
 		raw, _ := json.Marshal(journal)
@@ -766,6 +773,30 @@ func TestConversationIntentJournalCrashRecoveryAndCancellationErrors(t *testing.
 		}
 		if conversationTestRead(t, selection) != conversationFixtureSelection || conversationTestRead(t, bindings) != conversationFixtureBindings {
 			t.Fatal("JSON files were modified during rollback recovery")
+		}
+	})
+
+	t.Run("committed entries recover even if another conversation changed back", func(t *testing.T) {
+		store, selection, bindings := conversationFixture(t)
+		conversationTestSQL(t, store, `
+			db.prepare("UPDATE conversations SET extra_json = json_set(extra_json, '$.runtimePreferences.modelAlias', ?, '$.runtimePreferences.thinkingLevel', ?) WHERE agent_id = 'main' AND conversation_key = 'second'")
+				.run('`+conversationFixtureAlias+`', 'low');
+		`)
+		journal := map[string]any{"version": 1, "entries": []map[string]any{
+			{"key": conversationFixtureKey, "oldAlias": "kimi-k3", "oldLevel": "high", "modelAlias": conversationFixtureAlias, "thinkingLevel": "low", "byok": true},
+			{"key": "second", "oldAlias": "byok-kth-resp/prior", "oldLevel": "high", "modelAlias": conversationFixtureAlias, "thinkingLevel": "low", "byok": true},
+		}}
+		raw, _ := json.Marshal(journal)
+		conversationTestWrite(t, store.journalPath(), string(raw))
+		result, err := store.run(context.Background(), conversationSQLiteRequest{Operation: "recover"})
+		if err != nil || result.Recovered != "committed" || !slices.Equal(result.ConversationKeys, []string{"second"}) || store.hasPendingJournal() {
+			t.Fatalf("mixed recovery = %+v, %v, pending=%t", result, err, store.hasPendingJournal())
+		}
+		if text := conversationTestRead(t, selection); !strings.Contains(text, `"modelKey":"official"`) || !strings.Contains(text, `"second":{"modelKey":"`+conversationFixtureAlias+`"`) {
+			t.Fatalf("selection after recovery = %s", text)
+		}
+		if text := conversationTestRead(t, bindings); !strings.Contains(text, `"second":"`+conversationFixtureAlias+`"`) || strings.Contains(text, conversationFixtureKey) {
+			t.Fatalf("applied bindings after recovery = %s", text)
 		}
 	})
 

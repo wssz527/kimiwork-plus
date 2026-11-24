@@ -197,7 +197,7 @@ function recoverPendingJournal(db, agentDirectory, visibleWhere) {
     return { recovered: 'rolled_back' };
   }
   const read = db.prepare(`SELECT extra_json FROM conversations WHERE ${visibleWhere} AND conversation_key = ?`);
-  let matchedNew = 0;
+  let committedChange = false;
   let anyStillOld = false;
   const matchingEntries = [];
   for (const entry of journal.entries) {
@@ -210,14 +210,15 @@ function recoverPendingJournal(db, agentDirectory, visibleWhere) {
     const row = read.get(entry.key);
     if (!row) continue;
     const current = parsePreferences(row.extra_json);
+    const changed = oldAlias !== entry.modelAlias || oldLevel !== level;
     if (current.modelAlias === entry.modelAlias && current.thinkingLevel === level) {
-      matchedNew++;
+      committedChange ||= changed;
       matchingEntries.push({ key: entry.key, modelAlias: entry.modelAlias, thinkingLevel: level, byok: Boolean(entry.byok) });
-    } else if ((oldAlias !== entry.modelAlias || oldLevel !== level) && current.modelAlias === oldAlias && current.thinkingLevel === oldLevel) {
+    } else if (current.modelAlias === oldAlias && current.thinkingLevel === oldLevel) {
       anyStillOld = true;
     }
   }
-  if (matchedNew < journal.entries.length && (anyStillOld || matchedNew === 0)) {
+  if (!matchingEntries.length || (!committedChange && anyStillOld)) {
     removeJournal(journalPath);
     return { recovered: 'rolled_back' };
   }
@@ -225,7 +226,7 @@ function recoverPendingJournal(db, agentDirectory, visibleWhere) {
   removeJournal(journalPath);
   return {
     recovered: 'committed',
-    conversationKeys: journal.entries.map(entry => entry.key),
+    conversationKeys: matchingEntries.map(entry => entry.key),
     hadOfficial: Boolean(journal.hadOfficial),
     hasMore: Boolean(journal.hasMore),
   };
