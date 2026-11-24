@@ -546,11 +546,6 @@ func (c *Controller) ActivateAccount(ctx context.Context, session AccountSession
 	accountSessionMu.Lock()
 	defer accountSessionMu.Unlock()
 	result, err := c.activateAccount(ctx, session)
-	// The attempt may have written another account's credentials and then failed
-	// to verify, or rolled back to the previous one. Either way the tree a
-	// reconcile was reading is no longer the tree it is now, so the generation is
-	// ended before this call returns -- not only on the success path.
-	c.beginConfigWrite()
 	if err != nil || !result.Verified {
 		return result, err
 	}
@@ -587,6 +582,8 @@ func (c *Controller) activateAccount(ctx context.Context, session AccountSession
 	// attempt has something real to go back to.
 	original, originalErr := c.captureAccount(ctx, surface, home)
 	result := AccountActivation{UserID: session.UserID, Digest: sha256Hex(session.UserID)}
+	c.beginConfigWrite()
+	defer c.beginConfigWrite()
 
 	runtime, runtimePage, watching := watchAccountRuntime(ctx, surface)
 	if watching {
@@ -733,6 +730,8 @@ func (c *Controller) BeginAccountLogin(ctx context.Context) error {
 	if shell == nil {
 		return errors.New(AccountErrUnsupported)
 	}
+	c.beginConfigWrite()
+	defer c.beginConfigWrite()
 	if err := surface.accountBeginLogin(ctx, *shell); err != nil {
 		return err
 	}

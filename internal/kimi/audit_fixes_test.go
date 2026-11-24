@@ -750,41 +750,120 @@ func TestWaitForMainContextStopsWithTheHost(t *testing.T) {
 	}
 }
 
-// TestConfigureKeepsTheDiscoveredDirectSourceID proves a Configure cannot write
-// an older Direct Mode source id back over the one a reconcile just published.
-// The route is primed the way a reconcile primes it — by writing the intent and
-// calling syncActionsIntegrationRoute with the discovered id, which is also what
-// makes a later directSourceID lookup able to answer.
-func TestConfigureKeepsTheDiscoveredDirectSourceID(t *testing.T) {
-	profile, home := nativeProfile(t, "user-1")
-	seedNativeProfile(t, home, "http://127.0.0.1:9999/v1", "cred-1")
-	stateDir := filepath.Dir(profile)
+func TestActivateAccountInvalidatesGenerationAroundHotSwitch(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("original", "original-access", "original-refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "original")
+	harness.page.runtimeWatch, harness.page.runtimeTransition = true, true
+	initial := harness.controller.settingsGen
+	var during uint64
+	harness.page.onActivation = func() {
+		during = harness.controller.settingsGen
+		if during == initial {
+			t.Error("hot switch wrote page credentials in the previous generation")
+		}
+		harness.writeConfig(t, accountConfigFixture("target", "rotated-access", "rotated-refresh"))
+	}
+	result, err := harness.controller.ActivateAccount(context.Background(), AccountSession{
+		SchemaVersion: 1, UserID: "target", KimiWeb: map[string]any{"userId": "target", "accessToken": "target-access"},
+	})
+	if err != nil || !result.Hot || !result.Verified {
+		t.Fatalf("hot activation: %+v err=%v", result, err)
+	}
+	if harness.controller.settingsGen <= during {
+		t.Fatalf("generation did not advance before activation returned: before=%d during=%d after=%d", initial, during, harness.controller.settingsGen)
+	}
+}
+
+func TestBeginAccountLoginInvalidatesGenerationWhenSignOutVerificationFails(t *testing.T) {
+	harness := newAccountHarness(t)
+	harness.writeConfig(t, accountConfigFixture("user-1", "access", "refresh"))
+	harness.page.put("kimi-1", "msh_user_id", "user-1")
+	harness.page.officialIdentity = "stale-after-signout"
+	initial := harness.controller.settingsGen
+	var during uint64
+	harness.page.onBeginLogin = func() {
+		during = harness.controller.settingsGen
+		if during == initial {
+			t.Error("sign-out started before ending the previous generation")
+		}
+	}
+	if err := harness.controller.BeginAccountLogin(context.Background()); err == nil || err.Error() != AccountErrSignOutIncomplete {
+		t.Fatalf("login result: %v", err)
+	}
+	if harness.controller.settingsGen <= during {
+		t.Fatalf("failed sign-out returned without ending its generation: before=%d during=%d after=%d", initial, during, harness.controller.settingsGen)
+	}
+}
+
+func TestConfigureRefreshesDirectSourceRoute(t *testing.T) {
+	oldProfile, oldHome := nativeProfile(t, "user-old")
+	newProfile, newHome := nativeProfile(t, "user-new")
+	stateDir := t.TempDir()
 	settings := ControllerSettings{
 		StateDir:        stateDir,
-		UserDataDir:     profile,
+		UserDataDir:     newProfile,
 		IntegrationMode: IntegrationModeDirect,
 		DirectSpec: &DirectSpec{
 			Providers: []DirectProviderSpec{{ID: "p1", Protocol: "chat", BaseURL: "https://api.example.com/v1"}},
 			Models:    []DirectModel{{ID: "m1", ProviderID: "p1", Model: "m1", MaxContextSize: 128000}},
 		},
 	}
-	controller, err := NewController(settings)
+	controller, err := NewController(ControllerSettings{StateDir: stateDir, UserDataDir: oldProfile})
 	if err != nil {
 		t.Fatal(err)
 	}
-	actions := &fakePageActions{}
+	actions := &fakePageActions{mode: IntegrationModeGateway}
 	controller.mu.Lock()
 	controller.actions = actions
 	controller.mu.Unlock()
 
-	// The discovered id that a reconcile published and recorded.
-	controller.syncActionsIntegrationRoute(settings, "source-discovered")
+	for _, test := range []struct {
+		home     string
+		sourceID string
+	}{{oldHome, "source-old"}, {newHome, "source-new"}} {
+		native, err := NewNativeIntegration(stateDir, test.home, IntegrationModeDirect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := native.writeIntent(&nativeIntent{SchemaVersion: NativeWorkSchema,
+			Mode: IntegrationModeDirect, DirectSourceID: test.sourceID, Active: true, Generation: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := controller.Configure(settings); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
-	mode, sourceID := actions.route()
-	if mode != IntegrationModeDirect || sourceID == "" {
-		t.Fatalf("Configure erased the discovered route: mode=%q sourceID=%q", mode, sourceID)
+	if mode, sourceID := actions.route(); mode != IntegrationModeDirect || sourceID != "source-new" {
+		t.Fatalf("Configure read the previous profile: mode=%q sourceID=%q", mode, sourceID)
+	}
+
+	native, err := NewNativeIntegration(stateDir, newHome, IntegrationModeDirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := native.writeIntent(&nativeIntent{SchemaVersion: NativeWorkSchema,
+		Mode: IntegrationModeDirect, Active: false, Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Configure(settings); err != nil {
+		t.Fatal(err)
+	}
+	if mode, sourceID := actions.route(); mode != IntegrationModeDirect || sourceID != "" {
+		t.Fatalf("disconnected source survived: mode=%q sourceID=%q", mode, sourceID)
+	}
+
+	gateway := settings
+	gateway.IntegrationMode = IntegrationModeGateway
+	gateway.DirectSpec = nil
+	if err := controller.Configure(gateway); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Configure(settings); err != nil {
+		t.Fatal(err)
+	}
+	if mode, sourceID := actions.route(); mode != IntegrationModeDirect || sourceID != "" {
+		t.Fatalf("gateway to direct without intent: mode=%q sourceID=%q", mode, sourceID)
 	}
 }
 

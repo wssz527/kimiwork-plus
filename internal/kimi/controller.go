@@ -241,10 +241,6 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 	}
 	c.mu.Unlock()
 	c.reconcileMu.Lock()
-	// The source id is read here, not before the lock: a reconcile that is
-	// finishing now may have just discovered it, and computing it earlier would
-	// write that older value back over the route it just published.
-	sourceID := c.directSourceID(settings)
 	c.mu.Lock()
 	previousEnabled := c.settings.Translation.Enabled
 	c.settings = settings
@@ -252,12 +248,8 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 	actions := c.actions
 	host := c.host
 	c.mu.Unlock()
-	// An unknown Direct Mode source is not information, and writing it would
-	// erase a source a reconcile has already published. The route is left as it
-	// is until a reconcile names the source.
-	if settings.integrationMode() != IntegrationModeDirect || sourceID != "" {
-		updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
-	}
+	sourceID := c.directSourceID(settings)
+	updateActionsIntegrationRoute(actions, settings.integrationMode(), sourceID)
 	c.reconcileMu.Unlock()
 	if host != nil {
 		// Configure takes the host's own lock and invalidates the sessions whose
