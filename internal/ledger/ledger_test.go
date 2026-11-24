@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wssz527/kimiwork-plus/internal/ledger"
@@ -621,5 +622,219 @@ func TestNormalizationRedactsBeforeIdentifierValidation(t *testing.T) {
 	}
 	if strings.Contains(fmt.Sprint(record), account) || strings.Contains(fmt.Sprint(record), key) {
 		t.Fatal("raw identifiers survived normalization")
+	}
+}
+
+func TestLedgerConcurrentQueryRecordAndClear(t *testing.T) {
+	file := workspace(t)
+	now := int64(1794196800000)
+	instance, err := ledger.New(ledger.Options{
+		File:       file,
+		MaxRecords: 200,
+		Now:        func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if _, err := instance.Query(ledger.Query{Preset: "7d", TimeZone: shanghai, Now: &now}); err != nil {
+						t.Errorf("query: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 120; i++ {
+			id := fmt.Sprintf("op-%d", i%30)
+			status := "started"
+			if i%2 == 1 {
+				status = "completed"
+			}
+			_ = instance.Record(ledger.Entry{
+				OperationID: id,
+				At:          now - int64(i)*1000,
+				Status:      status,
+				ModelID:     str("model-a"),
+				PriceSource: str("table"),
+				Usage:       map[string]any{"input_tokens": float64(10 + i), "output_tokens": float64(5)},
+			})
+			if i%25 == 0 {
+				_ = instance.Clear(nil, "")
+			}
+		}
+		close(stop)
+	}()
+	wg.Wait()
+}
+
+func TestLedgerSkipsOversizedCorruptLineWithoutLosingLaterRecords(t *testing.T) {
+	file := workspace(t)
+	now := int64(1794196800000)
+	first, err := ledger.New(ledger.Options{
+		File:         file,
+		MaxFileBytes: 4096,
+		Now:          func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRecord(t, first, ledger.Entry{OperationID: "op-before", At: "2026-11-08T01:00:00.000Z", Status: "completed"})
+	mustRecord(t, first, ledger.Entry{OperationID: "op-after", At: "2026-11-08T02:00:00.000Z", Status: "completed"})
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	hugeCorrupt := `{"operationId":"bad","junk":"` + strings.Repeat("a", 5000) + `"}`
+	combined := lines[0] + "\n" + hugeCorrupt + "\n" + lines[1] + "\n"
+	if err := os.WriteFile(file, []byte(combined), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := ledger.New(ledger.Options{
+		File:         file,
+		MaxFileBytes: 4096,
+		Now:          func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.State() != "corrupt" || reloaded.Status().SkippedLines != 1 {
+		t.Fatalf("unexpected status: %+v", reloaded.Status())
+	}
+	recs := reloaded.Records()
+	if len(recs) != 2 || recs[0].OperationID != "op-before" || recs[1].OperationID != "op-after" {
+		t.Fatalf("expected both valid records around oversized corrupt line, got %+v", recs)
+	}
+}
+
+func TestLedgerQuarantinesUnreadableFileBeforeWriting(t *testing.T) {
+	file := workspace(t)
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := strings.Repeat("x", 5000)
+	if err := os.WriteFile(file, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := int64(1794196855555)
+	instance, err := ledger.New(ledger.Options{
+		File:         file,
+		MaxFileBytes: 1000,
+		Now:          func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.State() != "unavailable" {
+		t.Fatalf("expected unavailable state, got %q", instance.State())
+	}
+	backupPath := file + ".corrupt.1794196855555"
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("corrupt backup should not exist before write")
+	}
+	mustRecord(t, instance, ledger.Entry{OperationID: "op-new", At: "2026-11-08T03:00:00.000Z", Status: "completed"})
+	backupRaw, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("expected quarantined backup %s: %v", backupPath, err)
+	}
+	if string(backupRaw) != original {
+		t.Fatalf("quarantined backup content mismatch: len=%d want=%d", len(backupRaw), len(original))
+	}
+	if instance.State() != "ok" {
+		t.Fatalf("expected ok state after quarantine and write, got %q", instance.State())
+	}
+	reopened, err := ledger.New(ledger.Options{
+		File:         file,
+		MaxFileBytes: 1000,
+		Now:          func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs := reopened.Records(); len(recs) != 1 || recs[0].OperationID != "op-new" {
+		t.Fatalf("unexpected records in fresh file: %+v", recs)
+	}
+}
+
+func TestLedgerCompactTrimsOldestRecordsBelowMaxFileBytes(t *testing.T) {
+	file := workspace(t)
+	now := int64(1794196800000)
+	const limit = int64(3600)
+	instance, err := ledger.New(ledger.Options{
+		File:         file,
+		MaxRecords:   1000,
+		MaxFileBytes: limit,
+		CompactEvery: 1000,
+		Now:          func() int64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prevStat os.FileInfo
+	compactedAt := -1
+	for i := 0; i < 20; i++ {
+		mustRecord(t, instance, ledger.Entry{
+			OperationID: fmt.Sprintf("op-%02d", i),
+			At:          now - int64(30-i)*1000,
+			Status:      "completed",
+			ModelID:     str("model-compact-test"),
+		})
+		curStat, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if curStat.Size() >= limit {
+			t.Fatalf("after op-%02d file size %d still >= maxFileBytes %d", i, curStat.Size(), limit)
+		}
+		if prevStat != nil && !os.SameFile(prevStat, curStat) {
+			compactedAt = i
+			prevStat = curStat
+			break
+		}
+		prevStat = curStat
+	}
+	if compactedAt < 0 {
+		t.Fatal("expected compaction to trigger once file reached maxFileBytes")
+	}
+	if prevStat.Size() > limit*3/4 {
+		t.Fatalf("post-compact size %d should be <= 3/4 of limit %d", prevStat.Size(), limit)
+	}
+	recs := instance.Records()
+	if len(recs) == 0 || len(recs) > compactedAt {
+		t.Fatalf("expected oldest records trimmed on compaction, got %d records at step %d", len(recs), compactedAt)
+	}
+	wantNewest := fmt.Sprintf("op-%02d", compactedAt)
+	if recs[len(recs)-1].OperationID != wantNewest {
+		t.Fatalf("newest record = %q, want %q", recs[len(recs)-1].OperationID, wantNewest)
+	}
+	mustRecord(t, instance, ledger.Entry{
+		OperationID: "op-next",
+		At:          now - 1000,
+		Status:      "completed",
+		ModelID:     str("model-compact-test"),
+	})
+	statNext, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(prevStat, statNext) {
+		t.Fatalf("append immediately after compaction unexpectedly rewrote the file (sizes: %d -> %d)", prevStat.Size(), statNext.Size())
 	}
 }

@@ -3,6 +3,7 @@ package quota_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -513,6 +514,88 @@ type deadTransport struct{}
 
 func (d deadTransport) client() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return nil, os.ErrDeadlineExceeded
+		return nil, errors.New("connection refused")
 	})}
+}
+
+func TestMagpieParsesSuffixCurrencyBalances(t *testing.T) {
+	cases := []struct {
+		raw      string
+		currency string
+		amount   float64
+	}{
+		{"12.50 USD", "USD", 12.5},
+		{"100 CNY", "CNY", 100},
+		{"42.25 EUR", "EUR", 42.25},
+		{"18.75 GBP", "GBP", 18.75},
+		{"1,234.50 USD", "USD", 1234.5},
+	}
+	for _, tc := range cases {
+		var document any
+		payload, _ := json.Marshal([]map[string]any{{
+			"provider": "p",
+			"name":     "P",
+			"kind":     "balance",
+			"balance":  tc.raw,
+		}})
+		if err := json.Unmarshal(payload, &document); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, code := quota.ParseMagpieQuotas(document)
+		if code != "" || len(snapshot.Entries) != 1 {
+			t.Fatalf("%q: code=%q snapshot=%+v", tc.raw, code, snapshot)
+		}
+		entry := snapshot.Entries[0]
+		if entry.BalanceCurrency == nil || *entry.BalanceCurrency != tc.currency ||
+			entry.BalanceAmount == nil || *entry.BalanceAmount != tc.amount {
+			t.Fatalf("%q: got currency=%v amount=%v, want %s %v",
+				tc.raw, entry.BalanceCurrency, entry.BalanceAmount, tc.currency, tc.amount)
+		}
+	}
+}
+
+func TestMagpieTimeoutClassifiedAsTimeout(t *testing.T) {
+	t.Run("client_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Timeout: 15 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		reader, err := quota.NewMagpie(quota.MagpieOptions{BaseURL: "http://127.0.0.1:3430", HTTPClient: client})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.Refresh(context.Background()); err == nil {
+			t.Fatal("expected timeout error")
+		}
+		state := reader.State()
+		if state.Status != "error" || state.ErrorReason == nil || *state.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout state, got %+v", state)
+		}
+	})
+	t.Run("body_read_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       timeoutReadCloser{},
+					Request:    request,
+				}, nil
+			}),
+		}
+		reader, err := quota.NewMagpie(quota.MagpieOptions{BaseURL: "http://127.0.0.1:3430", HTTPClient: client})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.Refresh(context.Background()); err == nil {
+			t.Fatal("expected body read timeout error")
+		}
+		state := reader.State()
+		if state.Status != "error" || state.ErrorReason == nil || *state.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout on body read, got %+v", state)
+		}
+	})
 }

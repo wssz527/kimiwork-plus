@@ -358,6 +358,9 @@ func (t *StreamTranslator) delta(value map[string]any) []byte {
 	case "signature_delta":
 		if signature, ok := delta["signature"].(string); ok {
 			block.signature += signature
+			if block.source != nil {
+				block.source["signature"] = block.signature
+			}
 		}
 		return nil
 	case "text_delta":
@@ -426,14 +429,10 @@ func (t *StreamTranslator) blockStop(value map[string]any) []byte {
 	}
 	sources := t.sources()
 	signed := false
-	for _, source := range sources {
-		if kind, _ := source["type"].(string); kind == "thinking" {
-			if signature, ok := source["signature"].(string); ok && signature != "" {
-				signed = true
-			}
-		}
-		if kind, _ := source["type"].(string); kind == "redacted_thinking" {
+	for _, entry := range t.blocks {
+		if kind, _ := entry.source["type"].(string); kind == "thinking" && entry.signature != "" {
 			signed = true
+			break
 		}
 	}
 	if signed {
@@ -449,18 +448,25 @@ func (t *StreamTranslator) blockStop(value map[string]any) []byte {
 		}
 	}
 	block.done = true
+	var chatOut []byte
 	if kind, _ := block.source["type"].(string); kind == "tool_use" {
-		arguments := block.arguments
-		if arguments == "" {
-			arguments = "{}"
+		if block.arguments == "" {
+			block.arguments = "{}"
+			if block.item != nil {
+				block.item["arguments"] = "{}"
+			}
+			if t.route == ProtocolChat {
+				chatOut = chatDelta(map[string]any{"tool_calls": []any{map[string]any{"index": block.toolIndex,
+					"function": map[string]any{"arguments": "{}"}}}})
+			}
 		}
 		var parsed any
-		if json.Unmarshal([]byte(arguments), &parsed) != nil {
+		if json.Unmarshal([]byte(block.arguments), &parsed) != nil {
 			return t.fail("invalid_tool_arguments", "upstream_tool_json_incomplete")
 		}
 	}
 	if t.route == ProtocolChat || block.item == nil {
-		return nil
+		return chatOut
 	}
 	block.item["status"] = "completed"
 	var out bytes.Buffer

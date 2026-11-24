@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -142,11 +143,12 @@ type Accounts struct {
 	timeoutMS   int64
 	sourcesFile string
 	cacheFile   string
-	sources     []Source
-	readings    map[string]*Reading
-	refreshedAt *int64
-	cache       CacheState
-	refreshMu   sync.Mutex
+	sources        []Source
+	sourcesCorrupt bool
+	readings       map[string]*Reading
+	refreshedAt    *int64
+	cache          CacheState
+	refreshMu      sync.Mutex
 }
 
 // New loads the stored sources and readings.
@@ -203,33 +205,37 @@ func New(options Options) *Accounts {
 
 // --- persistence -----------------------------------------------------------
 
-func (a *Accounts) readJSON(file string) (map[string]any, bool) {
+func (a *Accounts) readJSON(file string) (map[string]any, bool, bool) {
 	if file == "" {
-		return nil, false
+		return nil, false, false
 	}
 	stat, err := os.Lstat(file)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false
+			return nil, false, false
 		}
 		a.setCacheError("store_unavailable")
-		return nil, false
+		return nil, false, false
 	}
-	if stat.Mode()&os.ModeSymlink != 0 || !stat.Mode().IsRegular() || stat.Size() > 4*1024*1024 {
+	if stat.Mode()&os.ModeSymlink != 0 || !stat.Mode().IsRegular() {
 		a.setCacheError("store_unavailable")
-		return nil, false
+		return nil, false, false
+	}
+	if stat.Size() > 4*1024*1024 {
+		a.setCacheError("store_unavailable")
+		return nil, false, true
 	}
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		a.setCacheError("store_unavailable")
-		return nil, false
+		return nil, false, true
 	}
 	var document map[string]any
-	if json.Unmarshal(stripBOM(raw), &document) != nil {
+	if json.Unmarshal(stripBOM(raw), &document) != nil || document == nil {
 		a.setCacheError("store_unavailable")
-		return nil, false
+		return nil, false, true
 	}
-	return document, true
+	return document, true, false
 }
 
 func stripBOM(raw []byte) []byte {
@@ -300,19 +306,23 @@ func (a *Accounts) writeJSON(file string, value any) {
 func randomToken() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return "tmp"
+		return "fallback"
 	}
 	return hex.EncodeToString(buf[:])
 }
 
 func (a *Accounts) load(seed []map[string]any) {
-	document, present := a.readJSON(a.sourcesFile)
+	document, present, corrupt := a.readJSON(a.sourcesFile)
+	if corrupt {
+		a.sourcesCorrupt = true
+	}
 	stored := []Source{}
 	if present {
 		schema, _ := document["schemaVersion"].(float64)
 		rows, _ := document["sources"].([]any)
 		if schema != 1 || rows == nil {
 			a.setCacheError("store_unavailable")
+			a.sourcesCorrupt = true
 		} else {
 			for _, row := range rows {
 				if len(stored) >= maxSources {
@@ -350,7 +360,7 @@ func (a *Accounts) load(seed []map[string]any) {
 		seen[source.SourceID] = true
 		a.sources = append(a.sources, source)
 	}
-	cached, present := a.readJSON(a.cacheFile)
+	cached, present, _ := a.readJSON(a.cacheFile)
 	if present {
 		schema, _ := cached["schemaVersion"].(float64)
 		if schema == 1 {
@@ -488,7 +498,39 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func (a *Accounts) quarantineCorruptSources() bool {
+	if !a.sourcesCorrupt || a.sourcesFile == "" {
+		return true
+	}
+	stat, err := os.Lstat(a.sourcesFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			a.sourcesCorrupt = false
+			return true
+		}
+		a.setCacheError("store_unavailable")
+		return false
+	}
+	if stat.Mode()&os.ModeSymlink != 0 || !stat.Mode().IsRegular() {
+		a.setCacheError("store_unavailable")
+		return false
+	}
+	backup := a.sourcesFile + ".corrupt." + strconv.FormatInt(a.now(), 10)
+	if _, err := os.Lstat(backup); err == nil {
+		backup = backup + "." + randomToken()[:8]
+	}
+	if err := os.Rename(a.sourcesFile, backup); err != nil {
+		a.setCacheError("store_unavailable")
+		return false
+	}
+	a.sourcesCorrupt = false
+	return true
+}
+
 func (a *Accounts) saveSources() {
+	if !a.quarantineCorruptSources() {
+		return
+	}
 	rows := make([]any, 0, len(a.sources))
 	for _, source := range a.sources {
 		view := Describe(source)
@@ -663,7 +705,7 @@ func (a *Accounts) fetch(ctx context.Context, target *httpTarget) (any, string, 
 	}
 	reply, err := a.client.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
+		if isTimeoutError(ctx, err) {
 			return nil, "timeout", nil
 		}
 		return nil, "network_error", nil
@@ -684,6 +726,9 @@ func (a *Accounts) fetch(ctx context.Context, target *httpTarget) (any, string, 
 	}
 	raw, err := io.ReadAll(io.LimitReader(reply.Body, maxResponseBytes+1))
 	if err != nil {
+		if isTimeoutError(ctx, err) {
+			return nil, "timeout", nil
+		}
 		return nil, "network_error", nil
 	}
 	if len(raw) > maxResponseBytes {
@@ -778,12 +823,64 @@ func parseCustom(source Source, document any) (Parsed, string) {
 		Limit: limit, Used: used, Remaining: derived, ResetAt: resetAt}}}, ""
 }
 
+func cloneReading(r *Reading) *Reading {
+	if r == nil {
+		return nil
+	}
+	copied := *r
+	if r.LastAttemptAt != nil {
+		v := *r.LastAttemptAt
+		copied.LastAttemptAt = &v
+	}
+	if r.ErrorReason != nil {
+		v := *r.ErrorReason
+		copied.ErrorReason = &v
+	}
+	if r.LastSuccessAt != nil {
+		v := *r.LastSuccessAt
+		copied.LastSuccessAt = &v
+	}
+	if r.Available != nil {
+		v := *r.Available
+		copied.Available = &v
+	}
+	if r.Parts != nil {
+		copied.Parts = make([]Part, len(r.Parts))
+		copy(copied.Parts, r.Parts)
+	}
+	if r.Records != nil {
+		copied.Records = make([]Record, len(r.Records))
+		copy(copied.Records, r.Records)
+	}
+	return &copied
+}
+
+func (a *Accounts) hasSourceLocked(sourceID string) bool {
+	for _, source := range a.sources {
+		if source.SourceID == sourceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Accounts) storeReading(sourceID string, reading *Reading) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.hasSourceLocked(sourceID) {
+		return
+	}
+	a.readings[sourceID] = reading
+}
+
 func (a *Accounts) refreshOne(ctx context.Context, source Source, force bool) RefreshResult {
-	previous := a.readings[source.SourceID]
+	a.mu.Lock()
+	previous := cloneReading(a.readings[source.SourceID])
+	a.mu.Unlock()
 	attemptedAt := a.now()
 	if !source.Supported {
-		a.readings[source.SourceID] = &Reading{LastAttemptAt: &attemptedAt,
-			ErrorReason: optString("unsupported_source"), Parts: []Part{}, Records: []Record{}}
+		a.storeReading(source.SourceID, &Reading{LastAttemptAt: &attemptedAt,
+			ErrorReason: optString("unsupported_source"), Parts: []Part{}, Records: []Record{}})
 		return RefreshResult{SourceID: source.SourceID, Status: "unsupported",
 			ErrorReason: optString("unsupported_source")}
 	}
@@ -801,7 +898,7 @@ func (a *Accounts) refreshOne(ctx context.Context, source Source, force bool) Re
 			reading.Parts = previous.Parts
 			reading.Records = previous.Records
 		}
-		a.readings[source.SourceID] = reading
+		a.storeReading(source.SourceID, reading)
 		return RefreshResult{SourceID: source.SourceID, Status: "not_configured",
 			ErrorReason: optString("credential_missing")}
 	}
@@ -835,8 +932,8 @@ func (a *Accounts) refreshOne(ctx context.Context, source Source, force bool) Re
 			PeriodStart: record.PeriodStart, ResetAt: record.ResetAt})
 	}
 	successAt := attemptedAt
-	a.readings[source.SourceID] = &Reading{LastAttemptAt: &attemptedAt, LastAttemptOK: true,
-		LastSuccessAt: &successAt, Available: parsed.Available, Parts: parsed.Parts, Records: records}
+	a.storeReading(source.SourceID, &Reading{LastAttemptAt: &attemptedAt, LastAttemptOK: true,
+		LastSuccessAt: &successAt, Available: parsed.Available, Parts: parsed.Parts, Records: records})
 	return RefreshResult{SourceID: source.SourceID, Status: "ok"}
 }
 
@@ -849,7 +946,7 @@ func (a *Accounts) failSource(source Source, attemptedAt int64, previous *Readin
 		reading.Parts = previous.Parts
 		reading.Records = previous.Records
 	}
-	a.readings[source.SourceID] = reading
+	a.storeReading(source.SourceID, reading)
 	// A failed read keeps what was last read. It is never written as 0 and never
 	// as "no limit".
 	result := RefreshResult{SourceID: source.SourceID, ErrorReason: optString(code), HTTPStatus: status}

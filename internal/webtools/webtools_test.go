@@ -858,3 +858,50 @@ func TestProbeWithoutAKeyIsAFailureNotAPanic(t *testing.T) {
 		t.Fatalf("answer %v", answer)
 	}
 }
+
+func TestProbeReportsExactStepRegardlessOfErrorCode(t *testing.T) {
+	t.Run("search_invalid_response_stays_in_search", func(t *testing.T) {
+		badSearch := newVendor(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"not_results":true}`))
+		})
+		res := webtools.ProbeService(context.Background(), options(badSearch.server.URL), "", "")
+		if res.OK || res.Step != "search" || res.Code != "web_adapter_invalid_response" {
+			t.Fatalf("ProbeService = %+v, want step=search code=web_adapter_invalid_response", res)
+		}
+		service := webtools.NewService(webtools.ServiceOptions{
+			Credentials:    &memCredentials{key: vendorKey},
+			SearchEndpoint: badSearch.server.URL,
+			FetchEndpoint:  badSearch.server.URL,
+		})
+		answer := service.Probe(webtools.ProviderTavily, "")
+		if answer["search"].(map[string]any)["state"] != "failed" ||
+			answer["fetch"].(map[string]any)["state"] != "not-run" {
+			t.Fatalf("service probe answer = %+v", answer)
+		}
+	})
+	t.Run("fetch_upstream_error_stays_in_read", func(t *testing.T) {
+		read503 := newVendor(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(string(body), `"query"`) {
+				_, _ = w.Write([]byte(`{"results":[{"title":"a","url":"https://a.test/","content":"b"}]}`))
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		res := webtools.ProbeService(context.Background(), options(read503.server.URL), "", "")
+		if res.OK || res.Step != "read" || res.Code != "web_adapter_upstream_error" || res.Results != 1 {
+			t.Fatalf("ProbeService = %+v, want step=read code=web_adapter_upstream_error results=1", res)
+		}
+		service := webtools.NewService(webtools.ServiceOptions{
+			Credentials:    &memCredentials{key: vendorKey},
+			SearchEndpoint: read503.server.URL,
+			FetchEndpoint:  read503.server.URL,
+		})
+		answer := service.Probe(webtools.ProviderTavily, "")
+		if answer["search"].(map[string]any)["state"] != "passed" ||
+			answer["fetch"].(map[string]any)["state"] != "failed" {
+			t.Fatalf("service probe answer = %+v", answer)
+		}
+	})
+}

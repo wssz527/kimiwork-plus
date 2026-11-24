@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 )
@@ -26,7 +28,8 @@ var RetryableStatuses = map[int]bool{
 func RetryableStatus(status int) bool { return RetryableStatuses[status] }
 
 // A failed exchange can return *url.Error after the vendor has consumed the
-// request. Only a dial failure proves that no request reached that connection.
+// request. Only failures proved to occur before any request bytes were sent
+// (dial, DNS, or TLS handshake) are safe to retry on a standby.
 func retryableError(err error) bool {
 	if err == nil {
 		return false
@@ -35,8 +38,32 @@ func retryableError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	var preSend *preSendError
+	if errors.As(err, &preSend) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
 	var operation *net.OpError
-	return errors.As(err, &operation) && operation.Op == "dial"
+	if errors.As(err, &operation) && operation.Op == "dial" {
+		return true
+	}
+	var certVerify *tls.CertificateVerificationError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var certInvalid x509.CertificateInvalidError
+	var sysRoots x509.SystemRootsError
+	var recordHdr tls.RecordHeaderError
+	var alertErr tls.AlertError
+	return errors.As(err, &certVerify) ||
+		errors.As(err, &unknownAuth) ||
+		errors.As(err, &hostErr) ||
+		errors.As(err, &certInvalid) ||
+		errors.As(err, &sysRoots) ||
+		errors.As(err, &recordHdr) ||
+		errors.As(err, &alertErr)
 }
 
 // attempt is one request's ordered candidates plus what it learned. The
@@ -105,9 +132,7 @@ func (g *Gateway) tryCandidates(ctx context.Context, route string, document *Doc
 		result.connectionID = candidate.ConnectionID
 		result.upstreamID = candidate.UpstreamID
 		result.upstreamWire = candidate.UpstreamProtocol
-		if resolved := g.resolveUsageContext(route, selected, candidate, headers, promptCacheKey); resolved != nil {
-			result.usage = resolved
-		}
+		result.usage = g.resolveUsageContext(route, selected, candidate, headers, promptCacheKey)
 		// The attempt carries the candidate's own wire format. A standby that
 		// speaks Messages while the primary speaks chat is served from the right
 		// conversion path instead of being forced through the primary's.

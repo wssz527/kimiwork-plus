@@ -3,9 +3,12 @@ package protocol_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -477,5 +480,271 @@ func TestCandidatesWithoutFailoverAreExactlyTheOldSingleUpstream(t *testing.T) {
 	if len(legacyCandidates) != 1 || legacyCandidates[0].ConnectionID != nil ||
 		legacyCandidates[0].UpstreamID != "kimi-legacy" {
 		t.Fatalf("legacy candidate %+v", legacyCandidates[0])
+	}
+}
+
+func TestFailoverClearsUsageContextWhenStandbyResolverReturnsNil(t *testing.T) {
+	primary := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	standby := newUpstream(t, jsonReply("standby-ok"))
+	var mu sync.Mutex
+	var entries []protocol.UsageEntry
+	primaryProv := "provider-primary"
+	primaryAcct := "account-primary"
+	_, url := failoverGateway(t, failoverModel("primary", "standby"),
+		map[string]*httptest.Server{"primary": primary.server, "standby": standby.server},
+		func(cfg *protocol.Config) {
+			cfg.UsageSink = protocol.UsageSinkFunc(func(entry protocol.UsageEntry) error {
+				mu.Lock()
+				entries = append(entries, entry)
+				mu.Unlock()
+				return nil
+			})
+			cfg.ResolveUsageContext = func(req protocol.UsageContextRequest) (protocol.UsageContext, error) {
+				if req.ConnectionID != nil && *req.ConnectionID == "primary" {
+					return protocol.UsageContext{ProviderID: &primaryProv, Account: &primaryAcct}, nil
+				}
+				return protocol.UsageContext{}, errors.New("standby metadata unavailable")
+			}
+		})
+	reply, body := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+	if reply.StatusCode != http.StatusOK || !strings.Contains(body, "standby-ok") {
+		t.Fatalf("status %d body %s", reply.StatusCode, body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var terminal *protocol.UsageEntry
+	for i := range entries {
+		if entries[i].Status != "started" {
+			terminal = &entries[i]
+		}
+	}
+	if terminal == nil {
+		t.Fatalf("missing terminal usage entry: %+v", entries)
+	}
+	if terminal.ConnectionID == nil || *terminal.ConnectionID != "standby" {
+		t.Fatalf("connectionId = %v, want standby", terminal.ConnectionID)
+	}
+	if terminal.ProviderID != nil || terminal.Account != nil {
+		t.Fatalf("standby entry leaked primary usage context: provider=%v account=%v",
+			terminal.ProviderID, terminal.Account)
+	}
+}
+
+func anthropicReply(content string) func(http.ResponseWriter, *http.Request, []byte) {
+	return func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"` + content +
+			`"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`))
+	}
+}
+
+func TestFailoverCrossProtocolCombinations(t *testing.T) {
+	cases := []struct {
+		name               string
+		rowJSON            string
+		standbyReply       func(http.ResponseWriter, *http.Request, []byte)
+		wantPrimaryPath    string
+		wantStandbyPath    string
+		wantStandbyWire    string
+		wantPrimaryAuthHdr string
+		wantStandbyAuthHdr string
+	}{
+		{
+			name:               "openai_primary_anthropic_standby",
+			rowJSON:            `{"id":"kimi-cross","protocol":"chat","contextWindow":8192,"connectionId":"primary","failover":[{"connectionId":"standby","upstreamProtocol":"anthropic"}]}`,
+			standbyReply:       anthropicReply("from-anthropic-standby"),
+			wantPrimaryPath:    "/chat/completions",
+			wantStandbyPath:    "/messages",
+			wantStandbyWire:    protocol.ProtocolAnthropic,
+			wantPrimaryAuthHdr: "Authorization",
+			wantStandbyAuthHdr: "x-api-key",
+		},
+		{
+			name:               "anthropic_primary_openai_standby",
+			rowJSON:            `{"id":"kimi-cross","protocol":"chat","contextWindow":8192,"connectionId":"primary","upstreamProtocol":"anthropic","failover":[{"connectionId":"standby","upstreamProtocol":"openai"}]}`,
+			standbyReply:       jsonReply("from-openai-standby"),
+			wantPrimaryPath:    "/messages",
+			wantStandbyPath:    "/chat/completions",
+			wantStandbyWire:    "",
+			wantPrimaryAuthHdr: "x-api-key",
+			wantStandbyAuthHdr: "Authorization",
+		},
+		{
+			name:               "anthropic_primary_same_protocol_standby",
+			rowJSON:            `{"id":"kimi-cross","protocol":"chat","contextWindow":8192,"connectionId":"primary","upstreamProtocol":"anthropic","failover":[{"connectionId":"standby"}]}`,
+			standbyReply:       anthropicReply("from-anthropic-same-standby"),
+			wantPrimaryPath:    "/messages",
+			wantStandbyPath:    "/messages",
+			wantStandbyWire:    protocol.ProtocolAnthropic,
+			wantPrimaryAuthHdr: "x-api-key",
+			wantStandbyAuthHdr: "x-api-key",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			models, err := protocol.ValidateModels([]json.RawMessage{json.RawMessage(tc.rowJSON)})
+			if err != nil {
+				t.Fatalf("ValidateModels: %v", err)
+			}
+			primary := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			standby := newUpstream(t, tc.standbyReply)
+			gateway, url := failoverGateway(t, models[0],
+				map[string]*httptest.Server{"primary": primary.server, "standby": standby.server}, nil)
+			reply, body := post(t, url, "/chat/completions", map[string]any{
+				"model":    "kimi-cross",
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			}, nil)
+			if reply.StatusCode != http.StatusOK {
+				t.Fatalf("status %d body %s", reply.StatusCode, body)
+			}
+			if len(primary.captured()) != 1 || primary.captured()[0].URL != tc.wantPrimaryPath {
+				t.Fatalf("primary captured = %+v, want path %s", primary.captured(), tc.wantPrimaryPath)
+			}
+			if primary.captured()[0].Headers.Get(tc.wantPrimaryAuthHdr) == "" {
+				t.Fatalf("primary missing header %s", tc.wantPrimaryAuthHdr)
+			}
+			if len(standby.captured()) != 1 || standby.captured()[0].URL != tc.wantStandbyPath {
+				t.Fatalf("standby captured = %+v, want path %s", standby.captured(), tc.wantStandbyPath)
+			}
+			if standby.captured()[0].Headers.Get(tc.wantStandbyAuthHdr) == "" {
+				t.Fatalf("standby missing header %s", tc.wantStandbyAuthHdr)
+			}
+			record := gateway.Metrics().Recent[0]
+			if record.Attempts != 2 || record.ConnectionID == nil || *record.ConnectionID != "standby" {
+				t.Fatalf("record = %+v", record)
+			}
+			gotWire := ""
+			if record.UpstreamProtocol != nil {
+				gotWire = *record.UpstreamProtocol
+			}
+			if gotWire != tc.wantStandbyWire {
+				t.Fatalf("record.UpstreamProtocol = %q, want %q", gotWire, tc.wantStandbyWire)
+			}
+		})
+	}
+}
+
+func TestFailoverRetriesTLSHandshakeFailureBeforeSend(t *testing.T) {
+	t.Run("untrusted_cert", func(t *testing.T) {
+		primaryHits := 0
+		primaryTLS := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			primaryHits++
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(primaryTLS.Close)
+		standby := newUpstream(t, jsonReply("after-tls-failover"))
+		gateway, url := failoverGateway(t, failoverModel("primary", "standby"),
+			map[string]*httptest.Server{"primary": primaryTLS, "standby": standby.server}, nil)
+		reply, body := post(t, url, "/chat/completions",
+			map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+		if reply.StatusCode != http.StatusOK || !strings.Contains(body, "after-tls-failover") {
+			t.Fatalf("status %d body %s", reply.StatusCode, body)
+		}
+		if primaryHits != 0 {
+			t.Fatalf("primary TLS server unexpectedly received %d requests", primaryHits)
+		}
+		if record := gateway.Metrics().Recent[0]; record.Attempts != 2 ||
+			record.FailoverFrom == nil || *record.FailoverFrom != "primary" ||
+			record.ConnectionID == nil || *record.ConnectionID != "standby" {
+			t.Fatalf("record = %+v", record)
+		}
+	})
+	t.Run("eof_during_tls_handshake", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = conn.Close()
+			}
+		}()
+		standby := newUpstream(t, jsonReply("after-tls-eof-failover"))
+		model := failoverModel("primary", "standby")
+		backend, err := protocol.NewBackend([]protocol.Endpoint{
+			{ID: "primary", BaseURL: "https://" + ln.Addr().String(), APIKey: "synthetic-primary"},
+			{ID: "standby", BaseURL: standby.server.URL, APIKey: "synthetic-standby"},
+		}, []protocol.Model{model})
+		if err != nil {
+			t.Fatalf("backend: %v", err)
+		}
+		gateway, err := protocol.NewGateway(protocol.Config{Backend: backend, Key: gatewayKey, RecordRequests: true})
+		if err != nil {
+			t.Fatalf("gateway: %v", err)
+		}
+		server, url, err := gateway.Listen(0)
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		t.Cleanup(func() { _ = server.Close() })
+		reply, body := post(t, url, "/chat/completions",
+			map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+		if reply.StatusCode != http.StatusOK || !strings.Contains(body, "after-tls-eof-failover") {
+			t.Fatalf("status %d body %s", reply.StatusCode, body)
+		}
+		if record := gateway.Metrics().Recent[0]; record.Attempts != 2 ||
+			record.FailoverFrom == nil || *record.FailoverFrom != "primary" ||
+			record.ConnectionID == nil || *record.ConnectionID != "standby" {
+			t.Fatalf("record = %+v", record)
+		}
+	})
+}
+
+func TestFailoverDoesNotRetryAfterDisconnectOnReusedKeepAliveConnection(t *testing.T) {
+	var mu sync.Mutex
+	var remoteAddrs []string
+	primary := newUpstream(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		mu.Lock()
+		callIndex := len(remoteAddrs)
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+		mu.Unlock()
+		if callIndex == 0 {
+			jsonReply("first-ok")(w, r, nil)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	standby := newUpstream(t, jsonReply("must not be billed again"))
+	gateway, url := failoverGateway(t, failoverModel("primary", "standby"),
+		map[string]*httptest.Server{"primary": primary.server, "standby": standby.server}, nil)
+
+	firstReply, firstBody := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+	if firstReply.StatusCode != http.StatusOK || !strings.Contains(firstBody, "first-ok") {
+		t.Fatalf("first status %d body %s", firstReply.StatusCode, firstBody)
+	}
+
+	secondReply, _ := post(t, url, "/chat/completions",
+		map[string]any{"model": "kimi-failover", "messages": []any{}}, nil)
+	if secondReply.StatusCode == http.StatusOK {
+		t.Fatal("expected second request to fail after primary disconnected")
+	}
+	mu.Lock()
+	addrs := append([]string(nil), remoteAddrs...)
+	mu.Unlock()
+	if len(addrs) != 2 || addrs[0] != addrs[1] {
+		t.Fatalf("expected reused keep-alive connection, got remote addrs %v", addrs)
+	}
+	if len(standby.captured()) != 0 {
+		t.Fatalf("standby was retried after POST on reused keep-alive conn: %d attempts", len(standby.captured()))
+	}
+	if record := gateway.Metrics().Recent[0]; record.Attempts != 1 ||
+		record.ConnectionID == nil || *record.ConnectionID != "primary" {
+		t.Fatalf("record = %+v", record)
 	}
 }

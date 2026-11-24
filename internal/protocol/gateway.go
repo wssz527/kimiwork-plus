@@ -788,7 +788,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		case chosen.unavailable:
 			refuse(http.StatusServiceUnavailable, "connection_unavailable")
 		default:
-			g.connectionFailure(w, record, failure, ctx)
+			g.connectionFailure(w, record, failure, r.Context(), ctx)
 		}
 		// A request that lost every candidate is reported as that outcome, not as
 		// the last candidate's own error, so the panel can say what happened.
@@ -862,10 +862,21 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
 				if record != nil {
-					if ctx.Err() != nil {
+					switch {
+					case r.Context().Err() != nil:
 						record.Status = 499
 						record.Error = "request_cancelled"
-					} else {
+					case errors.Is(ctx.Err(), context.DeadlineExceeded):
+						status := upstream.Status
+						record.TransportStatus = &status
+						record.Status = http.StatusGatewayTimeout
+						record.Error = "upstream_timeout"
+						record.Side = SideConnection
+						record.Outcome = string(OutcomeFailed)
+					case ctx.Err() != nil:
+						record.Status = 499
+						record.Error = "request_cancelled"
+					default:
 						status := upstream.Status
 						record.TransportStatus = &status
 						record.Status = http.StatusBadGateway
@@ -893,8 +904,17 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 	}
 	if ctx.Err() != nil {
 		if record != nil {
-			record.Status = 499
-			record.Error = "request_cancelled"
+			if r.Context().Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				status := upstream.Status
+				record.TransportStatus = &status
+				record.Status = http.StatusGatewayTimeout
+				record.Error = "upstream_timeout"
+				record.Side = SideConnection
+				record.Outcome = string(OutcomeFailed)
+			} else {
+				record.Status = 499
+				record.Error = "request_cancelled"
+			}
 		}
 		return usageContext
 	}
@@ -934,13 +954,18 @@ func (g *Gateway) noteCatalogAttempt(r *http.Request, w http.ResponseWriter) {
 // connectionFailure reports a request that never reached an upstream answer.
 // "Upstream returned 503" and "we never reached the upstream" are different
 // problems with different fixes, so they must not be reported as the same one.
-func (g *Gateway) connectionFailure(w http.ResponseWriter, record *Record, failure error, ctx context.Context) {
-	cancelled := ctx.Err() != nil
+func (g *Gateway) connectionFailure(w http.ResponseWriter, record *Record, failure error, requestCtx, ctx context.Context) {
+	clientCancelled := requestCtx != nil && requestCtx.Err() != nil
+	timedOut := !clientCancelled && errors.Is(ctx.Err(), context.DeadlineExceeded)
+	cancelled := clientCancelled || (!timedOut && ctx.Err() != nil)
 	code := "upstream_connection_failed"
 	status := http.StatusServiceUnavailable
 	if cancelled {
 		code = "request_cancelled"
 		status = 499
+	} else if timedOut {
+		code = "upstream_timeout"
+		status = http.StatusGatewayTimeout
 	} else if errors.Is(failure, ErrCatalogUnavailable) {
 		code = "catalog_unavailable"
 	} else if errors.Is(failure, ErrInvalidUpstreamResponse) {

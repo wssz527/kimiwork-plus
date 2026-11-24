@@ -36,6 +36,9 @@ const (
 	ProtocolResponses = "responses"
 	// ProtocolAnthropic is an upstream wire format, never a Kimi-facing route.
 	ProtocolAnthropic = "anthropic"
+	// ProtocolOpenAI explicitly selects the native OpenAI upstream wire format on
+	// a failover standby whose primary row uses another upstream wire.
+	ProtocolOpenAI = "openai"
 
 	maxTextChars = 2048
 	maxSafeInt   = 1<<53 - 1
@@ -124,14 +127,19 @@ func (m Model) Candidates() []Candidate {
 	out := []Candidate{primary}
 	seen := map[string]bool{m.candidateKey(primary): true}
 	for _, standby := range m.Failover {
-		candidate := Candidate{ConnectionID: &standby.ConnectionID, UpstreamID: m.UpstreamID(),
+		connectionID := standby.ConnectionID
+		candidate := Candidate{ConnectionID: &connectionID, UpstreamID: m.UpstreamID(),
 			UpstreamProtocol: m.UpstreamProtocol, Standby: true}
 		if standby.UpstreamModelID != nil && *standby.UpstreamModelID != "" {
 			candidate.UpstreamID = *standby.UpstreamModelID
 		}
 		if standby.UpstreamProtocol != nil {
 			value := *standby.UpstreamProtocol
-			candidate.UpstreamProtocol = &value
+			if value == ProtocolOpenAI {
+				candidate.UpstreamProtocol = nil
+			} else {
+				candidate.UpstreamProtocol = &value
+			}
 		}
 		key := m.candidateKey(candidate)
 		if seen[key] {
@@ -611,7 +619,7 @@ func validateFailover(raw json.RawMessage, primary *string) ([]ModelFailover, er
 		}
 		if present(row["upstreamProtocol"]) {
 			value, _ := rawString(row["upstreamProtocol"])
-			if value != ProtocolAnthropic {
+			if value != ProtocolAnthropic && value != ProtocolOpenAI {
 				return nil, ErrInvalidModels
 			}
 			standby.UpstreamProtocol = &value

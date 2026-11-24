@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/quota"
 )
@@ -911,4 +912,67 @@ func TestTheCredentialNeverAppearsInAnyAnswer(t *testing.T) {
 			t.Fatalf("a credential reached the answer: %s", encoded)
 		}
 	}
+}
+
+type stubTimeoutErr struct{}
+
+func (stubTimeoutErr) Error() string   { return "i/o timeout" }
+func (stubTimeoutErr) Timeout() bool   { return true }
+func (stubTimeoutErr) Temporary() bool { return true }
+
+type timeoutReadCloser struct{}
+
+func (timeoutReadCloser) Read([]byte) (int, error) { return 0, stubTimeoutErr{} }
+func (timeoutReadCloser) Close() error             { return nil }
+
+func TestCodeUsageClientTimeoutClassifiedAsTimeout(t *testing.T) {
+	t.Run("client_timeout", func(t *testing.T) {
+		keys := newMemoryKeys()
+		keys.values["kimi-code:manual"] = codeManualKey
+		client := &http.Client{
+			Timeout: 15 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		service := newCodeUsage(t, quota.CodeUsageOptions{Keys: keys, HTTPClient: client})
+		result := service.Refresh(context.Background(), true)
+		if result.ErrorReason == nil || *result.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout, got %+v", result)
+		}
+	})
+	t.Run("net_error_timeout", func(t *testing.T) {
+		keys := newMemoryKeys()
+		keys.values["kimi-code:manual"] = codeManualKey
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return nil, stubTimeoutErr{}
+			}),
+		}
+		service := newCodeUsage(t, quota.CodeUsageOptions{Keys: keys, HTTPClient: client})
+		result := service.Refresh(context.Background(), true)
+		if result.ErrorReason == nil || *result.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout for net.Error.Timeout(), got %+v", result)
+		}
+	})
+	t.Run("body_read_timeout", func(t *testing.T) {
+		keys := newMemoryKeys()
+		keys.values["kimi-code:manual"] = codeManualKey
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       timeoutReadCloser{},
+					Request:    request,
+				}, nil
+			}),
+		}
+		service := newCodeUsage(t, quota.CodeUsageOptions{Keys: keys, HTTPClient: client})
+		result := service.Refresh(context.Background(), true)
+		if result.ErrorReason == nil || *result.ErrorReason != "timeout" {
+			t.Fatalf("expected timeout on body read, got %+v", result)
+		}
+	})
 }

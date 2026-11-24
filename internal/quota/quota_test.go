@@ -8,8 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/quota"
 )
@@ -1282,4 +1286,267 @@ func TestPanelKeepsDefaultAdapterWithoutUserConnection(t *testing.T) {
 	if err == nil || err.Error() != "quota_source_not_removable" {
 		t.Fatalf("remove error = %v", err)
 	}
+}
+
+func TestAccountsConcurrentRefreshStateAndMutations(t *testing.T) {
+	stateDir := t.TempDir()
+	var tick atomic.Int64
+	tick.Store(1794196800000)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		time.Sleep(time.Millisecond)
+		body := deepSeekBalance()
+		if strings.Contains(request.URL.Host, "moonshot") {
+			body = `{"code":0,"data":{"available_balance":12.5,"voucher_balance":0,"cash_balance":12.5},"status":true}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	accounts := quota.New(quota.Options{
+		StateDir:    stateDir,
+		Credentials: func(string) string { return deepSeekKey },
+		HTTPClient:  client,
+		Now:         func() int64 { return tick.Add(1000) },
+		ThrottleMS:  -1,
+	})
+	if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds-main"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.AddSource(map[string]any{"adapter": "moonshot-cn", "sourceId": "ms-main"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = accounts.Refresh(context.Background(), nil, true)
+				}
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = accounts.State()
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			id := "dyn-" + strconv.Itoa(i%5)
+			_, _ = accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": id})
+			time.Sleep(time.Millisecond)
+			_ = accounts.RemoveSource(id)
+		}
+		close(stop)
+	}()
+	wg.Wait()
+}
+
+func TestAccountsRefreshDoesNotRestoreRemovedSourceReading(t *testing.T) {
+	stateDir := t.TempDir()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekBalance())), Request: request}, nil
+	})}
+	accounts := quota.New(quota.Options{
+		StateDir:    stateDir,
+		Credentials: func(string) string { return deepSeekKey },
+		HTTPClient:  client,
+		Now:         func() int64 { return 1794196800000 },
+		ThrottleMS:  -1,
+	})
+	if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ephemeral"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan quota.RefreshReport, 1)
+	go func() {
+		done <- accounts.Refresh(context.Background(), []string{"ephemeral"}, true)
+	}()
+	<-entered
+	if !accounts.RemoveSource("ephemeral") {
+		t.Fatal("RemoveSource returned false")
+	}
+	close(release)
+	<-done
+
+	cacheRaw, err := os.ReadFile(filepath.Join(stateDir, "quota-cache.json"))
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	var cacheDoc map[string]any
+	if err := json.Unmarshal(cacheRaw, &cacheDoc); err != nil {
+		t.Fatalf("unmarshal cache: %v", err)
+	}
+	sources, _ := cacheDoc["sources"].(map[string]any)
+	if _, exists := sources["ephemeral"]; exists {
+		t.Fatalf("removed source wrote ghost reading to cache: %s", cacheRaw)
+	}
+}
+
+func TestAccountsCorruptSourcesBackedUpBeforeSave(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"invalid_json", "{not valid json"},
+		{"bad_schema", `{"schemaVersion":99,"sources":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			sourcesPath := filepath.Join(stateDir, "quota-sources.json")
+			if err := os.WriteFile(sourcesPath, []byte(tc.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			now := int64(1794196812345)
+			accounts := quota.New(quota.Options{
+				StateDir:    stateDir,
+				Credentials: func(string) string { return deepSeekKey },
+				Now:         func() int64 { return now },
+			})
+			if accounts.State().Cache.Error == nil || *accounts.State().Cache.Error != "store_unavailable" {
+				t.Fatalf("expected store_unavailable cache error, got %+v", accounts.State().Cache.Error)
+			}
+			if _, err := os.Stat(sourcesPath + ".corrupt.1794196812345"); !os.IsNotExist(err) {
+				t.Fatalf("backup should not exist before save")
+			}
+			if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds"}); err != nil {
+				t.Fatal(err)
+			}
+			backupPath := sourcesPath + ".corrupt.1794196812345"
+			backupRaw, err := os.ReadFile(backupPath)
+			if err != nil {
+				t.Fatalf("expected corrupt backup at %s: %v", backupPath, err)
+			}
+			if string(backupRaw) != tc.payload {
+				t.Fatalf("backup content %q != %q", string(backupRaw), tc.payload)
+			}
+			savedRaw, err := os.ReadFile(sourcesPath)
+			if err != nil {
+				t.Fatalf("read new sources: %v", err)
+			}
+			var saved map[string]any
+			if err := json.Unmarshal(savedRaw, &saved); err != nil || saved["schemaVersion"] != float64(1) {
+				t.Fatalf("saved sources invalid: %s", savedRaw)
+			}
+		})
+	}
+}
+
+func TestAccountsUnreadableSourcesBackedUpBeforeSave(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires non-root Unix permissions to trigger os.ReadFile EACCES")
+	}
+	stateDir := t.TempDir()
+	sourcesPath := filepath.Join(stateDir, "quota-sources.json")
+	original := `{"schemaVersion":1,"sources":[{"adapter":"deepseek","sourceId":"ds-old"}]}` + "\n"
+	if err := os.WriteFile(sourcesPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourcesPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := sourcesPath + ".corrupt.1794196812345"
+	t.Cleanup(func() {
+		_ = os.Chmod(sourcesPath, 0o600)
+		_ = os.Chmod(backupPath, 0o600)
+	})
+	accounts := quota.New(quota.Options{
+		StateDir:    stateDir,
+		Credentials: func(string) string { return deepSeekKey },
+		Now:         func() int64 { return 1794196812345 },
+	})
+	if accounts.State().Cache.Error == nil || *accounts.State().Cache.Error != "store_unavailable" {
+		t.Fatalf("expected store_unavailable cache error, got %+v", accounts.State().Cache.Error)
+	}
+	if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds-new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backupPath, 0o600); err != nil {
+		t.Fatalf("expected unreadable sources backed up at %s: %v", backupPath, err)
+	}
+	backupRaw, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backupRaw) != original {
+		t.Fatalf("backup content %q != %q", string(backupRaw), original)
+	}
+	savedRaw, err := os.ReadFile(sourcesPath)
+	if err != nil {
+		t.Fatalf("read new sources: %v", err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(savedRaw, &saved); err != nil || saved["schemaVersion"] != float64(1) {
+		t.Fatalf("saved sources invalid: %s", savedRaw)
+	}
+}
+
+func TestAccountsFetchTimeoutClassifiedAsTimeout(t *testing.T) {
+	t.Run("client_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Timeout: 15 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		accounts := manager(t, quota.Options{
+			Credentials: func(string) string { return deepSeekKey },
+			HTTPClient:  client,
+		})
+		if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds"}); err != nil {
+			t.Fatal(err)
+		}
+		report := accounts.Refresh(context.Background(), []string{"ds"}, true)
+		if len(report.Results) != 1 || report.Results[0].Status != "error" ||
+			report.Results[0].ErrorReason == nil || *report.Results[0].ErrorReason != "timeout" {
+			t.Fatalf("expected timeout result, got %+v", report.Results)
+		}
+	})
+	t.Run("body_read_timeout", func(t *testing.T) {
+		client := &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       timeoutReadCloser{},
+					Request:    request,
+				}, nil
+			}),
+		}
+		accounts := manager(t, quota.Options{
+			Credentials: func(string) string { return deepSeekKey },
+			HTTPClient:  client,
+		})
+		if _, err := accounts.AddSource(map[string]any{"adapter": "deepseek", "sourceId": "ds"}); err != nil {
+			t.Fatal(err)
+		}
+		report := accounts.Refresh(context.Background(), []string{"ds"}, true)
+		if len(report.Results) != 1 || report.Results[0].Status != "error" ||
+			report.Results[0].ErrorReason == nil || *report.Results[0].ErrorReason != "timeout" {
+			t.Fatalf("expected timeout on body read, got %+v", report.Results)
+		}
+	})
 }

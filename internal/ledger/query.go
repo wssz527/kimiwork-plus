@@ -492,9 +492,13 @@ func (l *Ledger) Query(q Query) (QueryResult, error) {
 	}
 	l.mu.Lock()
 	all := make([]*Record, len(l.records))
-	copy(all, l.records)
+	for i, record := range l.records {
+		all[i] = record.clone()
+	}
 	state := l.stateLocked()
 	skipped := l.skippedLines
+	maxRecords := l.maxRecords
+	maxAgeDays := l.maxAgeDays
 	l.mu.Unlock()
 
 	inRange := make([]*Record, 0, len(all))
@@ -551,7 +555,7 @@ func (l *Ledger) Query(q Query) (QueryResult, error) {
 			From: isoOf(rng.fromMS), To: isoOf(rng.toMS), BucketCount: len(buckets)},
 		Summary: summarize(filtered), Buckets: buckets, Records: rows,
 		RecordsTotal: len(filtered), RecordsTruncated: truncated, Filters: filters,
-		Coverage: l.coverage(len(inRange), state, skipped)}, nil
+		Coverage: coverage(all, len(inRange), state, skipped, maxRecords, maxAgeDays)}, nil
 }
 
 func deref(value *string) string {
@@ -773,44 +777,44 @@ func modelOptions(records []*Record) []ModelOption {
 	return out
 }
 
-func (l *Ledger) coverage(recordsInRange int, state string, skipped int) Coverage {
-	coverage := Coverage{Scope: "gateway_observed", Sources: []string{}, PriceSources: []string{},
-		RecordsInLedger: len(l.records), RecordsInRange: recordsInRange,
-		Retention: map[string]int{"maxRecords": l.maxRecords, "maxAgeDays": l.maxAgeDays},
+func coverage(all []*Record, recordsInRange int, state string, skipped int, maxRecords int, maxAgeDays int) Coverage {
+	cov := Coverage{Scope: "gateway_observed", Sources: []string{}, PriceSources: []string{},
+		RecordsInLedger: len(all), RecordsInRange: recordsInRange,
+		Retention: map[string]int{"maxRecords": maxRecords, "maxAgeDays": maxAgeDays},
 		State:     state, SkippedLines: skipped}
 	sources := map[string]bool{}
 	priced := map[string]bool{}
-	for _, record := range l.records {
+	for _, record := range all {
 		sources[record.Source] = true
 		if record.PriceSource != nil {
 			priced[*record.PriceSource] = true
 		}
 	}
 	for source := range sources {
-		coverage.Sources = append(coverage.Sources, source)
+		cov.Sources = append(cov.Sources, source)
 	}
-	sort.Strings(coverage.Sources)
-	if len(l.records) > 0 {
-		first := l.records[0].At
-		last := l.records[len(l.records)-1].At
-		coverage.RecordingSince = &first
-		coverage.LastRecordAt = &last
+	sort.Strings(cov.Sources)
+	if len(all) > 0 {
+		first := all[0].At
+		last := all[len(all)-1].At
+		cov.RecordingSince = &first
+		cov.LastRecordAt = &last
 	}
 	for source := range priced {
-		coverage.PriceSources = append(coverage.PriceSources, source)
+		cov.PriceSources = append(cov.PriceSources, source)
 	}
-	sort.Strings(coverage.PriceSources)
+	sort.Strings(cov.PriceSources)
 	// Cost is an estimate against a named price table or nothing at all; a
 	// history with no reliable price says so instead of implying a zero bill.
 	switch {
 	case len(priced) == 1:
-		coverage.Pricing = "estimated"
+		cov.Pricing = "estimated"
 	case len(priced) > 1:
-		coverage.Pricing = "mixed_price_sources"
+		cov.Pricing = "mixed_price_sources"
 	default:
-		coverage.Pricing = "not_provided"
+		cov.Pricing = "not_provided"
 	}
-	return coverage
+	return cov
 }
 
 // ExportJSON is the same redacted record set the query returns: no key, no

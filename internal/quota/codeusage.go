@@ -3,8 +3,10 @@ package quota
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -653,6 +655,20 @@ func parseCodeMoney(value any) *codeMoney {
 
 // --- request ---------------------------------------------------------------
 
+func isTimeoutError(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 func (c *CodeUsage) request(ctx context.Context, key string) (any, string, *int) {
 	if c.client == nil {
 		return nil, "network_error", nil
@@ -665,7 +681,7 @@ func (c *CodeUsage) request(ctx context.Context, key string) (any, string, *int)
 	request.Header.Set("Authorization", "Bearer "+key)
 	reply, err := c.client.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
+		if isTimeoutError(ctx, err) {
 			return nil, "timeout", nil
 		}
 		return nil, "network_error", nil
@@ -688,6 +704,9 @@ func (c *CodeUsage) request(ctx context.Context, key string) (any, string, *int)
 	}
 	raw, err := io.ReadAll(io.LimitReader(reply.Body, maxResponseBytes+1))
 	if err != nil {
+		if isTimeoutError(ctx, err) {
+			return nil, "timeout", nil
+		}
 		return nil, "network_error", nil
 	}
 	if len(raw) > maxResponseBytes {

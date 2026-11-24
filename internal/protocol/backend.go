@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -183,11 +186,37 @@ func (b *HTTPBackend) Request(ctx context.Context, route string, payload []byte,
 	for name, value := range options.Headers {
 		request.Header.Set(name, value)
 	}
-	reply, err := b.client.Do(request)
+	reply, err := b.do(request)
 	if err != nil {
 		return nil, err
 	}
 	return &UpstreamResponse{Status: reply.StatusCode, Header: reply.Header, Body: reply.Body}, nil
+}
+
+type preSendError struct {
+	err error
+}
+
+func (e *preSendError) Error() string { return e.err.Error() }
+func (e *preSendError) Unwrap() error { return e.err }
+
+func (b *HTTPBackend) do(request *http.Request) (*http.Response, error) {
+	var gotConn atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			gotConn.Store(true)
+		},
+	}
+	traced := request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	reply, err := b.client.Do(traced)
+	if err != nil {
+		var urlErr *url.Error
+		if !gotConn.Load() && errors.As(err, &urlErr) {
+			return nil, &preSendError{err: err}
+		}
+		return nil, err
+	}
+	return reply, nil
 }
 
 // anthropic converts both directions for one Messages upstream.
@@ -217,7 +246,7 @@ func (b *HTTPBackend) anthropic(ctx context.Context, route string, payload []byt
 	for name, value := range options.Headers {
 		request.Header.Set(name, value)
 	}
-	reply, err := b.client.Do(request)
+	reply, err := b.do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -277,19 +306,22 @@ func (b *HTTPBackend) anthropic(ctx context.Context, route string, payload []byt
 type translatedBody struct {
 	upstream   io.ReadCloser
 	translator *StreamTranslator
+	buf        []byte
 	pending    []byte
 	finished   bool
 }
 
 func (t *translatedBody) Read(p []byte) (int, error) {
+	if len(t.buf) == 0 {
+		t.buf = make([]byte, 32*1024)
+	}
 	for len(t.pending) == 0 {
 		if t.finished {
 			return 0, io.EOF
 		}
-		buffer := make([]byte, 32*1024)
-		n, err := t.upstream.Read(buffer)
+		n, err := t.upstream.Read(t.buf)
 		if n > 0 {
-			t.pending = append(t.pending, t.translator.Push(buffer[:n])...)
+			t.pending = append(t.pending, t.translator.Push(t.buf[:n])...)
 			continue
 		}
 		if err == io.EOF {
@@ -307,6 +339,9 @@ func (t *translatedBody) Read(p []byte) (int, error) {
 	}
 	n := copy(p, t.pending)
 	t.pending = t.pending[n:]
+	if len(t.pending) == 0 {
+		t.pending = nil
+	}
 	return n, nil
 }
 
