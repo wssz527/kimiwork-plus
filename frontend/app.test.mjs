@@ -41,6 +41,18 @@ const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['mode
   'directHasNoEligibleModels', 'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
   'directRestartRequired', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
+/* 真实原因码翻译：测试直接执行 app-core.js 的三张表与 reasonText，
+   不再手写一张小映射，避免生产表缺项时被假 mock 掩盖。 */
+const REASON_TEXT_SOURCES = [
+  DIAG_REASON_SOURCE,
+  DIRECT_REASON_SOURCE,
+  ...['normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction),
+];
+
+function makeReasonText() {
+  return new Function([...REASON_TEXT_SOURCES, 'return reasonText;'].join('\n'))();
+}
+
 function makeSyncState() {
   return new Function('fmtCount', 'String',
     [...INTEGRATION_HELPERS, sourceFunction('syncState'), 'return syncState;'].join('\n'))(
@@ -1151,20 +1163,24 @@ test('a new connection editor reads its current endpoint and key before an ID or
 test('switching the private panel session clears the visible catalogue query and key', () => {
   const state = { key: 'old-session', onboard: { advanced: false, query: 'vision' } };
   const dom = { onboardKey: { value: 'old-key' }, onboardModelQuery: { value: 'vision' }, toast: { hidden: false }, shell: { hidden: false } };
+  const panelCalls = [];
   const code = [
     'const resetModelSignature = () => {}, resetRecentSignature = () => {}, resetSubagentSignatures = () => {}, resetIntegrationModeSignature = () => {}, clearDisconnectConfirm = () => {}, refreshServiceStatus = () => {};',
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
-  const rotate = new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', code)(
+  const rotate = new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', 'conversationsPanel', code)(
     state, dom, { location: { hash: '#key=new-session', pathname: '/', search: '' } },
     { setItem: () => {} }, { replaceState: () => {} }, 'panel-key', () => {}, () => {}, () => {}, () => {}, async () => true, () => {},
+    { reset: () => panelCalls.push('reset') },
   );
   assert.equal(rotate(), true);
   assert.equal(state.key, 'new-session');
   assert.equal(state.onboard.query, '');
   assert.equal(dom.onboardModelQuery.value, '');
   assert.equal(dom.onboardKey.value, '');
+  assert.deepEqual(panelCalls, ['reset'], 'the conversations page must drop its cached signature on a key switch');
+  assert.equal(state.conversations.rowConfirm, null);
 });
 
 function rotatedKeyHarness(loadState, calls) {
@@ -1176,10 +1192,11 @@ function rotatedKeyHarness(loadState, calls) {
     sourceFunction('adoptLocationKey'),
     'return adoptLocationKey;',
   ].join('\n');
-  return new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', 'usagePanel', code)(
+  return new Function('state', 'dom', 'window', 'sessionStorage', 'history', 'KEY_STORE', 'stopPolling', 'setHidden', 'showGate', 'loadProviders', 'loadState', 'startPolling', 'usagePanel', 'conversationsPanel', code)(
     state, dom, { location: { hash: '#key=new-session', pathname: '/', search: '' } },
     { setItem: () => {} }, { replaceState: () => {} }, 'panel-key',
     () => calls.push('stop'), () => {}, () => {}, () => {}, loadState, () => calls.push('start'), usagePanel,
+    { reset() {} },
   );
 }
 
@@ -4875,9 +4892,21 @@ class ConvElement {
     };
     return walk(this);
   }
+  querySelectorAll(selector) {
+    const match = /^\[data-([a-z-]+)\]$/.exec(selector || '');
+    const key = match ? match[1].replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()) : '';
+    const out = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (key && node.dataset && Object.prototype.hasOwnProperty.call(node.dataset, key)) out.push(node);
+      for (const child of node.children || []) walk(child);
+    };
+    walk(this);
+    return out;
+  }
 }
 
-function makeConversationPageEnv({ kimiRunning = false, models = null, conversations = null } = {}) {
+function makeConversationPageEnv({ kimiRunning = false, models = null, conversations = null, reasonText = makeReasonText() } = {}) {
   const ui = {};
   for (const name of ['guide', 'guideText', 'refresh', 'status', 'result', 'query', 'count', 'list', 'empty',
     'emptyNote', 'migration', 'migrationText', 'migrateAll', 'batch', 'batchModel', 'batchEffort', 'batchGo',
@@ -4926,7 +4955,6 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
     CONVERSATION_CONSTANTS,
     'const $ = id => id === "conv-q-clear" ? ui.queryClear : null;',
     'const savedIntegrationMode = data => data?.integrationMode === "direct" ? "direct" : "gateway";',
-    'const reasonText = code => ({ conversation_kimi_restart_failed: "Kimi 未能自动重启" })[code] || "";',
     sourceFunction('sourceWord'),
     sourceFunction('displayNameOf'),
     sourceFunction('withSource'),
@@ -4946,12 +4974,12 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
     sourceFunction('mountConversationsPage'),
     'return mountConversationsPage;',
   ].join('\n');
-  const factory = new Function('__dom', 'ui', 'state', 'request', 'document', 'API', 'setHidden', 'setText', 'showToast', 'loadState', code)(
+  const factory = new Function('__dom', 'ui', 'state', 'request', 'document', 'API', 'setHidden', 'setText', 'showToast', 'loadState', 'reasonText', code)(
     dom, ui, state, request, { createElement: tag => new ConvElement(tag) },
     { workConversations: '/api/work/conversations', rebindConversations: '/api/work/conversations/rebind' },
     (el, hidden) => { if (el) el.hidden = Boolean(hidden); },
     (el, text) => { if (el) el.textContent = text; },
-    (message, tone) => toasts.push([message, tone]), async () => true,
+    (message, tone) => toasts.push([message, tone]), async () => true, reasonText,
   );
   return { ui, state, calls, toasts, page: factory(), setReply: (value) => { reply = value; }, setList: (value) => { nextList = value; } };
 }
@@ -5422,7 +5450,7 @@ test('a finished auto-sync no longer sticks on “正在自动同步…” or le
     const setDot = (element, tone) => { if (element) element.dataset.tone = tone; };
     const setText = (element, text) => { if (element) element.textContent = text; };
     const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };
-    const reasonText = code => '原因:' + code;
+    ${REASON_TEXT_SOURCES.join('\n')}
     const AUTO_SYNC_QUIET_STATES = new Set(['synced', 'idle', 'deferred_offline']);
     ${sourceFunction('isInFlight')}
     ${sourceFunction('operationNote')}
@@ -5449,7 +5477,8 @@ test('a finished auto-sync no longer sticks on “正在自动同步…” or le
   assert.equal(nodes.opbarDot.dataset.tone, 'warn');
   renderOperation({ operation: { action: 'auto-sync', state: 'failed', reason: 'direct_import_failed' } });
   assert.equal(nodes.opbarDot.dataset.tone, 'bad');
-  assert.match(nodes.opbarNote.textContent, /原因:direct_import_failed/);
+  assert.match(nodes.opbarNote.textContent, /官方 Kimi 没有接受这次直连写入/);
+  assert.doesNotMatch(nodes.opbarNote.textContent, /direct_import_failed/);
   assert.doesNotMatch(nodes.opbarName.textContent, /failed|synced|deferred_offline/);
 });
 
@@ -5739,7 +5768,10 @@ test('the batch migrate action follows the model selected in the toolbar, not th
 });
 
 test('a restart failure is translated instead of exposing the raw reason code', async () => {
-  const env = makeConversationPageEnv({ kimiRunning: true });
+  /* 直接使用 app-core.js 的真实 reasonText：生产表缺项时这条用例必须失败。 */
+  const reasonText = makeReasonText();
+  assert.match(reasonText('conversation_kimi_restart_failed'), /Kimi 未能自动重新打开/);
+  const env = makeConversationPageEnv({ kimiRunning: true, reasonText });
   env.setReply({ conversationKeys: ['recent'], kimiRestarted: false, restartReason: 'conversation_kimi_restart_failed' });
   await env.page.refresh();
   const row = env.ui.list.children[0];
@@ -5748,7 +5780,7 @@ test('a restart failure is translated instead of exposing the raw reason code', 
   const submit = findNode(row, node => node.dataset?.convConfirmSubmit === 'recent');
   await submit.fire('click');
   await flushConversation();
-  assert.match(env.ui.result.textContent, /Kimi 未能自动重启/);
+  assert.match(env.ui.result.textContent, /Kimi 未能自动重新打开，请手动打开 Kimi Work 后继续/);
   assert.doesNotMatch(env.ui.result.textContent, /conversation_kimi_restart_failed/);
 });
 
@@ -5785,4 +5817,139 @@ test('a known Kimi state releases the switch guard that an unknown state set', a
   env.page.onState({ revision: 'rev-4', kimiProcess: { running: true, state: 'checked' } });
   assert.equal(env.state.conversations.list.kimiRunning, true);
   await flushConversation();
+});
+
+/* ---------- 原因码翻译与会话页边界（独立审查跟进） ---------- */
+
+test('reasonText translates every reason code the UI can show', () => {
+  const reasonText = makeReasonText();
+  const codes = [
+    'conversation_kimi_restart_failed',
+    'native_import_failed',
+    'direct_prepare_required',
+    'model_sync_write_blocked',
+    'configuration_unavailable',
+    'kimi_not_running',
+    'unmanaged_kimi_running',
+    'disconnected',
+    'waiting_login',
+    'account_changed',
+  ];
+  for (const code of codes) {
+    const text = reasonText(code);
+    assert.ok(text && text !== code, code + ' must be translated');
+    assert.match(text, /[\u4e00-\u9fff]/, code + ' must resolve to Chinese');
+    assert.doesNotMatch(text, new RegExp(code), code + ' must not leak the raw code');
+  }
+  assert.match(reasonText('configuration_unavailable'), /尚未读取到本机配置/);
+  assert.match(reasonText('direct_prepare_required'), /静态 hosts 系统授权/);
+  assert.match(reasonText('conversation_kimi_restart_failed'), /Kimi 未能自动重新打开/);
+});
+
+test('the workspace bar offers a manual resync when static hosts are still missing', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+  render({ integrationMode: 'direct', models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: false,
+      eligibleModels: 1, eligibleModelIds: ['conn/resp/model-a'] },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } } });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
+  assert.match(nodes['workspace-sync-note'].textContent, /补齐静态 hosts/);
+  assert.equal(nodes['workspace-resync'].hidden, false, 'missing static hosts needs one manual resync');
+});
+
+test('a deleted model drops its stale effort and batch selection instead of submitting an invalid level', async () => {
+  const modelA = makeConversationModel({ alias: 'byok-kth-kimi/kimi-a', displayName: '模型 A', supportEfforts: ['low', 'high'], defaultEffort: '' });
+  const modelB = makeConversationModel({ alias: 'byok-kth-kimi/kimi-b', displayName: '模型 B', supportEfforts: ['medium'], defaultEffort: '' });
+  const rows = [
+    { conversationKey: 'recent', title: '新会话', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
+  ];
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [modelA], conversations: rows });
+  await env.page.refresh();
+  env.state.conversations.targets.recent = modelA.alias;
+  env.state.conversations.efforts.recent = 'high';
+  env.state.conversations.batchModel = modelA.alias;
+  env.state.conversations.batchEffort = 'high';
+
+  /* 模型 A 被删掉，只剩不支持 high 的模型 B。 */
+  env.setList({ conversations: rows, models: [modelB], application: 'not_running', kimiRunning: false });
+  await env.page.refresh();
+  assert.equal(env.state.conversations.targets.recent, modelB.alias);
+  assert.equal(env.state.conversations.efforts.recent, undefined, 'high is not a valid level for model B');
+  /* 失效的模型 A 别名被丢弃；渲染后回落到当前唯一的模型 B 与它的默认档位。 */
+  assert.notEqual(env.state.conversations.batchModel, modelA.alias);
+  assert.equal(env.state.conversations.batchModel, modelB.alias);
+  assert.equal(env.state.conversations.batchEffort, 'medium');
+  assert.equal(env.ui.batchModel.value, modelB.alias);
+  const row = env.ui.list.children[0];
+  assert.equal(findNode(row, node => node.dataset?.convEffort === 'true').value, 'medium',
+    'the row effort falls back to the new model default');
+
+  /* 仍有效的批量选择保留。 */
+  env.state.conversations.batchModel = modelB.alias;
+  env.state.conversations.batchEffort = 'medium';
+  env.setList({ conversations: rows, models: [modelB], application: 'not_running', kimiRunning: false });
+  await env.page.refresh();
+  assert.equal(env.state.conversations.batchModel, modelB.alias);
+  assert.equal(env.state.conversations.batchEffort, 'medium');
+});
+
+test('an invalid batch effort falls back to the selected model default', async () => {
+  const model = makeConversationModel({ supportEfforts: ['medium'], defaultEffort: '' });
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [model] });
+  await env.page.refresh();
+  env.state.conversations.batchModel = model.alias;
+  env.state.conversations.batchEffort = 'high';
+  await env.page.refresh();
+  assert.equal(env.ui.batchEffort.value, 'medium');
+  assert.equal(env.state.conversations.batchEffort, 'medium');
+});
+
+test('the batch switch explains a missing target model instead of doing nothing', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [] });
+  env.setList({ conversations: [], models: [], application: 'not_running', kimiRunning: false });
+  await env.page.refresh();
+  await env.ui.batchGo.fire('click');
+  assert.ok(env.toasts.some(([message]) => /请先选择目标模型/.test(message)),
+    'a click without a target model must explain itself');
+});
+
+test('the row effort select follows the same switch guard as the row button', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  assert.equal(findNode(row, node => node.dataset?.convEffort === 'true').disabled, false);
+  env.setList({ conversations: env.state.conversations.list.conversations, models: [makeConversationModel()], application: 'unknown', kimiRunning: false });
+  await env.page.refresh();
+  const guarded = env.ui.list.children[0];
+  assert.equal(findNode(guarded, node => node.dataset?.convEffort === 'true').disabled, true);
+  assert.equal(findNode(guarded, node => node.dataset?.convTarget === 'recent').disabled, true);
+  assert.equal(findNode(guarded, node => node.dataset?.convSwitch === 'recent').disabled, true);
+});
+
+test('the first state adopts an already-loaded conversation list', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  assert.equal(env.ui.status.textContent.includes('无法确认'), false);
+  /* 冷启动：会话先读到，首个 /api/state 才到，且运行状态未知。 */
+  env.page.onState({ revision: 'rev-1', kimiProcess: { running: false, state: 'unknown' } });
+  assert.match(env.ui.status.textContent, /无法确认 Kimi 的运行状态/);
+  const row = env.ui.list.children[0];
+  if (row) assert.equal(findNode(row, node => node.dataset?.convSwitch === 'recent').disabled, true);
+});
+
+test('an unknown transition closes a stale confirm while the user is busy', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: true });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  await findNode(row, node => node.dataset?.convSwitch === 'recent').fire('click');
+  const confirmHost = findNode(row, node => node.dataset?.convConfirm === 'recent');
+  assert.equal(confirmHost.hidden, false);
+  env.page.onState({ revision: 'rev-1', kimiProcess: { running: true, state: 'checked' } });
+  env.page.onState({ revision: 'rev-2', kimiProcess: { running: true, state: 'unknown' } });
+  assert.match(env.ui.status.textContent, /无法确认 Kimi 的运行状态/);
+  assert.equal(confirmHost.hidden, true, 'a confirm that can no longer succeed must close');
+  assert.equal(env.state.conversations.rowConfirm, null);
+  assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 1, 'no reload while the user is busy');
 });

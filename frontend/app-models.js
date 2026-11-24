@@ -1744,7 +1744,7 @@ function renderEditor() {
   if (dom.modelSave) dom.modelSave.disabled = errors.length > 0 || !ready || !dirty || state.modelsSaving || protocolPending;
   if (dom.modelSave) setText(dom.modelSave, state.modelsSaving ? '正在保存…' : '保存');
   if (dom.modelCancel) setText(dom.modelCancel, editor.confirmClose ? '继续编辑' : '取消');
-  setText(dom.modelSaveNote, dirty ? '保存会提交整个模型目录并写入本机网关；之后按顶部同步状态同步到 Kimi Work。' : '没有未保存的修改。');
+  setText(dom.modelSaveNote, dirty ? '保存会提交整个模型目录并写入本机网关，后台会自动同步到 Kimi Work。' : '没有未保存的修改。');
 }
 
 /* 路由区：连接下拉 + 上游 ID + 由两者推导的建议路由 ID。

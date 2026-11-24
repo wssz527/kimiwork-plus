@@ -1608,7 +1608,7 @@ function renderWorkspaceSync(data) {
             : '直连模型已写入官方 Kimi；点「重新同步模型目录」补齐静态 hosts 后即可彻底退出后台服务。')
           : '已选择零网关直连模式。后台会在打开 Kimi 时自动写入服务商地址与静态 hosts；也可以点「重新同步模型目录」立即写入，之后可退出本软件。');
     setHidden($('workspace-restart'), !restart);
-    showResync(!restart && (!synced || cleanup));
+    showResync(!restart && (!synced || !hosts || cleanup));
     return;
   }
   /* 回执要求重启时，重启提示必须先于模式/清理提示；否则用户会去重复同步。 */
@@ -1899,8 +1899,8 @@ function updateCompletionVerdict(data, actionLabel) {
   const isWindows = typeof document !== 'undefined' && document.documentElement?.dataset?.platform === 'windows';
   return { tone: 'warn', complete: false,
     text: isWindows
-      ? '当前版本 ' + version + '。部分旧版连接凭据需要系统授权迁移，请到「模型」页点「重新授权并应用连接」。'
-      : '当前版本 ' + version + '。部分旧版连接凭据仍待迁移授权，请到「模型」页点「重新授权并应用连接」（若 macOS 弹出钥匙串提示可选择「始终允许」一次完成迁移）。' };
+      ? '当前版本 ' + version + '。部分旧版连接凭据需要系统授权迁移，请到「模型与服务商」页点「重新授权并应用连接」。'
+      : '当前版本 ' + version + '。部分旧版连接凭据仍待迁移授权，请到「模型与服务商」页点「重新授权并应用连接」（若 macOS 弹出钥匙串提示可选择「始终允许」一次完成迁移）。' };
 }
 
 async function waitForUpdateReconnect(prevBuildId, actionLabel) {
@@ -2093,7 +2093,7 @@ function renderUpdates(data) {
       const pending = credentialAuthPending(data);
       historyNote.classList.toggle('note--warn', pending);
       setText(historyNote, pending
-        ? `已更新到 ${applied.toVersion}（${fmtTime(applied.at)}），但已保存的连接 Key 仍需系统授权：请到「模型」页点「重新授权并应用连接」。`
+        ? `已更新到 ${applied.toVersion}（${fmtTime(applied.at)}），但已保存的连接 Key 仍需系统授权：请到「模型与服务商」页点「重新授权并应用连接」。`
         : `最近一次已于 ${fmtTime(applied.at)} 从 ${applied.fromVersion || '旧版本'} 更新到 ${applied.toVersion}。`);
     } else {
       historyNote.hidden = true;

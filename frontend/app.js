@@ -1454,7 +1454,8 @@ function adoptLocationKey() {
   state.lastFocusUpdateCheckAt = 0;
   state.initialUpdateCheckDone = false;
   state.conversations = { list: null, loading: false, error: '', query: '', stale: false, pending: false,
-    targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null };
+    targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null, rowConfirm: null };
+  conversationsPanel?.reset?.();
   clearDisconnectConfirm();
   state.providers = null;
   state.overviewToday = { key: null, requests: null, totalTokens: null, loading: false, fetchedAt: 0, requestCount: -1 };
