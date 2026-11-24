@@ -69,6 +69,10 @@ type Native struct {
 	staticHostsProbe  func() bool
 	autoSyncReconcile func(context.Context) kimi.IntegrationResult
 	autoSync          *autoSyncCoordinator
+	// operationStart holds the saved surface digest a manual prepare started
+	// from, keyed by operation id. It is private: the published operation keeps
+	// its existing shape, and the entry is dropped when that operation finishes.
+	operationStart map[string]string
 }
 
 func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, error) {
@@ -272,9 +276,13 @@ func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.F
 
 	n.controller.Tick(ctx)
 	if !modelBlocked {
+		// The readback answers for the document it was made against. Two saves
+		// can land between it and the read below, so the store revision has to be
+		// the same on both sides before the readback settles anything.
+		_, revBefore, beforeErr := n.service.Store.Read()
 		integration := n.controller.ReconcileWithReadback(ctx)
 		n.controller.RepairIntegration(ctx, integration)
-		if d, _, err := n.service.Store.Read(); err == nil {
+		if d, revAfter, err := n.service.Store.Read(); err == nil && beforeErr == nil && revAfter == revBefore {
 			n.autoSync.observe(&integration, d)
 		}
 		n.autoSync.kickIfReady()
@@ -670,16 +678,12 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		n.logOperationRejected(action, "native_preview_unavailable")
 		return nil, errors.New("native_preview_unavailable")
 	}
-	n.mu.Lock()
-	if n.operation != nil && n.operation["state"] == "running" {
-		n.mu.Unlock()
+	id, claimed := n.beginOperation(action)
+	if !claimed {
 		n.logOperationRejected(action, "operation_busy")
 		return nil, errors.New("operation_busy")
 	}
-	id := RandomKey()[:16]
-	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
 	initial := core.Document{"id": id, "action": action, "state": "running"}
-	n.mu.Unlock()
 	n.logOperationStarted(id, action)
 	go func() {
 		timeout := 45 * time.Second
@@ -969,6 +973,36 @@ func (n *Native) importDirectWithEnsure(ctx context.Context, ensure func(context
 		}, importWaitingWork)
 }
 
+// beginOperation claims Native.operation for one action. A manual prepare
+// snapshots the saved surface before the claim: its import answers for the
+// catalog that was on disk when it started, and the completion compares that
+// generation instead of whatever a save landed while it ran.
+func (n *Native) beginOperation(action string) (string, bool) {
+	startedDigest := ""
+	if action == "connect-kimi" || action == "prepare-native" {
+		startedDigest = n.currentSurfaceDigest()
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.operation != nil && n.operation["state"] == "running" {
+		return "", false
+	}
+	id := RandomKey()[:16]
+	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
+	n.recordOperationStartLocked(id, startedDigest)
+	return id, true
+}
+
+func (n *Native) recordOperationStartLocked(id, digest string) {
+	if digest == "" {
+		return
+	}
+	if n.operationStart == nil {
+		n.operationStart = map[string]string{}
+	}
+	n.operationStart[id] = digest
+}
+
 // releaseOperation frees a claimed operation slot without publishing an outcome.
 // It is the shutdown path: nothing ran, so nothing is recorded.
 func (n *Native) releaseOperation(id string) {
@@ -976,6 +1010,7 @@ func (n *Native) releaseOperation(id string) {
 	if n.operation != nil && n.operation["id"] == id {
 		n.operation = nil
 	}
+	delete(n.operationStart, id)
 	n.mu.Unlock()
 }
 
@@ -1002,6 +1037,10 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		n.operation["reason"] = reason
 	}
 	action := core.String(n.operation["action"])
+	// The surface this manual prepare started from travels with the completion;
+	// the entry is consumed here so a later operation cannot inherit it.
+	startedDigest := n.operationStart[id]
+	delete(n.operationStart, id)
 	if action == "disconnect-models" && err == nil {
 		n.receipt = nil
 	}
@@ -1024,7 +1063,7 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		}
 	}
 	n.logOperationFinished(id, action, stage, state, reason, duration, result)
-	n.autoSync.operationFinished(action, result, err)
+	n.autoSync.operationFinished(action, startedDigest, result, err)
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }

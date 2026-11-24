@@ -535,10 +535,22 @@ func (h *autoSyncHarness) finishOperation(t *testing.T, action string) {
 
 func (h *autoSyncHarness) finishOperationResult(t *testing.T, action string, result any) {
 	t.Helper()
-	h.n.mu.Lock()
-	h.n.operation = core.Document{"id": action, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
-	h.n.mu.Unlock()
-	h.n.finishOperation(action, "done", result, nil)
+	id, claimed := h.n.beginOperation(action)
+	if !claimed {
+		// A background run holds the slot. Publish this action's operation the way
+		// a claim would, including the start snapshot, so the completion path stays
+		// the one under test.
+		digest := ""
+		if action == "connect-kimi" || action == "prepare-native" {
+			digest = h.n.currentSurfaceDigest()
+		}
+		h.n.mu.Lock()
+		id = action
+		h.n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
+		h.n.recordOperationStartLocked(id, digest)
+		h.n.mu.Unlock()
+	}
+	h.n.finishOperation(id, "done", result, nil)
 }
 
 // operationState is the state of the newest operation, or empty while a manual
@@ -1205,5 +1217,134 @@ func TestAutoSyncStartupReadbackConfirmsTheCatalog(t *testing.T) {
 	}
 	if core.Object(h.n.autoSync.status())["pending"] != false {
 		t.Fatal("a startup confirmation queued a write")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: a failed write is never answered by the catalog it replaced
+
+// The catalog of an earlier generation can still read back as applied and
+// adopted. That is evidence about the write that put it there, not about a
+// removal, a rename or a rotated key that just failed to land.
+func TestAutoSyncFailedImportDoesNotInheritTheOlderCatalog(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.autoSync.debounce = 20 * time.Millisecond
+
+	base := h.doc(t)
+	baseDigest := catalogSurfaceDigest(base)
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = baseDigest, true
+	h.n.autoSync.mu.Unlock()
+
+	// Removing the only model fails at the bridge.
+	h.set(func(h *autoSyncHarness) { h.failImport = "native_bridge_timeout" })
+	next := cloneDocument(base)
+	next["models"] = []any{}
+	h.save(t, "/api/models", next)
+
+	waitAutoSyncState(t, h, autoSyncFailed)
+	status := h.n.autoSync.status()
+	if reason := core.String(status["reason"]); reason != "native_bridge_timeout" {
+		t.Fatalf("failure reason = %q", reason)
+	}
+	if status["pending"] != false {
+		t.Fatal("a failed import kept retrying the same generation")
+	}
+	h.n.autoSync.mu.Lock()
+	synced := h.n.autoSync.synced
+	h.n.autoSync.mu.Unlock()
+	if synced != baseDigest {
+		t.Fatalf("a failed write moved the baseline to %q", synced)
+	}
+	h.n.mu.Lock()
+	operationState := core.String(h.n.operation["state"])
+	h.n.mu.Unlock()
+	if operationState != "failed" {
+		t.Fatalf("the failed write published operation state %q", operationState)
+	}
+}
+
+// A manual connect answers for the surface that was saved when it started. A
+// save that lands while the import runs is a newer generation: reading the
+// document again at completion used to settle it with the running application's
+// digest, so the queued rename never reached Kimi.
+func TestAutoSyncManualConnectDoesNotSwallowAConcurrentSave(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.autoSync.debounce = 5 * time.Millisecond
+
+	base := h.doc(t)
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = catalogSurfaceDigest(base), true
+	h.n.autoSync.mu.Unlock()
+
+	id, claimed := h.n.beginOperation("connect-kimi")
+	if !claimed {
+		t.Fatal("the manual connect could not claim the slot")
+	}
+	// The user renames a model while the manual import is still running.
+	next := cloneDocument(base)
+	core.Object(core.Rows(next["models"])[0])["name"] = "Alpha Renamed"
+	h.save(t, "/api/models", next)
+
+	// The queued write cannot take the slot and waits for the manual operation.
+	waitAutoSync(t, "the queued write to wait for the manual slot", func() bool {
+		h.n.autoSync.mu.Lock()
+		defer h.n.autoSync.mu.Unlock()
+		return h.n.autoSync.blocked
+	})
+	if imports := h.counts(); imports != 0 {
+		t.Fatalf("the queued write ran beside the manual connect: %d", imports)
+	}
+
+	h.n.finishOperation(id, "prepared", kimi.ImportResult{OK: true, State: kimi.ImportStateApplied, Applied: true, Adopted: true}, nil)
+	waitAutoSync(t, "the concurrent save to be written", func() bool { return h.counts() == 1 })
+	waitAutoSyncState(t, h, autoSyncSynced)
+
+	h.n.autoSync.mu.Lock()
+	pending, target, synced := h.n.autoSync.pending, h.n.autoSync.target, h.n.autoSync.synced
+	h.n.autoSync.mu.Unlock()
+	if pending || target != "" {
+		t.Fatalf("the concurrent save stayed queued: pending=%v target=%q", pending, target)
+	}
+	if want := catalogSurfaceDigest(next); synced != want {
+		t.Fatalf("the baseline does not describe the written surface: %q != %q", synced, want)
+	}
+}
+
+// A rename or a removal queued before an account switch is still owed to the
+// new account's profile. Clearing the target used to make the catch-up reconcile
+// instead of importing, and a readback that already reports a catalog settled
+// the queued edit without writing it.
+func TestAutoSyncAccountSwitchKeepsTheQueuedTarget(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.autoSync.debounce = 5 * time.Second
+
+	base := h.doc(t)
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = catalogSurfaceDigest(base), true
+	h.n.autoSync.mu.Unlock()
+
+	next := cloneDocument(base)
+	core.Object(core.Rows(next["models"])[0])["name"] = "Alpha Renamed"
+	h.save(t, "/api/models", next)
+	if target := func() string {
+		h.n.autoSync.mu.Lock()
+		defer h.n.autoSync.mu.Unlock()
+		return h.n.autoSync.target
+	}(); target != catalogSurfaceDigest(next) {
+		t.Fatalf("the save queued %q", target)
+	}
+
+	h.finishOperation(t, "account-switch")
+	waitAutoSync(t, "the new account's import", func() bool { return h.counts() == 1 })
+	waitAutoSyncState(t, h, autoSyncSynced)
+	h.n.autoSync.mu.Lock()
+	pending, target := h.n.autoSync.pending, h.n.autoSync.target
+	h.n.autoSync.mu.Unlock()
+	if pending || target != "" {
+		t.Fatalf("the switched account kept the queue: pending=%v target=%q", pending, target)
 	}
 }

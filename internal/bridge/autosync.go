@@ -288,7 +288,10 @@ func (c *autoSyncCoordinator) reset() {
 // operationFinished is the wake-up for a run that could not take the slot. The
 // caller has already released Native.mu. `result` is what the operation
 // produced, so a manual prepare can settle the queue it just satisfied.
-func (c *autoSyncCoordinator) operationFinished(action string, result any, err error) {
+// `startedDigest` is the surface that was saved when a manual prepare claimed
+// the slot: the import answered for that generation, not for a save that landed
+// while it ran.
+func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, result any, err error) {
 	if c == nil {
 		return
 	}
@@ -297,9 +300,9 @@ func (c *autoSyncCoordinator) operationFinished(action string, result any, err e
 		return
 	}
 	manualPrepare := err == nil && (action == "connect-kimi" || action == "prepare-native")
-	var digest string
+	var currentDigest string
 	if manualPrepare {
-		digest = c.native.currentSurfaceDigest()
+		currentDigest = c.native.currentSurfaceDigest()
 	}
 	imported, produced := importResultValue(result)
 	c.mu.Lock()
@@ -309,10 +312,12 @@ func (c *autoSyncCoordinator) operationFinished(action string, result any, err e
 	}
 	if err == nil && action == "account-switch" {
 		// A different account owns a different profile; the previous baseline
-		// says nothing about it. A catch-up compares the new profile again.
+		// says nothing about it. A catch-up compares the new profile again. A
+		// generation that was already queued keeps its target: it is the edit the
+		// user saved, and the new account still owes it.
 		c.synced, c.syncedAdopted = "", false
 		if !c.disconnected {
-			c.pending, c.target, c.blocked = true, "", false
+			c.pending, c.blocked = true, false
 			c.setStateLocked(autoSyncScheduled, "")
 			c.armLocked(0)
 		}
@@ -322,13 +327,14 @@ func (c *autoSyncCoordinator) operationFinished(action string, result any, err e
 		// The user asked for the models again, whatever the import answered.
 		c.disconnected = false
 	}
-	if manualPrepare && produced && digest != "" &&
+	if manualPrepare && produced && startedDigest != "" && currentDigest == startedDigest &&
 		(imported.Applied || imported.RequiresRestart) &&
-		(!c.pending || c.target == "" || c.target == digest) {
+		(!c.pending || c.target == "" || c.target == startedDigest) {
 		// The manual prepare already wrote this surface. Settling here keeps the
 		// queued generation from writing it a second time and clears a previous
-		// failure the user just resolved.
-		c.synced, c.syncedAdopted = digest, imported.Adopted && !imported.RequiresRestart
+		// failure the user just resolved. A save that moved the surface while the
+		// import ran is newer and stays queued.
+		c.synced, c.syncedAdopted = startedDigest, imported.Adopted && !imported.RequiresRestart
 		c.pending, c.target, c.blocked = false, "", false
 		c.stopTimerLocked()
 		if c.syncedAdopted {
@@ -441,6 +447,14 @@ func (c *autoSyncCoordinator) run() {
 		c.mu.Unlock()
 	}()
 	if c.ctx.Err() != nil {
+		return
+	}
+	c.mu.Lock()
+	queued := c.pending && !c.stopped
+	c.mu.Unlock()
+	if !queued {
+		// A save or a disconnect settled the queue before this run claimed the
+		// slot. Taking it anyway would overwrite Native.operation for nothing.
 		return
 	}
 	id, ok := c.native.beginAutoSyncOperation()
@@ -569,6 +583,25 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		}
 		c.hold(autoSyncDeferredOffline, autoSyncReasonNotRunning)
 		return autoSyncDeferredOffline, autoSyncReasonNotRunning, imported, nil
+	}
+	if imported.State == kimi.ImportStateWaitingLogin || imported.State == kimi.ImportStateAccountChanged {
+		// The import never reached a write, so the profile signing in again is the
+		// only thing this generation waits for. A readback of the older catalog
+		// must not publish it as applied.
+		state, reason := autoSyncWaitingLogin, firstCode(imported.Reason, kimi.NativeWaitingLogin)
+		c.finish(state, reason, false, digest, target)
+		return state, reason, imported, err
+	}
+	if (err != nil || !imported.OK) && !imported.Applied && !imported.RequiresRestart {
+		// The write did not land. The profile still holding the catalog of an
+		// earlier generation is not evidence about this one, so the failure is
+		// the answer even when the readback below reports the old catalog.
+		reason := firstCode(imported.Reason, core.ErrorCode(err), "native_import_failed")
+		c.finish(autoSyncFailed, reason, false, digest, target)
+		if err == nil {
+			err = errors.New(reason)
+		}
+		return autoSyncFailed, reason, imported, err
 	}
 	current := c.reconcile(ctx)
 	state, reason := autoSyncOutcome(imported, current)
