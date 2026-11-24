@@ -15,9 +15,14 @@ const API = {
   context: '/api/context',
   tools: '/api/tools',
   integrationMode: '/api/integration-mode',
-  kimiK3Compatibility: '/api/kimi-k3-compatibility',
   diagnosticsExport: '/api/diagnostics/export',
   openUrl: '/api/open-url',
+  updatesCheck: '/api/updates/check',
+  updatesDownload: '/api/updates/download',
+  updatesApply: '/api/updates/apply',
+  updatesSettings: '/api/updates/settings',
+  updatesCancel: '/api/updates/cancel',
+  updatesRollback: '/api/updates/rollback',
 };
 
 const POLL_MS = 2000;
@@ -92,8 +97,9 @@ const UPSTREAM_REASON = {
 
 
 const VIEW_COPY = {
-  overview: { title: '总览', lede: '快速上手、网关与 Kimi Work 接入、当前账号、子代理与今日用量。' },
-  models: { title: '模型', lede: '管理服务商连接与模型目录，保存后同步到 Kimi Work。' },
+  overview: { title: '总览', lede: '网关与 Kimi Work 接入状态、当前账号、子代理与今日用量。' },
+  models: { title: '模型与服务商', lede: '在同一页管理服务商连接与已启用模型；保存后立即生效并自动同步到 Kimi Work。' },
+  conversations: { title: '会话', lede: '为已有的 Kimi Work 对话切换模型；网关模式下通常直接在 Kimi 下拉框切换即可。' },
   subagents: { title: '子代理', lede: '按角色分配子代理模型，管理模型池与当前会话 Swarm 并行。' },
   usage: { title: '用量', lede: '查看本机网关与 Kimi Work 会话用量、服务商余额与预算保护。' },
   maintenance: { title: '设置', lede: '账号管理、接入与自动更新、扩展工具与高级诊断。' },
@@ -102,6 +108,12 @@ const VIEW_COPY = {
 const VIEW_ALIASES = {
   connection: 'models',
   connections: 'models',
+  provider: 'models',
+  providers: 'models',
+  conversation: 'conversations',
+  sessions: 'conversations',
+  session: 'conversations',
+  rebind: 'conversations',
   enhancements: 'subagents',
   work: 'subagents',
   tools: 'maintenance',
@@ -196,6 +208,7 @@ const ACTION_LABEL = {
   'account-remove': '移除账号',
   'set-swarm': '设置并行模式',
   'rebind-conversations': '改绑旧会话模型',
+  'auto-sync': '自动同步模型目录',
   'check-compatibility': '官方版本自检',
 };
 
@@ -475,6 +488,10 @@ const dom = {
   restartBannerLink: $('restart-banner-link'),
   budgetBanner: $('budget-banner'),
   budgetBannerText: $('budget-banner-text'),
+  updateBanner: $('update-banner'),
+  updateBannerText: $('update-banner-text'),
+  updateBannerPrimary: $('update-banner-primary'),
+  updateBannerNotes: $('update-banner-notes'),
 
   opbar: $('opbar'),
   opbarDot: $('opbar-dot'),
@@ -488,10 +505,12 @@ const dom = {
 
   navOverview: $('nav-overview'),
   navModels: $('nav-models'),
+  navConversations: $('nav-conversations'),
   navSubagents: $('nav-subagents'),
   navUsage: $('nav-usage'),
   navMaintenance: $('nav-maintenance'),
   navModelCount: $('nav-model-count'),
+  navUpdateDot: $('nav-update-dot'),
 
   railGatewayDot: $('rail-gateway-dot'),
   railGatewayText: $('rail-gateway-text'),
@@ -765,9 +784,6 @@ const dom = {
   modeGateway: $('mode-gateway'),
   modeDirect: $('mode-direct'),
   integrationModeState: $('integration-mode-state'),
-  kimiK3Setting: $('kimi-k3-setting'),
-  kimiK3Enabled: $('kimi-k3-enabled'),
-  kimiK3Status: $('kimi-k3-status'),
   directModeNotice: $('direct-mode-notice'),
   directModeSupport: $('direct-mode-support'),
   directModeHosts: $('direct-mode-hosts'),
@@ -780,6 +796,29 @@ const dom = {
   updCurrent: $('upd-current'),
   updCurrentSub: $('upd-current-sub'),
 
+  convGuide: $('conv-guide'),
+  convGuideText: $('conv-guide-text'),
+  convRefresh: $('conv-refresh'),
+  convStatus: $('conv-status'),
+  convResult: $('conv-result'),
+  convQ: $('conv-q'),
+  convCount: $('conv-count'),
+  convList: $('conv-list'),
+  convEmpty: $('conv-empty'),
+  convEmptyNote: $('conv-empty-note'),
+  convMigrationTip: $('conv-migration-tip'),
+  convMigrationText: $('conv-migration-text'),
+  convMigrateAll: $('conv-migrate-all'),
+  convBatchModel: $('conv-batch-model'),
+  convBatchEffort: $('conv-batch-effort'),
+  convBatchGo: $('conv-batch-go'),
+  convBatchMigrate: $('conv-batch-migrate'),
+  convBatchNote: $('conv-batch-note'),
+  convConfirm: $('conv-confirm'),
+  convConfirmText: $('conv-confirm-text'),
+  convConfirmSubmit: $('conv-confirm-submit'),
+  convConfirmCancel: $('conv-confirm-cancel'),
+
   toast: $('toast'),
 };
 
@@ -787,7 +826,7 @@ const state = {
   key: null,
   data: null,
   view: 'overview',
-  subtabs: { models: 'catalog', subagents: 'models', maintenance: 'accounts' },
+  subtabs: { subagents: 'models', maintenance: 'accounts' },
   subagentModeCache: { force: null, pool: null },
   guideCollapsed: null,
   query: '',
@@ -835,6 +874,13 @@ const state = {
   toastTimer: null,
   started: false,
   actionButtons: [],
+  /* 窗口聚焦时的更新复查：60 秒内不重复发请求，30 分钟内的检查结果直接复用。 */
+  lastFocusUpdateCheckAt: 0,
+  initialUpdateCheckDone: false,
+  conversations: {
+    list: null, loading: false, error: '', query: '', stale: false, pending: false,
+    targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null,
+  },
 };
 
 

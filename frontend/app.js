@@ -1,17 +1,19 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderOnboardOverview, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, routeIdFor, routeIdPreservingProtocol, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, toggleEffortChoice, validateEditor } from './app-models.js';
-import { chooseIntegrationMode, chooseKimiK3Compatibility, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
-import { appendPoolModel, discardDraft, draftFromSaved, mountConversationRebind, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
+import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
+import { mountConversationsPage } from './app-conversations.js';
 
 let renderGrowth = () => {};
 let usagePanel = { show() {}, reload: async () => {}, reset() {} };
 let plusPanel = { render() {}, refresh: async () => {} };
+let conversationsPanel = { show() {}, refresh: async () => {}, onState() {} };
 
 
-const DEFAULT_SUBTABS = { models: 'catalog', subagents: 'models', maintenance: 'accounts' };
+/* 模型与服务商已合并为同一页，不再有二级子标签；这里只剩子代理与设置两组。 */
+const DEFAULT_SUBTABS = { subagents: 'models', maintenance: 'accounts' };
 const VALID_SUBTABS = {
-  models: new Set(['catalog', 'connections']),
   subagents: new Set(['models', 'swarm']),
   maintenance: new Set(['accounts', 'connection', 'extensions', 'advanced']),
 };
@@ -68,8 +70,8 @@ function setView(view, { persist = true } = {}) {
     state.composing = false;
     clearDisconnectConfirm();
     if (state.data && view === 'overview') {
-      renderOverview(state.data, { view: 'overview' });
       renderOnboardOverview(state.data);
+      renderOverview(state.data, { view: 'overview' });
     }
     if (view === 'models') {
       if (state.data) {
@@ -81,6 +83,7 @@ function setView(view, { persist = true } = {}) {
       renderPicker();
       if (state.data) renderGrowth(state.data, { view: 'models' });
     }
+    if (view === 'conversations') conversationsPanel.show();
     if (view === 'subagents') renderSubagents();
     if (state.data && view === 'maintenance') {
       renderOverview(state.data, { view: 'maintenance' });
@@ -112,7 +115,7 @@ function adoptState(next, { initial = false, external = false } = {}) {
     state.pendingService = null;
   }
   state.data = next;
-  state.conversationRebindStateChanged?.(next);
+  state.conversationsStateChanged?.(next);
 
   /* 子代理草稿同一规则：默认继承只用于展示，绝不自动提交；轮询不覆盖
      正在编辑的草稿，非脏时才用已保存值回填。 */
@@ -192,6 +195,8 @@ function renderAll() {
     renderConnection();
     renderPicker();
     renderGrowth(state.data, { view: 'models' });
+  } else if (view === 'conversations') {
+    conversationsPanel.show();
   } else if (view === 'subagents') {
     renderSubagents();
   } else if (view === 'maintenance') {
@@ -228,6 +233,10 @@ async function loadState({ silent = false } = {}) {
       dom.gate.hidden = true;
     }
     renderAll();
+    if (!state.initialUpdateCheckDone) {
+      state.initialUpdateCheckDone = true;
+      maybeCheckUpdatesOnFocus();
+    }
     return true;
   } catch (error) {
     if (!current()) return false;
@@ -607,8 +616,66 @@ function refreshServiceStatus() {
   }).catch(() => {});
 }
 
+/* ---------- 更新：窗口聚焦时的静默过期复查 ---------- */
+
+/* 后台守护进程每 2 小时自动检查一次；用户把窗口切回前台时，如果距上次成功
+   检查已超过 30 分钟，就静默补查一次。60 秒内不重复发请求，避免频繁切焦点
+   造成成串检查；检查失败不弹打扰式 Toast，设置页的手动检查仍保留明确反馈。 */
+const FOCUS_UPDATE_MIN_INTERVAL_MS = 60_000;
+const FOCUS_UPDATE_STALE_MS = 30 * 60 * 1000;
+const FOCUS_UPDATE_BUSY_STATES = ['checking', 'downloading', 'verifying', 'downloaded', 'applying', 'rolling_back', 'waiting_idle'];
+
+function focusUpdateDue(updates, now) {
+  if (!updates || typeof updates !== 'object') return false;
+  if (updates.autoCheck === false) return false;
+  if (FOCUS_UPDATE_BUSY_STATES.includes(updates.state)) return false;
+  if (now - Number(state.lastFocusUpdateCheckAt || 0) <= FOCUS_UPDATE_MIN_INTERVAL_MS) return false;
+  const last = Date.parse(updates.lastCheckedAt || '');
+  if (Number.isFinite(last) && (now - last) <= FOCUS_UPDATE_STALE_MS) return false;
+  return true;
+}
+
+async function runFocusUpdateCheck() {
+  try {
+    const result = await request(API.updatesCheck, { method: 'POST', body: {} });
+    if (result?.updates && state.data) {
+      state.data.updates = result.updates;
+      renderUpdates(state.data);
+    }
+    await loadState({ silent: true });
+  } catch {
+    /* 静默检查不打扰用户：网络或更新源失败只在设置页手动检查时提示。 */
+  }
+}
+
+function maybeCheckUpdatesOnFocus({ now = Date.now() } = {}) {
+  if (!state.key || !state.data?.updates) return false;
+  if (!focusUpdateDue(state.data.updates, now)) return false;
+  state.lastFocusUpdateCheckAt = now;
+  void runFocusUpdateCheck();
+  return true;
+}
+
+/* 托盘「前往更新」与总览「查看更新说明」共用的定位入口：切到设置 → 接入与更新，
+   展开折叠区，只滚动 .main 并聚焦手动检查按钮，绝不调用 scrollIntoView。 */
+function openUpdatesPanel() {
+  setView('maintenance');
+  setSubtab('maintenance', 'connection');
+  const panel = $('update-panel');
+  if (panel) {
+    for (let node = panel; node; node = node.parentElement) {
+      if (node.tagName === 'DETAILS') node.open = true;
+    }
+    scrollMainToElement(panel);
+  }
+  const check = $('upd-check');
+  if (check && typeof check.focus === 'function') check.focus({ preventScroll: true });
+}
+
 function bindEvents() {
-  state.conversationRebindStateChanged = mountConversationRebind();
+  conversationsPanel = mountConversationsPage();
+  state.conversationsStateChanged = conversationsPanel.onState;
+  if (state.view === 'conversations') conversationsPanel.show();
   Object.keys(VIEW_COPY).forEach(view => {
     const button = $('nav-' + view);
     if (button) button.addEventListener('click', () => setView(view));
@@ -620,8 +687,13 @@ function bindEvents() {
   });
 
   if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => {
-    setView('models');
-    setSubtab('models', 'connections');
+    const action = dom.restartBannerLink.dataset.bannerAction || 'restart-kimi';
+    if (action === 'models') {
+      setView('models');
+      revealWorkspaceSection('restart-panel');
+      return;
+    }
+    void runAction('restart-kimi');
   });
   $('budget-banner-link')?.addEventListener('click', () => {
     setView('usage');
@@ -648,10 +720,15 @@ function bindEvents() {
     const hasModels = Array.isArray(state.data?.models) && state.data.models.length > 0;
     if (hasModels) {
       setView('models');
-      setSubtab('models', 'catalog');
+      revealWorkspaceSection('catalog-panel');
     } else {
       openOnboardWizard();
     }
+  });
+  $('quickstart-step-2-action')?.addEventListener('click', () => {
+    setView('maintenance');
+    setSubtab('maintenance', 'connection');
+    revealWorkspaceSection('native-panel');
   });
   $('quickstart-step-2-mode')?.addEventListener('click', () => {
     setView('maintenance');
@@ -730,12 +807,23 @@ function bindEvents() {
     setSubtab('maintenance', 'connection');
     revealWorkspaceSection('migration-banner');
   });
-  const openUpdateSection = () => {
-    setView('maintenance');
-    revealWorkspaceSection('update-panel');
-  };
+  const openUpdateSection = () => openUpdatesPanel();
   const updTopLink = $('update-top-banner-link');
   if (updTopLink) updTopLink.addEventListener('click', openUpdateSection);
+  if (dom.updateBannerPrimary) dom.updateBannerPrimary.addEventListener('click', async () => {
+    const action = dom.updateBannerPrimary.dataset.updateAction || 'download';
+    dom.updateBannerPrimary.disabled = true;
+    try { await updateAction(action, {}); }
+    catch (error) { showToast(error.message || '更新操作未能启动，当前运行未受影响。', 'error'); }
+    finally {
+      if (state.data) renderUpdates(state.data);
+      else dom.updateBannerPrimary.disabled = false;
+    }
+  });
+  if (dom.updateBannerNotes) dom.updateBannerNotes.addEventListener('click', () => {
+    if (typeof window.__kwpOpenUpdates === 'function') window.__kwpOpenUpdates();
+    else openUpdatesPanel();
+  });
   const overviewUpdGo = $('overview-update-go');
   if (overviewUpdGo) overviewUpdGo.addEventListener('click', openUpdateSection);
   const updReleaseLink = $('upd-release-link');
@@ -831,15 +919,6 @@ function bindEvents() {
     void chooseIntegrationMode(target.value, {
       onSaved: (next) => {
         /* 成功回执就是最新状态：直接采纳，避免轮询把模式与提示短暂改回旧值。 */
-        adoptState(next, { external: true });
-        renderAll();
-      },
-    });
-  });
-
-  if (dom.kimiK3Enabled) dom.kimiK3Enabled.addEventListener('change', () => {
-    void chooseKimiK3Compatibility(dom.kimiK3Enabled.checked, {
-      onSaved: (next) => {
         adoptState(next, { external: true });
         renderAll();
       },
@@ -1161,6 +1240,11 @@ function bindEvents() {
     if (suggested && !editor.draft.touched.has('id')) {
       editor.draft.id = suggested;
       if (dom.mId) dom.mId.value = suggested;
+      /* 上游模型名足以推导协议时不再要求用户展开高级手动确认：
+         默认按 Responses 生成，高级里仍可切换。 */
+      editor.draft.protocolConfirmed = true;
+      editor.draft.protocolSource = 'derived';
+      editor.draft.protocolHint = '已按上游模型名自动推导本地路由与接口协议；可在「高级」中修改。';
     }
     renderEditor();
   });
@@ -1336,6 +1420,10 @@ function adoptLocationKey() {
   state.diagnosticsExportPath = '';
   state.pendingService = null;
   state.composing = false;
+  state.lastFocusUpdateCheckAt = 0;
+  state.initialUpdateCheckDone = false;
+  state.conversations = { list: null, loading: false, error: '', query: '', stale: false, pending: false,
+    targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null };
   clearDisconnectConfirm();
   state.providers = null;
   state.overviewToday = { key: null, requests: null, totalTokens: null, loading: false, fetchedAt: 0, requestCount: -1 };
@@ -1389,6 +1477,11 @@ function boot() {
     revealWorkspaceSection('plus-accounts-panel');
   };
   window.__kwpOpenAccounts = openAccountsTab;
+  window.__kwpOpenConversations = () => {
+    setView('conversations');
+    void conversationsPanel.refresh();
+  };
+  window.__kwpOpenUpdates = () => openUpdatesPanel();
   if (typeof globalThis.KimiWorkGrowth?.mountGrowth === 'function') {
     renderGrowth = globalThis.KimiWorkGrowth.mountGrowth({ request, getState: () => state.data, getProviders: () => state.providers,
       refresh: loadState, notify: showToast, runAction });
@@ -1414,8 +1507,10 @@ function boot() {
      因此在 hash 变化与页面重新可见时都重新取一次密钥。密钥已更换时
      adoptLocationKey 会自己重读状态；同一次可见事件不再并发补一次。 */
   window.addEventListener('hashchange', adoptLocationKey);
+  window.addEventListener('focus', () => { maybeCheckUpdatesOnFocus(); });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    maybeCheckUpdatesOnFocus();
     if (adoptLocationKey()) return;
     if (!state.key) return;
     if (!state.started) {
@@ -1452,6 +1547,8 @@ export {
   clearOnboardSaveErrors,
   handleSaveFailure,
   loadState,
+  maybeCheckUpdatesOnFocus,
+  openUpdatesPanel,
   renderAll,
   runAction,
   setView,

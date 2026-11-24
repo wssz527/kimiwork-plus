@@ -1,4 +1,4 @@
-import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, ACTION_LABEL, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
@@ -1679,7 +1679,6 @@ function openOnboardWizard() {
     return;
   }
   setView('models');
-  setSubtab('models', 'connections');
   closeEditor(true);
   if (dom.onboardDisclosure) {
     dom.onboardDisclosure.open = true;
@@ -1922,8 +1921,7 @@ async function saveOnboard() {
     fillOnboardForm();
     state.lastSync = Date.now();
     renderAll();
-    setSubtab('models', 'catalog');
-    showToast('已保存 ' + fmtCount(built.length) + ' 个模型和服务商。请按同步状态同步到 Work。', 'ok');
+    showToast('已保存 ' + fmtCount(built.length) + ' 个模型和服务商；后台会自动同步到 Kimi Work。', 'ok');
     return true;
   } catch (error) {
     if (current()) {
@@ -2033,7 +2031,7 @@ function fillOnboardPresets() {
 const APPLY_COPY = {
   idle: { tone: 'ok', word: '已应用', note: '当前网关正在使用已保存的连接与凭据。' },
   pending: { tone: 'warn', word: '等待应用',
-    note: '连接已保存，当前网关尚未应用。点「应用已保存的连接」由后台服务安全应用。' },
+    note: '连接已保存，后台会自动应用到网关；若长时间未生效，请到「设置 → 接入与更新 → 高级排障」重新同步模型目录。' },
   applying: { tone: 'warn', word: '正在应用',
     note: '后台服务正在应用连接；Kimi 忙时会等待空闲，不会打断正在进行的请求。' },
   waiting: { tone: 'warn', word: '等待空闲',
@@ -2186,12 +2184,12 @@ function renderApply(data) {
     setText(dom.applyVerdictWord, stateInfo.word);
     setText(dom.applyVerdictNote, stateInfo.note);
   }
+  /* 保存后网关已热应用，日常不再提供「应用已保存的连接」。只有旧版凭据
+     需要系统授权迁移时，才在这里保留同一个重授权入口。 */
   if (dom.applyButton) {
-    const pending = stateInfo === APPLY_COPY.pending || stateInfo === APPLY_COPY.failed || credentialPrompt;
-    setHidden(dom.applyButton, !pending);
-    dom.applyButton.disabled = !pending || Boolean(state.pendingAction);
-    setText(dom.applyButton, credentialPrompt ? '重新授权并应用连接'
-      : stateInfo === APPLY_COPY.failed ? '重试应用连接' : '应用已保存的连接');
+    setHidden(dom.applyButton, !credentialPrompt);
+    dom.applyButton.disabled = !credentialPrompt || Boolean(state.pendingAction);
+    setText(dom.applyButton, '重新授权并应用连接');
   }
 }
 

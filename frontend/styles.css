@@ -151,11 +151,13 @@ html[data-platform="mac"]:not([data-fullscreen="true"]) .masthead { padding-left
 .brand { display: inline-flex; align-items: center; padding: 3px 0; border: 0; background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; flex: none; }
 .brand__name { font: 700 17px/1.1 var(--display); letter-spacing: -.02em; }
 .brand__plus, .product-lockup__plus { color: var(--accent); }
-.masthead__nav { display: flex; align-items: center; gap: 2px; min-width: 0; flex-wrap: wrap; }
+.masthead__nav { display: flex; align-items: center; gap: 2px; min-width: 0; flex-wrap: nowrap; }
 .masthead__tab { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 5px 10px; border: 1px solid transparent; border-radius: var(--r-control); background: transparent; color: var(--ink-2); font-size: 13px; font-weight: 560; white-space: nowrap; cursor: pointer; transition: background var(--fast) var(--ease), color var(--fast) var(--ease), border-color var(--fast) var(--ease); }
 .masthead__tab:hover { background: var(--hover); color: var(--ink); }
 .masthead__tab[aria-current="page"] { border-color: var(--accent-rule); background: var(--accent-soft); color: var(--accent); font-weight: 660; }
 .nav__count { color: var(--ink-4); font-size: 11px; }
+.nav__dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--registration); box-shadow: 0 0 0 2px var(--accent-soft); }
+.nav__dot[hidden] { display: none; }
 .masthead__tab[aria-current="page"] .nav__count { color: var(--accent); }
 .masthead__tools { display: flex; align-items: center; gap: 10px; flex: none; }
 .gateway-chip { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
@@ -656,6 +658,7 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--sunk); color: var
 @media (max-width: 780px) {
   .masthead { grid-template-columns: minmax(0, 1fr); align-items: start; row-gap: 8px; }
   .masthead__navigation { flex-wrap: wrap; row-gap: 6px; }
+  .masthead__nav { flex-wrap: wrap; row-gap: 4px; }
   .masthead__tools { justify-content: space-between; width: 100%; margin-left: 0; }
 }
 
@@ -942,3 +945,33 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 }
 @media (max-width: 900px) { .failover-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 @media (max-width: 640px) { .plus-account-bar { display: none; } .failover-row { grid-template-columns: 1fr; } }
+
+/* ---------- 独立「会话」页与更新提醒 ---------- */
+
+.update-banner { margin: 0 0 6px; }
+.update-banner .btn--primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.update-banner .btn--primary:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+.conv-hero { padding-top: 22px; border-top: 0; }
+.conv-hero[data-mode="gateway"] { background: transparent; }
+.conv-migration { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
+.conv-migration .btn { flex: none; }
+.conv-toolbar { padding-top: 16px; }
+.conv-list { display: grid; gap: 12px; }
+.conv-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px 18px; padding: 14px 16px; border: 1px solid var(--rule); border-radius: var(--r-group); background: var(--surface); }
+.conv-row--recent { border-color: var(--accent-rule); background: var(--surface-strong); box-shadow: inset 3px 0 0 var(--accent); }
+.conv-select { align-self: start; padding-top: 3px; }
+.conv-main { min-width: 0; }
+.conv-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.conv-title { font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+.conv-meta { display: flex; flex-wrap: wrap; align-items: center; margin-top: 5px; color: var(--ink-4); font-size: 12px; }
+.conv-workspace { color: var(--ink-3); }
+.conv-model { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; color: var(--ink-3); font-size: 12px; }
+.conv-badge { border-color: var(--accent-rule); background: var(--accent-soft); color: var(--accent); }
+.conv-actions { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
+.conv-actions .field { min-width: 148px; }
+.conv-actions .field select { min-height: 32px; }
+.conv-row-confirm { grid-column: 1 / -1; margin-top: 2px; }
+@media (max-width: 980px) {
+  .conv-row { grid-template-columns: auto minmax(0, 1fr); }
+  .conv-actions { grid-column: 1 / -1; }
+}

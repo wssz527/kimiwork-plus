@@ -1199,7 +1199,7 @@ function openEditor(model) {
   fillEditorFields();
   renderEditor();
   renderModels();
-  const focusTarget = state.editor.originalId ? dom.mName : dom.mId;
+  const focusTarget = state.editor.originalId ? dom.mName : dom.mUpstream;
   if (focusTarget && focusTarget.focus) focusTarget.focus();
 }
 
@@ -1754,7 +1754,8 @@ function renderEditorRouting(editor) {
         + restricted.map(protocolLabel).join(' 或 ') + '。');
     } else if (family) {
       setText(dom.mProtocolHint, '由当前路由 ID 末段推导为 ' + protocolLabel(family)
-        + (restricted ? '；连接「' + connectionLabel(connection) + '」允许 ' + restricted.map(protocolLabel).join('/') + '。' : '。'));
+        + (restricted ? '；连接「' + connectionLabel(connection) + '」允许 ' + restricted.map(protocolLabel).join('/') : '')
+        + '。它只决定本机网关与上游之间的调用格式；网关模式下所有协议模型都能在 Kimi 下拉框原会话切换。');
     } else if (draft.protocolSource === 'preset') {
       setText(dom.mProtocolHint, '上游目录未声明协议；当前值来自供应商预设「'
         + (providerPreset(draft.providerPresetId) ? providerPreset(draft.providerPresetId).name || providerPreset(draft.providerPresetId).id : '')
@@ -1769,7 +1770,7 @@ function renderEditorRouting(editor) {
   if (dom.mConnectionHint) {
     setText(dom.mConnectionHint, rows.length
       ? '连接决定请求发往哪个上游；上游模型 ID 决定上游看到的 model 值。'
-      : '还没有命名连接。先在「服务商连接」页签添加连接，或使用旧版单上游设置。');
+      : '还没有命名连接。先在上方「服务商连接」区块添加连接，或使用旧版单上游设置。');
   }
 }
 

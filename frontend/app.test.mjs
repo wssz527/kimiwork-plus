@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const appFiles = ['./app-core.js', './app-overview.js', './app-models.js', './app-connections.js', './app-work.js', './app.js'];
+const appFiles = ['./app-core.js', './app-overview.js', './app-models.js', './app-connections.js', './app-work.js', './app-conversations.js', './app.js'];
 const source = '\n' + appFiles.map(file => readFileSync(new URL(file, import.meta.url), 'utf8')).join('\n');
 const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
 const htmlSource = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
@@ -1004,7 +1004,6 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   const code = [
     sourceFunction('openOnboardWizard'),
     'const setView = (view) => calls.push(view);',
-    'const setSubtab = (group, tab) => calls.push(group + ":" + tab);',
     'const scrollMainToElement = () => calls.push("scroll-main");',
     'const editorDirty = () => state.editor?.dirty === true;',
     'const closeEditor = () => { state.editor = null; calls.push("close"); };',
@@ -1014,7 +1013,7 @@ test('the shared wizard opens at provider choice without discarding a dirty edit
   const open = new Function('state', 'dom', 'calls', code)(state, dom, calls);
   open();
   assert.equal(dom.onboardDisclosure.open, true);
-  assert.deepEqual(calls, ['models', 'models:connections', 'close', 'scroll-main', 'focus']);
+  assert.deepEqual(calls, ['models', 'close', 'scroll-main', 'focus']);
   calls.length = 0;
   state.editor = { dirty: true };
   open();
@@ -1030,7 +1029,6 @@ test('a successful onboarding save closes the form and shows the saved model cat
     stateReadEpoch: 0, key: 'session',
   };
   const dom = { onboardKey: { value: 'synthetic' }, onboardDisclosure: { open: true } };
-  const tabs = [];
   const code = [
     sourceFunction('saveOnboard'),
     'const clearOnboardSaveErrors = () => {};',
@@ -1039,7 +1037,7 @@ test('a successful onboarding save closes the form and shows the saved model cat
   const save = new Function(
     'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
     'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
-    'handleSaveFailure', 'setSubtab', 'ApiError', 'fmtCount',
+    'handleSaveFailure', 'ApiError', 'fmtCount',
     'savedOnboardRow', 'onboardConnectionPayload', 'savedConnectionsSignature', 'connectionDraftFrom',
     'fillOnboardForm', 'onboardEndpointKey', code,
   )(
@@ -1048,16 +1046,15 @@ test('a successful onboarding save closes the form and shows the saved model cat
       values: { id: 'conn', name: 'Connection', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'synthetic' },
     }), () => [], () => [], (_existing, built) => built,
     async () => ({ state: savedState }), next => { state.data = next; }, () => {}, () => {}, () => {}, () => {}, async () => {},
-    (group, tab) => tabs.push([group, tab]), class ApiError extends Error {}, String,
+    class ApiError extends Error {}, String,
     () => null, () => ({ id: 'conn' }), () => 'sig', () => [], () => {}, () => 'endpoint',
   );
   assert.equal(await save(), true);
   assert.equal(dom.onboardDisclosure.open, false);
-  assert.deepEqual(tabs, [['models', 'catalog']]);
   assert.equal(dom.onboardKey.value, '');
 });
 
-test('a failed onboarding save keeps the form, the key and the current subtab', async () => {
+test('a failed onboarding save keeps the form and the key', async () => {
   const state = {
     data: { revision: 'rev-1', models: [], connections: { saved: [] } },
     onboard: { saving: false, touched: true },
@@ -1065,12 +1062,11 @@ test('a failed onboarding save keeps the form, the key and the current subtab', 
     stateReadEpoch: 0, key: 'session',
   };
   const dom = { onboardKey: { value: 'sk-typed' }, onboardDisclosure: { open: true } };
-  const tabs = [];
   const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'return saveOnboard;'].join('\n');
   const save = new Function(
     'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
     'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
-    'handleSaveFailure', 'setSubtab', 'ApiError', 'fmtCount',
+    'handleSaveFailure', 'ApiError', 'fmtCount',
     'savedOnboardRow', 'onboardConnectionPayload', 'savedConnectionsSignature', 'connectionDraftFrom',
     'fillOnboardForm', 'onboardEndpointKey', code,
   )(
@@ -1079,13 +1075,12 @@ test('a failed onboarding save keeps the form, the key and the current subtab', 
       values: { id: 'conn', name: 'Connection', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-typed' },
     }), () => [], () => [], (_existing, built) => built,
     async () => { throw new Error('offline'); }, next => { state.data = next; }, () => {}, () => {}, () => {}, () => {},
-    async () => {}, (group, tab) => tabs.push([group, tab]), class ApiError extends Error {}, String,
+    async () => {}, class ApiError extends Error {}, String,
     () => null, () => ({ id: 'conn' }), () => 'sig', () => [], () => {}, () => 'endpoint',
   );
   assert.equal(await save(), false);
   assert.equal(dom.onboardKey.value, 'sk-typed');
   assert.equal(dom.onboardDisclosure.open, true);
-  assert.deepEqual(tabs, []);
 });
 
 test('catalogue reads require only address and key and never borrow a key for a changed endpoint', () => {
@@ -1368,30 +1363,60 @@ test('custom model context shortcuts and thinking efforts are visible outside ad
   }
 });
 
-test('index.html lays out five flat tabs, subtabs, and static views without scrollIntoView or overflow:clip', () => {
-  for (const id of ['nav-overview', 'nav-models', 'nav-subagents', 'nav-usage', 'nav-maintenance']) {
+test('index.html lays out six top-level tabs, the merged model page, the conversations page and the update banner', () => {
+  for (const id of ['nav-overview', 'nav-models', 'nav-conversations', 'nav-subagents', 'nav-usage', 'nav-maintenance']) {
     assert.ok(htmlSource.includes(`id="${id}"`), 'missing top tab ' + id);
   }
+  assert.match(htmlSource, /id="nav-models"[^>]*>模型与服务商 <span class="nav__count mono" id="nav-model-count"><\/span>/);
+  assert.match(htmlSource, /id="nav-maintenance"[^>]*>[\s\S]{0,160}id="nav-update-dot"/);
   assert.equal(htmlSource.includes('id="nav-work"'), false);
   assert.equal(htmlSource.includes('id="nav-extensions"'), false);
-  assert.equal(htmlSource.includes('id="work-index"'), false);
-  assert.equal(htmlSource.includes('id="quick-models"'), false);
-  assert.equal(htmlSource.includes('id="models-services"'), false);
+  assert.equal(htmlSource.includes('models-tab-catalog'), false, 'the model page must not keep a catalog subtab');
+  assert.equal(htmlSource.includes('models-tab-connections'), false, 'the model page must not keep a connections subtab');
+  assert.equal(htmlSource.includes('data-subtab-group="models"'), false);
+  assert.equal(htmlSource.includes('id="kimi-k3-setting"'), false, 'the manual K3 switch is gone');
+  assert.ok(htmlSource.includes('id="native-troubleshoot"'));
+  assert.ok(htmlSource.indexOf('id="native-troubleshoot"') < htmlSource.indexOf('id="native-sync"'));
+  assert.ok(htmlSource.includes('id="view-conversations"'));
+  assert.ok(htmlSource.includes('id="conv-list"'));
+  assert.ok(htmlSource.includes('id="conv-migration-tip"'));
+  assert.ok(htmlSource.includes('id="update-banner"'));
+  assert.ok(htmlSource.includes('id="update-banner-primary"'));
   assert.equal(source.includes('function mountWorkspace('), false);
   assert.equal(source.includes('.scrollIntoView('), false, 'production JS must scroll .main, never call scrollIntoView');
   const cssSource = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
   assert.equal(cssSource.includes('overflow: clip'), false, 'styles.css must avoid overflow: clip on root');
   assert.match(cssSource, /\.shell\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/);
-  for (const id of ['models-tab-catalog', 'models-tab-connections', 'subagents-tab-models', 'subagents-tab-swarm',
+  for (const id of ['subagents-tab-models', 'subagents-tab-swarm',
     'settings-tab-accounts', 'settings-tab-connection', 'settings-tab-extensions', 'settings-tab-advanced']) {
     assert.ok(htmlSource.includes(`id="${id}"`), 'missing subtab ' + id);
   }
   const modelsIdx = htmlSource.indexOf('id="view-models"');
+  const conversationsIdx = htmlSource.indexOf('id="view-conversations"');
   const usageIdx = htmlSource.indexOf('id="view-usage"');
-  const modelsSlice = htmlSource.slice(modelsIdx, usageIdx);
+  const modelsSlice = htmlSource.slice(modelsIdx, conversationsIdx);
   assert.ok(modelsSlice.includes('id="connections-panel"'));
+  assert.ok(modelsSlice.includes('id="catalog-panel"'));
   assert.ok(modelsSlice.includes('id="restart-panel"'));
-  assert.ok(modelsSlice.indexOf('id="model-table"') < modelsSlice.indexOf('id="connections-panel"'));
+  assert.ok(modelsSlice.indexOf('id="connections-panel"') < modelsSlice.indexOf('id="catalog-panel"'),
+    'service connections come first, the enabled catalog follows');
+  assert.ok(modelsSlice.indexOf('id="catalog-panel"') < modelsSlice.indexOf('id="model-table"'));
+  assert.ok(htmlSource.slice(conversationsIdx, usageIdx).includes('id="conv-list"'));
+
+  const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
+  const advanced = form.indexOf('id="m-advanced"');
+  assert.match(form.slice(advanced, form.indexOf('</summary>', advanced)), /高级：上游接口协议、定价与故障转移备用连接/);
+  for (const id of ['m-name', 'm-connection', 'm-candidates', 'm-upstream', 'm-tools', 'm-reasoning', 'm-vision',
+    'm-context', 'm-output', 'm-effort-field', 'm-default']) {
+    const position = form.indexOf(`id="${id}"`);
+    assert.ok(position >= 0, 'missing ' + id);
+    assert.ok(position < advanced, id + ' must stay in the default editor, not inside advanced settings');
+  }
+  for (const id of ['m-id', 'm-protocol-group', 'm-price-input', 'm-failover-rows']) {
+    const position = form.indexOf(`id="${id}"`);
+    assert.ok(position > advanced, id + ' belongs to the advanced disclosure');
+  }
+  assert.match(htmlSource, /所有协议模型都能在 Kimi 下拉框原会话切换/);
 });
 
 test('computeOverviewIssue prioritizes gateway, connection apply, budget, integration and recent failures', () => {
@@ -1406,7 +1431,7 @@ test('computeOverviewIssue prioritizes gateway, connection apply, budget, integr
     return computeOverviewIssue;
   `)();
   assert.equal(compute({ gateway: { state: 'stopped' } }).action.view, 'maintenance');
-  assert.equal(compute({ gateway: { state: 'running' }, _apply: { tone: 'warn', word: '等待应用', note: '待应用' } }).action.section, 'restart-panel');
+  assert.equal(compute({ gateway: { state: 'running' }, _apply: { tone: 'warn', word: '等待应用', note: '待应用' } }).action.section, 'native-troubleshoot');
   assert.equal(compute({ gateway: { state: 'running' }, budget: { msg: '今日已达预算上限。' } }).action.type, 'budget');
   assert.equal(compute({ gateway: { state: 'running' }, _sync: { code: 'restart', tone: 'warn', word: '需要重启', note: '重启' } }).action.action, 'restart-kimi');
   const failed = compute({ gateway: { state: 'running' }, metrics: { recent: [{ model: 'deepseek/r1', status: 401, error: 'upstream_unauthorized', msg: '密钥无效' }] } });
@@ -3271,19 +3296,21 @@ test('an update that leaves credentials unreadable is not reported as fully read
   assert.equal(done.text, '版本替换已完成，当前版本 1.1.0。');
 });
 
-test('the shell banner keeps the credential prompt alive across pages', () => {
+test('the shell banner promotes one direct restart action and keeps the credential prompt', () => {
   const blockedCodes = source.slice(source.indexOf('const CREDENTIAL_VAULT_BLOCKED ='), source.indexOf('\nfunction credentialAuthPending'));
   const nodes = {
     'restart-banner': { textContent: '', hidden: true },
     'restart-banner-text': { textContent: '', hidden: true },
+    'restart-banner-link': { textContent: '', hidden: false, dataset: {}, setAttribute() {} },
   };
   const dom = {
     railGatewayDot: {}, railGatewayText: {}, railGatewayUrl: {}, sync: {},
     restartBanner: nodes['restart-banner'], restartBannerText: nodes['restart-banner-text'],
+    restartBannerLink: nodes['restart-banner-link'],
     navModelCount: {}, budgetBanner: {}, budgetBannerText: {},
   };
   const renderShell = new Function('dom', `${blockedCodes}
-    const state = { lastSync: 0 };
+    const state = { lastSync: 0, pendingAction: null };
     const setText = (element, text) => { if (element) element.textContent = text; };
     const setHidden = (element, hidden) => { if (element) element.hidden = hidden; };
     const setDot = () => {};
@@ -3291,28 +3318,63 @@ test('the shell banner keeps the credential prompt alive across pages', () => {
     const fmtCount = v => String(v);
     const savedIntegrationMode = data => data?.integrationMode === 'direct' ? 'direct' : 'gateway';
     const budgetNotice = () => '';
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('nativeRestartReceipt')}
     ${sourceFunction('credentialAuthPending')}
     ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('autoSyncOf')}
+    ${sourceFunction('syncNeedsImport')}
+    ${sourceFunction('restartBannerState')}
     ${sourceFunction('renderShell')}
     return renderShell;`)(dom);
 
-  /* 配置未变更、但有连接待授权：横幅仍然出现，并指向重授权。 */
+  /* 配置未变更、旧凭据待授权：横幅保留，并指向模型与服务商页重授权。 */
   renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
     connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
   assert.equal(nodes['restart-banner'].hidden, false);
   assert.match(nodes['restart-banner-text'].textContent, /部分已保存的连接凭据暂时无法读取/);
-  assert.doesNotMatch(nodes['restart-banner-text'].textContent, /钥匙串/);
-  assert.match(nodes['restart-banner-text'].textContent, /「模型」页查看原因并重新授权/);
+  assert.match(nodes['restart-banner-text'].textContent, /模型与服务商/);
+  assert.equal(nodes['restart-banner-link'].textContent, '前往模型与服务商处理');
+  assert.equal(nodes['restart-banner-link'].dataset.bannerAction, 'models');
 
-  /* 配置变更提示优先，保持原措辞不被覆盖。 */
+  /* 仅配置文件状态变化不再要求去模型页点「应用已保存的连接」。 */
   renderShell({ gateway: { state: 'running' }, configuration: { state: 'changed' },
-    connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
-  assert.match(nodes['restart-banner-text'].textContent, /连接配置已修改/);
-
-  /* 都正常时横幅隐藏，原行为不变。 */
-  renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
     connections: { saved: [{ id: 'c1', apiKeySet: true }] } });
   assert.equal(nodes['restart-banner'].hidden, true);
+
+  /* 自动同步要求重启刷新菜单：按钮直接是「立即重启 Kimi 生效」。 */
+  renderShell({ gateway: { state: 'running' }, models: [{ id: 'a' }],
+    kimiProcess: { running: true },
+    integration: { autoSync: { state: 'requires_restart' }, desktop: { managed: true } },
+    connections: { saved: [] } });
+  assert.equal(nodes['restart-banner'].hidden, false);
+  assert.equal(nodes['restart-banner-text'].textContent, '模型菜单已更新，重启 Kimi Work 后即可在下拉框看到最新变化。');
+  assert.equal(nodes['restart-banner-link'].textContent, '立即重启 Kimi 生效');
+  assert.equal(nodes['restart-banner-link'].dataset.bannerAction, 'restart-kimi');
+
+  /* 外部启动的 Kimi 正在运行：同一入口改为「重启并接管 Kimi 生效」。 */
+  renderShell({ gateway: { state: 'running' }, models: [{ id: 'a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { autoSync: { state: 'waiting_unmanaged' }, desktop: { managed: false } },
+    connections: { saved: [] } });
+  assert.equal(nodes['restart-banner'].hidden, false);
+  assert.match(nodes['restart-banner-text'].textContent, /外部启动的官方 Kimi Work 正在运行/);
+  assert.equal(nodes['restart-banner-link'].textContent, '重启并接管 Kimi 生效');
+  assert.equal(nodes['restart-banner-link'].dataset.bannerAction, 'restart-kimi');
+
+  renderShell({ gateway: { state: 'running' }, models: [{ id: 'a' }],
+    kimiProcess: { running: true },
+    integration: { autoSync: { state: 'synced' }, desktop: { managed: true }, adopted: true },
+    connections: { saved: [] } });
+  assert.equal(nodes['restart-banner'].hidden, true);
+
+  /* 点击横幅不再先跳页面：restart-kimi 两种文案都直接走 runAction。 */
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = appText.indexOf("if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click'");
+  assert.notEqual(start, -1);
+  const handler = appText.slice(start, appText.indexOf('});', start) + 3);
+  assert.match(handler, /runAction\('restart-kimi'\)/);
+  assert.doesNotMatch(handler, /setSubtab\('models'/);
 });
 
 test('local credential failures explain recovery instead of requesting keychain authorization', () => {
@@ -3550,9 +3612,7 @@ test('release running service is recognized as managed backend for connection ap
   assert.equal(applyAvailability(releaseRunning), 'pending');
   assert.equal(applyState(releaseRunning).word, '等待应用');
   renderApply(releaseRunning);
-  assert.equal(dom.applyButton.hidden, false);
-  assert.equal(dom.applyButton.disabled, false);
-  assert.equal(dom.applyButton.textContent, '应用已保存的连接');
+  assert.equal(dom.applyButton.hidden, true, 'saving applies connections; no daily apply button remains');
   assert.match(dom.restartHead.textContent, /本面板已连接本机后台服务/);
   assert.doesNotMatch(dom.restartHead.textContent, /不是由受管后台服务运行/);
 
@@ -4733,336 +4793,424 @@ test('inline disconnect confirm is cleared by runAction, chooseIntegrationMode, 
   assert.ok(cleared.length >= 3, 'runAction must clear confirm at entry');
 });
 
-function conversationPanelTest(initial, rebindReply) {
-  class Element {
-    constructor(tag) {
-      this.tag = tag;
-      this.children = [];
-      this.listeners = new Map();
-      this.classList = { toggle() {} };
-      this.value = '';
-    }
-    addEventListener(name, fn) { this.listeners.set(name, fn); }
-    async fire(name, target = this) { await this.listeners.get(name)?.({ target }); }
-    append(...children) { this.children.push(...children); }
-    replaceChildren(...children) {
-      this.children = children;
-      if (children[0]?.tag === 'option') this.value = children[0].value;
-    }
-    querySelectorAll() {
-      return this.children.flatMap(child => child.tag === 'input' && child.type === 'checkbox' ? [child] : child.querySelectorAll());
-    }
-    focus() { this.focused = true; }
-  }
-  const ids = new Map();
-  const element = id => {
-    if (!ids.has(id)) ids.set(id, new Element(id));
-    return ids.get(id);
+
+/* ---------- 独立「会话」页 ---------- */
+
+function makeConversationModel(extra = {}) {
+  return {
+    alias: 'byok-kth-kimi/kimi-k3-kwp-' + 'a'.repeat(64),
+    displayName: 'DeepSeek V4.1 Flash',
+    protocol: 'kimi',
+    sourceKind: 'kth',
+    supportEfforts: ['low', 'high'],
+    defaultEffort: 'low',
+    ...extra,
   };
-  const api = { workConversations: '/api/work/conversations', rebindConversations: '/api/work/conversations/rebind' };
-  const calls = [];
-  let next = initial;
-  const request = async (path, options) => {
-    calls.push([path, options]);
-    const reply = path === api.workConversations ? next : rebindReply;
-    if (reply instanceof Error) throw reply;
-    return reply;
-  };
-  const code = ['conversationListStatus', 'conversationModelLabel', 'conversationRow', 'conversationRebindPayload',
-    'conversationPanelSignature', 'mountConversationRebind'].map(sourceFunction).join('\n');
-  const updatePanel = new Function('$', 'API', 'document', 'state', 'request', 'setHidden', 'setText', code + '\nreturn mountConversationRebind();')(
-    element, api, { createElement: tag => new Element(tag) }, { key: 'local-test' }, request,
-    (el, value) => { el.hidden = value; }, (el, value) => { el.textContent = value; });
-  return { calls, panel: element('conversation-rebind'), get: id => element('rebind-' + id), setNext: value => { next = value; }, updatePanel };
 }
 
-const oldConversationRows = [
-  { conversationKey: 'official-1', title: 'Existing conversation', modelAlias: 'kimi-k3', updatedAtMs: 10, isByok: false },
-  { conversationKey: 'third-party-2', title: 'Other conversation', modelAlias: 'byok-kth/example', updatedAtMs: 8, isByok: true },
-];
-const rebindTarget = { alias: 'byok-custom/claude', displayName: 'Claude', protocol: 'anthropic', sourceKind: 'custom',
-  supportEfforts: ['low', 'high'], defaultEffort: 'low', directAnthropicHistoryWarning: true };
+const CONVERSATION_CONSTANTS = [
+  source.slice(source.indexOf('const OFFICIAL_MODEL_NAMES = {'), source.indexOf('\n};', source.indexOf('const OFFICIAL_MODEL_NAMES = {')) + 3),
+  'const KIMI_COMPATIBLE_ID = /^kimi-k3-kwp-[0-9a-f]{64}$/i;',
+  'const EFFORT_ORDER = ["off", "low", "medium", "high", "xhigh", "max"];',
+  'const CONVERSATION_REASONS = {};',
+  'const MODEL_ALIAS_PREFIXES = ["byok-kth-kimi/", "byok-kth-resp/"];',
+  'const MODEL_ALIAS_UUID_PREFIX = /^byok-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\//i;',
+].join('\n');
 
-async function openConversationTestPanel(env) {
-  env.panel.open = true;
-  await env.panel.fire('toggle');
-  await Promise.resolve();
+class ConvElement {
+  constructor(tag) {
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.children = [];
+    this.listeners = new Map();
+    this.dataset = {};
+    this.value = '';
+    this.textContent = '';
+    this.hidden = false;
+    this.disabled = false;
+    this.checked = false;
+    this.classList = { add() {}, remove() {}, toggle() {} };
+  }
+  append(...nodes) {
+    for (const node of nodes) {
+      if (node && typeof node === 'object') node.parent = this;
+      this.children.push(node);
+    }
+  }
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+  addEventListener(name, fn) {
+    const list = this.listeners.get(name) || [];
+    list.push(fn);
+    this.listeners.set(name, list);
+  }
+  async fire(name, target = this) {
+    for (const fn of this.listeners.get(name) || []) await fn({ target, key: name });
+  }
+  setAttribute() {}
+  focus() { this.focused = true; }
+  querySelector(selector) {
+    const match = /^\[data-([a-z-]+)\]$/.exec(selector || '');
+    const key = match ? match[1].replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()) : '';
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (key && node.dataset && Object.prototype.hasOwnProperty.call(node.dataset, key)) return node;
+      for (const child of node.children || []) {
+        const found = walk(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    return walk(this);
+  }
 }
 
-test('old conversations render in Kimi access settings with model, date and distinct empty states', async () => {
-  assert.match(htmlSource, /id="native-panel"[\s\S]+id="conversation-rebind"[\s\S]+id="update-panel"/);
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false });
-  env.panel.open = true;
-  const loading = env.panel.fire('toggle');
-  assert.match(env.get('status').textContent, /正在读取/);
-  await loading;
-  assert.equal(env.get('form').hidden, false);
-  const label = env.get('list').children[0].children[0];
-  assert.deepEqual(label.children[1].children.map(el => el.textContent), ['Existing conversation', 'kimi-k3']);
-  assert.equal(label.children[2].dateTime, new Date(10).toISOString());
-  assert.match(label.children[2].textContent, /1970|1969/);
-  assert.equal(env.get('model').children[1].textContent, 'Claude · Anthropic Messages · 直连');
-
-  for (const [data, message] of [
-    [{ reason: 'conversation_database_missing', conversations: [], models: [] }, /还没有 Kimi Work 会话库/],
-    [{ reason: 'conversation_rollback_failed', conversations: [], models: [], application: 'running' }, /恢复尚未完成.*退出 Kimi/],
-    [{ reason: 'conversation_rollback_failed', conversations: [], models: [], application: 'not_running' }, /恢复尚未完成.*写入权限/],
-    [{ conversations: [], models: [rebindTarget], application: 'not_running' }, /没有可改绑/],
-    [{ conversations: oldConversationRows, models: [], application: 'not_running' }, /没有可用的第三方模型/],
-    [{ conversations: oldConversationRows, models: [rebindTarget], application: 'unknown' }, /无法确认 Kimi 的运行状态/],
-    [new Error('读取失败'), /读取失败/],
-  ]) {
-    env.setNext(data);
-    await env.get('refresh').fire('click');
-    assert.match(env.get('status').textContent, message);
-    assert.equal(env.get('review').hidden, true);
+function makeConversationPageEnv({ kimiRunning = false, models = null, conversations = null } = {}) {
+  const ui = {};
+  for (const name of ['guide', 'guideText', 'refresh', 'status', 'result', 'query', 'count', 'list', 'empty',
+    'emptyNote', 'migration', 'migrationText', 'migrateAll', 'batch', 'batchModel', 'batchEffort', 'batchGo',
+    'batchMigrate', 'batchNote', 'confirm', 'confirmText', 'confirmSubmit', 'confirmCancel']) {
+    ui[name] = new ConvElement('div');
   }
-});
-
-test('a single old conversation shows the direct Anthropic warning and submits only after confirmation', async () => {
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false },
-    { conversationKeys: ['official-1'], kimiRestarted: false, directAnthropicHistoryWarning: true });
-  await openConversationTestPanel(env);
-  const [first, second] = env.get('list').querySelectorAll();
-  env.get('model').value = rebindTarget.alias;
-  await env.get('model').fire('change');
-  assert.equal(env.get('warning').hidden, true);
-  first.checked = true;
-  await env.get('list').fire('change', first);
-  assert.equal(env.get('warning').hidden, false);
-  assert.equal(second.checked, false);
-  assert.equal(env.get('all').indeterminate, true);
-  assert.equal(env.get('review').textContent, '改绑所选会话');
-  assert.deepEqual(env.get('effort').children.map(option => option.textContent), ['模型默认（low）', 'low', 'high']);
-  env.get('effort').value = 'high';
-  await env.get('review').fire('click');
-  assert.equal(env.calls.length, 1);
-  assert.match(env.get('confirm-text').textContent, /将 1 个会话改绑/);
-  await env.get('submit').fire('click');
-  assert.deepEqual(env.calls[1], ['/api/work/conversations/rebind', { method: 'POST', body: {
-    conversationKeys: ['official-1'], targetModelAlias: rebindTarget.alias, thinkingLevel: 'high', restartKimi: false,
-  } }]);
-  assert.match(env.get('result').textContent, /已改绑 1 个会话.*直连 Anthropic/);
-});
-
-test('batch selection confirms Kimi restart and displays a restart failure after committed changes', async () => {
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true },
-    { conversationKeys: ['official-1', 'third-party-2'], kimiRestarted: false, restartReason: 'restart failed' });
-  await openConversationTestPanel(env);
-  env.get('model').value = rebindTarget.alias;
-  await env.get('model').fire('change');
-  env.get('all').checked = true;
-  await env.get('all').fire('change');
-  assert.deepEqual(env.get('list').querySelectorAll().map(input => input.checked), [true, true]);
-  assert.equal(env.get('review').textContent, '改绑并重启 Kimi');
-  await env.get('review').fire('click');
-  assert.match(env.get('confirm-text').textContent, /退出后重新打开 Kimi/);
-  await env.get('cancel').fire('click');
-  await env.get('submit').fire('click');
-  assert.equal(env.calls.length, 1);
-  await env.get('review').fire('click');
-  await env.get('submit').fire('click');
-  assert.deepEqual(env.calls[1][1].body, {
-    conversationKeys: ['official-1', 'third-party-2'], targetModelAlias: rebindTarget.alias, thinkingLevel: '', restartKimi: true,
-  });
-  assert.match(env.get('result').textContent, /已改绑 2 个会话。Kimi 未能重启，请手动打开 Kimi/);
-});
-
-test('conversation rebind prefers the first non-off supported effort when the model has no default', async () => {
-  const target = { ...rebindTarget, protocol: 'google-genai', defaultEffort: '',
-    supportEfforts: ['zeta', 'max', 'high', 'low', 'off', 'alpha', 'medium', 'xhigh'] };
-  const offOnly = { ...target, alias: 'byok-custom/off-only', displayName: 'OffOnly', supportEfforts: ['off'] };
-  const chat = { ...target, alias: 'byok-custom/chat', protocol: 'openai', supportEfforts: [] };
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [target, offOnly, chat], application: 'not_running', kimiRunning: false },
-    { conversationKeys: ['official-1'], kimiRestarted: false });
-  await openConversationTestPanel(env);
-  assert.deepEqual(env.get('model').children.slice(1).map(option => option.textContent),
-    ['Claude · Google GenAI · 直连', 'OffOnly · Google GenAI · 直连', 'Claude · OpenAI Chat · 直连']);
-  env.get('model').value = target.alias;
-  await env.get('model').fire('change');
-  assert.deepEqual(env.get('effort').children.map(option => option.value), ['off', 'low', 'medium', 'high', 'xhigh', 'max', 'alpha', 'zeta']);
-  assert.equal(env.get('effort').value, 'low');
-  const [first] = env.get('list').querySelectorAll();
-  first.checked = true;
-  await env.get('list').fire('change', first);
-  await env.get('review').fire('click');
-  assert.match(env.get('confirm-text').textContent, /思考档位：low/);
-  await env.get('submit').fire('click');
-  assert.equal(env.calls[1][1].body.thinkingLevel, 'low');
-  env.get('model').value = offOnly.alias;
-  await env.get('model').fire('change');
-  assert.equal(env.get('effort').value, 'off');
-  env.get('model').value = chat.alias;
-  await env.get('model').fire('change');
-  assert.equal(env.get('effort').disabled, true);
-  assert.equal(env.get('effort').value, '');
-});
-
-test('failed rebind with restart consent refreshes process state and keeps the original error', async () => {
-  const list = { conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true };
-  const error = Object.assign(new Error('会话库写入失败'), { code: 'conversation_database_unavailable' });
-  const env = conversationPanelTest(list, error);
-  await openConversationTestPanel(env);
-  env.get('model').value = rebindTarget.alias;
-  await env.get('model').fire('change');
-  env.get('all').checked = true;
-  await env.get('all').fire('change');
-  await env.get('review').fire('click');
-  env.setNext({ ...list, application: 'not_running', kimiRunning: false });
-  await env.get('submit').fire('click');
-  assert.deepEqual(env.calls.map(call => call[0]), ['/api/work/conversations', '/api/work/conversations/rebind', '/api/work/conversations']);
-  assert.equal(env.calls[1][1].body.restartKimi, true);
-  assert.match(env.get('result').textContent, /会话库写入失败/);
-  assert.match(env.get('status').textContent, /Kimi 已退出/);
-  assert.equal(env.get('review').textContent, '改绑所选会话');
-});
-
-test('an open rebind panel invalidates its confirmation when account, config or process changes', async () => {
-  const list = { conversations: oldConversationRows, models: [rebindTarget], application: 'running', kimiRunning: true };
-  const env = conversationPanelTest(list);
-  assert.match(sourceFunction('adoptState'), /state\.conversationRebindStateChanged\?\.\(next\)/);
-  const data = { accounts: { currentId: 'a', state: 'ready' }, revision: 'r1', kimiProcess: { running: true, state: 'running' } };
-  env.updatePanel(data);
-  await openConversationTestPanel(env);
-  const updates = [
-    { ...data, accounts: { currentId: 'b', state: 'ready' } },
-    { ...data, revision: 'r2' },
-    { ...data, revision: 'r2', kimiProcess: { running: false, state: 'not_running' } },
+  ui.queryClear = new ConvElement('button');
+  ui.result.hidden = true;
+  ui.migration.hidden = true;
+  ui.confirm.hidden = true;
+  const rows = conversations || [
+    { conversationKey: 'recent', title: '重构网关路由', workspacePath: '/Users/dev/projects/kimiwork-plus', updatedAtMs: Date.now() - 120000, modelAlias: 'k2d8-preview', isByok: false },
+    { conversationKey: 'older', title: '写一个排序算法', workspacePath: 'C:\\work\\algo', updatedAtMs: Date.now() - 7200000, modelAlias: 'byok-kth-kimi/kimi-k3-kwp-' + 'a'.repeat(64), isByok: true },
   ];
-  for (const update of updates) {
-    env.get('model').value = rebindTarget.alias;
-    await env.get('model').fire('change');
-    env.get('all').checked = true;
-    await env.get('all').fire('change');
-    await env.get('review').fire('click');
-    assert.equal(env.get('confirm').hidden, false);
-    env.updatePanel(update);
-    assert.match(env.get('status').textContent, /已变化，请刷新会话/);
-    assert.equal(env.get('review').disabled, true);
-    assert.equal(env.get('confirm').hidden, true);
-    await env.get('submit').fire('click');
-    assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
-    await env.get('refresh').fire('click');
-    assert.equal(env.get('form').disabled, false);
-  }
-  env.updatePanel({ ...updates.at(-1), updates: { state: 'checking' } });
-  assert.doesNotMatch(env.get('status').textContent, /已变化/);
-});
-
-test('a pending conversation query is marked stale even if the account changes back', async () => {
-  let finish;
-  const pending = new Promise(resolve => { finish = resolve; });
-  const env = conversationPanelTest(pending);
-  const original = { accounts: { currentId: 'a' } };
-  env.updatePanel(original);
-  env.panel.open = true;
-  const loading = env.panel.fire('toggle');
-  env.updatePanel({ accounts: { currentId: 'b' } });
-  env.updatePanel(original);
-  finish({ conversations: oldConversationRows, models: [rebindTarget], application: 'not_running', kimiRunning: false });
-  await loading;
-  await Promise.resolve();
-  assert.match(env.get('status').textContent, /已变化，请刷新会话/);
-  assert.equal(env.get('form').disabled, true);
-});
-
-test('K3 alias migration asks for confirmation and sends the model instead of recent conversation IDs', async () => {
-  const model = { ...rebindTarget, alias: 'byok-kth-kimi/kimi-k3-kwp-example',
-    previousAlias: 'byok-kth-kimi/group/kimi-example', protocol: 'kimi', sourceKind: 'kth' };
-  const env = conversationPanelTest({ conversations: oldConversationRows, models: [model], application: 'running', kimiRunning: true },
-    { conversationKeys: ['older-than-recent-list'], kimiRestarted: true, hasMore: true });
-  await openConversationTestPanel(env);
-  env.get('model').value = model.alias;
-  await env.get('model').fire('change');
-  assert.equal(env.get('migrate').hidden, false);
-  assert.equal(env.get('review').disabled, true);
-  await env.get('migrate').fire('click');
-  assert.match(env.get('confirm-text').textContent, /旧别名.*退出后重新打开 Kimi/);
-  assert.equal(env.calls.length, 1);
-  await env.get('submit').fire('click');
-  assert.deepEqual(env.calls[1][1].body, { targetModelAlias: model.alias, thinkingLevel: '', restartKimi: true, migratePreviousAlias: true });
-  assert.match(env.get('result').textContent, /已迁移 1 个会话.*还有会话待迁移/);
-});
-
-test('K3 compatibility setting renders gateway-only state copy and saves or restores on failure', async () => {
-  const makeNode = id => ({ id, textContent: '', hidden: false, disabled: false, checked: false, dataset: {}, setAttribute() {}, classList: { add() {}, toggle() {} } });
-  const dom = {
-    modeGateway: { value: 'gateway', checked: false, disabled: false },
-    modeDirect: { value: 'direct', checked: false, disabled: false },
-    integrationModeGroup: null,
-    integrationModeState: makeNode('integration-mode-state'),
-    kimiK3Setting: makeNode('kimi-k3-setting'),
-    kimiK3Enabled: makeNode('kimi-k3-enabled'),
-    kimiK3Status: makeNode('kimi-k3-status'),
-    nativeSyncLabel: makeNode('native-sync-label'),
-    nativeSync: makeNode('native-sync'),
-    nativeRecover: makeNode('native-recover'),
-    directModeNotice: makeNode('direct-mode-notice'),
-    directModeSupport: makeNode('direct-mode-support'),
-    directModeHosts: makeNode('direct-mode-hosts'),
-    directModeBypassed: null,
-    directModeSkipped: null,
-  };
+  const listModels = models || [makeConversationModel()];
   const calls = [];
   const toasts = [];
-  const errors = [];
-  let nextReply = { ok: true, state: { revision: 'r2', integrationMode: 'gateway', kimiK3Compatibility: true, kimiK3State: 'needs_sync', models: [] } };
   const state = {
-    data: { revision: 'r1', integrationMode: 'gateway', kimiK3Compatibility: false, kimiK3State: '', models: [] },
-    actionButtons: [dom.nativeSync, dom.nativeRecover],
-    pendingAction: null,
-    modelsSaving: false,
-    connsSaving: false,
+    key: 'session-key',
+    view: 'conversations',
+    data: { integrationMode: 'gateway', models: [{ id: 'deepseek-v4-1-flash', name: 'DeepSeek V4.1 Flash' }] },
+    conversations: { list: null, loading: false, error: '', query: '', stale: false, pending: false,
+      targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null },
   };
-  const api = new Function('dom', 'state', 'request', 'showToast', 'handleSaveFailure', `
-    ${INTEGRATION_HELPERS.join('\n')}
-    const API = { kimiK3Compatibility: '/api/kimi-k3-compatibility' };
-    let integrationModeSaving = false;
-    const integrationModeBusy = data => integrationModeSaving || data?.operation?.state === 'running';
-    const onboardBusy = () => false;
-    const renderOnboard = () => {};
-    const renderOnboardOverview = () => {};
-    const clearDisconnectConfirm = () => {};
-    const configReady = () => true;
-    const ACTION_LABEL = {};
-    const setText = (el, text) => { if (el) el.textContent = text; };
-    const setHidden = (el, hidden) => { if (el) el.hidden = Boolean(hidden); };
-    const displayModelId = id => id;
-    const DIRECT_BYPASS_WORD = {};
-    const DIRECT_SKIP_REASON = {};
-    ${sourceFunction('isInFlight')}
-    ${sourceFunction('renderIntegrationMode')}
-    ${sourceFunction('renderActions')}
-    ${sourceFunction('chooseKimiK3Compatibility')}
-    return { renderIntegrationMode, chooseKimiK3Compatibility };
-  `)(dom, state, async (path, options) => {
+  let nextList = { conversations: rows, models: listModels, application: kimiRunning ? 'running' : 'not_running', kimiRunning };
+  let reply = { conversationKeys: ['recent'], targetModelAlias: listModels[0]?.alias, kimiRestarted: kimiRunning };
+  const request = async (path, options) => {
     calls.push([path, options]);
-    if (nextReply instanceof Error) throw nextReply;
-    return nextReply;
-  }, (msg, tone) => toasts.push([msg, tone]), async (err, scope) => errors.push([err.message, scope]));
+    if (path === '/api/work/conversations') return nextList;
+    if (path === '/api/work/conversations/rebind') {
+      if (reply instanceof Error) throw reply;
+      return reply;
+    }
+    return {};
+  };
+  const dom = {
+    convGuide: ui.guide, convGuideText: ui.guideText, convRefresh: ui.refresh, convStatus: ui.status,
+    convResult: ui.result, convQ: ui.query, convCount: ui.count, convList: ui.list, convEmpty: ui.empty,
+    convEmptyNote: ui.emptyNote, convMigrationTip: ui.migration, convMigrationText: ui.migrationText,
+    convMigrateAll: ui.migrateAll, convBatch: ui.batch, convBatchModel: ui.batchModel, convBatchEffort: ui.batchEffort,
+    convBatchGo: ui.batchGo, convBatchMigrate: ui.batchMigrate, convBatchNote: ui.batchNote,
+    convConfirm: ui.confirm, convConfirmText: ui.confirmText, convConfirmSubmit: ui.confirmSubmit,
+    convConfirmCancel: ui.confirmCancel,
+  };
+  const code = [
+    CONVERSATION_CONSTANTS,
+    'const $ = id => id === "conv-q-clear" ? ui.queryClear : null;',
+    'const savedIntegrationMode = data => data?.integrationMode === "direct" ? "direct" : "gateway";',
+    sourceFunction('sourceWord'),
+    sourceFunction('displayNameOf'),
+    sourceFunction('withSource'),
+    sourceFunction('directoryNameOf'),
+    sourceFunction('stripModelAliasPrefix'),
+    sourceFunction('humanizeConversationModel'),
+    sourceFunction('relativeTime'),
+    sourceFunction('workspaceTail'),
+    sourceFunction('conversationListStatus'),
+    sourceFunction('conversationReasonText'),
+    sourceFunction('effortChoices'),
+    sourceFunction('defaultEffortFor'),
+    'const dom = __dom;',
+    sourceFunction('mountConversationsPage'),
+    'return mountConversationsPage;',
+  ].join('\n');
+  const factory = new Function('__dom', 'ui', 'state', 'request', 'document', 'API', 'setHidden', 'setText', 'showToast', 'loadState', code)(
+    dom, ui, state, request, { createElement: tag => new ConvElement(tag) },
+    { workConversations: '/api/work/conversations', rebindConversations: '/api/work/conversations/rebind' },
+    (el, hidden) => { if (el) el.hidden = Boolean(hidden); },
+    (el, text) => { if (el) el.textContent = text; },
+    (message, tone) => toasts.push([message, tone]), async () => true,
+  );
+  return { ui, state, calls, toasts, page: factory(), setReply: (value) => { reply = value; }, setList: (value) => { nextList = value; } };
+}
 
-  api.renderIntegrationMode(state.data);
-  assert.equal(dom.kimiK3Setting.hidden, false);
-  assert.equal(dom.kimiK3Enabled.checked, false);
-  assert.equal(dom.kimiK3Status.hidden, true);
+async function flushConversation() {
+  for (let i = 0; i < 8; i += 1) await new Promise(resolve => setImmediate(resolve));
+}
 
-  dom.kimiK3Enabled.checked = true;
-  await api.chooseKimiK3Compatibility(true, { onSaved: next => { state.data = next; } });
-  assert.deepEqual(calls[0], ['/api/kimi-k3-compatibility', { method: 'POST', body: { revision: 'r1', enabled: true } }]);
-  assert.equal(dom.kimiK3Enabled.checked, true);
-  assert.equal(dom.kimiK3Status.hidden, false);
-  assert.match(dom.kimiK3Status.textContent, /同步到 Work/);
-  assert.equal(toasts.length, 1);
+function findNode(root, predicate) {
+  if (!root || typeof root !== 'object') return null;
+  if (predicate(root)) return root;
+  for (const child of root.children || []) {
+    const found = findNode(child, predicate);
+    if (found) return found;
+  }
+  return null;
+}
 
-  api.renderIntegrationMode({ ...state.data, kimiK3State: 'ready' });
-  assert.match(dom.kimiK3Status.textContent, /切到官方 K3/);
+test('conversation model aliases become readable names and never leak raw UUID or hash prefixes', () => {
+  const fn = new Function([
+    CONVERSATION_CONSTANTS,
+    'const state = { data: { integrationMode: "gateway" } };',
+    'const savedIntegrationMode = data => data?.integrationMode === "direct" ? "direct" : "gateway";',
+    sourceFunction('stripModelAliasPrefix'),
+    sourceFunction('sourceWord'),
+    sourceFunction('displayNameOf'),
+    sourceFunction('withSource'),
+    sourceFunction('directoryNameOf'),
+    sourceFunction('humanizeConversationModel'),
+    'return humanizeConversationModel;',
+  ].join('\n'))();
+  assert.equal(fn('k3-agent'), '官方 · K3');
+  assert.equal(fn('k3d1-agent'), '官方 · K3.1 Pro');
+  assert.equal(fn('k2d8-preview'), '官方 · K2.8 Preview');
+  const gatewayAlias = 'byok-kth-kimi/kimi-k3-kwp-' + 'a'.repeat(64);
+  const known = [{ alias: gatewayAlias, displayName: 'DeepSeek V4.1 Flash', sourceKind: 'kth' }];
+  assert.equal(fn(gatewayAlias, known, []), 'DeepSeek V4.1 Flash · 网关');
+  const uuidAlias = 'byok-12345678-1234-1234-1234-123456789abc/glm-5';
+  assert.equal(fn(uuidAlias, [], [{ id: 'glm-5', name: 'GLM-5.3 Flash' }]), 'GLM-5.3 Flash · 网关');
+  const unknown = fn('byok-kth-kimi/kimi-k3-kwp-' + 'c'.repeat(64), [], []);
+  assert.doesNotMatch(unknown, /byok|kimi-k3-kwp/);
+  assert.match(unknown, /目录未列出/);
+  const previous = fn('byok-kth-kimi/group/deepseek', [{ alias: 'byok-kth-kimi/kimi-new', previousAlias: 'byok-kth-kimi/group/deepseek', displayName: 'DeepSeek V4.1 Flash', sourceKind: 'kth' }], []);
+  assert.match(previous, /DeepSeek V4\.1 Flash/);
+  assert.match(previous, /旧别名/);
+});
 
-  api.renderIntegrationMode({ ...state.data, integrationMode: 'direct', kimiK3Compatibility: false });
-  assert.equal(dom.kimiK3Setting.hidden, true);
+test('the conversations page pins the most recent conversation and confirms a running Kimi only once', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: true });
+  await env.page.refresh();
+  assert.match(env.ui.guideText.textContent, /本机网关模式/);
+  assert.match(env.ui.guideText.textContent, /K3\.1 Pro/);
+  assert.match(env.ui.guideText.textContent, /无需在此操作/);
+  assert.equal(env.ui.list.children.length, 2);
+  const recent = env.ui.list.children[0];
+  assert.match(recent.className, /conv-row--recent/);
+  const tag = findNode(recent, node => node.textContent === '最近活跃会话');
+  assert.ok(tag);
+  const badge = findNode(recent, node => node.dataset?.convCurrent === 'recent');
+  assert.equal(badge.textContent, '官方 · K2.8 Preview');
+  assert.equal(findNode(env.ui.list.children[1], node => node.dataset?.convCurrent === 'older').textContent, 'DeepSeek V4.1 Flash · 网关');
 
-  nextReply = new Error('save_failed');
-  dom.kimiK3Enabled.checked = false;
-  await api.chooseKimiK3Compatibility(false);
-  assert.deepEqual(errors, [['save_failed', 'integration-mode']]);
-  assert.equal(dom.kimiK3Enabled.checked, true);
+  const switchButton = findNode(recent, node => node.dataset?.convSwitch === 'recent');
+  await switchButton.fire('click');
+  const confirmHost = findNode(recent, node => node.dataset?.convConfirm === 'recent');
+  assert.equal(confirmHost.hidden, false);
+  assert.equal(env.calls.filter(call => call[1]?.method === 'POST').length, 0, 'running Kimi waits for confirmation');
+
+  const remember = findNode(confirmHost, node => node.dataset?.convNoconfirm === 'true');
+  remember.checked = true;
+  const submit = findNode(confirmHost, node => node.dataset?.convConfirmSubmit === 'recent');
+  await submit.fire('click');
+  await flushConversation();
+  const post = env.calls.find(call => call[1]?.method === 'POST');
+  assert.deepEqual(post[1].body, {
+    conversationKeys: ['recent'], targetModelAlias: makeConversationModel().alias, thinkingLevel: '', restartKimi: true,
+  });
+  assert.match(env.ui.result.textContent, /已将 1 个会话切换/);
+  assert.match(env.ui.result.textContent, /Kimi 已自动重启/);
+  assert.equal(env.state.conversations.noConfirm, true);
+});
+
+test('a stopped Kimi switches a single row immediately without a restart dialog', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  const row = env.ui.list.children[1];
+  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'older');
+  await switchButton.fire('click');
+  await flushConversation();
+  const post = env.calls.find(call => call[1]?.method === 'POST');
+  assert.ok(post);
+  assert.equal(post[1].body.restartKimi, false);
+  assert.deepEqual(post[1].body.conversationKeys, ['older']);
+  assert.equal(findNode(row, node => node.dataset?.convConfirm === 'older').hidden, true);
+});
+
+test('the conversations guide follows the saved integration mode and search filters by title or workspace', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  env.state.data.integrationMode = 'direct';
+  env.page.show();
+  assert.match(env.ui.guideText.textContent, /零网关直连模式/);
+  assert.match(env.ui.guideText.textContent, /新开对话/);
+  env.ui.query.value = '排序';
+  await env.ui.query.fire('input');
+  assert.equal(env.ui.list.children.length, 1);
+  assert.match(env.ui.count.textContent, /显示 1 \/ 共 2/);
+  env.ui.query.value = 'kimiwork-plus';
+  await env.ui.query.fire('input');
+  assert.equal(env.ui.list.children.length, 1);
+  env.ui.query.value = '不存在';
+  await env.ui.query.fire('input');
+  assert.equal(env.ui.empty.hidden, false);
+});
+
+test('previous-alias models surface a one-click migration entry and send the migration flag', async () => {
+  const model = makeConversationModel({ previousAlias: 'byok-kth-kimi/group/deepseek' });
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [model] });
+  await env.page.refresh();
+  assert.equal(env.ui.migration.hidden, false);
+  assert.equal(env.ui.migrateAll.disabled, false);
+  await env.ui.migrateAll.fire('click');
+  await flushConversation();
+  const post = env.calls.find(call => call[1]?.method === 'POST');
+  assert.deepEqual(post[1].body, { targetModelAlias: model.alias, thinkingLevel: '', restartKimi: false, migratePreviousAlias: true });
+  assert.match(env.ui.result.textContent, /已迁移 1 个旧别名会话/);
+});
+
+test('the restart banner clicks restart-kimi directly and only credential cases navigate', async () => {
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = appText.indexOf("if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click'");
+  assert.notEqual(start, -1);
+  const block = appText.slice(start, appText.indexOf('});', start) + 3);
+  const link = { dataset: {}, addEventListener(type, fn) { this.click = fn; } };
+  const calls = [];
+  const handler = new Function('dom', 'runAction', 'setView', 'revealWorkspaceSection', block);
+  handler({ restartBannerLink: link }, action => calls.push(['action', action]),
+    view => calls.push(['view', view]), section => calls.push(['section', section]));
+
+  link.dataset.bannerAction = 'restart-kimi';
+  await link.click();
+  assert.deepEqual(calls, [['action', 'restart-kimi']]);
+
+  calls.length = 0;
+  link.dataset.bannerAction = 'models';
+  await link.click();
+  assert.deepEqual(calls, [['view', 'models'], ['section', 'restart-panel']]);
+});
+
+test('the overview update banner primary action follows the backend state', async () => {
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = appText.indexOf("if (dom.updateBannerPrimary) dom.updateBannerPrimary.addEventListener('click'");
+  assert.notEqual(start, -1);
+  const end = appText.indexOf('if (dom.updateBannerNotes)', start);
+  assert.ok(end > start);
+  const block = appText.slice(start, end);
+  const primary = { dataset: { updateAction: 'download' }, disabled: false, addEventListener(type, fn) { this.click = fn; } };
+  const calls = [];
+  const handler = new Function('dom', 'state', 'showToast', 'renderUpdates', 'updateAction', block);
+  handler({ updateBannerPrimary: primary, updateBannerNotes: null }, { data: {} }, () => {}, () => {},
+    async action => { calls.push(action); });
+
+  await primary.click();
+  assert.deepEqual(calls, ['download']);
+  primary.dataset.updateAction = 'apply';
+  await primary.click();
+  assert.deepEqual(calls, ['download', 'apply']);
+});
+
+test('app.js exposes the tray navigation hooks and only scrolls .main', () => {
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  assert.match(appText, /window\.__kwpOpenAccounts\s*=/);
+  assert.match(appText, /window\.__kwpOpenConversations\s*=/);
+  assert.match(appText, /window\.__kwpOpenUpdates\s*=/);
+  const block = appText.slice(appText.indexOf('function openUpdatesPanel()'), appText.indexOf('function bindEvents()'));
+  assert.match(block, /setView\('maintenance'\)/);
+  assert.match(block, /setSubtab\('maintenance', 'connection'\)/);
+  assert.match(block, /scrollMainToElement\(panel\)/);
+  assert.doesNotMatch(block, /scrollIntoView/);
+  assert.match(block, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(htmlSource, /id="settings-tab-connection"/);
+  assert.match(htmlSource, /id="update-panel"/);
+  assert.match(htmlSource, /id="upd-check"/);
+});
+
+test('focus update checks skip fresh results, throttle repeats and stay silent', async () => {
+  const calls = [];
+  const toasts = [];
+  const now = Date.parse('2026-11-25T12:00:00+08:00');
+  const state = {
+    key: 'session', lastFocusUpdateCheckAt: 0,
+    data: { updates: { autoCheck: true, state: 'idle', lastCheckedAt: new Date(now - 10 * 60 * 1000).toISOString() } },
+  };
+  const code = [
+    'const FOCUS_UPDATE_MIN_INTERVAL_MS = 60_000;',
+    'const FOCUS_UPDATE_STALE_MS = 30 * 60 * 1000;',
+    'const FOCUS_UPDATE_BUSY_STATES = ["checking", "downloading", "verifying", "downloaded", "applying", "rolling_back", "waiting_idle"];',
+    sourceFunction('focusUpdateDue'),
+    sourceFunction('runFocusUpdateCheck'),
+    sourceFunction('maybeCheckUpdatesOnFocus'),
+    'return { focusUpdateDue, maybeCheckUpdatesOnFocus };',
+  ].join('\n');
+  const api = new Function('state', 'request', 'API', 'loadState', 'renderUpdates', code)(
+    state,
+    async (path, options) => { calls.push([path, options]); return { updates: { state: 'up_to_date' } }; },
+    { updatesCheck: '/api/updates/check' },
+    async () => true,
+    () => {},
+  );
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now }), false, 'a 10 minute old check is fresh enough');
+  assert.equal(calls.length, 0);
+  state.data.updates.lastCheckedAt = new Date(now - 31 * 60 * 1000).toISOString();
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now }), true);
+  await flushConversation();
+  assert.deepEqual(calls[0], ['/api/updates/check', { method: 'POST', body: {} }]);
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now: now + 5000 }), false, '60 second throttle');
+  state.data.updates.autoCheck = false;
+  state.data.updates.lastCheckedAt = '';
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now: now + 120000 }), false);
+  state.data.updates.autoCheck = true;
+  state.data.updates.state = 'downloading';
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now: now + 240000 }), false);
+  state.data.updates.state = 'idle';
+  state.data.updates.lastCheckedAt = '';
+  assert.equal(api.maybeCheckUpdatesOnFocus({ now: now + 360000 }), true);
+  await flushConversation();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(toasts, [], 'silent checks never surface error toasts');
+});
+
+test('an available update lights the settings dot and the overview banner with direct actions', () => {
+  const makeEl = () => ({ textContent: '', hidden: true, disabled: false, checked: false, value: '', style: {},
+    dataset: {}, attrs: {}, classList: { toggle() {} }, setAttribute(name, value) { this.attrs[name] = String(value); },
+    removeAttribute(name) { delete this.attrs[name]; } });
+  const ids = ['upd-current', 'upd-current-sub', 'upd-state-dot', 'upd-state-word', 'upd-last-check', 'upd-source',
+    'upd-channel', 'upd-auto-check', 'upd-release-box', 'upd-release-title', 'upd-release-notes',
+    'update-top-banner', 'update-top-banner-text', 'update-banner', 'update-banner-text', 'update-banner-primary',
+    'nav-update-dot', 'overview-update-card', 'overview-update-title', 'overview-update-notes',
+    'upd-progress-wrap', 'upd-progress-bar', 'upd-progress-label', 'upd-error-box', 'upd-error-msg',
+    'upd-error-next', 'upd-error-detail', 'upd-history-note', 'upd-check', 'upd-download', 'upd-cancel',
+    'upd-rollback', 'upd-release-link'];
+  const nodes = Object.fromEntries(ids.map(id => [id, makeEl()]));
+  const $ = id => nodes[id] || null;
+  const state = { view: 'overview' };
+  const renderUpdates = new Function('$', 'document', 'state', 'setDot', 'setText', 'fmtTime', `
+    const credentialAuthPending = () => false;
+    const scheduleUpdateFastPoll = () => {};
+    const waitForUpdateReconnect = () => {};
+    ${sourceFunction('fmtBytes')}
+    ${sourceFunction('normalizeUpdateSourceKind')}
+    ${sourceFunction('updateSourceLabel')}
+    ${sourceFunction('safeHttpUrl')}
+    ${sourceFunction('updateStateSummary')}
+    ${sourceFunction('renderUpdates')}
+    return renderUpdates;
+  `)($, { activeElement: null }, state, () => {}, (el, text) => { if (el) el.textContent = text; }, () => '12:00');
+
+  renderUpdates({ updates: { state: 'available', available: { version: '1.1.11', notes: '修复若干问题' } } });
+  assert.equal(nodes['nav-update-dot'].hidden, false);
+  assert.equal(nodes['update-banner'].hidden, false);
+  assert.match(nodes['update-banner-text'].textContent, /发现新版本 v1\.1\.11/);
+  assert.equal(nodes['update-banner-primary'].dataset.updateAction, 'download');
+  assert.equal(nodes['update-banner-primary'].textContent, '立即下载并更新');
+
+  renderUpdates({ updates: { state: 'downloaded', available: { version: '1.1.11' } } });
+  assert.equal(nodes['update-banner-primary'].dataset.updateAction, 'apply');
+  assert.equal(nodes['update-banner-primary'].textContent, '立即安装并重启');
+
+  renderUpdates({ updates: { state: 'up_to_date' } });
+  assert.equal(nodes['nav-update-dot'].hidden, true);
+  assert.equal(nodes['update-banner'].hidden, true);
+
+  const appText = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  assert.match(appText, /dom\.updateBannerPrimary\.dataset\.updateAction/);
+  assert.match(appText, /await updateAction\(action, \{\}\)/);
+  assert.match(appText, /window\.__kwpOpenUpdates\(\)|openUpdatesPanel\(\)/);
 });
