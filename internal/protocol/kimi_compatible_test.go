@@ -91,12 +91,12 @@ func decodeNativeCatalog(t *testing.T, body []byte) nativeCatalog {
 	return catalog
 }
 
-func TestNativeCatalogCompatibleOnlyRenamesChatRows(t *testing.T) {
+func TestNativeCatalogCompatibleOffersEveryRowFromOneKimiGroup(t *testing.T) {
 	display := "DeepSeek V4.1 Flash · Magpie"
 	models := []protocol.Model{
 		chatModel("kimi-alpha", func(m *protocol.Model) { m.Name = &display }),
-		chatModel("vendor/kimi-beta"),
 		responsesModel("vendor/responses"),
+		chatModel("vendor/kimi-beta"),
 	}
 	const api = "http://127.0.0.1:1234/v1"
 
@@ -107,12 +107,25 @@ func TestNativeCatalogCompatibleOnlyRenamesChatRows(t *testing.T) {
 	if plain.Kimi.Models["kimi-alpha"].Name != display {
 		t.Fatalf("plain display name = %q", plain.Kimi.Models["kimi-alpha"].Name)
 	}
+	if _, ok := plain.Responses.Models["vendor/responses"]; !ok {
+		t.Fatalf("plain responses group = %v", plain.Responses.Models)
+	}
 
-	compatible := decodeNativeCatalog(t, protocol.NativeCatalogCompatible(models, api))
+	body := protocol.NativeCatalogCompatible(models, api)
+	compatible := decodeNativeCatalog(t, body)
 	alphaKey := protocol.KimiCompatibleModelID("kimi-alpha")
 	betaKey := protocol.KimiCompatibleModelID("vendor/kimi-beta")
-	if _, ok := compatible.Kimi.Models["kimi-alpha"]; ok {
-		t.Fatalf("the saved id is still advertised under the opt-in: %v", compatible.Kimi.Models)
+	responsesKey := protocol.KimiCompatibleModelID("vendor/responses")
+	if len(compatible.Kimi.Models) != len(models) {
+		t.Fatalf("compatible kimi group = %v", compatible.Kimi.Models)
+	}
+	if compatible.Kimi.Type != "kimi" {
+		t.Fatalf("compatible group type = %q", compatible.Kimi.Type)
+	}
+	// The Responses group is gone: every row is served from the one `kimi` group,
+	// so Kimi never has to resolve a model family from the name.
+	if len(compatible.Responses.Models) != 0 {
+		t.Fatalf("compatible catalog still has a responses group: %v", compatible.Responses.Models)
 	}
 	if got := compatible.Kimi.Models[alphaKey].Name; got != display {
 		t.Fatalf("display name for a named model = %q", got)
@@ -122,12 +135,21 @@ func TestNativeCatalogCompatibleOnlyRenamesChatRows(t *testing.T) {
 	if got := compatible.Kimi.Models[betaKey].Name; got != "vendor/kimi-beta" {
 		t.Fatalf("display fallback = %q", got)
 	}
-	// Responses rows are resolved from their own id and are not renamed.
-	if !reflect.DeepEqual(plain.Responses.Models, compatible.Responses.Models) {
-		t.Fatalf("responses rows changed: %v vs %v", plain.Responses.Models, compatible.Responses.Models)
+	if got := compatible.Kimi.Models[responsesKey].Name; got != "vendor/responses" {
+		t.Fatalf("responses display fallback = %q", got)
 	}
-	if compatible.Kimi.API != api || compatible.Responses.API != api {
+	if _, ok := compatible.Kimi.Models["kimi-alpha"]; ok {
+		t.Fatalf("the saved id is still advertised under the opt-in: %v", compatible.Kimi.Models)
+	}
+	if compatible.Kimi.API != api {
 		t.Fatalf("api changed: %+v", compatible)
+	}
+	// The rows keep the order the user saved them in.
+	alphaAt := strings.Index(string(body), `"`+alphaKey+`"`)
+	responsesAt := strings.Index(string(body), `"`+responsesKey+`"`)
+	betaAt := strings.Index(string(body), `"`+betaKey+`"`)
+	if alphaAt < 0 || responsesAt < 0 || betaAt < 0 || !(alphaAt < responsesAt && responsesAt < betaAt) {
+		t.Fatalf("catalog order changed: %d %d %d", alphaAt, responsesAt, betaAt)
 	}
 
 	// The OpenAI list is a different contract and never carries generated ids.
@@ -143,7 +165,7 @@ func TestNativeCatalogCompatibleOnlyRenamesChatRows(t *testing.T) {
 	for _, row := range list.Data {
 		ids = append(ids, row.ID)
 	}
-	if !reflect.DeepEqual(ids, []string{"kimi-alpha", "vendor/kimi-beta", "vendor/responses"}) {
+	if !reflect.DeepEqual(ids, []string{"kimi-alpha", "vendor/responses", "vendor/kimi-beta"}) {
 		t.Fatalf("OpenAI ids = %v", ids)
 	}
 }

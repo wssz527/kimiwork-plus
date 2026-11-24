@@ -350,7 +350,7 @@ func TestFailoverDocumentIsValidated(t *testing.T) {
 	for name, row := range map[string]string{
 		"bad connection id": `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"failover":[{"connectionId":"bad id"}]}`,
 		"unknown field":     `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"failover":[{"connectionId":"a","baseURL":"x"}]}`,
-		"bad protocol":      `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"failover":[{"connectionId":"a","upstreamProtocol":"chat"}]}`,
+		"bad protocol":      `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"failover":[{"connectionId":"a","upstreamProtocol":"bogus"}]}`,
 		"not an array":      `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"failover":{"connectionId":"a"}}`,
 		"half price":        `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"pricing":{"inputPerMillion":1}}`,
 		"negative price":    `{"id":"kimi-cost","protocol":"chat","contextWindow":1000,"pricing":{"inputPerMillion":-1,"outputPerMillion":1}}`,

@@ -178,9 +178,7 @@ func (n *Native) Configure(d core.Document) error {
 	settings := n.controller.Settings()
 	if core.KimiK3Compatibility(d) {
 		for i := range models {
-			if models[i].Protocol == protocol.ProtocolChat {
-				models[i].CatalogID = protocol.KimiCompatibleModelID(models[i].ID)
-			}
+			models[i].CatalogID = protocol.KimiCompatibleModelID(models[i].ID)
 		}
 	}
 	settings.Models = models

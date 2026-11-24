@@ -167,11 +167,24 @@ func (b *HTTPBackend) Request(ctx context.Context, route string, payload []byte,
 	if err != nil {
 		return nil, err
 	}
+	if options.Model != nil && options.Model.IsAnthropic() {
+		// The row's own protocol names the family the connection must speak, so a
+		// Chat request served from a Messages row is allowed when the endpoint
+		// lists either wire.
+		if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, route) &&
+			!contains(endpoint.Protocols, options.Model.Protocol) {
+			return nil, ErrInvalidProtocol
+		}
+		return b.anthropic(ctx, route, payload, options, endpoint)
+	}
+	if route == ProtocolChat && responsesUpstream(options.Model, endpoint) {
+		if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, ProtocolResponses) {
+			return nil, ErrInvalidProtocol
+		}
+		return b.responsesFromChat(ctx, payload, options, endpoint)
+	}
 	if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, route) {
 		return nil, ErrInvalidProtocol
-	}
-	if options.Model != nil && options.Model.IsAnthropic() {
-		return b.anthropic(ctx, route, payload, options, endpoint)
 	}
 	path := "/chat/completions"
 	if route == ProtocolResponses {
@@ -192,6 +205,33 @@ func (b *HTTPBackend) Request(ctx context.Context, route string, payload []byte,
 		return nil, err
 	}
 	return &UpstreamResponse{Status: reply.StatusCode, Header: reply.Header, Body: reply.Body}, nil
+}
+
+// responsesUpstream decides whether one attempt has to be sent to the OpenAI
+// `/responses` wire even though the client spoke Chat. The candidate's own
+// override wins, because a failover standby may speak a different wire from the
+// row it stands in for; a connection that only offers Chat keeps the Chat path
+// so an explicitly chat-only standby is not refused.
+func responsesUpstream(model *Model, endpoint *Endpoint) bool {
+	if model == nil || model.IsAnthropic() {
+		return false
+	}
+	if model.UpstreamProtocol != nil {
+		switch *model.UpstreamProtocol {
+		case ProtocolChat:
+			return false
+		case ProtocolResponses:
+			return true
+		}
+	}
+	if model.Protocol != ProtocolResponses {
+		return false
+	}
+	if endpoint != nil && len(endpoint.Protocols) > 0 &&
+		!contains(endpoint.Protocols, ProtocolResponses) && contains(endpoint.Protocols, ProtocolChat) {
+		return false
+	}
+	return true
 }
 
 type preSendError struct {
@@ -301,12 +341,90 @@ func (b *HTTPBackend) anthropic(ctx context.Context, route string, payload []byt
 		Body: &translatedBody{upstream: reply.Body, translator: translator}}, nil
 }
 
+// responsesFromChat serves a Chat request from an upstream that only offers the
+// OpenAI Responses API. The request is converted after history cleaning, so a
+// stored reasoning field can never reach an upstream that rejects it.
+func (b *HTTPBackend) responsesFromChat(ctx context.Context, payload []byte, options RequestOptions, endpoint *Endpoint) (*UpstreamResponse, error) {
+	cleaned := cleanOpenAIHistory(payload, ProtocolChat)
+	var decoded map[string]any
+	if err := json.Unmarshal(cleaned, &decoded); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	body, err := ToResponsesFromChat(decoded, options.Model)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.BaseURL+"/responses", bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+	for name, value := range options.Headers {
+		request.Header.Set(name, value)
+	}
+	reply, err := b.do(request)
+	if err != nil {
+		return nil, err
+	}
+	if reply.StatusCode < 200 || reply.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(reply.Body, UsageScanLimit))
+		_ = reply.Body.Close()
+		body := ResponsesErrorBody(raw, reply.StatusCode)
+		header := reply.Header.Clone()
+		header.Set("Content-Type", "application/json")
+		return &UpstreamResponse{Status: reply.StatusCode, Header: header,
+			Body: io.NopCloser(bytes.NewReader(body))}, nil
+	}
+	streamed, _ := body["stream"].(bool)
+	if !streamed {
+		raw, err := io.ReadAll(io.LimitReader(reply.Body, 64*1024*1024))
+		_ = reply.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var response map[string]any
+		if json.Unmarshal(raw, &response) != nil || response == nil {
+			return nil, ErrInvalidUpstreamResponse
+		}
+		shaped, err := FromResponsesToChat(response, b.now())
+		if err != nil {
+			return nil, err
+		}
+		encoded, _ := json.Marshal(shaped)
+		header := http.Header{}
+		header.Set("Content-Type", "application/json")
+		return &UpstreamResponse{Status: reply.StatusCode, Header: header,
+			Body: io.NopCloser(bytes.NewReader(encoded))}, nil
+	}
+	translator, err := NewResponsesChatTranslator(1024 * 1024)
+	if err != nil {
+		_ = reply.Body.Close()
+		return nil, err
+	}
+	header := http.Header{}
+	header.Set("Content-Type", "text/event-stream")
+	return &UpstreamResponse{Status: reply.StatusCode, Header: header,
+		Body: &translatedBody{upstream: reply.Body, translator: translator}}, nil
+}
+
+// streamTranslator is the byte-level contract every upstream wire conversion
+// satisfies, so translatedBody does not depend on which one produced the bytes.
+type streamTranslator interface {
+	Push(chunk []byte) []byte
+	End() []byte
+}
+
 // translatedBody pulls the upstream lazily, so a client that goes away cancels
 // the upstream body through the gateway's own cancellation instead of draining
 // a reply nobody will read.
 type translatedBody struct {
 	upstream   io.ReadCloser
-	translator *StreamTranslator
+	translator streamTranslator
 	buf        []byte
 	pending    []byte
 	finished   bool

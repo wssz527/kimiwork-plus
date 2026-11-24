@@ -1135,8 +1135,16 @@ func normalizeCatalog(models []Model) ([]catalogEntry, bool) {
 		if protocol != "chat" && protocol != "responses" {
 			return nil, false
 		}
+		// The Kimi side matches a row by the family its generated id belongs to.
+		// A compatible id always starts with `kimi-k3`, so reconciling it against
+		// the row's upstream protocol would look in the `responses` group and
+		// report a synced model as missing forever.
+		family := protocol
+		if model.CatalogID != "" {
+			family = ModelFamily(model.CatalogID)
+		}
 		seen[model.ID] = true
-		out = append(out, catalogEntry{id: model.ID, modelID: firstNonEmpty(model.CatalogID, model.ID), protocol: protocol})
+		out = append(out, catalogEntry{id: model.ID, modelID: firstNonEmpty(model.CatalogID, model.ID), protocol: family})
 	}
 	return out, true
 }

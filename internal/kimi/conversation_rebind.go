@@ -363,23 +363,28 @@ func (s conversationStore) models() []ConversationModel {
 			}
 		}
 	}
-	previousIDs := make(map[string]string, len(s.catalog))
+	// Every model is offered from the compatible catalog, so every one may have a
+	// conversation bound under a different alias. The previous alias is the one
+	// the switch left behind: a compatible id replaced the saved id, or the saved
+	// id replaced the compatible one when the opt-in was turned off.
+	previousAliases := make(map[string]string, len(s.catalog))
 	for _, model := range s.catalog {
-		if model.Protocol != protocol.ProtocolChat {
-			continue
-		}
 		compatibleID := protocol.KimiCompatibleModelID(model.ID)
 		if model.CatalogID == compatibleID {
-			previousIDs[compatibleID] = model.ID
+			previous := "byok-kth-resp/"
+			if model.Protocol == protocol.ProtocolChat {
+				previous = "byok-kth-kimi/"
+			}
+			previousAliases[compatibleID] = previous + model.ID
 		} else {
-			previousIDs[model.ID] = compatibleID
+			previousAliases[model.ID] = "byok-kth-kimi/" + compatibleID
 		}
 	}
 	for i := range models {
 		model := &models[i]
-		provider, id, _ := strings.Cut(model.Alias, "/")
-		if previous, ok := previousIDs[id]; ok && model.SourceKind == "kth" && model.Protocol == "kimi" {
-			model.PreviousAlias = provider + "/" + previous
+		_, id, _ := strings.Cut(model.Alias, "/")
+		if previous, ok := previousAliases[id]; ok && model.SourceKind == "kth" {
+			model.PreviousAlias = previous
 		}
 	}
 	slices.SortFunc(models, func(a, b ConversationModel) int { return strings.Compare(a.Alias, b.Alias) })

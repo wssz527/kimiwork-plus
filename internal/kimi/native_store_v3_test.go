@@ -557,3 +557,97 @@ func TestNativeKimiK3ReadbackKeepsLogicalModelIdentity(t *testing.T) {
 		t.Fatalf("K3 targets = %+v", got)
 	}
 }
+
+// The compatible catalog keys every row by its generated id, so a Responses row
+// has to be reconciled against the `kimi` family. Reading its upstream protocol
+// instead would look in the `responses` group and report a synced model as
+// missing forever.
+func TestNativeCatalogFamilyFollowsTheGeneratedID(t *testing.T) {
+	respID := "gpt-probe-model"
+	compatible := protocol.KimiCompatibleModelID(respID)
+	catalog, ok := normalizeCatalog([]Model{
+		{ID: respID, Protocol: "responses", ContextWindow: 1, CatalogID: compatible},
+		{ID: "kimi-probe-model", Protocol: "chat", ContextWindow: 1},
+	})
+	if !ok {
+		t.Fatal("catalog refused")
+	}
+	if catalog[0].protocol != "chat" || catalog[0].modelID != compatible {
+		t.Fatalf("compatible responses row = %+v", catalog[0])
+	}
+	if catalog[1].protocol != "chat" || catalog[1].modelID != "kimi-probe-model" {
+		t.Fatalf("plain chat row = %+v", catalog[1])
+	}
+	// A legacy two-group row keeps its own family.
+	legacy, ok := normalizeCatalog([]Model{{ID: respID, Protocol: "responses", ContextWindow: 1}})
+	if !ok || legacy[0].protocol != "responses" {
+		t.Fatalf("legacy responses row = %+v", legacy)
+	}
+	if _, ok := normalizeCatalog([]Model{{ID: "vendor/x", Protocol: "anthropic", ContextWindow: 1}}); ok {
+		t.Fatal("illegal protocol accepted")
+	}
+}
+
+func TestNativeResponsesRowReconcilesUnderItsCompatibleAlias(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const url = "http://127.0.0.1:9999/v1"
+	key := sha256Hex("account-new")
+	fixture.seedV3Store(t, key, url, "cred-1")
+	catalog := testCatalog()
+	const logical = "gpt-probe-model"
+	catalog[1].CatalogID = protocol.KimiCompatibleModelID(logical)
+	compatible := catalog[1].CatalogID
+	options := ReconcileOptions{Enabled: true, URL: url, Models: catalog, AccountScope: key}
+	integration := fixture.integration(t)
+	if got := integration.Reconcile(options); got.Reason != "models_missing" ||
+		len(got.MissingModels) != 1 || got.MissingModels[0] != logical {
+		t.Fatalf("waiting for the compatible alias = %+v", got)
+	}
+
+	storePath := filepath.Join(fixture.dir, NativeWorkStore)
+	store := fixture.readJSON(t, storePath)
+	account := store["accounts"].(map[string]any)[key].(map[string]any)
+	for _, raw := range account["active"].(map[string]any)["models"].([]any) {
+		row := raw.(map[string]any)
+		if row["model"] != logical {
+			continue
+		}
+		row["alias"] = "byok-kth-kimi/" + compatible
+		row["model"] = compatible
+		row["providerId"] = "byok-kth-kimi"
+		row["family"] = "kimi"
+	}
+	fixture.writeJSON(t, storePath, store)
+	alias := "byok-kth-kimi/" + compatible
+	configPath := filepath.Join(fixture.dir, NativeWorkConfig)
+	config := fixture.readJSON(t, configPath)
+	configModels := config["model"].(map[string]any)["models"].(map[string]any)
+	entry := configModels["byok-kth-resp/gpt-probe-model"].(map[string]any)
+	entry["provider"] = "byok-kth-kimi"
+	entry["model"] = compatible
+	delete(configModels, "byok-kth-resp/gpt-probe-model")
+	configModels[alias] = entry
+	fixture.writeJSON(t, configPath, config)
+	if got := integration.Reconcile(options); got.State != IntegrationReady || got.Aliases[logical] != alias {
+		t.Fatalf("compatible responses reconcile = %+v", got)
+	}
+
+	// The rebind target list must offer the Responses row too, with the alias it
+	// was imported under before the compatible catalog moved it.
+	config = fixture.readJSON(t, configPath)
+	config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-new"}
+	fixture.writeJSON(t, configPath, config)
+	models := (conversationStore{home: fixture.dir, catalog: catalog}).models()
+	var target *ConversationModel
+	for i := range models {
+		if models[i].Alias == alias {
+			target = &models[i]
+		}
+	}
+	if target == nil {
+		t.Fatalf("compatible responses target missing: %+v", models)
+	}
+	if target.PreviousAlias != "byok-kth-resp/"+logical {
+		t.Fatalf("previous alias = %q", target.PreviousAlias)
+	}
+}

@@ -102,13 +102,15 @@ func TestKimiK3CompatibilityIsAnEffectiveGatewayOptIn(t *testing.T) {
 		document Document
 		want     bool
 	}{
-		"absent":              {Document{}, false},
-		"false":               {Document{"kimiK3Compatibility": false}, false},
-		"true":                {Document{"kimiK3Compatibility": true}, true},
-		"null":                {Document{"kimiK3Compatibility": nil}, false},
-		"string":              {Document{"kimiK3Compatibility": "true"}, false},
-		"direct ignores true": {Document{"integrationMode": IntegrationModeDirect, "kimiK3Compatibility": true}, false},
-		"gateway keeps true":  {Document{"integrationMode": IntegrationModeGateway, "kimiK3Compatibility": true}, true},
+		"absent defaults on":   {Document{}, true},
+		"false turns it off":   {Document{"kimiK3Compatibility": false}, false},
+		"true":                 {Document{"kimiK3Compatibility": true}, true},
+		"null defaults on":     {Document{"kimiK3Compatibility": nil}, true},
+		"string defaults on":   {Document{"kimiK3Compatibility": "true"}, true},
+		"direct ignores true":  {Document{"integrationMode": IntegrationModeDirect, "kimiK3Compatibility": true}, false},
+		"gateway keeps true":   {Document{"integrationMode": IntegrationModeGateway, "kimiK3Compatibility": true}, true},
+		"gateway keeps false":  {Document{"integrationMode": IntegrationModeGateway, "kimiK3Compatibility": false}, false},
+		"direct ignores false": {Document{"integrationMode": IntegrationModeDirect, "kimiK3Compatibility": false}, false},
 	} {
 		if got := KimiK3Compatibility(tc.document); got != tc.want {
 			t.Fatalf("%s: %v", name, got)
@@ -135,8 +137,8 @@ func TestValidateKimiK3Compatibility(t *testing.T) {
 }
 
 func TestValidateRefusesKimiCompatibleIDCollision(t *testing.T) {
-	chat := func(id string) Document {
-		return Document{"id": id, "protocol": "chat", "contextWindow": float64(32000)}
+	model := func(id, protocol string) Document {
+		return Document{"id": id, "protocol": protocol, "contextWindow": float64(32000)}
 	}
 	shadow := protocol.KimiCompatibleModelID("kimi-alpha")
 	if shadow == "kimi-alpha" {
@@ -144,7 +146,7 @@ func TestValidateRefusesKimiCompatibleIDCollision(t *testing.T) {
 	}
 	// The shadowing row is legitimate on its own: the name starts with "kimi-"
 	// and is a short, control-free id.
-	models := []any{chat("kimi-alpha"), chat("vendor/kimi-beta"), chat(shadow)}
+	models := []any{model("kimi-alpha", "chat"), model("vendor/kimi-beta", "chat"), model(shadow, "chat")}
 	// It is refused with the opt-in off, on and absent alike: turning the
 	// option on later must not reinterpret a name an old alias already used.
 	for name, flag := range map[string]any{"absent": nil, "off": false, "on": true} {
@@ -156,11 +158,18 @@ func TestValidateRefusesKimiCompatibleIDCollision(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
+	// A Responses row is offered under its generated id too, so its shadow is
+	// refused exactly the same way.
+	responses := []any{model("vendor/gpt", "responses"), model(protocol.KimiCompatibleModelID("vendor/gpt"), "chat")}
+	if err := Validate(Document{"connections": []any{}, "models": responses}); err == nil || err.Error() != "kimi_k3_model_id_conflict" {
+		t.Fatalf("responses shadow: %v", err)
+	}
 	// Without the shadowing row the same catalog is accepted, including long
 	// and nested ids whose generated forms stay legal.
 	long := Document{"connections": []any{}, "models": []any{
-		chat("kimi-alpha"),
-		chat("vendor/subgroup/kimi-" + strings.Repeat("n", 480)),
+		model("kimi-alpha", "chat"),
+		model("vendor/gpt", "responses"),
+		model("vendor/subgroup/kimi-"+strings.Repeat("n", 480), "chat"),
 	}}
 	if err := Validate(long); err != nil {
 		t.Fatal(err)

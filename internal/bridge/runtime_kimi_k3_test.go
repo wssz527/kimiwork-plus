@@ -92,12 +92,13 @@ func TestRuntimeAppliesKimiK3Compatibility(t *testing.T) {
 		t.Fatalf("upstream models = %v", seen)
 	}
 
-	// Disabling the opt-in stops the catalog rename but the id stays routable.
+	// An absent value keeps the gateway default (on); storing false is what
+	// restores the older two-group catalog, while the generated id stays routable.
 	stored, _, err := store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	delete(stored, core.KimiK3CompatibilityKey)
+	stored[core.KimiK3CompatibilityKey] = false
 	if err = runtime.Apply(stored); err != nil {
 		t.Fatal(err)
 	}

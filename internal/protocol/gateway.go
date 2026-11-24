@@ -258,8 +258,9 @@ type catalogIndex struct {
 	// imported normally.
 	byID map[string]int
 	// compatible maps the generated Kimi-compatible id to the same row. It is
-	// filled for Chat rows regardless of the opt-in, because a conversation
-	// bound while the opt-in was on must keep routing after it is turned off.
+	// filled for every row regardless of the opt-in, because the compatible
+	// catalog offers each row under that id and a conversation bound while the
+	// opt-in was on must keep routing after it is turned off.
 	compatible map[string]int
 }
 
@@ -267,11 +268,9 @@ func newCatalogIndex(models []Model) catalogIndex {
 	index := catalogIndex{byID: make(map[string]int, len(models)), compatible: map[string]int{}}
 	for i := range models {
 		index.byID[models[i].ID] = i
-		if models[i].Protocol == ProtocolChat {
-			generated := KimiCompatibleModelID(models[i].ID)
-			if _, exists := index.compatible[generated]; !exists {
-				index.compatible[generated] = i
-			}
+		generated := KimiCompatibleModelID(models[i].ID)
+		if _, exists := index.compatible[generated]; !exists {
+			index.compatible[generated] = i
 		}
 	}
 	return index
@@ -734,7 +733,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		record.UpstreamModelID = selected.UpstreamModelID
 		record.UpstreamProtocol = selected.UpstreamProtocol
 	}
-	if selected.Protocol != route {
+	// A Responses row served from the `kimi` group is exactly what the
+	// compatibility opt-in makes possible: Kimi speaks Chat, the conversion path
+	// speaks `/responses` upstream. The reverse direction has no conversion, so a
+	// Chat row on the Responses route stays a mismatch.
+	if selected.Protocol != route &&
+		!(route == ProtocolChat && selected.Protocol == ProtocolResponses && g.config.KimiK3Compatibility) {
 		refuse(http.StatusConflict, "model_protocol_mismatch")
 		return nil
 	}

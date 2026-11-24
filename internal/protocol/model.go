@@ -113,7 +113,9 @@ func (m Model) UpstreamID() string {
 type Candidate struct {
 	ConnectionID *string
 	UpstreamID   string
-	// UpstreamProtocol is set only for a Messages upstream, matching the row.
+	// UpstreamProtocol overrides the row's own upstream wire for this attempt:
+	// a Messages upstream, or a Chat/Responses standby that differs from the
+	// primary. Nil means the row's protocol decides.
 	UpstreamProtocol *string
 	// Standby is true for every candidate except the primary one, which is what
 	// the failure report uses to say a retry happened.
@@ -137,9 +139,10 @@ func (m Model) Candidates() []Candidate {
 		}
 		if standby.UpstreamProtocol != nil {
 			value := *standby.UpstreamProtocol
-			if value == ProtocolOpenAI {
+			switch value {
+			case ProtocolOpenAI:
 				candidate.UpstreamProtocol = nil
-			} else {
+			case ProtocolChat, ProtocolResponses, ProtocolAnthropic:
 				candidate.UpstreamProtocol = &value
 			}
 		}
@@ -636,7 +639,9 @@ func validateFailover(raw json.RawMessage, primary *string) ([]ModelFailover, er
 		}
 		if present(row["upstreamProtocol"]) {
 			value, _ := rawString(row["upstreamProtocol"])
-			if value != ProtocolAnthropic && value != ProtocolOpenAI {
+			switch value {
+			case ProtocolAnthropic, ProtocolOpenAI, ProtocolChat, ProtocolResponses:
+			default:
 				return nil, ErrInvalidModels
 			}
 			standby.UpstreamProtocol = &value
@@ -673,21 +678,27 @@ func NativeCatalog(models []Model, api string) []byte {
 }
 
 // NativeCatalogCompatible renders the same catalog with the K3 compatibility
-// opt-in on: every Chat row is keyed by its generated Kimi-compatible id so it
-// can be offered for existing K3 conversations, while the display name stays
-// the one the user saved. Responses rows are untouched, because Kimi resolves
-// those from their own id.
+// opt-in on: every row, whatever its own protocol, is keyed by its generated
+// Kimi-compatible id and offered from the one `kimi` group Kimi's K3 menu reads,
+// while the display name stays the one the user saved. The single group is what
+// lets one conversation be switched to a model whose upstream speaks
+// `/responses` without Kimi resolving a different family from the name.
 func NativeCatalogCompatible(models []Model, api string) []byte {
 	return nativeCatalog(models, api, true)
 }
 
 func nativeCatalog(models []Model, api string, compatible bool) []byte {
 	var kimi, responses []Model
-	for _, model := range models {
-		if model.Protocol == ProtocolChat {
-			kimi = append(kimi, model)
-		} else {
-			responses = append(responses, model)
+	if compatible {
+		// The slice order is the menu order, so every row keeps its position.
+		kimi = models
+	} else {
+		for _, model := range models {
+			if model.Protocol == ProtocolChat {
+				kimi = append(kimi, model)
+			} else {
+				responses = append(responses, model)
+			}
 		}
 	}
 	var b bytes.Buffer
@@ -712,7 +723,7 @@ func nativeCatalog(models []Model, api string, compatible bool) []byte {
 				b.WriteByte(',')
 			}
 			key := model.ID
-			if compatible && model.Protocol == ProtocolChat {
+			if compatible {
 				key = KimiCompatibleModelID(model.ID)
 			}
 			b.WriteString(quote(key))

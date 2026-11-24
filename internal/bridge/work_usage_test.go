@@ -325,24 +325,37 @@ func TestWorkUsageRealGatewayDedupBudgetIsolationAndHomeCursors(t *testing.T) {
 
 func TestWorkModelResolverMapsCompatibleK3Aliases(t *testing.T) {
 	const logicalID = "magpie/kimi-group%2Fdeepseek-v4-1-flash"
+	const responsesID = "magpie/%2Fgroup%2Fgpt-5"
 	compatibleID := protocol.KimiCompatibleModelID(logicalID)
+	responsesCompatible := protocol.KimiCompatibleModelID(responsesID)
 	d := core.Document{
 		"connections": []any{
 			core.Document{"id": "magpie", "name": "Magpie", "providerPresetId": "custom-magpie", "baseURL": "http://127.0.0.1:3425/v1"},
 		},
 		"models": []any{
 			core.Document{"id": logicalID, "connectionId": "magpie", "upstreamModelId": "group/deepseek-v4-1-flash", "protocol": "chat", "contextWindow": float64(300000), "tools": true},
+			core.Document{"id": responsesID, "connectionId": "magpie", "upstreamModelId": "group/gpt-5", "protocol": "responses", "contextWindow": float64(400000), "tools": true},
 		},
 	}
 	resolver := buildWorkModelResolver(t.TempDir(), t.TempDir(), d)
-	for _, raw := range []string{
-		"byok-kth-kimi/" + compatibleID,
-		"byok-603d1804-6650-453a-9e1c-a475a1050d27/" + compatibleID,
-		compatibleID,
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"byok-kth-kimi/" + compatibleID, logicalID},
+		{"byok-603d1804-6650-453a-9e1c-a475a1050d27/" + compatibleID, logicalID},
+		{compatibleID, logicalID},
+		// A Responses row is offered under the same generated id, so the wire log
+		// must resolve it as the saved model, not as an unpriced name.
+		{"byok-kth-kimi/" + responsesCompatible, responsesID},
+		{"byok-603d1804-6650-453a-9e1c-a475a1050d27/" + responsesCompatible, responsesID},
+		{responsesCompatible, responsesID},
+		{"byok-kth-resp/" + responsesID, responsesID},
+		{"byok-kth-kimi/" + responsesID, responsesID},
 	} {
-		meta, alias := resolver.resolve(raw)
-		if meta.ModelID != logicalID || meta.ConnectionID != "magpie" || meta.ProviderID != "custom-magpie" || alias != raw {
-			t.Fatalf("resolve(%q) = %+v, %q", raw, meta, alias)
+		meta, alias := resolver.resolve(tc.raw)
+		if meta.ModelID != tc.want || meta.ConnectionID != "magpie" || meta.ProviderID != "custom-magpie" || alias != tc.raw {
+			t.Fatalf("resolve(%q) = %+v, %q", tc.raw, meta, alias)
 		}
 	}
 }

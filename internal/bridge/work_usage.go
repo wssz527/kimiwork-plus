@@ -216,9 +216,15 @@ func buildWorkModelResolver(stateDir, kimiHome string, d core.Document) workMode
 		res.byID[id] = meta
 		res.byAlias["byok-kth-kimi/"+id] = meta
 		res.byAlias["byok-kth-resp/"+id] = meta
-		if meta.Protocol == protocol.ProtocolChat {
-			res.byAlias["byok-kth-kimi/"+protocol.KimiCompatibleModelID(id)] = meta
+		// Every model is offered under its generated id once the compatible
+		// catalog is on, whatever wire it uses upstream, so the wire log can name
+		// either spelling and still be priced as the saved model.
+		compatibleID := protocol.KimiCompatibleModelID(id)
+		if _, exists := res.byID[compatibleID]; !exists {
+			res.byID[compatibleID] = meta
 		}
+		res.byAlias["byok-kth-kimi/"+compatibleID] = meta
+		res.byAlias["byok-kth-resp/"+compatibleID] = meta
 		if upstream != "" {
 			if existing, exists := res.byUpstream[upstream]; exists && existing.ModelID != id {
 				res.ambiguous[upstream] = true

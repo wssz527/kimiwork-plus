@@ -90,21 +90,10 @@ func (t *StreamTranslator) Push(chunk []byte) []byte {
 	}
 	var out bytes.Buffer
 	for {
-		index := strings.IndexAny(t.buffer, "\r\n")
-		if index < 0 {
+		line, ok := takeSSELine(&t.buffer)
+		if !ok {
 			break
 		}
-		// A trailing CR might be the first half of a CRLF that has not arrived
-		// yet; waiting for the next chunk keeps the line intact.
-		if t.buffer[index] == '\r' && index == len(t.buffer)-1 {
-			break
-		}
-		line := t.buffer[:index]
-		width := 1
-		if t.buffer[index] == '\r' && index+1 < len(t.buffer) && t.buffer[index+1] == '\n' {
-			width = 2
-		}
-		t.buffer = t.buffer[index+width:]
 		if text := t.line(line); len(text) > 0 {
 			out.Write(text)
 		}
@@ -116,12 +105,39 @@ func (t *StreamTranslator) Push(chunk []byte) []byte {
 	return out.Bytes()
 }
 
+// takeSSELine removes one complete line from an SSE buffer. A trailing CR might
+// be the first half of a CRLF that has not arrived yet; waiting for the next
+// chunk keeps the line intact.
+func takeSSELine(buffer *string) (string, bool) {
+	value := *buffer
+	index := strings.IndexAny(value, "\r\n")
+	if index < 0 {
+		return "", false
+	}
+	if value[index] == '\r' && index == len(value)-1 {
+		return "", false
+	}
+	line := value[:index]
+	width := 1
+	if value[index] == '\r' && index+1 < len(value) && value[index+1] == '\n' {
+		width = 2
+	}
+	*buffer = value[index+width:]
+	return line, true
+}
+
 func (t *StreamTranslator) decode(chunk []byte) []byte {
+	return decodeSSEChunk(&t.partial, chunk)
+}
+
+// decodeSSEChunk decodes a chunk while holding back an incomplete trailing rune,
+// so a multi-byte character split across two chunks is decoded once, not twice.
+func decodeSSEChunk(partial *[]byte, chunk []byte) []byte {
 	if len(chunk) == 0 {
 		return nil
 	}
-	buf := append(t.partial, chunk...)
-	t.partial = nil
+	buf := append(*partial, chunk...)
+	*partial = nil
 	if utf8.Valid(buf) {
 		return buf
 	}
@@ -135,7 +151,7 @@ func (t *StreamTranslator) decode(chunk []byte) []byte {
 			break
 		}
 	}
-	t.partial = append([]byte(nil), buf[cut:]...)
+	*partial = append([]byte(nil), buf[cut:]...)
 	return buf[:cut]
 }
 

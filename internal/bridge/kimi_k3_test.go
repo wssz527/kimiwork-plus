@@ -40,13 +40,36 @@ func TestKimiK3CompatibilityRequiresReadbackFromFixedProvider(t *testing.T) {
 	if got := kimiK3State(d, nil, false); got != "" {
 		t.Fatalf("disabled before check: %q", got)
 	}
+
+	// A Responses row is imported into the same `kimi` family under its generated
+	// id, so the state reads it exactly like a Chat row.
+	responses := core.Document{"models": []any{map[string]any{"id": "vendor/gpt", "protocol": protocol.ProtocolResponses}}}
+	responsesID := protocol.KimiCompatibleModelID("vendor/gpt")
+	view := &kimi.IntegrationResult{Applied: true, Adopted: true, Aliases: map[string]string{"vendor/gpt": "byok-kth-kimi/" + responsesID}}
+	if got := kimiK3State(responses, view, true); got != "ready" {
+		t.Fatalf("responses row state: %q", got)
+	}
+	if got := kimiK3State(responses, &kimi.IntegrationResult{Applied: true, Adopted: true,
+		Aliases: map[string]string{"vendor/gpt": "byok-kth-resp/vendor/gpt"}}, true); got != "needs_sync" {
+		t.Fatalf("responses row still on the old family: %q", got)
+	}
 }
 
 func TestKimiK3CompatibilitySettingPersistsAndAppliesOnlyInGatewayMode(t *testing.T) {
 	fixture := newDirectHTTPFixture(t)
 	status, state := fixture.call(t, "GET", "/api/state", nil)
-	if status != 200 || state[core.KimiK3CompatibilityKey] != false {
+	if status != 200 || state[core.KimiK3CompatibilityKey] != true {
 		t.Fatalf("default state = %d, %v", status, state[core.KimiK3CompatibilityKey])
+	}
+	// The gateway default is on; a stored `false` is what the compatibility
+	// regression path uses to get the older two-group catalog back.
+	status, state = fixture.call(t, "POST", "/api/kimi-k3-compatibility", core.Document{"revision": fixture.revision(t), "enabled": false})
+	if status != 200 || core.Object(state["state"])[core.KimiK3CompatibilityKey] != false {
+		t.Fatalf("disable = %d, %v", status, state)
+	}
+	status, state = fixture.call(t, "GET", "/api/state", nil)
+	if status != 200 || state[core.KimiK3CompatibilityKey] != false {
+		t.Fatalf("stored disable = %d, %v", status, state[core.KimiK3CompatibilityKey])
 	}
 	status, state = fixture.call(t, "POST", "/api/kimi-k3-compatibility", core.Document{"revision": fixture.revision(t), "enabled": true})
 	if status != 200 || core.Object(state["state"])[core.KimiK3CompatibilityKey] != true {

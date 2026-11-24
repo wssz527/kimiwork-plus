@@ -17,9 +17,6 @@ func kimiK3State(d core.Document, integration *kimi.IntegrationResult, running b
 	needsSync, providerMismatch := false, false
 	for _, raw := range core.Rows(d["models"]) {
 		model := core.Object(raw)
-		if model["protocol"] != protocol.ProtocolChat {
-			continue
-		}
 		count++
 		id := core.String(model["id"])
 		if integration == nil || !integration.Applied || integration.Mode == core.IntegrationModeDirect {
