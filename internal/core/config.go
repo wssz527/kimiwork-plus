@@ -54,8 +54,9 @@ func SetIntegrationMode(d Document, mode string) error {
 	return nil
 }
 
-// KimiK3CompatibilityKey is the stored opt-in that offers Chat models under a
-// Kimi-compatible id, so an existing K3 conversation can be switched to them.
+// KimiK3CompatibilityKey is the stored opt-in that offers every saved model
+// under a Kimi-compatible id, so an existing K3 conversation can be switched to
+// any of them.
 const KimiK3CompatibilityKey = "kimiK3Compatibility"
 
 // KimiK3Compatibility reads the effective opt-in. It applies only in gateway

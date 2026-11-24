@@ -37,9 +37,6 @@ func kimiK3State(d core.Document, integration *kimi.IntegrationResult, running b
 			providerMismatch = true
 		}
 	}
-	if !enabled && d[core.KimiK3CompatibilityKey] == nil {
-		return ""
-	}
 	switch {
 	case count == 0 && enabled:
 		return "no_chat_models"

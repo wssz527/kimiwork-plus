@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file bridges the OpenAI Chat shape Kimi's client speaks and the OpenAI
@@ -22,6 +23,7 @@ func ToResponsesFromChat(payload map[string]any, model *Model) (map[string]any, 
 	body := map[string]any{"model": payload["model"]}
 	instructions, _ := payload["instructions"].(string)
 	input := []any{}
+	pending := []string{}
 	leading := true
 	rows, _ := payload["messages"].([]any)
 	for _, row := range rows {
@@ -57,11 +59,37 @@ func ToResponsesFromChat(payload map[string]any, model *Model) (map[string]any, 
 			if content := responsesAssistantContent(message["content"]); len(content) > 0 {
 				input = append(input, responsesMessage("assistant", content))
 			}
-			input = append(input, responsesCalls(message["tool_calls"])...)
+			calls := responsesCalls(message["tool_calls"])
+			input = append(input, calls...)
+			for _, call := range calls {
+				if row, ok := call.(map[string]any); ok {
+					if id, _ := row["call_id"].(string); id != "" {
+						pending = append(pending, id)
+					}
+				}
+			}
 		case "tool":
 			callID, _ := message["tool_call_id"].(string)
+			callID = strings.TrimSpace(callID)
+			if callID == "" {
+				// Responses refuses an empty call_id, so an output that names no
+				// call is paired with the oldest call still waiting for a result.
+				if len(pending) > 0 {
+					callID, pending = pending[0], pending[1:]
+				}
+			} else {
+				for i, id := range pending {
+					if id == callID {
+						pending = append(pending[:i], pending[i+1:]...)
+						break
+					}
+				}
+			}
+			if callID == "" {
+				continue
+			}
 			input = append(input, map[string]any{"type": "function_call_output", "call_id": callID,
-				"output": strings.Join(responsesTextParts(message["content"]), "\n")})
+				"output": responsesToolOutput(message["content"])})
 		}
 	}
 	if instructions != "" {
@@ -138,6 +166,47 @@ func responsesTextParts(content any) []string {
 	return nil
 }
 
+// responsesToolOutput keeps a tool result the model can use. Chat allows any
+// JSON value in that slot while Responses takes a string, so a structured value
+// is encoded rather than dropped.
+func responsesToolOutput(content any) string {
+	switch value := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case []any:
+		texts := make([]string, 0, len(value))
+		for _, part := range value {
+			switch item := part.(type) {
+			case string:
+				texts = append(texts, item)
+			case map[string]any:
+				if typ, _ := item["type"].(string); typ != "text" && typ != "input_text" && typ != "output_text" {
+					return responsesJSONText(value)
+				}
+				text, ok := item["text"].(string)
+				if !ok {
+					return responsesJSONText(value)
+				}
+				texts = append(texts, text)
+			default:
+				return responsesJSONText(value)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return responsesJSONText(content)
+}
+
+func responsesJSONText(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 func responsesUserContent(content any) []any {
 	switch value := content.(type) {
 	case string:
@@ -180,14 +249,18 @@ func responsesUserContent(content any) []any {
 // responsesImageRef accepts both the Chat object form (`image_url` naming a
 // `{url, detail}` object) and the flattened Responses form.
 func responsesImageRef(part map[string]any) (string, string) {
-	for _, key := range []string{"image_url", "url"} {
+	detail, _ := part["detail"].(string)
+	for _, key := range []string{"image_url", "url", "data_url"} {
 		switch value := part[key].(type) {
 		case string:
-			detail, _ := part["detail"].(string)
-			return value, detail
+			if value != "" {
+				return value, detail
+			}
 		case map[string]any:
 			if url, ok := value["url"].(string); ok && url != "" {
-				detail, _ := value["detail"].(string)
+				if nested, ok := value["detail"].(string); ok && nested != "" {
+					detail = nested
+				}
 				return url, detail
 			}
 		}
@@ -206,14 +279,19 @@ func responsesAssistantContent(content any) []any {
 func responsesCalls(toolCalls any) []any {
 	rows, _ := toolCalls.([]any)
 	out := make([]any, 0, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
 		call, _ := row.(map[string]any)
 		fn, _ := call["function"].(map[string]any)
 		name, _ := fn["name"].(string)
 		if name == "" {
 			continue
 		}
-		callID := firstString(call["id"], name)
+		callID := firstString(call["id"])
+		if callID == "" {
+			// Responses refuses an empty call_id, so a call without an id gets a
+			// stable one its output can be paired with.
+			callID = "call_" + itoa(i)
+		}
 		out = append(out, map[string]any{"type": "function_call", "call_id": callID, "name": name,
 			"arguments": responsesArguments(fn["arguments"])})
 	}
@@ -312,6 +390,11 @@ func responsesToolChoice(choice any) any {
 // level and a summary mode, so a request that cannot name a level falls back to
 // the model's default effort and otherwise asks for a summary alone.
 func responsesReasoning(payload map[string]any, model *Model) map[string]any {
+	if model != nil && model.Reasoning != nil && !*model.Reasoning {
+		// A model declared as non-reasoning rejects the object outright, even
+		// when the request still carries controls from another model.
+		return nil
+	}
 	effort := strings.ToLower(strings.TrimSpace(effortOf(payload)))
 	disabled, enabled := false, false
 	switch value := payload["thinking"].(type) {
@@ -345,7 +428,15 @@ func responsesReasoning(payload map[string]any, model *Model) map[string]any {
 		level = ""
 	}
 	if level == "" && model != nil && model.DefaultEffort != nil {
-		level = *model.DefaultEffort
+		level = strings.ToLower(strings.TrimSpace(*model.DefaultEffort))
+	}
+	if offEfforts[level] {
+		// A default effort can be a switch-off value; it must not be sent as a
+		// level, and the summary alone would be malformed without one.
+		if modelSupportsEffort(model, "none") {
+			return map[string]any{"effort": "none"}
+		}
+		return nil
 	}
 	out := map[string]any{"summary": "auto"}
 	if level != "" && vendorTypePattern.MatchString(level) {
@@ -552,7 +643,11 @@ func ResponsesErrorBody(raw []byte, status int) []byte {
 		}
 	}
 	if len(message) > 512 {
-		message = message[:512]
+		cut := 512
+		for cut > 0 && !utf8.RuneStart(message[cut]) {
+			cut--
+		}
+		message = message[:cut]
 	}
 	if message == "" {
 		message = "upstream_http_" + itoa(status)
@@ -722,8 +817,10 @@ func (t *ResponsesChatStreamTranslator) event(typ string, value map[string]any) 
 		return t.reasoningDelta(value, "summary")
 	case "response.reasoning_text.delta":
 		return t.reasoningDelta(value, "text")
-	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
-		return t.reasoningDone(value)
+	case "response.reasoning_summary_text.done":
+		return t.reasoningDone(value, "summary")
+	case "response.reasoning_text.done":
+		return t.reasoningDone(value, "text")
 	case "response.function_call_arguments.delta":
 		return t.argumentsDelta(value)
 	case "response.function_call_arguments.done":
@@ -785,28 +882,60 @@ func (t *ResponsesChatStreamTranslator) finishChunk(reason string) []byte {
 }
 
 func (t *ResponsesChatStreamTranslator) item(id string, index int, kind string) *responsesStreamItem {
-	key := id
-	if key == "" {
-		for _, existing := range t.order {
-			if item, ok := t.items[existing]; ok && item.outputIndex == index {
-				if kind != "" && item.kind == "" {
-					item.kind = kind
-				}
-				return item
+	if id == "" {
+		for _, key := range t.order {
+			existing, ok := t.items[key]
+			if !ok || existing.outputIndex != index || !kindCompatible(existing.kind, kind) {
+				continue
 			}
+			if kind != "" && existing.kind == "" {
+				existing.kind = kind
+			}
+			return existing
 		}
-		key = "index:" + itoa(index)
+		key := "index:" + itoa(index) + ":" + kind
+		created := &responsesStreamItem{kind: kind, outputIndex: index}
+		t.items[key] = created
+		t.order = append(t.order, key)
+		return created
 	}
-	if existing, ok := t.items[key]; ok {
+	if existing, ok := t.items[id]; ok {
 		if kind != "" && existing.kind == "" {
 			existing.kind = kind
 		}
 		return existing
 	}
+	// A placeholder opened while the upstream omitted `item_id` is claimed here,
+	// instead of opening a second item that would repeat its text or arguments.
+	for _, key := range t.order {
+		existing, ok := t.items[key]
+		if !ok || existing.id != "" || existing.outputIndex != index || !kindCompatible(existing.kind, kind) {
+			continue
+		}
+		existing.id = id
+		if kind != "" {
+			existing.kind = kind
+		}
+		delete(t.items, key)
+		t.items[id] = existing
+		for i, other := range t.order {
+			if other == key {
+				t.order[i] = id
+				break
+			}
+		}
+		return existing
+	}
 	created := &responsesStreamItem{id: id, kind: kind, outputIndex: index}
-	t.items[key] = created
-	t.order = append(t.order, key)
+	t.items[id] = created
+	t.order = append(t.order, id)
 	return created
+}
+
+// kindCompatible reports whether two item kinds can be the same item. An empty
+// kind means the upstream has not said yet, so it can still become anything.
+func kindCompatible(a, b string) bool {
+	return a == "" || b == "" || a == b
 }
 
 func (t *ResponsesChatStreamTranslator) itemFor(value map[string]any, kind string) *responsesStreamItem {
@@ -991,14 +1120,16 @@ func (t *ResponsesChatStreamTranslator) reasoningDelta(value map[string]any, cha
 	return out.Bytes()
 }
 
-func (t *ResponsesChatStreamTranslator) reasoningDone(value map[string]any) []byte {
+func (t *ResponsesChatStreamTranslator) reasoningDone(value map[string]any, channel string) []byte {
 	text, _ := value["text"].(string)
 	if text == "" {
 		return nil
 	}
 	item := t.itemFor(value, "reasoning")
-	out := t.fillReasoning(item, text, "")
-	return out
+	if channel == "text" {
+		return t.fillReasoning(item, "", text)
+	}
+	return t.fillReasoning(item, text, "")
 }
 
 func (t *ResponsesChatStreamTranslator) fillReasoning(item *responsesStreamItem, summary, text string) []byte {
@@ -1006,11 +1137,15 @@ func (t *ResponsesChatStreamTranslator) fillReasoning(item *responsesStreamItem,
 		item.kind = "reasoning"
 	}
 	full, channel := summary, "summary"
-	if item.reasoningChannel == "text" {
+	switch item.reasoningChannel {
+	case "summary":
+		full = summary
+	case "text":
 		full, channel = text, "text"
-	}
-	if full == "" {
-		full, channel = text, "text"
+	default:
+		if full == "" {
+			full, channel = text, "text"
+		}
 	}
 	if full == "" || len(full) <= item.reasoningSent {
 		return nil
@@ -1053,11 +1188,23 @@ func (t *ResponsesChatStreamTranslator) argumentsDelta(value map[string]any) []b
 }
 
 func (t *ResponsesChatStreamTranslator) argumentsDone(value map[string]any) []byte {
-	arguments, _ := responsesArgumentsText(value["arguments"])
-	if arguments == "" {
+	item := t.itemFor(value, "function_call")
+	if name, ok := value["name"].(string); ok && name != "" {
+		item.name = name
+	}
+	if callID, ok := value["call_id"].(string); ok && callID != "" {
+		item.callID = callID
+	}
+	arguments, ok := responsesArgumentsText(value["arguments"])
+	if !ok {
 		return nil
 	}
-	item := t.itemFor(value, "function_call")
+	if item.name == "" && !item.announced {
+		// Without a name the first tool frame cannot be formed; the arguments wait
+		// for output_item.done or the terminal event, which carry it.
+		item.arguments = arguments
+		return nil
+	}
 	var out bytes.Buffer
 	out.Write(t.ensureStarted())
 	out.Write(t.announceTool(item))
@@ -1112,10 +1259,16 @@ func (t *ResponsesChatStreamTranslator) complete(value map[string]any, incomplet
 		}
 	}
 	finish := "stop"
-	if t.hasToolCall {
+	switch {
+	case t.hasToolCall:
 		finish = "tool_calls"
-	} else if incomplete {
+	case incomplete:
 		finish = "length"
+		if details, ok := response["incomplete_details"].(map[string]any); ok {
+			if reason, _ := details["reason"].(string); reason == "content_filter" {
+				finish = "content_filter"
+			}
+		}
 	}
 	out.Write(t.finishChunk(finish))
 	if usage, ok := response["usage"].(map[string]any); ok {

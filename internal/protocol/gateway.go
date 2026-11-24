@@ -221,7 +221,7 @@ type Config struct {
 	// gate keeps the behaviour of every release before budget support: nothing
 	// is refused and no cost is written.
 	Budget BudgetGate
-	// KimiK3Compatibility offers each Chat model under its generated
+	// KimiK3Compatibility offers each saved model under its generated
 	// Kimi-compatible id so an existing K3 conversation can be switched to it.
 	// The generated id is accepted as a request name whether or not this is on,
 	// because a conversation bound while it was on must stay routable after the
@@ -278,15 +278,17 @@ func newCatalogIndex(models []Model) catalogIndex {
 
 // selectModel resolves a request name. The saved id wins over a generated one,
 // so a name the user chose keeps working; a configuration where the two collide
-// is refused at validation time.
-func (c catalogIndex) selectModel(models []Model, name string) *Model {
+// is refused at validation time. viaCompatible reports that only the generated
+// id matched, which is what keeps a conversation bound while the opt-in was on
+// routable after it is turned off.
+func (c catalogIndex) selectModel(models []Model, name string) (model *Model, viaCompatible bool, found bool) {
 	if i, ok := c.byID[name]; ok {
-		return &models[i]
+		return &models[i], false, true
 	}
 	if i, ok := c.compatible[name]; ok {
-		return &models[i]
+		return &models[i], true, true
 	}
-	return nil
+	return nil, false, false
 }
 
 // Metrics is the panel's short window over what just happened.
@@ -722,8 +724,8 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		return nil
 	}
 	modelName = stripModelAliasPrefix(modelName)
-	selected := g.catalog.selectModel(models, modelName)
-	if selected == nil {
+	selected, viaCompatible, found := g.catalog.selectModel(models, modelName)
+	if !found {
 		refuse(http.StatusConflict, "model_not_enabled_for_kimi")
 		return nil
 	}
@@ -733,12 +735,15 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, record *Record
 		record.UpstreamModelID = selected.UpstreamModelID
 		record.UpstreamProtocol = selected.UpstreamProtocol
 	}
-	// A Responses row served from the `kimi` group is exactly what the
+	// A Responses row reached through its generated id is exactly what the
 	// compatibility opt-in makes possible: Kimi speaks Chat, the conversion path
-	// speaks `/responses` upstream. The reverse direction has no conversion, so a
-	// Chat row on the Responses route stays a mismatch.
-	if selected.Protocol != route &&
-		!(route == ProtocolChat && selected.Protocol == ProtocolResponses && g.config.KimiK3Compatibility) {
+	// speaks `/responses` upstream. The generated id stays routable after the
+	// opt-in is turned off, so a bound conversation is not cut off. The reverse
+	// direction has no conversion, so a Chat row on the Responses route stays a
+	// mismatch.
+	bridged := route == ProtocolChat && selected.Protocol == ProtocolResponses &&
+		(g.config.KimiK3Compatibility || viaCompatible)
+	if selected.Protocol != route && !bridged {
 		refuse(http.StatusConflict, "model_protocol_mismatch")
 		return nil
 	}

@@ -253,6 +253,7 @@ func TestToResponsesFromChatReasoningControls(t *testing.T) {
 	effortsWithNone := []string{"none", "low", "medium", "high"}
 	efforts := []string{"low", "medium", "high"}
 	low := "low"
+	off := " OFF "
 	cases := []struct {
 		name    string
 		model   *protocol.Model
@@ -302,6 +303,30 @@ func TestToResponsesFromChatReasoningControls(t *testing.T) {
 			want:    nil,
 		},
 		{
+			name:    "non-reasoning model ignores a request level",
+			model:   &protocol.Model{Reasoning: &disabled, ReasoningEfforts: &efforts},
+			payload: map[string]any{"reasoning_effort": "high"},
+			want:    nil,
+		},
+		{
+			name:    "non-reasoning model ignores enabled thinking",
+			model:   &protocol.Model{Reasoning: &disabled},
+			payload: map[string]any{"thinking": map[string]any{"type": "enabled"}},
+			want:    nil,
+		},
+		{
+			name:    "disabled default effort sends nothing",
+			model:   &protocol.Model{Reasoning: &enabled, ReasoningEfforts: &efforts, DefaultEffort: &off},
+			payload: map[string]any{},
+			want:    nil,
+		},
+		{
+			name:    "disabled default effort with none support asks for none",
+			model:   &protocol.Model{Reasoning: &enabled, ReasoningEfforts: &effortsWithNone, DefaultEffort: &off},
+			payload: map[string]any{},
+			want:    map[string]any{"effort": "none"},
+		},
+		{
 			name:    "reasoning budget enables the summary",
 			model:   &protocol.Model{},
 			payload: map[string]any{"reasoning": map[string]any{"max_tokens": float64(2048)}},
@@ -332,6 +357,125 @@ func TestToResponsesFromChatReasoningControls(t *testing.T) {
 				t.Fatalf("reasoning = %s, want %s", encodedGot, encodedWant)
 			}
 		})
+	}
+}
+
+func TestToResponsesFromChatPreservesToolContent(t *testing.T) {
+	cases := []struct {
+		name    string
+		content any
+		want    string
+	}{
+		{"string", `{"temperature":20}`, `{"temperature":20}`},
+		{"text parts", []any{
+			map[string]any{"type": "text", "text": "line one"},
+			map[string]any{"type": "text", "text": "line two"},
+		}, "line one\nline two"},
+		{"structured parts", []any{map[string]any{
+			"type": "image_url", "image_url": map[string]any{"url": "https://example.test/a.png"}}},
+			`[{"image_url":{"url":"https://example.test/a.png"},"type":"image_url"}]`},
+		{"object", map[string]any{"temperature": float64(20)}, `{"temperature":20}`},
+		{"number", float64(42), "42"},
+		{"bool", true, "true"},
+		{"missing", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := protocol.ToResponsesFromChat(map[string]any{
+				"model": "vendor/gpt",
+				"messages": []any{
+					map[string]any{"role": "assistant", "tool_calls": []any{
+						map[string]any{"id": "call_1", "type": "function",
+							"function": map[string]any{"name": "lookup", "arguments": "{}"}}}},
+					map[string]any{"role": "tool", "tool_call_id": "call_1", "content": tc.content},
+				},
+			}, nil)
+			if err != nil {
+				t.Fatalf("convert: %v", err)
+			}
+			inputs := listAt(t, body, "input")
+			if len(inputs) != 2 {
+				t.Fatalf("input = %v", inputs)
+			}
+			output := objectAt(t, inputs[1], "")
+			if output["type"] != "function_call_output" || output["call_id"] != "call_1" {
+				t.Fatalf("tool output = %v", output)
+			}
+			if output["output"] != tc.want {
+				t.Fatalf("output = %v, want %q", output["output"], tc.want)
+			}
+		})
+	}
+}
+
+func TestToResponsesFromChatPairsToolResultsWithoutCallID(t *testing.T) {
+	body, err := protocol.ToResponsesFromChat(map[string]any{
+		"model": "vendor/gpt",
+		"messages": []any{
+			map[string]any{"role": "assistant", "tool_calls": []any{
+				map[string]any{"type": "function",
+					"function": map[string]any{"name": "first", "arguments": "{}"}},
+				map[string]any{"id": "call_2", "type": "function",
+					"function": map[string]any{"name": "second", "arguments": "{}"}},
+			}},
+			map[string]any{"role": "tool", "content": "one"},
+			map[string]any{"role": "tool", "tool_call_id": "call_2", "content": "two"},
+			// Nothing is waiting for this one, so sending it would be an empty
+			// call_id the upstream refuses.
+			map[string]any{"role": "tool", "content": "dangling"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	outputs := []map[string]any{}
+	for _, row := range listAt(t, body, "input") {
+		entry := objectAt(t, row, "")
+		if entry["type"] == "function_call_output" {
+			outputs = append(outputs, entry)
+		}
+	}
+	if len(outputs) != 2 {
+		t.Fatalf("tool outputs = %v", outputs)
+	}
+	if outputs[0]["call_id"] != "call_0" || outputs[0]["output"] != "one" {
+		t.Fatalf("first output = %v", outputs[0])
+	}
+	if outputs[1]["call_id"] != "call_2" || outputs[1]["output"] != "two" {
+		t.Fatalf("second output = %v", outputs[1])
+	}
+	encoded, _ := json.Marshal(body)
+	if strings.Contains(string(encoded), `"call_id":""`) {
+		t.Fatalf("body carries an empty call_id: %s", encoded)
+	}
+}
+
+func TestToResponsesFromChatImageRefFallbacks(t *testing.T) {
+	body, err := protocol.ToResponsesFromChat(map[string]any{
+		"model": "vendor/gpt",
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": ""},
+			map[string]any{"type": "input_image", "url": "https://example.test/fallback.png", "detail": "high"},
+			map[string]any{"type": "image_url", "data_url": "data:image/png;base64,AAAA"},
+		}}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	inputs := listAt(t, body, "input")
+	if len(inputs) != 1 {
+		t.Fatalf("input = %v", inputs)
+	}
+	parts := listAt(t, inputs[0], "content")
+	if len(parts) != 2 {
+		t.Fatalf("content = %v", parts)
+	}
+	first := objectAt(t, parts[0], "")
+	if first["image_url"] != "https://example.test/fallback.png" || first["detail"] != "high" {
+		t.Fatalf("fallback image = %v", first)
+	}
+	if second := objectAt(t, parts[1], ""); second["image_url"] != "data:image/png;base64,AAAA" {
+		t.Fatalf("data url image = %v", second)
 	}
 }
 
@@ -455,6 +599,20 @@ func TestFromResponsesToChatFinishReasons(t *testing.T) {
 				t.Fatalf("finish_reason = %v, want %s", choice["finish_reason"], tc.want)
 			}
 		})
+	}
+}
+
+func TestResponsesErrorBodyTruncatesOnARuneBoundary(t *testing.T) {
+	message := strings.Repeat("拒", 400)
+	raw, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "api_error", "message": message}})
+	body := protocol.ResponsesErrorBody(raw, 400)
+	inner := objectAt(t, decodeBody(t, body), "error")
+	got, _ := inner["message"].(string)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated message is not valid UTF-8: %q", got)
+	}
+	if len(got) > 512 || len(got) < 509 || !strings.HasPrefix(message, got) {
+		t.Fatalf("truncated message = %q (%d bytes)", got, len(got))
 	}
 }
 
@@ -866,6 +1024,190 @@ func TestResponsesChatStreamTranslatorBoundsBufferedEvent(t *testing.T) {
 	}
 }
 
+func TestResponsesChatStreamTranslatorKeepsToolArgumentsUntilTheNameArrives(t *testing.T) {
+	translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+	var out strings.Builder
+	feed := func(value string) { out.Write(translator.Push([]byte(value))) }
+	feed(sseFrame(t, "response.created", map[string]any{"response": map[string]any{
+		"id": "resp_6", "model": "vendor/gpt"}}))
+	// The finished arguments can arrive before anything names the call.
+	feed(sseFrame(t, "response.function_call_arguments.done", map[string]any{
+		"item_id": "fc_1", "output_index": 0, "arguments": `{"q":1}`}))
+	feed(sseFrame(t, "response.output_item.done", map[string]any{"output_index": 0,
+		"item": map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1",
+			"name": "lookup", "arguments": `{"q":1}`}}))
+	feed(sseFrame(t, "response.completed", map[string]any{"response": map[string]any{
+		"id": "resp_6", "model": "vendor/gpt", "status": "completed",
+		"output": []any{map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1",
+			"name": "lookup", "arguments": `{"q":1}`}},
+	}}))
+	out.Write(translator.End())
+	body := out.String()
+	if strings.Contains(body, `"name":""`) {
+		t.Fatalf("a tool frame went out without a name: %s", body)
+	}
+	frames, done := chatFrames(t, body)
+	if !done {
+		t.Fatalf("stream lacks [DONE]: %s", body)
+	}
+	names := []string{}
+	arguments := strings.Builder{}
+	for _, frame := range frames {
+		calls, _ := frameDelta(t, frame)["tool_calls"].([]any)
+		for _, row := range calls {
+			fn := objectAt(t, objectAt(t, row, ""), "function")
+			if name, ok := fn["name"].(string); ok && name != "" {
+				names = append(names, name)
+			}
+			if value, ok := fn["arguments"].(string); ok {
+				arguments.WriteString(value)
+			}
+		}
+	}
+	if len(names) != 1 || names[0] != "lookup" {
+		t.Fatalf("tool names = %v", names)
+	}
+	if arguments.String() != `{"q":1}` {
+		t.Fatalf("arguments = %q", arguments.String())
+	}
+}
+
+func TestResponsesChatStreamTranslatorClaimsPlaceholderItems(t *testing.T) {
+	t.Run("deltas without an item id are not repeated", func(t *testing.T) {
+		translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+		var out strings.Builder
+		feed := func(value string) { out.Write(translator.Push([]byte(value))) }
+		feed(sseFrame(t, "response.created", map[string]any{"response": map[string]any{"id": "resp_7"}}))
+		feed(sseFrame(t, "response.output_text.delta", map[string]any{"output_index": 0, "delta": "hel"}))
+		feed(sseFrame(t, "response.output_text.delta", map[string]any{"output_index": 0, "delta": "lo"}))
+		// Only the finished item names the message.
+		feed(sseFrame(t, "response.output_item.done", map[string]any{"output_index": 0,
+			"item": map[string]any{"id": "msg_1", "type": "message", "content": []any{
+				map[string]any{"type": "output_text", "text": "hello"}}}}))
+		feed(sseFrame(t, "response.completed", map[string]any{"response": map[string]any{
+			"id": "resp_7", "status": "completed", "output": []any{
+				map[string]any{"id": "msg_1", "type": "message", "content": []any{
+					map[string]any{"type": "output_text", "text": "hello"}}},
+			}}}))
+		out.Write(translator.End())
+		body := out.String()
+		frames, _ := chatFrames(t, body)
+		content := strings.Builder{}
+		for _, frame := range frames {
+			if text, ok := frameDelta(t, frame)["content"].(string); ok {
+				content.WriteString(text)
+			}
+		}
+		if content.String() != "hello" {
+			t.Fatalf("content = %q: %s", content.String(), body)
+		}
+	})
+
+	t.Run("an untagged tool call does not swallow the message", func(t *testing.T) {
+		translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+		var out strings.Builder
+		feed := func(value string) { out.Write(translator.Push([]byte(value))) }
+		feed(sseFrame(t, "response.created", map[string]any{"response": map[string]any{"id": "resp_8"}}))
+		feed(sseFrame(t, "response.output_text.delta", map[string]any{"delta": "hello"}))
+		feed(sseFrame(t, "response.output_item.done", map[string]any{"item": map[string]any{
+			"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": `{"q":1}`}}))
+		feed(sseFrame(t, "response.completed", map[string]any{"response": map[string]any{
+			"id": "resp_8", "status": "completed", "output": []any{
+				map[string]any{"id": "msg_1", "type": "message", "content": []any{
+					map[string]any{"type": "output_text", "text": "hello"}}},
+			}}}))
+		out.Write(translator.End())
+		body := out.String()
+		frames, _ := chatFrames(t, body)
+		content := strings.Builder{}
+		names := []string{}
+		for _, frame := range frames {
+			delta := frameDelta(t, frame)
+			if text, ok := delta["content"].(string); ok {
+				content.WriteString(text)
+			}
+			calls, _ := delta["tool_calls"].([]any)
+			for _, row := range calls {
+				if name, ok := objectAt(t, objectAt(t, row, ""), "function")["name"].(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+		if content.String() != "hello" {
+			t.Fatalf("content = %q: %s", content.String(), body)
+		}
+		if len(names) != 1 || names[0] != "lookup" {
+			t.Fatalf("tool names = %v: %s", names, body)
+		}
+	})
+}
+
+func TestResponsesChatStreamTranslatorBindsReasoningDoneToItsChannel(t *testing.T) {
+	t.Run("raw text done does not lock the summary channel", func(t *testing.T) {
+		translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+		var out strings.Builder
+		feed := func(value string) { out.Write(translator.Push([]byte(value))) }
+		feed(sseFrame(t, "response.reasoning_text.done", map[string]any{
+			"item_id": "rs_1", "output_index": 0, "text": "raw"}))
+		feed(sseFrame(t, "response.reasoning_summary_text.delta", map[string]any{
+			"item_id": "rs_1", "output_index": 0, "delta": "summary"}))
+		out.Write(translator.End())
+		body := out.String()
+		frames, _ := chatFrames(t, body)
+		reasoning := strings.Builder{}
+		for _, frame := range frames {
+			if text, ok := frameDelta(t, frame)["reasoning_content"].(string); ok {
+				reasoning.WriteString(text)
+			}
+		}
+		if reasoning.String() != "raw" {
+			t.Fatalf("reasoning = %q: %s", reasoning.String(), body)
+		}
+	})
+
+	t.Run("summary deltas keep the raw text out", func(t *testing.T) {
+		translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+		var out strings.Builder
+		feed := func(value string) { out.Write(translator.Push([]byte(value))) }
+		feed(sseFrame(t, "response.reasoning_summary_text.delta", map[string]any{
+			"item_id": "rs_1", "output_index": 0, "delta": "summary"}))
+		// The raw reasoning extends the summary here, which must not leak into the
+		// already-locked channel.
+		feed(sseFrame(t, "response.reasoning_text.done", map[string]any{
+			"item_id": "rs_1", "output_index": 0, "text": "summary and more"}))
+		out.Write(translator.End())
+		body := out.String()
+		frames, _ := chatFrames(t, body)
+		reasoning := strings.Builder{}
+		for _, frame := range frames {
+			if text, ok := frameDelta(t, frame)["reasoning_content"].(string); ok {
+				reasoning.WriteString(text)
+			}
+		}
+		if reasoning.String() != "summary" {
+			t.Fatalf("reasoning = %q: %s", reasoning.String(), body)
+		}
+	})
+}
+
+func TestResponsesChatStreamTranslatorReportsContentFilterIncomplete(t *testing.T) {
+	translator, _ := protocol.NewResponsesChatTranslator(1024 * 1024)
+	out := translator.Push([]byte(sseFrame(t, "response.incomplete", map[string]any{
+		"response": map[string]any{"id": "resp_9", "status": "incomplete",
+			"incomplete_details": map[string]any{"reason": "content_filter"}}})))
+	out = append(out, translator.End()...)
+	body := string(out)
+	if translator.Outcome() != protocol.OutcomeIncomplete {
+		t.Fatalf("outcome = %q", translator.Outcome())
+	}
+	if !strings.Contains(body, `"finish_reason":"content_filter"`) {
+		t.Fatalf("content filter stream = %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"length"`) {
+		t.Fatalf("content filter stream reported length: %s", body)
+	}
+}
+
 // --- gateway end to end ----------------------------------------------------
 
 func startGatewayWithEndpoints(t *testing.T, endpoints []protocol.Endpoint, models []protocol.Model,
@@ -1246,6 +1588,40 @@ func TestGatewayChatRouteFailsOverToChatStandby(t *testing.T) {
 	}
 }
 
+func TestCompatibleResponsesIDStaysBridgedAfterDisable(t *testing.T) {
+	upstream := newUpstream(t, responsesJSONReply(`{"id":"resp_10","object":"response","model":"vendor/gpt",
+		"status":"completed","output":[{"type":"message","role":"assistant",
+		"content":[{"type":"output_text","text":"bridged"}]}]}`))
+	_, url := startGatewayWithEndpoints(t, []protocol.Endpoint{
+		{BaseURL: upstream.server.URL, APIKey: "synthetic-upstream"},
+	}, []protocol.Model{responsesRow("vendor/gpt")}, func(c *protocol.Config) {
+		c.KimiK3Compatibility = false
+	})
+	reply, body := post(t, url, "/chat/completions", map[string]any{
+		"model":    protocol.KimiCompatibleModelID("vendor/gpt"),
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}, nil)
+	if reply.StatusCode != http.StatusOK || !strings.Contains(body, "bridged") {
+		t.Fatalf("compatible id after disable: %d %s", reply.StatusCode, body)
+	}
+	captured := upstream.captured()
+	if len(captured) != 1 || captured[0].URL != "/responses" {
+		t.Fatalf("upstream captured = %+v", captured)
+	}
+
+	// The saved id is what the request must carry to be served while the opt-in
+	// is off; the generated name stays a compatibility path only.
+	reply, body = post(t, url, "/chat/completions", map[string]any{
+		"model":    "vendor/gpt",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}, nil)
+	if reply.StatusCode != http.StatusConflict || errorCode(t, body) != "model_protocol_mismatch" {
+		t.Fatalf("saved id after disable: %d %s", reply.StatusCode, errorCode(t, body))
+	}
+	if len(upstream.captured()) != 1 {
+		t.Fatal("a refused request reached the upstream")
+	}
+}
 func TestResponsesModelStaysRefusedWithoutCompatibility(t *testing.T) {
 	upstream := newUpstream(t, jsonReply("must not be used"))
 	_, url := startGatewayWithEndpoints(t, []protocol.Endpoint{
