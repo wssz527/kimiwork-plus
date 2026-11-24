@@ -328,7 +328,7 @@
       const result = await request('/api/quota/magpie');
       if (result && result.state) magpie.state = result.state;
     } catch (error) {
-      magpie.state = { status: 'error', errorReason: error.code || 'request_failed', notes: [], snapshot: null };
+      magpie.state = { configured: magpie.state?.configured === true, status: 'error', errorReason: error.code || 'request_failed', notes: [], snapshot: null };
     } finally {
       magpie.loading = false;
     }
@@ -348,10 +348,17 @@
   }
 
   function renderMagpie() {
+    const card = $('plus-magpie-card');
     const body = $('plus-magpie-body');
     if (!body) return;
     const state = magpie.state;
-    if (!state) { body.replaceChildren(node('p', 'empty', '正在读取 Magpie 额度。')); return; }
+    if (card) card.hidden = !magpie.form.open && state?.configured !== true;
+    const add = $('plus-magpie-add');
+    if (add) add.hidden = magpie.form.open || state?.configured === true;
+    if (!state) {
+      body.replaceChildren(...(magpie.form.open ? [renderMagpieForm()] : [node('p', 'empty', '正在读取 Magpie 额度。')]));
+      return;
+    }
     const wrap = node('div', 'plus-verdict');
     const dot = node('span', 'dot');
     const status = textOf(state.status) || 'not_read';
@@ -503,6 +510,11 @@
   async function refreshMagpie() {
     const result = await magpieAction({ action: 'refresh' });
     if (result) renderMagpie();
+  }
+
+  async function refreshMagpieIfConfigured() {
+    if (!magpie.state) await loadMagpie();
+    if (magpie.state?.configured === true) await refreshMagpie();
   }
 
   function connectionRows() {
@@ -1469,10 +1481,9 @@
       },
       async refresh(options = {}) {
         const { live = false } = options;
-        /* 用户停在用量页点顶栏刷新时，读缓存不够：Kimi Code 与 Magpie 要走
-           各自的真实重读，Kimi Code 仍遵守后台的节流窗口，不额外强制。 */
+        /* 顶栏实时刷新只查询明确配置过的来源，不能把默认地址当成已接入。 */
         if (live) {
-          await Promise.all([refreshCode(false), refreshMagpie(), loadBudget()]);
+          await Promise.all([refreshCode(false), refreshMagpieIfConfigured(), loadBudget()]);
         } else {
           await Promise.all([loadCode(), loadMagpie(), loadBudget()]);
         }
@@ -1489,10 +1500,18 @@
     section.id = 'plus-usage-panel';
     const head = node('div', 'band__head');
     head.append(node('div'));
-    head.firstChild.append(node('h2', null, 'Kimi Code 与 Magpie 额度'));
-    head.firstChild.append(node('p', null, '这两份读数来自不同账目：Kimi Code 是官方订阅窗口与加速包，Magpie 是本机网关自己记的余额。不跨来源求和，也不会把失败显示成 0。'));
-    const refresh = button('刷新额度', { onClick: () => { void Promise.all([refreshCode(true), refreshMagpie()]); } });
-    head.append(refresh);
+    head.firstChild.append(node('h2', null, 'Kimi Code 额度'));
+    head.firstChild.append(node('p', null, '这里显示官方 Kimi Code 订阅窗口与加速包。其他额度只在你明确添加后展示，不跨来源求和，也不会把失败显示成 0。'));
+    const actions = node('div', 'action-line');
+    const add = button('添加其他网关额度', { onClick: () => {
+      magpie.form.open = true;
+      renderMagpie();
+      if (!magpie.state) void loadMagpie();
+    } });
+    add.id = 'plus-magpie-add';
+    const refresh = button('刷新额度', { onClick: () => { void Promise.all([refreshCode(true), refreshMagpieIfConfigured()]); } });
+    actions.append(add, refresh);
+    head.append(actions);
     section.append(head);
 
     const codeBox = node('div', 'plus-block');
@@ -1503,6 +1522,8 @@
     section.append(codeBox);
 
     const magpieBox = node('div', 'plus-block');
+    magpieBox.id = 'plus-magpie-card';
+    magpieBox.hidden = true;
     magpieBox.append(node('h3', null, 'Magpie'));
     const magpieBody = node('div');
     magpieBody.id = 'plus-magpie-body';

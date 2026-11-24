@@ -12,6 +12,35 @@ import (
 	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
+func TestNativeQuotaMagpieRefreshRequiresExplicitConfiguration(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer upstream.Close()
+	q := newNativeQuota(&Service{StateDir: t.TempDir()}, func() string { return "" }, func() string { return "" })
+	if state := core.Object(q.State()["magpie"]); state["configured"] != false {
+		t.Fatal("Magpie starts configured without a saved choice", state)
+	}
+	q.settings.BaseURL = upstream.URL
+	if err := q.magpie.SetBaseURL(upstream.URL); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := q.Action(context.Background(), "/api/quota/magpie", core.Document{"action": "refresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Fatal("refresh queried an unconfigured Magpie endpoint")
+	}
+	state := core.Object(core.Object(reply)["state"])
+	if state["configured"] != false || state["status"] != "not_read" {
+		t.Fatal(state)
+	}
+}
+
 func TestNativeQuotaRoutesPersistChoiceAndRefreshMagpie(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/magpie/quotas" || r.Header.Get("Authorization") != "Bearer magpie-private-key" {
@@ -80,12 +109,15 @@ func TestNativeQuotaRoutesPersistChoiceAndRefreshMagpie(t *testing.T) {
 	call("POST", "/api/quota/code", core.Document{"action": "select", "source": "local"})
 	call("POST", "/api/quota/magpie", core.Document{"action": "address", "connectionId": "magpie"})
 	magpie := core.Object(call("POST", "/api/quota/magpie", core.Document{"action": "refresh"})["state"])
-	if magpie["status"] != "ok" || magpie["connectionId"] != "magpie" || len(core.Rows(core.Object(magpie["snapshot"])["entries"])) != 1 {
+	if magpie["status"] != "ok" || magpie["configured"] != true || magpie["connectionId"] != "magpie" || len(core.Rows(core.Object(magpie["snapshot"])["entries"])) != 1 {
 		t.Fatal(magpie)
 	}
 	restored := newNativeQuota(s, func() string { return "work-private-key" }, func() string { return "local-private-key" })
 	if restored.code.State().SelectedSource == nil || *restored.code.State().SelectedSource != "local" || restored.settings.ConnectionID != "magpie" {
 		t.Fatal("quota selection did not survive restart")
+	}
+	if state := core.Object(restored.State()["magpie"]); state["configured"] != true {
+		t.Fatal("saved Magpie choice was not restored", state)
 	}
 	raw, err := os.ReadFile(q.settingsPath())
 	if err != nil || strings.Contains(string(raw), "private-key") {

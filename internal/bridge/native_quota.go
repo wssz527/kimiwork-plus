@@ -20,14 +20,15 @@ type quotaSettings struct {
 }
 
 type nativeQuota struct {
-	mu             sync.Mutex
-	actionMu       sync.Mutex
-	service        *Service
-	code           *quota.CodeUsage
-	magpie         *quota.Magpie
-	settings       quotaSettings
-	settingsReason string
-	magpieKey      string
+	mu               sync.Mutex
+	actionMu         sync.Mutex
+	service          *Service
+	code             *quota.CodeUsage
+	magpie           *quota.Magpie
+	settings         quotaSettings
+	settingsReason   string
+	magpieConfigured bool
+	magpieKey        string
 }
 
 type visibleQuotaKeys struct{ KeyStore }
@@ -52,6 +53,7 @@ func newNativeQuota(s *Service, workKey, localKey func() string) *nativeQuota {
 			q.settingsReason = "quota_settings_invalid"
 		} else {
 			q.settings = settings
+			q.magpieConfigured = true
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		q.settingsReason = "quota_settings_unavailable"
@@ -75,6 +77,7 @@ func (q *nativeQuota) magpieStateLocked() core.Document {
 	out := core.Document{}
 	_ = json.Unmarshal(raw, &out)
 	out["connectionId"] = q.settings.ConnectionID
+	out["configured"] = q.magpieConfigured
 	if q.settingsReason != "" {
 		out["settingsReason"] = q.settingsReason
 	}
@@ -136,9 +139,13 @@ func (q *nativeQuota) Action(ctx context.Context, path string, in core.Document)
 			return nil, errors.New("quota_settings_write_failed")
 		}
 		q.settings, q.magpie, q.magpieKey, q.settingsReason = settings, reader, options.APIKey, ""
+		q.magpieConfigured = true
 		return core.Document{"state": q.magpieStateLocked()}, nil
 	}
 	if action == "refresh" {
+		if !q.magpieConfigured {
+			return core.Document{"state": q.magpieStateLocked()}, nil
+		}
 		options, err := q.magpieOptions(q.settings)
 		if err != nil {
 			q.settingsReason = core.ErrorCode(err)

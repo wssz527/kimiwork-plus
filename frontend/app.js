@@ -673,8 +673,8 @@ function bindEvents() {
 
   if (dom.refresh) dom.refresh.addEventListener('click', async () => {
     dom.refresh.disabled = true;
-    /* 顶栏刷新是用户明确要求「现在就是最新的」：额度卡片与用量一起重读，
-       否则停在用量页时点刷新，Kimi Code 与 Magpie 的读数仍是上一轮的。 */
+    /* 顶栏刷新是用户明确要求「现在就是最新的」：Kimi Code、已配置的可选额度与
+       用量一起重读，否则停在用量页时点刷新仍会保留上一轮读数。 */
     try {
       const tasks = [loadState(), refreshOverviewToday({ force: true })];
       if (state.view === 'usage') tasks.push(usagePanel.reload());

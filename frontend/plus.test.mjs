@@ -165,6 +165,40 @@ test('quota and budget sections mount inside their scrollable usage tabs', () =>
   } finally { env.restore(); }
 });
 
+test('Magpie quota is opt in and is not refreshed by default', async () => {
+  const env = makePlus({ routes: {
+    '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], notes: [], sources: [] } }),
+    '/api/quota/magpie': () => ({ state: { configured: false, status: 'not_read', notes: [], snapshot: null } }),
+    '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+  } });
+  try {
+    await env.panel.refresh();
+    const card = env.byId('plus-magpie-card');
+    assert.ok(card);
+    assert.equal(card.hidden, true);
+    await env.panel.refresh({ live: true });
+    assert.equal(env.calls.filter(call => call.path === '/api/quota/magpie' && call.body?.action === 'refresh').length, 0);
+    const add = findButton(env.byId('plus-usage-panel'), '添加其他网关额度');
+    assert.ok(add);
+    await add.listeners.click[0]();
+    assert.equal(card.hidden, false);
+  } finally { env.restore(); }
+});
+
+test('an explicitly configured Magpie remains visible and refreshes', async () => {
+  const env = makePlus({ routes: {
+    '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], notes: [], sources: [] } }),
+    '/api/quota/magpie': body => ({ state: { configured: true, status: body?.action === 'refresh' ? 'ok' : 'not_read', notes: [], snapshot: null } }),
+    '/api/budget': () => ({ budget: { configured: null, status: {} } }),
+  } });
+  try {
+    await env.panel.refresh();
+    assert.equal(env.byId('plus-magpie-card').hidden, false);
+    await env.panel.refresh({ live: true });
+    assert.equal(env.calls.filter(call => call.path === '/api/quota/magpie' && call.body?.action === 'refresh').length, 1);
+  } finally { env.restore(); }
+});
+
 test('a failed Kimi Code read shows no numbers at all', async () => {
   const env = makePlus({
     data: { workCapabilities: null },
@@ -772,10 +806,10 @@ test('the subagent force-key line never claims support the kernel lacks', () => 
   }
 });
 
-test('a masthead refresh in the usage view re-reads the live quota instead of the cache', async () => {
+test('a masthead refresh in the usage view re-reads the configured live quotas instead of the cache', async () => {
   const routes = {
     '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], notes: [], sources: [] } }),
-    '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+    '/api/quota/magpie': () => ({ state: { configured: true, status: 'not_read', notes: [], snapshot: null } }),
     '/api/budget': () => ({ budget: { configured: null, status: {} } }),
   };
   const env = makePlus({ routes });
