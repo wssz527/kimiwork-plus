@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +97,37 @@ func TestExtractPayloadRejectsZipSlip(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "install")
 	if _, _, err := extractPayload(sfx, dest); err == nil {
 		t.Fatal("expected zip-slip path to be rejected")
+	}
+}
+
+func TestBuildSelfDeleteScriptIsNonRecursiveAndTargetsUninstaller(t *testing.T) {
+	dir := `C:\Users\o'neil\AppData\Local\Programs\Kimi Work+`
+	script := buildSelfDeleteScript(dir)
+	if strings.Contains(strings.ToLower(script), "-recurse") {
+		t.Fatalf("self-delete script must never use -Recurse: %s", script)
+	}
+	if !strings.Contains(script, `C:\Users\o''neil\AppData\Local\Programs\Kimi Work+\uninstall.exe`) {
+		t.Fatalf("expected quoted uninstall.exe path in script: %s", script)
+	}
+	if !strings.Contains(script, "Get-ChildItem -LiteralPath $dir -Force") || !strings.Contains(script, ".Count -eq 0") {
+		t.Fatalf("expected empty-directory guard before removing installDir: %s", script)
+	}
+}
+
+func TestBuildStopDesktopScriptEnforcesTrailingBackslash(t *testing.T) {
+	script := buildStopDesktopScript(`C:\Users\alice\AppData\Local\Programs\Kimi Work+`)
+	if !strings.Contains(script, `$dir = 'C:\Users\alice\AppData\Local\Programs\Kimi Work+\'`) {
+		t.Fatalf("expected trailing backslash on dir prefix: %s", script)
+	}
+	if got := normalizeWindowsDirPrefix(`C:\Users\alice\Kimi Work+\`); got != `C:\Users\alice\Kimi Work+\` {
+		t.Fatalf("unexpected normalized prefix: %q", got)
+	}
+	for _, bad := range []string{"", "   ", `\`, `///`} {
+		if got := buildStopDesktopScript(bad); got != "" {
+			t.Fatalf("expected empty stop script for invalid installDir %q, got %q", bad, got)
+		}
+		if got := buildSelfDeleteScript(bad); got != "" {
+			t.Fatalf("expected empty self-delete script for invalid installDir %q, got %q", bad, got)
+		}
 	}
 }

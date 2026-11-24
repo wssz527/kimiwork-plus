@@ -169,6 +169,7 @@ func saveApplyHooks(t *testing.T) {
 	origValidateInstalled := applyValidateInstalled
 	origStopDesktop := applyStopDesktop
 	origStopDaemon := applyStopDaemon
+	origForceStopDaemon := applyForceStopDaemon
 	origSwap := applySwapInstallation
 	origRestore := applyRestoreInstallation
 	origLaunch := applyLaunchInstallation
@@ -180,6 +181,7 @@ func saveApplyHooks(t *testing.T) {
 		applyValidateInstalled = origValidateInstalled
 		applyStopDesktop = origStopDesktop
 		applyStopDaemon = origStopDaemon
+		applyForceStopDaemon = origForceStopDaemon
 		applySwapInstallation = origSwap
 		applyRestoreInstallation = origRestore
 		applyLaunchInstallation = origLaunch
@@ -581,5 +583,120 @@ func TestExecuteApplyPlanRefreshesStaleServiceWithoutChangingLoginStart(t *testi
 				t.Fatalf("expected LastApplied recorded for 1.2.0, got %+v", h.LastApplied)
 			}
 		})
+	}
+}
+
+func TestAutoRollbackRefreshesStaleServiceMetadata(t *testing.T) {
+	saveApplyHooks(t)
+
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	if err := core.PrivateDirectory(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(root, "Kimi Work+.app")
+	backupDir := filepath.Join(root, "backup", "Kimi Work+.app")
+	stagedDir := filepath.Join(root, "wails-update-stage", "Kimi Work+.app")
+
+	writeFakeInstallDir(t, targetDir, "1.1.6", "build-116")
+	writeFakeInstallDir(t, backupDir, "1.1.6", "build-116")
+	writeFakeInstallDir(t, stagedDir, "1.1.7", "build-117")
+
+	tracker := &testChildTracker{}
+	t.Cleanup(func() { tracker.cleanup(stateDir) })
+
+	fakeMgr := &fakeServiceManager{state: platform.ManagerState{Registered: true, Stale: true, Enabled: true}}
+	var capturedOpts platform.ManagerOptions
+	openPlatformServiceManager = func(opts platform.ManagerOptions) (platform.Manager, error) {
+		capturedOpts = opts
+		return fakeMgr, nil
+	}
+
+	applyValidateStaged = func(string) error { return nil }
+	applyValidateInstalled = func(string) error { return nil }
+	applyStopDesktop = func(string, func(string, ...any)) {}
+	applyStopDaemon = func(string, int, func(string, ...any)) bool { return true }
+	applyForceStopDaemon = func(string, func(string, ...any)) {
+		t.Fatal("forceStopTargetDaemon must not run when graceful stop succeeds")
+	}
+	applySwapInstallation = func(target, staged, _ string, _ func(string, ...any)) error {
+		return replaceDirCopy(target, staged)
+	}
+	applyRestoreInstallation = func(target, backup string, _ func(string, ...any)) error {
+		return replaceDirCopy(target, backup)
+	}
+	applyLaunchInstallation = func(target, stDir, _ string, _ func(string, ...any)) error {
+		ver, bid := readFakeInstallDir(t, target)
+		if ver == "1.1.7" {
+			return tracker.spawn(t, stDir, "fail_immediately", ver, bid)
+		}
+		return tracker.spawn(t, stDir, "healthy", ver, bid)
+	}
+	applyRollbackHealthTimeout = 5 * time.Second
+
+	plan := ApplyPlan{
+		Mode:              "update",
+		StateDir:          stateDir,
+		TargetPath:        targetDir,
+		StagedPath:        stagedDir,
+		StagingRoot:       filepath.Dir(stagedDir),
+		BackupPath:        backupDir,
+		PrevVersion:       "1.1.6",
+		PrevBuildID:       "build-116",
+		TargetVersion:     "1.1.7",
+		StartupTimeoutSec: 1,
+	}
+
+	code := executeApplyPlan(plan, "")
+	if code != 14 {
+		t.Fatalf("expected rollback exit code 14, got %d", code)
+	}
+	if fakeMgr.enableCalls != 1 {
+		t.Fatalf("expected stale service metadata refreshed after rollback, enableCalls=%d", fakeMgr.enableCalls)
+	}
+	if capturedOpts.BuildID != "build-116" {
+		t.Fatalf("expected refreshed buildId=build-116, got %q", capturedOpts.BuildID)
+	}
+}
+
+func TestExecuteApplyPlanForceStopsDaemonOnlyOnGracefulTimeout(t *testing.T) {
+	saveApplyHooks(t)
+
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	if err := core.PrivateDirectory(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(root, "Kimi Work+.app")
+	stagedDir := filepath.Join(root, "wails-update-stage", "Kimi Work+.app")
+	writeFakeInstallDir(t, targetDir, "1.1.6", "build-116")
+	writeFakeInstallDir(t, stagedDir, "1.1.7", "build-117")
+
+	var forceCalls int
+	applyValidateStaged = func(string) error { return nil }
+	applyStopDesktop = func(string, func(string, ...any)) {}
+	applyStopDaemon = func(string, int, func(string, ...any)) bool { return false }
+	applyForceStopDaemon = func(string, func(string, ...any)) { forceCalls++ }
+	applySwapInstallation = func(string, string, string, func(string, ...any)) error {
+		return errors.New("stop here")
+	}
+	applyLaunchInstallation = func(string, string, string, func(string, ...any)) error { return nil }
+
+	plan := ApplyPlan{
+		Mode:          "update",
+		StateDir:      stateDir,
+		TargetPath:    targetDir,
+		StagedPath:    stagedDir,
+		StagingRoot:   filepath.Dir(stagedDir),
+		PrevVersion:   "1.1.6",
+		PrevBuildID:   "build-116",
+		TargetVersion: "1.1.7",
+	}
+
+	if code := executeApplyPlan(plan, ""); code != 11 {
+		t.Fatalf("expected swap failure code 11, got %d", code)
+	}
+	if forceCalls != 1 {
+		t.Fatalf("expected forceStopTargetDaemon called once on graceful timeout, got %d", forceCalls)
 	}
 }

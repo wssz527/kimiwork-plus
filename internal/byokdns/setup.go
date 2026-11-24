@@ -70,16 +70,42 @@ func (s *Setup) Run(ctx context.Context, action string) error {
 		}
 		return nil
 	}
+	hostsPath := s.HostsPath
+	if hostsPath == "" {
+		hostsPath = DefaultHostsPath(nil)
+	}
+	if action == "prepare" {
+		if HasManagedHostsEntry(hostsPath) && s.Probe != nil && s.Probe.DNS(ctx).Passed {
+			return RevealFlag(s.FlagFile)
+		}
+		if beforeHosts, readErr := readHostsForSetup(hostsPath); readErr == nil {
+			if _, _, updErr := UpdateHosts(beforeHosts, action); updErr != nil {
+				return setupFailure(ctx, updErr)
+			}
+		} else if readErr.Error() == "resolver_conflict" {
+			return setupFailure(ctx, readErr)
+		}
+	}
+	if action == "remove-dns" {
+		if beforeHosts, readErr := readHostsForSetup(hostsPath); readErr == nil {
+			_, changed, updErr := UpdateHosts(beforeHosts, action)
+			if updErr != nil {
+				return setupFailure(ctx, updErr)
+			}
+			if !changed {
+				return nil
+			}
+		} else if readErr.Error() == "resolver_conflict" {
+			return setupFailure(ctx, readErr)
+		}
+	}
+
 	temporary, err := os.MkdirTemp("", "kimi-work-byok-")
 	if err != nil {
 		return errors.New("native_setup_failed")
 	}
 	defer os.RemoveAll(temporary)
 
-	hostsPath := s.HostsPath
-	if hostsPath == "" {
-		hostsPath = DefaultHostsPath(nil)
-	}
 	report := filepath.Join(temporary, "report")
 	err = admin(ctx, HostsScript(action, hostsPath, true, report), report)
 	if err == nil {

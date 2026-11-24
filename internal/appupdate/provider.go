@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -137,12 +138,59 @@ func (p *mirrorFallbackProvider) Check(ctx context.Context, req updater.CheckReq
 	if !p.useCustomAPI && p.channel == "stable" {
 		return p.checkStableDirect(ctx, req)
 	}
+	if !p.useCustomAPI && p.channel == "preview" && p.mirrorBase != "" {
+		return p.checkPreviewMirrorFirst(ctx, req)
+	}
 	return p.checkViaGitHubAPI(ctx, req)
 }
 
 type checkSource struct {
 	name        string
 	manifestURL string
+}
+
+type manifestCandidate struct {
+	tag         string
+	assetName   string
+	manifestURL string
+}
+
+type multiSourceError struct {
+	reasons []string
+}
+
+func (e *multiSourceError) Error() string {
+	return fmt.Sprintf("update check failed across all sources (%s)", strings.Join(e.reasons, "; "))
+}
+
+func briefSourceError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timeout"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() {
+			return "request timeout"
+		}
+		if urlErr.Err != nil {
+			return strings.TrimSpace(urlErr.Err.Error())
+		}
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func appendErrorReasons(dst []string, err error) []string {
+	var mse *multiSourceError
+	if errors.As(err, &mse) {
+		return append(dst, mse.reasons...)
+	}
+	if text := briefSourceError(err); text != "" {
+		return append(dst, text)
+	}
+	return dst
 }
 
 func (p *mirrorFallbackProvider) checkStableDirect(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
@@ -177,7 +225,7 @@ func (p *mirrorFallbackProvider) checkDirectSources(ctx context.Context, req upd
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			errs = append(errs, fmt.Sprintf("%s: %v", src.name, err))
+			errs = append(errs, fmt.Sprintf("%s: %s", src.name, briefSourceError(err)))
 			continue
 		}
 		p.recordActiveSource(src.name)
@@ -187,7 +235,7 @@ func (p *mirrorFallbackProvider) checkDirectSources(ctx context.Context, req upd
 		p.populateReleaseMetadata(rel, src.name)
 		return rel, nil
 	}
-	return nil, fmt.Errorf("update check failed across all sources (%s)", strings.Join(errs, "; "))
+	return nil, &multiSourceError{reasons: errs}
 }
 
 func (p *mirrorFallbackProvider) tagPinnedMirrorManifestURL(manifestURL string) string {
@@ -203,30 +251,123 @@ func (p *mirrorFallbackProvider) tagPinnedMirrorManifestURL(manifestURL string) 
 		return ""
 	}
 	asset, err := url.PathUnescape(parts[1])
-	if err != nil || (asset != "update-manifest-"+p.channel+".json" && asset != "update-manifest.json") {
+	if err != nil || (!strings.EqualFold(asset, "update-manifest-"+p.channel+".json") && !strings.EqualFold(asset, "update-manifest.json")) {
 		return ""
 	}
 	tag, err := url.PathUnescape(parts[0])
 	if err != nil || tag == "" || strings.Contains(tag, "/") {
 		return ""
 	}
-	return p.mirrorBase + "/" + p.repo + "/-/releases/download/" + url.PathEscape(tag) + "/" + asset
+	return p.mirrorBase + "/" + p.repo + "/-/releases/download/" + url.PathEscape(tag) + "/" + url.PathEscape(asset)
 }
 
-func (p *mirrorFallbackProvider) checkViaGitHubAPI(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
-	manifestURL, err := p.resolveGitHubAPIManifestURL(ctx)
-	if err != nil {
-		return nil, err
+func (p *mirrorFallbackProvider) tagPinnedGitHubManifestURL(tag, assetName string) string {
+	if p.githubWebBase == "" || (p.useCustomAPI && !p.explicitGitHubWeb) {
+		return ""
 	}
-	if manifestURL == "" {
+	tag = strings.TrimSpace(tag)
+	assetName = strings.TrimSpace(assetName)
+	if tag == "" || strings.Contains(tag, "/") || strings.ContainsAny(tag, "?#") {
+		return ""
+	}
+	if !strings.EqualFold(assetName, "update-manifest-"+p.channel+".json") && !strings.EqualFold(assetName, "update-manifest.json") {
+		return ""
+	}
+	return p.githubWebBase + "/" + p.repo + "/releases/download/" + url.PathEscape(tag) + "/" + url.PathEscape(assetName)
+}
+
+func (p *mirrorFallbackProvider) sourcesForCNBCandidate(cand manifestCandidate) []checkSource {
+	sources := []checkSource{{name: "cnb", manifestURL: cand.manifestURL}}
+	if ghURL := p.tagPinnedGitHubManifestURL(cand.tag, cand.assetName); ghURL != "" && ghURL != cand.manifestURL {
+		sources = append(sources, checkSource{name: "github", manifestURL: ghURL})
+	}
+	return sources
+}
+
+func (p *mirrorFallbackProvider) sourcesForGitHubCandidate(cand manifestCandidate) []checkSource {
+	sources := []checkSource{{name: "github", manifestURL: cand.manifestURL}}
+	if mirrorURL := p.tagPinnedMirrorManifestURL(cand.manifestURL); mirrorURL != "" && mirrorURL != cand.manifestURL {
+		sources = append([]checkSource{{name: "cnb", manifestURL: mirrorURL}}, sources...)
+	}
+	return sources
+}
+
+func (p *mirrorFallbackProvider) checkPreviewMirrorFirst(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
+	var reasons []string
+	tried := map[string]bool{}
+
+	cnbCand, cnbErr := p.resolveCNBManifestCandidate(ctx)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if cnbErr != nil {
+		reasons = append(reasons, "cnb-releases: "+briefSourceError(cnbErr))
+	} else if cnbCand == nil {
+		reasons = append(reasons, "cnb-releases: no manifest asset found")
+	} else {
+		sources := p.sourcesForCNBCandidate(*cnbCand)
+		for _, src := range sources {
+			tried[src.manifestURL] = true
+		}
+		rel, err := p.checkDirectSources(ctx, req, sources)
+		if err == nil {
+			return rel, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		reasons = appendErrorReasons(reasons, err)
+	}
+
+	ghCand, ghErr := p.resolveGitHubAPIManifestCandidate(ctx)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if ghErr != nil {
+		reasons = append(reasons, "github-releases: "+briefSourceError(ghErr))
+		return nil, &multiSourceError{reasons: reasons}
+	}
+	if ghCand == nil {
+		if cnbCand != nil {
+			return nil, &multiSourceError{reasons: reasons}
+		}
+		if cnbErr == nil {
+			p.recordActiveSource("cnb")
+			return nil, nil
+		}
 		p.recordActiveSource("github")
 		return nil, nil
 	}
-	sources := []checkSource{{name: "github", manifestURL: manifestURL}}
-	if mirrorURL := p.tagPinnedMirrorManifestURL(manifestURL); mirrorURL != "" {
-		sources = append([]checkSource{{name: "cnb", manifestURL: mirrorURL}}, sources...)
+	var fallbackSources []checkSource
+	for _, src := range p.sourcesForGitHubCandidate(*ghCand) {
+		if !tried[src.manifestURL] {
+			fallbackSources = append(fallbackSources, src)
+		}
 	}
-	return p.checkDirectSources(ctx, req, sources)
+	if len(fallbackSources) == 0 {
+		return nil, &multiSourceError{reasons: reasons}
+	}
+	rel, err := p.checkDirectSources(ctx, req, fallbackSources)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		reasons = appendErrorReasons(reasons, err)
+		return nil, &multiSourceError{reasons: reasons}
+	}
+	return rel, nil
+}
+
+func (p *mirrorFallbackProvider) checkViaGitHubAPI(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
+	cand, err := p.resolveGitHubAPIManifestCandidate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github-releases: %s", briefSourceError(err))
+	}
+	if cand == nil {
+		p.recordActiveSource("github")
+		return nil, nil
+	}
+	return p.checkDirectSources(ctx, req, p.sourcesForGitHubCandidate(*cand))
 }
 
 func (p *mirrorFallbackProvider) fetchDirectManifest(ctx context.Context, sourceName, manifestURL string, req updater.CheckRequest) (*updater.Release, error) {
@@ -412,7 +553,7 @@ func (p *mirrorFallbackProvider) Download(ctx context.Context, r *updater.Releas
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			errs = append(errs, err.Error())
+			errs = append(errs, fmt.Sprintf("%s: %s", p.sourceForURL(candidateURL), briefSourceError(err)))
 			continue
 		}
 		copyErr := copyTempFileToWriter(tmpPath, dst)
@@ -426,7 +567,41 @@ func (p *mirrorFallbackProvider) Download(ctx context.Context, r *updater.Releas
 	return fmt.Errorf("download failed across all candidates (%s)", strings.Join(errs, "; "))
 }
 
-func (p *mirrorFallbackProvider) resolveGitHubAPIManifestURL(ctx context.Context) (string, error) {
+func (p *mirrorFallbackProvider) resolveCNBManifestCandidate(ctx context.Context) (*manifestCandidate, error) {
+	srcCtx, cancel := withTimeoutIfPositive(ctx, p.checkTimeout)
+	defer cancel()
+
+	releasesURL := p.mirrorBase + "/" + p.repo + "/-/releases?page=1&page_size=10"
+	httpReq, err := http.NewRequestWithContext(srcCtx, http.MethodGet, releasesURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "KimiWorkPlus-Updater")
+
+	checkClient := wrapStripAuthOnRedirect(p.httpClient)
+	resp, err := checkClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var list []githubRelease
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("decode release list: %w", err)
+	}
+	return selectBestManifestCandidate(list, p.channel, p.mirrorBase), nil
+}
+
+func (p *mirrorFallbackProvider) resolveGitHubAPIManifestCandidate(ctx context.Context) (*manifestCandidate, error) {
 	srcCtx, cancel := withTimeoutIfPositive(ctx, p.checkTimeout)
 	defer cancel()
 
@@ -436,7 +611,7 @@ func (p *mirrorFallbackProvider) resolveGitHubAPIManifestURL(ctx context.Context
 	}
 	httpReq, err := http.NewRequestWithContext(srcCtx, http.MethodGet, releasesURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("User-Agent", "KimiWorkPlus-Updater")
@@ -444,56 +619,247 @@ func (p *mirrorFallbackProvider) resolveGitHubAPIManifestURL(ctx context.Context
 	checkClient := wrapStripAuthOnRedirect(p.httpClient)
 	resp, err := checkClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("github-releases: fetch releases: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", nil
+		return nil, nil
 	}
 	rateLimited := resp.StatusCode == http.StatusTooManyRequests ||
 		(resp.StatusCode == http.StatusForbidden && (resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""))
 	if rateLimited && p.channel == "stable" && !p.useCustomAPI {
-		return p.githubWebBase + "/" + p.repo + "/releases/latest/download/update-manifest.json", nil
+		return &manifestCandidate{
+			assetName:   "update-manifest.json",
+			manifestURL: p.githubWebBase + "/" + p.repo + "/releases/latest/download/update-manifest.json",
+		}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("github-releases: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var list []githubRelease
 	if p.channel == "preview" {
 		if err := json.Unmarshal(body, &list); err != nil {
-			return "", fmt.Errorf("github-releases: decode release list: %w", err)
+			return nil, fmt.Errorf("decode release list: %w", err)
 		}
 	} else {
 		var single githubRelease
 		if err := json.Unmarshal(body, &single); err != nil {
-			return "", fmt.Errorf("github-releases: decode latest release: %w", err)
+			return nil, fmt.Errorf("decode latest release: %w", err)
 		}
 		list = []githubRelease{single}
 	}
 
-	preferred := []string{"update-manifest-" + p.channel + ".json", "update-manifest.json"}
+	return selectBestManifestCandidate(list, p.channel, p.githubWebBase), nil
+}
+
+func selectBestManifestCandidate(list []githubRelease, channel, baseURL string) *manifestCandidate {
+	preferred := []string{"update-manifest-" + channel + ".json", "update-manifest.json"}
+	var best *manifestCandidate
+	var bestVer releaseSemver
+	bestValid := false
+
 	for _, rel := range list {
 		if rel.Draft {
 			continue
 		}
-		if p.channel == "stable" && rel.Prerelease {
+		if channel == "stable" && rel.Prerelease {
 			continue
 		}
+		var matched *manifestCandidate
 		for _, wantName := range preferred {
 			for _, asset := range rel.Assets {
-				if strings.EqualFold(asset.Name, wantName) && asset.BrowserDownloadURL != "" {
-					return asset.BrowserDownloadURL, nil
+				rawURL := strings.TrimSpace(asset.BrowserDownloadURL)
+				if strings.EqualFold(asset.Name, wantName) && rawURL != "" {
+					matched = &manifestCandidate{
+						tag:         strings.TrimSpace(rel.TagName),
+						assetName:   strings.TrimSpace(asset.Name),
+						manifestURL: resolveCandidateURL(rawURL, baseURL),
+					}
+					break
 				}
+			}
+			if matched != nil {
+				break
+			}
+		}
+		if matched == nil {
+			continue
+		}
+		ver, ok := parseReleaseSemver(matched.tag)
+		if best == nil || (ok && !bestValid) || (ok && bestValid && compareReleaseSemver(ver, bestVer) > 0) {
+			best = matched
+			bestVer = ver
+			bestValid = ok
+		}
+	}
+	return best
+}
+
+func resolveCandidateURL(rawURL, baseURL string) string {
+	lower := strings.ToLower(rawURL)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || baseURL == "" {
+		return rawURL
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return rawURL
+	}
+	ref, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return base.ResolveReference(ref).String()
+}
+
+type releaseSemver struct {
+	major int
+	minor int
+	patch int
+	pre   []string
+}
+
+func parseReleaseSemver(raw string) (releaseSemver, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return releaseSemver{}, false
+	}
+	if s[0] == 'v' || s[0] == 'V' {
+		s = s[1:]
+	}
+	if idx := strings.IndexByte(s, '+'); idx >= 0 {
+		s = s[:idx]
+	}
+	corePart := s
+	prePart := ""
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		corePart = s[:idx]
+		prePart = s[idx+1:]
+		if prePart == "" {
+			return releaseSemver{}, false
+		}
+	}
+	nums := strings.Split(corePart, ".")
+	if len(nums) != 3 {
+		return releaseSemver{}, false
+	}
+	major, ok1 := parseNonNegDecimal(nums[0])
+	minor, ok2 := parseNonNegDecimal(nums[1])
+	patch, ok3 := parseNonNegDecimal(nums[2])
+	if !ok1 || !ok2 || !ok3 {
+		return releaseSemver{}, false
+	}
+	var pre []string
+	if prePart != "" {
+		pre = strings.Split(prePart, ".")
+		for _, id := range pre {
+			if id == "" {
+				return releaseSemver{}, false
+			}
+			allDigits := true
+			for i := 0; i < len(id); i++ {
+				c := id[i]
+				if c < '0' || c > '9' {
+					allDigits = false
+					if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') {
+						return releaseSemver{}, false
+					}
+				}
+			}
+			if allDigits && len(id) > 1 && id[0] == '0' {
+				return releaseSemver{}, false
 			}
 		}
 	}
-	return "", nil
+	return releaseSemver{major: major, minor: minor, patch: patch, pre: pre}, true
+}
+
+func parseNonNegDecimal(s string) (int, bool) {
+	if s == "" || (len(s) > 1 && s[0] == '0') {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+func compareReleaseSemver(a, b releaseSemver) int {
+	if a.major != b.major {
+		if a.major > b.major {
+			return 1
+		}
+		return -1
+	}
+	if a.minor != b.minor {
+		if a.minor > b.minor {
+			return 1
+		}
+		return -1
+	}
+	if a.patch != b.patch {
+		if a.patch > b.patch {
+			return 1
+		}
+		return -1
+	}
+	if len(a.pre) == 0 && len(b.pre) == 0 {
+		return 0
+	}
+	if len(a.pre) == 0 {
+		return 1
+	}
+	if len(b.pre) == 0 {
+		return -1
+	}
+	minLen := len(a.pre)
+	if len(b.pre) < minLen {
+		minLen = len(b.pre)
+	}
+	for i := 0; i < minLen; i++ {
+		if a.pre[i] == b.pre[i] {
+			continue
+		}
+		na, aNum := parseNonNegDecimal(a.pre[i])
+		nb, bNum := parseNonNegDecimal(b.pre[i])
+		switch {
+		case aNum && bNum:
+			if na > nb {
+				return 1
+			}
+			if na < nb {
+				return -1
+			}
+			continue
+		case aNum && !bNum:
+			return -1
+		case !aNum && bNum:
+			return 1
+		default:
+			if a.pre[i] > b.pre[i] {
+				return 1
+			}
+			return -1
+		}
+	}
+	if len(a.pre) > len(b.pre) {
+		return 1
+	}
+	if len(a.pre) < len(b.pre) {
+		return -1
+	}
+	return 0
 }
 
 // feedEndpointProvider wraps a custom FeedURL manifest provider so Check uses

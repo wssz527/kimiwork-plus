@@ -207,7 +207,7 @@ def push_git_refs(web_base, repo, token, tag, prerelease):
         env["CNB_GIT_PASSWORD"] = token
         if not prerelease:
             result = subprocess.run(
-                ["git", "-c", "credential.helper=", "push", remote_url, "HEAD:refs/heads/main"],
+                ["git", "-c", "credential.helper=", "push", remote_url, f"refs/tags/{tag}^{{commit}}:refs/heads/main"],
                 env=env,
                 check=False,
                 stdout=subprocess.PIPE,

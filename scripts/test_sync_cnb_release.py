@@ -184,6 +184,24 @@ class SyncCNBReleaseTest(unittest.TestCase):
                 sync.push_git_refs("https://cnb.example", "owner/repo", "test-token", "v1.1.4", False)
             self.assertIn("main", str(ctx.exception))
             self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][-1], "refs/tags/v1.1.4^{commit}:refs/heads/main")
+        finally:
+            sync.subprocess.run = original_run
+
+    def test_stable_pushes_dereferenced_tag_commit_to_main_and_tag(self):
+        calls = []
+        original_run = sync.subprocess.run
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return sync.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        sync.subprocess.run = fake_run
+        try:
+            sync.push_git_refs("https://cnb.example", "owner/repo", "test-token", "v1.1.7", False)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][-1], "refs/tags/v1.1.7^{commit}:refs/heads/main")
+            self.assertEqual(calls[1][-1], "refs/tags/v1.1.7:refs/tags/v1.1.7")
         finally:
             sync.subprocess.run = original_run
 

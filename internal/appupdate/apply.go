@@ -22,6 +22,7 @@ var (
 	applyValidateInstalled     = validateInstalledArtifact
 	applyStopDesktop           = stopTargetDesktop
 	applyStopDaemon            = stopRunningDaemon
+	applyForceStopDaemon       = forceStopTargetDaemon
 	applySwapInstallation      = swapInstallation
 	applyRestoreInstallation   = restoreInstallation
 	applyLaunchInstallation    = launchInstallation
@@ -97,7 +98,9 @@ func executeApplyPlan(plan ApplyPlan, planPath string) int {
 	}
 
 	applyStopDesktop(plan.TargetPath, logf)
-	applyStopDaemon(plan.StateDir, plan.DaemonPID, logf)
+	if !applyStopDaemon(plan.StateDir, plan.DaemonPID, logf) {
+		applyForceStopDaemon(plan.TargetPath, logf)
+	}
 
 	if err := applySwapInstallation(plan.TargetPath, plan.StagedPath, plan.BackupPath, logf); err != nil {
 		logf("swap failed: %v — attempting relaunch of existing installation", err)
@@ -145,7 +148,9 @@ func executeApplyPlan(plan ApplyPlan, planPath string) int {
 
 func autoRollback(plan ApplyPlan, reason string, logf func(string, ...any)) {
 	applyStopDesktop(plan.TargetPath, logf)
-	applyStopDaemon(plan.StateDir, 0, logf)
+	if !applyStopDaemon(plan.StateDir, 0, logf) {
+		applyForceStopDaemon(plan.TargetPath, logf)
+	}
 
 	if plan.BackupPath != "" {
 		if _, err := os.Stat(plan.BackupPath); err == nil {
@@ -180,6 +185,7 @@ func autoRollback(plan ApplyPlan, reason string, logf func(string, ...any)) {
 		for time.Now().Before(rbDeadline) {
 			if h, err := probeDaemonHealth(plan.StateDir); err == nil && h.Alive {
 				logf("rollback recovery healthy: version=%s buildId=%s pid=%d", h.Version, h.BuildID, h.PID)
+				postInstallUpdateMetadata(plan, h, logf)
 				break
 			}
 			time.Sleep(250 * time.Millisecond)
@@ -376,32 +382,42 @@ func waitForUpdatedHealth(plan ApplyPlan, timeout time.Duration) (daemonHealth, 
 	return daemonHealth{}, fmt.Errorf("new version %s did not become healthy within %s", plan.TargetVersion, timeout)
 }
 
-func stopRunningDaemon(stateDir string, prevPID int, logf func(string, ...any)) {
+func stopRunningDaemon(stateDir string, prevPID int, logf func(string, ...any)) bool {
 	transport := platform.HTTPTransport{Timeout: 2 * time.Second}
 	endpointPID := 0
+	endpointFound := false
+	stillAlive := false
 	if ep, err := transport.Endpoint(stateDir); err == nil {
+		endpointFound = true
 		endpointPID = ep.PID
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		_ = transport.Stop(ctx, ep)
 		cancel()
+		stillAlive = true
 		deadline := time.Now().Add(8 * time.Second)
 		for time.Now().Before(deadline) {
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), time.Second)
 			res := transport.Health(probeCtx, ep)
 			probeCancel()
 			if !res.Alive {
+				stillAlive = false
 				break
 			}
 			time.Sleep(150 * time.Millisecond)
 		}
 	}
-	if prevPID > 0 {
-		waitForProcessExit(prevPID, 5*time.Second)
+	if prevPID > 0 && !waitForProcessExit(prevPID, 5*time.Second) {
+		stillAlive = true
 	}
-	if endpointPID > 0 && endpointPID != prevPID {
-		waitForProcessExit(endpointPID, 5*time.Second)
+	if endpointPID > 0 && endpointPID != prevPID && !waitForProcessExit(endpointPID, 5*time.Second) {
+		stillAlive = true
 	}
-	logf("previous daemon stopped (planPid=%d endpointPid=%d)", prevPID, endpointPID)
+	if !endpointFound && prevPID <= 0 {
+		logf("no daemon endpoint or pid to stop gracefully")
+		return false
+	}
+	logf("previous daemon stopped (planPid=%d endpointPid=%d graceful=%t)", prevPID, endpointPID, !stillAlive)
+	return !stillAlive
 }
 
 func openApplyLog(stateDir string) *os.File {

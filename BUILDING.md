@@ -16,16 +16,16 @@ go test -race -count=1 ./...
 node --experimental-vm-modules --test frontend/app.test.mjs frontend/plus.test.mjs frontend/usage.test.mjs frontend/app-editor-regression.test.mjs frontend/module-link.test.mjs
 
 # 构建 macOS Universal .app + .zip + .dmg（默认 ad-hoc；发布使用固定自签名证书 CODESIGN_IDENTITY）
-VERSION=1.1.6 BUILD_ID=1.1.6-local bash build/macos-dmg.sh
+VERSION=1.1.7 BUILD_ID=1.1.7-local bash build/macos-dmg.sh
 
 # 交叉构建 Windows amd64 二进制、便携 .zip 与用户级 setup.exe 安装程序
-VERSION=1.1.6 BUILD_ID=1.1.6-local bash build/windows.sh
+VERSION=1.1.7 BUILD_ID=1.1.7-local bash build/windows.sh
 
 # 一键构建、签名双端发布包并生成跨源相对路径 update-manifest.json
-VERSION=1.1.6 BUILD_ID=1.1.6-local NOTES_FILE=/path/to/notes.txt bash scripts/package_release.sh
+VERSION=1.1.7 BUILD_ID=1.1.7-local NOTES_FILE=/path/to/notes.txt bash scripts/package_release.sh
 
 # 同步发布包到国内 CNB 镜像
-python3 scripts/sync_cnb_release.py --tag v1.1.6 --notes-file /path/to/notes.txt /path/to/release-assets/*
+python3 scripts/sync_cnb_release.py --tag v1.1.7 --notes-file /path/to/notes.txt /path/to/release-assets/*
 ```
 
 可用 `GO=/absolute/path/to/go OUTPUT_DIR=/absolute/path/to/output` 指定本地工具链与独立输出目录，并用 `CODESIGN_IDENTITY="<证书名或 SHA-1>"`、`UPDATE_PUBLIC_KEY="<hex>"`、`UPDATE_GITHUB_REPO="<owner/repo>"` 绑定发布证书与自动更新源。固定自签名证书可用 `build/create-signing-cert.sh` 在仓库外生成；自动更新清单位与 Ed25519 签名由 `cmd/signrelease` 生成（签名私钥必须保存在仓库之外）。脚本不安装、不启动、不覆盖本机既有安装，并会自动把根目录的 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt` 打入应用包、DMG 与 Windows 安装器。
@@ -68,8 +68,6 @@ if code, handled := platform.RunHelperFromArgs(os.Args); handled {
 
 本机 Security SDK 仅用于读取和清理旧版本 Keychain 条目；普通后台迁移不显示隐藏授权，显式重授权可通过 `VisibleSaveStore` 请求一次系统交互。新凭据使用应用内 AES-GCM 存储，不经过该 SDK。缺失、锁定、取消、拒绝、会话不可用与读回失败分别返回可诊断状态。系统实测与最终 GUI 的完成级别以回传证据为准，不用单元测试替代。
 
-`build/install-preview.sh` 只安装到当前用户的 `Applications/Kimi Work+ Preview.app`。升级前验证新包并正常停止旧预览，保留 `Kimi Work+ Preview.previous.app`；停止或校验失败不会替换旧预览。稳定版不在脚本目标中。
-
 Windows 使用 `build/windows.ps1 -BuildId <build-id>` 或以下等价命令生成同身份 PE 文件：
 
 ```powershell
@@ -87,7 +85,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 接入模式保存在私有配置的 `integrationMode` 中，缺失或非法值一律按 `gateway` 处理，因此旧配置和手改文件不会意外进入直连数据路径。`bridge.buildDirectSpec` 只在直连下产出非密钥目录（服务商、协议、地址、模型）。
 
 - 直连导入先准备静态解析：macOS 走 `byokdns.Setup{RequireStaticHosts: true}`，把 `dev.msh.team` 的带标记条目写进 `/etc/hosts`，并在同一次提权步骤里删除旧版本安装的 `/etc/resolver/dev.msh.team`；Windows 只写带标记的 hosts 对。两种平台都保留文件原有 BOM、行尾和无关条目，遇到同域名的其他写法报 `resolver_conflict` 而不是覆盖。
-- 提权通过 `/usr/bin/osascript ... with administrator privileges`（macOS）或 PowerShell `Start-Process -Verb RunAs`（Windows）完成。macOS 在已有本产品条目且解析探测通过时不弹授权；`RequireStaticHosts` 只决定 macOS 是否愿意复用旧版本安装的 `/etc/resolver` 条目，网关模式仍可复用它，直连模式必须换成 hosts 条目。Windows 的 `prepare` 每次都经提权脚本写入，不做无提权的复用判断。
+- 提权通过 `/usr/bin/osascript ... with administrator privileges`（macOS）或 PowerShell `Start-Process -Verb RunAs`（Windows）完成。macOS 在已有本产品条目且解析探测通过时不弹授权；`RequireStaticHosts` 只决定 macOS 是否愿意复用旧版本安装的 `/etc/resolver` 条目，网关模式仍可复用它，直连模式必须换成 hosts 条目。Windows 在已有本产品静态 hosts 条目且解析探测通过时同样跳过提权直接复用，移除操作在无托管条目时也跳过提权。
 - 导入走 `clawBridgeAPI.byokSources` 的 `list` / `preview` / `save` / `applyPending` / `discard` / `disconnect`。页面答案只是候选，`gradeDirectImport` 仍以官方 store 与生成的 `config.json` 读回为准确认 `applied`。
 - 直连判定 `ready` 同时要求模式为直连、官方 store 与生成配置校验通过、以及静态 hosts 就绪（Windows 还要一次通过的解析探测）。只缺 hosts 时是「待补齐静态 hosts」，不是已就绪。
 - 双向切换都先预览、保存、应用并读回新来源，再断开旧来源。预览或保存失败不触碰旧路由；若官方后台目录发现与首次直连清理竞争，且没有其他来源待确认，同一次操作会按精确手工草稿自动收尾一次。未请求的目录 pending 不阻塞读回，手工模型 pending 仍会阻塞；剩余清理失败用 `routeCleanupPending` / `route_cleanup_pending` 报告，可通过再次同步重试。两个方向的导入各自拒绝错误的模式（`native_import_direct_mode` / `native_import_gateway_mode`）。
@@ -97,7 +95,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$flags -H w
 
 ## 阶段 2–6 集成候选
 
-导航为总览、模型、用量、Work 能力、扩展、设置。服务商与模型共用一次保存事务；保存本机目录与同步到 Work 是不同操作，新增/删除模型后按同步状态重新导入，必要时正常重启 Kimi。
+导航为「总览 / 模型 / 子代理 / 用量 / 设置」。服务商与模型共用一次保存事务；保存本机目录与同步到 Work 是不同操作，新增/删除模型后按同步状态重新导入，必要时正常重启 Kimi。
 
 - 用量页包含真实请求、Kimi Code 三来源、Magpie 余额和预算。Work 来源随当前官方凭据重新读取。本机 Kimi Code 登录只有显式采用后才使用，手填 Key 保存在本产品的加密凭据存储中。读取失败保留错误和过期标记，不能解释为额度为 0。
 - 账号库把可恢复会话保存在本产品的加密凭据存储（macOS 应用内 AES-GCM，Windows DPAPI），窗口顶部、菜单栏和设置共用后台状态。先捕获当前最新凭据，再通过官方 TokenStore 完整写入目标 Cookie 和令牌，优先由官方协调器切换账号与内核。免桌面重启成功要求切换前安装的监听观察到非就绪态，再读回协调器就绪、内核只读模型查询成功、官方 Work shell 和配置身份一致。成功时保留官方轮换后的令牌与 Code Key。内核核验总等待最多 12 秒，无法核实时最多正常重启桌面一次；写入不完整不重启，失败尝试恢复原账号，上层不会重复自动切换。任务在跑或忙状态未知时拒绝切换。开发候选已完成两真实账号五次往返、额度跟随及添加/取消恢复，全程桌面 PID 不变。最终产物与 GUI 验收状态以工作区交接记录为准。
