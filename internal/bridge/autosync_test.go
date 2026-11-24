@@ -1,12 +1,18 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/wssz527/kimiwork-plus/internal/byokdns"
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
@@ -32,7 +38,9 @@ func autoSyncGatewayDoc() core.Document {
 
 func autoSyncDocWith(models ...any) core.Document {
 	d := autoSyncGatewayDoc()
-	d["models"] = append([]any(nil), models...)
+	rows := make([]any, 0, len(models))
+	rows = append(rows, models...)
+	d["models"] = rows
 	return d
 }
 
@@ -239,6 +247,30 @@ func newAutoSyncHarness(t *testing.T, direct bool, d core.Document) *autoSyncHar
 	n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult { return h.integration() }
 	n.managedProbe = func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.managed }
 	n.runningProbe = func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.running }
+	if direct {
+		// The Direct Mode prepare step is stubbed so a test never elevates, and
+		// the static entry is reported present so the write reaches the import.
+		// The background path's own refusal has its own test below.
+		n.admin = func(_ context.Context, _, report string) error {
+			if report != "" {
+				return os.WriteFile(report, []byte("done\n"), 0o600)
+			}
+			return nil
+		}
+		n.staticHostsProbe = func() bool { return true }
+		// A direct import reads the provider keys before it runs.
+		if d, _, readErr := n.service.Store.Read(); readErr == nil {
+			for _, row := range core.Rows(d["connections"]) {
+				ref := credentialReference(core.Object(row))
+				if ref == "" {
+					continue
+				}
+				if err := n.service.Keys.Set(ref, "test-key"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
 	n.autoSync = newAutoSyncCoordinator(context.Background(), n)
 	n.autoSync.debounce = 5 * time.Millisecond
 	t.Cleanup(n.autoSync.stop)
@@ -326,7 +358,21 @@ func waitAutoSync(t *testing.T, what string, condition func() bool) {
 
 func waitAutoSyncState(t *testing.T, h *autoSyncHarness, want string) {
 	t.Helper()
-	waitAutoSync(t, "state "+want, func() bool { return h.state() == want })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.n.autoSync.mu.Lock()
+		running := h.n.autoSync.running
+		h.n.autoSync.mu.Unlock()
+		// The run publishes its outcome before it clears `running`; waiting for
+		// both keeps a follow-up call from seeing a slot that is still busy.
+		if h.state() == want && !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for state %q; status = %+v", want, h.n.autoSync.status())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // A save that only moves a gateway-only field must never reach Kimi.
@@ -484,10 +530,26 @@ func TestAutoSyncWaitingUnmanagedThenRestartCatchesUp(t *testing.T) {
 // uses it so the wake-up it installs is the one under test.
 func (h *autoSyncHarness) finishOperation(t *testing.T, action string) {
 	t.Helper()
+	h.finishOperationResult(t, action, nil)
+}
+
+func (h *autoSyncHarness) finishOperationResult(t *testing.T, action string, result any) {
+	t.Helper()
 	h.n.mu.Lock()
 	h.n.operation = core.Document{"id": action, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
 	h.n.mu.Unlock()
-	h.n.finishOperation(action, "done", nil, nil)
+	h.n.finishOperation(action, "done", result, nil)
+}
+
+// operationState is the state of the newest operation, or empty while a manual
+// or launch operation still owns the slot.
+func (h *autoSyncHarness) operationState() string {
+	h.n.mu.Lock()
+	defer h.n.mu.Unlock()
+	if core.String(h.n.operation["action"]) != "auto-sync" {
+		return ""
+	}
+	return core.String(h.n.operation["state"])
 }
 
 func TestAutoSyncDisconnectStaysQuietUntilTheSurfaceChanges(t *testing.T) {
@@ -678,5 +740,470 @@ func TestServiceConfigureNotifiesAutoSyncWithBothDocuments(t *testing.T) {
 	}
 	if catalogSurfaceDigest(previous) == catalogSurfaceDigest(next) {
 		t.Fatal("adding a model did not move the surface")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: the periodic readback must not settle a queued generation
+
+// observe used to treat an adopted readback as proof about the newest save, so
+// a removal, a rename or a rotated key saved inside the debounce window was
+// cancelled before it ever reached Kimi.
+func TestAutoSyncObserveNeverDropsAQueuedGeneration(t *testing.T) {
+	cases := []struct {
+		name   string
+		direct bool
+		edit   func(core.Document)
+	}{
+		{name: "removed model", edit: func(d core.Document) {
+			d["models"] = core.Rows(d["models"])[:1]
+		}},
+		{name: "renamed model", edit: func(d core.Document) {
+			core.Object(core.Rows(d["models"])[0])["name"] = "Renamed One"
+		}},
+		{name: "rotated direct key", direct: true, edit: func(d core.Document) {
+			core.Object(core.Rows(d["connections"])[0])["apiKeyRef"] = "connection-b2"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := autoSyncGatewayDoc()
+			if tc.direct {
+				doc = autoSyncGatewayDocWithMode("direct")
+			}
+			h := newAutoSyncHarness(t, tc.direct, doc)
+			h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+			h.n.autoSync.debounce = 30 * time.Millisecond
+
+			// The baseline the running application has adopted.
+			added := h.doc(t)
+			added["models"] = append(core.Rows(added["models"]), autoSyncModel("gpt-beta", "Beta"))
+			h.save(t, "/api/models", added)
+			waitAutoSyncState(t, h, autoSyncSynced)
+			imports := h.counts()
+
+			// Widen the window so the readback below lands while the save waits.
+			h.n.autoSync.debounce = 5 * time.Second
+			next := h.doc(t)
+			tc.edit(next)
+			h.save(t, "/api/models", next)
+			if state := h.state(); state != autoSyncScheduled {
+				t.Fatalf("the save published %q", state)
+			}
+			h.n.autoSync.observe(integrationValue(h.integration()), h.doc(t))
+			if state := h.state(); state != autoSyncScheduled {
+				t.Fatalf("the readback turned a queued save into %q", state)
+			}
+			if core.Object(h.n.autoSync.status())["pending"] != true {
+				t.Fatal("the readback dropped the queued generation")
+			}
+			if h.counts() != imports {
+				t.Fatal("the readback ran the queued import itself")
+			}
+		})
+	}
+}
+
+// A failed write is an explicit answer for the user; a later adoption of the
+// same surface must not rewrite it into `synced`.
+func TestAutoSyncObserveLeavesAnExplicitFailureAlone(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced = catalogSurfaceDigest(h.doc(t))
+	h.n.autoSync.setStateLocked(autoSyncFailed, "native_bridge_timeout")
+	h.n.autoSync.mu.Unlock()
+
+	h.n.autoSync.observe(integrationValue(h.integration()), h.doc(t))
+	status := h.n.autoSync.status()
+	if core.String(status["state"]) != autoSyncFailed || core.String(status["reason"]) != "native_bridge_timeout" {
+		t.Fatalf("an adopted readback rewrote %+v", status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: a background write never launches Kimi and never elevates
+
+// The managed process can leave between the coordinator's check and the write.
+// The generation then stays queued instead of failing for good.
+func TestAutoSyncDirectImportNeverLaunchesKimi(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		running bool
+		want    string
+		reason  string
+	}{
+		{name: "offline", running: false, want: autoSyncDeferredOffline, reason: autoSyncReasonNotRunning},
+		{name: "unmanaged", running: true, want: autoSyncWaitingUnmanaged, reason: autoSyncReasonUnmanaged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAutoSyncHarness(t, true, autoSyncGatewayDocWithMode("direct"))
+			// Present for the check, gone for the write.
+			var checks atomic.Int32
+			h.n.managedProbe = func() bool { return checks.Add(1) == 1 }
+			h.n.runningProbe = func() bool { return tc.running }
+			h.n.staticHostsProbe = func() bool { return true }
+			// No fake: the real controller reports that it has no managed bridge.
+			h.n.importDirectModels = nil
+			var launched atomic.Int32
+			h.n.autoLaunch = func(context.Context) error {
+				launched.Add(1)
+				return nil
+			}
+
+			next := h.doc(t)
+			next["models"] = append(core.Rows(next["models"]), autoSyncModel("gpt-beta", "Beta"))
+			h.save(t, "/api/models", next)
+			waitAutoSyncState(t, h, tc.want)
+			if reason := core.String(h.n.autoSync.status()["reason"]); reason != tc.reason {
+				t.Fatalf("reason = %q", reason)
+			}
+			if got := launched.Load(); got != 0 {
+				t.Fatalf("a background write launched Kimi %d times", got)
+			}
+			if core.Object(h.n.autoSync.status())["pending"] != true {
+				t.Fatalf("%s dropped the queued generation", tc.want)
+			}
+		})
+	}
+}
+
+// A direct background write must refuse the administrator step instead of
+// opening a prompt, and say which step the user has to run.
+func TestAutoSyncDirectPrepareNeverAsksForElevation(t *testing.T) {
+	h := newAutoSyncHarness(t, true, autoSyncGatewayDocWithMode("direct"))
+	// The production value: the setup layer would fall back to osascript/UAC.
+	h.n.admin = nil
+	h.n.probe = &byokdns.Probe{Lookup: func(context.Context, string) (string, error) {
+		return "", errors.New("lookup timeout")
+	}}
+	if err := h.n.prepareBYOKSilent(context.Background()); core.ErrorCode(err) != autoSyncReasonPrepareNeeded {
+		t.Fatalf("silent prepare = %v (%q)", err, core.ErrorCode(err))
+	}
+
+	// Through the coordinator the same refusal is published as a failure that
+	// asks for the panel's prepare action.
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.staticHostsProbe = func() bool { return true }
+	next := h.doc(t)
+	next["models"] = append(core.Rows(next["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", next)
+	waitAutoSyncState(t, h, autoSyncFailed)
+	if reason := core.String(h.n.autoSync.status()["reason"]); reason != autoSyncReasonPrepareNeeded {
+		t.Fatalf("background prepare reason = %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: the surface digest covers the fields Kimi renders
+
+// A direct model belongs to a provider; moving it to another connection changes
+// the provider Kimi stores and must move the digest too.
+func TestCatalogSurfaceDigestDirectCoversProviderID(t *testing.T) {
+	base := core.Document{
+		"integrationMode": "direct",
+		"connections": []any{
+			core.Document{"id": "alpha", "name": "Alpha", "baseURL": "https://alpha.example/v1",
+				"apiKeyEnv": "KIMI_WORK_ALPHA_KEY", "apiKeyRef": "connection-a1", "protocols": []any{"responses"}},
+			core.Document{"id": "beta", "name": "Beta", "baseURL": "https://beta.example/v1",
+				"apiKeyEnv": "KIMI_WORK_BETA_KEY", "apiKeyRef": "connection-b2", "protocols": []any{"responses"}},
+		},
+		"models": []any{autoSyncModel("gpt-alpha", "Alpha One")},
+	}
+	moved := cloneDocument(base)
+	core.Object(core.Rows(moved["models"])[0])["connectionId"] = "beta"
+	before, after := buildDirectSpec(base), buildDirectSpec(moved)
+	if before == nil || after == nil || before.Models[0].ProviderID == after.Models[0].ProviderID {
+		t.Fatal("the provider id did not follow the connection")
+	}
+	if catalogSurfaceDigest(moved) == catalogSurfaceDigest(base) {
+		t.Fatal("moving a direct model to another connection kept the surface")
+	}
+}
+
+// A value that contains the row separator must not be able to stand in for a
+// different split of the same fields.
+func TestCatalogSurfaceDigestSeparatesFieldsContainingTheSeparator(t *testing.T) {
+	first := sha256.New()
+	digestLine(first, "model", "a|b", "c")
+	second := sha256.New()
+	digestLine(second, "model", "a", "b|c")
+	if bytes.Equal(first.Sum(nil), second.Sum(nil)) {
+		t.Fatal("a separator inside a field collided with two fields")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: the baseline is dropped when the profile stops holding it
+
+// A disconnect empties the profile, so restoring the surface that was in place
+// before it is a new write, not a no-op.
+func TestAutoSyncReconnectAfterDisconnectImportsTheRestoredSurface(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+	h.n.autoSync.debounce = 20 * time.Millisecond
+
+	base := h.doc(t)
+	added := cloneDocument(base)
+	added["models"] = append(core.Rows(added["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", added)
+	waitAutoSyncState(t, h, autoSyncSynced)
+
+	h.finishOperation(t, "disconnect-models")
+	if state := h.state(); state != autoSyncIdle {
+		t.Fatalf("a disconnect left %q", state)
+	}
+
+	// Two saves inside one window end on the surface that was in place before
+	// the disconnect. It still has to be written again.
+	h.n.autoSync.debounce = 5 * time.Second
+	h.save(t, "/api/models", base)
+	h.save(t, "/api/models", added)
+	if state := h.state(); state != autoSyncScheduled {
+		t.Fatalf("restoring the surface published %q", state)
+	}
+	h.n.autoSync.kickIfReady()
+	waitAutoSyncState(t, h, autoSyncSynced)
+	if imports := h.counts(); imports != 2 {
+		t.Fatalf("the restored surface ran %d imports", imports)
+	}
+}
+
+// A run writing the older surface must not let a revert inside its window be
+// mistaken for "already in place": the profile still holds the newer one.
+func TestAutoSyncRevertWhileWritingStillImportsTheRevert(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+	h.n.autoSync.debounce = 10 * time.Millisecond
+
+	var mu sync.Mutex
+	calls := 0
+	entered := make(chan int, 8)
+	release := make(chan struct{})
+	h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		entered <- call
+		if call == 2 {
+			<-release
+		}
+		h.set(func(h *autoSyncHarness) { h.applied = true })
+		return kimi.ImportResult{OK: true, State: kimi.ImportStateApplied, Applied: true}, nil
+	}
+
+	base := h.doc(t)
+	added := cloneDocument(base)
+	added["models"] = append(core.Rows(added["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", added)
+	if call := <-entered; call != 1 {
+		t.Fatalf("first import = %d", call)
+	}
+	waitAutoSyncState(t, h, autoSyncSynced)
+
+	// Remove the model, and revert while that write is still holding.
+	h.save(t, "/api/models", base)
+	if call := <-entered; call != 2 {
+		t.Fatalf("second import = %d", call)
+	}
+	h.save(t, "/api/models", added)
+	close(release)
+
+	select {
+	case call := <-entered:
+		if call != 3 {
+			t.Fatalf("third import = %d", call)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the revert was never imported")
+	}
+	waitAutoSyncState(t, h, autoSyncSynced)
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("the revert produced %d imports", calls)
+	}
+}
+
+// The surface that was written but never adopted keeps its restart prompt when
+// the user edits away and back inside one window.
+func TestAutoSyncRevertToTheUnadoptedSurfaceKeepsTheRestartPrompt(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.restart = true, true, true })
+	h.n.autoSync.debounce = 20 * time.Millisecond
+
+	first := h.doc(t)
+	first["models"] = append(core.Rows(first["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", first)
+	waitAutoSyncState(t, h, autoSyncRequiresRestart)
+
+	h.n.autoSync.debounce = 5 * time.Second
+	second := cloneDocument(first)
+	second["models"] = append(core.Rows(second["models"]), autoSyncModel("gpt-gamma", "Gamma"))
+	h.save(t, "/api/models", second)
+	h.save(t, "/api/models", first)
+	if state := h.state(); state != autoSyncRequiresRestart {
+		t.Fatalf("reverting to the written surface published %q", state)
+	}
+	if reason := core.String(h.n.autoSync.status()["reason"]); reason == "" {
+		t.Fatal("the restart prompt lost its reason")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if imports := h.counts(); imports != 1 {
+		t.Fatalf("reverting to the written surface imported again: %d", imports)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: manual operations settle the queue they answered
+
+// A manual prepare imports the same surface the queued write owes, so the
+// background run must not repeat it, and a previous failure must be cleared.
+func TestAutoSyncManualConnectSettlesTheQueuedWrite(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+	h.n.autoSync.debounce = 750 * time.Millisecond
+
+	next := h.doc(t)
+	next["models"] = append(core.Rows(next["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", next)
+	if state := h.state(); state != autoSyncScheduled {
+		t.Fatalf("the save published %q", state)
+	}
+	// A failed background attempt may still be published from before.
+	h.n.autoSync.hold(autoSyncFailed, autoSyncReasonPrepareNeeded)
+
+	h.finishOperationResult(t, "connect-kimi", kimi.ImportResult{OK: true, State: kimi.ImportStateApplied, Applied: true, Adopted: true})
+	if state := h.state(); state != autoSyncSynced {
+		t.Fatalf("a manual prepare left %q", state)
+	}
+	if reason := core.String(h.n.autoSync.status()["reason"]); reason != "" {
+		t.Fatalf("a manual prepare left reason %q", reason)
+	}
+	if core.Object(h.n.autoSync.status())["pending"] != false {
+		t.Fatal("the queued write survived the manual prepare")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if imports := h.counts(); imports != 0 {
+		t.Fatalf("the manual prepare was followed by another import: %d", imports)
+	}
+}
+
+// A different account owns a different profile, so the next catch-up has to
+// compare and write again even though the document did not change.
+func TestAutoSyncAccountSwitchCatchesUp(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	h.n.autoSync.debounce = 20 * time.Millisecond
+
+	base := h.doc(t)
+	added := cloneDocument(base)
+	added["models"] = append(core.Rows(added["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", added)
+	waitAutoSyncState(t, h, autoSyncSynced)
+	imports := h.counts()
+
+	// The other account's profile does not hold the catalog yet.
+	h.set(func(h *autoSyncHarness) { h.applied = false })
+	h.finishOperation(t, "account-switch")
+	waitAutoSync(t, "the account catch-up", func() bool { return h.counts() > imports })
+	waitAutoSyncState(t, h, autoSyncSynced)
+}
+
+// ---------------------------------------------------------------------------
+// regression: an empty configuration is not a failed write
+
+func TestAutoSyncEmptyConfigurationOnLaunchStaysIdle(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncDocWith())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+	var reconciles atomic.Int32
+	h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult {
+		reconciles.Add(1)
+		return kimi.IntegrationResult{State: kimi.IntegrationWaitingConfig, Reason: "invalid_request"}
+	}
+
+	h.finishOperation(t, "launch-kimi")
+	waitAutoSync(t, "the empty launch to settle", func() bool { return h.operationState() == autoSyncIdle })
+	if state := h.state(); state != autoSyncIdle {
+		t.Fatalf("an empty configuration published %q", state)
+	}
+	if got := reconciles.Load(); got != 0 {
+		t.Fatalf("an empty configuration ran %d reconciles", got)
+	}
+	if imports := h.counts(); imports != 0 {
+		t.Fatalf("an empty configuration ran %d imports", imports)
+	}
+}
+
+// A readback that cannot import yet is a state to wait out, not a failure.
+func TestAutoSyncWaitingConfigurationIsNotAFailure(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+	h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult {
+		return kimi.IntegrationResult{State: kimi.IntegrationWaitingConfig, Reason: "invalid_request"}
+	}
+	h.finishOperation(t, "launch-kimi")
+	waitAutoSync(t, "the configuration check to settle", func() bool { return h.operationState() == autoSyncIdle })
+	if state := h.state(); state != autoSyncIdle {
+		t.Fatalf("a waiting configuration published %q", state)
+	}
+	if imports := h.counts(); imports != 0 {
+		t.Fatalf("a waiting configuration ran %d imports", imports)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// regression: closing the service waits for the write it is cancelling
+
+func TestAutoSyncStopWaitsForTheRunningWrite(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+	h.n.autoSync.debounce = 5 * time.Millisecond
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
+		entered <- struct{}{}
+		<-release
+		return kimi.ImportResult{OK: true, State: kimi.ImportStateApplied, Applied: true}, nil
+	}
+
+	next := h.doc(t)
+	next["models"] = append(core.Rows(next["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.save(t, "/api/models", next)
+	<-entered
+
+	stopped := make(chan struct{})
+	go func() {
+		h.n.autoSync.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a write was still running")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not return after the write finished")
+	}
+}
+
+// A process that starts with the catalog already in place is settled by the
+// first adopted readback, without waiting for a restart that is not needed.
+func TestAutoSyncStartupReadbackConfirmsTheCatalog(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	if state := h.state(); state != autoSyncIdle {
+		t.Fatalf("the harness did not start idle: %q", state)
+	}
+	h.n.autoSync.observe(integrationValue(h.integration()), h.doc(t))
+	if state := h.state(); state != autoSyncSynced {
+		t.Fatalf("an adopted catalog on startup published %q", state)
+	}
+	if core.Object(h.n.autoSync.status())["pending"] != false {
+		t.Fatal("a startup confirmation queued a write")
 	}
 }

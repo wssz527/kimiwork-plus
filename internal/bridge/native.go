@@ -946,6 +946,12 @@ func (n *Native) disconnectModelsWithAutoStart(ctx context.Context) (kimi.Discon
 // so it stays local to this call: it is never stored on the operation, in a
 // state file or in the settings.
 func (n *Native) importDirect(ctx context.Context) (kimi.ImportResult, error) {
+	return n.importDirectWithEnsure(ctx, n.ensureManagedKimi)
+}
+
+// importDirectWithEnsure is importDirect with the launch step left to the
+// caller. A background write passes a no-op: it must never start Kimi.
+func (n *Native) importDirectWithEnsure(ctx context.Context, ensure func(context.Context) error) (kimi.ImportResult, error) {
 	request, err := n.directImportFor()
 	if err != nil {
 		return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(err)}, err
@@ -957,10 +963,20 @@ func (n *Native) importDirect(ctx context.Context) (kimi.ImportResult, error) {
 	if run == nil {
 		run = n.controller.ImportDirectAuthorized
 	}
-	return runWithManagedKimi(ctx, n.ensureManagedKimi, n.autoOpenWork,
+	return runWithManagedKimi(ctx, ensure, n.autoOpenWork,
 		func(ctx context.Context) (kimi.ImportResult, error) {
 			return run(ctx, request)
 		}, importWaitingWork)
+}
+
+// releaseOperation frees a claimed operation slot without publishing an outcome.
+// It is the shutdown path: nothing ran, so nothing is recorded.
+func (n *Native) releaseOperation(id string) {
+	n.mu.Lock()
+	if n.operation != nil && n.operation["id"] == id {
+		n.operation = nil
+	}
+	n.mu.Unlock()
 }
 
 func (n *Native) finishOperation(id, state string, result any, err error) {
@@ -1008,7 +1024,7 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		}
 	}
 	n.logOperationFinished(id, action, stage, state, reason, duration, result)
-	n.autoSync.operationFinished(action, err)
+	n.autoSync.operationFinished(action, result, err)
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }

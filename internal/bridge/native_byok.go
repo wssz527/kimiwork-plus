@@ -87,13 +87,38 @@ func (n *Native) byokState() core.Document {
 }
 
 func (n *Native) prepareBYOK(ctx context.Context) error {
+	return n.prepareBYOKWith(ctx, n.byokSetup())
+}
+
+// prepareBYOKSilent is prepareBYOK for a background run: it never opens an
+// administrator prompt. A machine that still needs the elevated step is
+// reported as needing it, and the panel action performs it when the user asks.
+func (n *Native) prepareBYOKSilent(ctx context.Context) error {
+	setup := n.byokSetup()
+	refused := false
+	if setup.Admin == nil {
+		setup.Admin = func(context.Context, string, string) error {
+			refused = true
+			return errors.New(autoSyncReasonPrepareNeeded)
+		}
+	}
+	err := n.prepareBYOKWith(ctx, setup)
+	if refused {
+		// The setup layer maps unknown failures onto its own codes, so the
+		// refusal is remembered here instead of through the error chain.
+		return errors.New(autoSyncReasonPrepareNeeded)
+	}
+	return err
+}
+
+func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) error {
 	n.probe.Invalidate()
 	// Direct Mode resolves the intranet name from a static hosts entry, so a
 	// listener that cannot bind is not a failure: the port is not used at all.
 	// The one administrator step writes that entry and removes the resolver an
 	// earlier release installed; once the entry is in place the call costs none.
 	if runtime.GOOS == "darwin" && n.isDirectMode() {
-		if err := n.byokSetup().Run(ctx, "prepare"); err != nil {
+		if err := setup.Run(ctx, "prepare"); err != nil {
 			return err
 		}
 		if n.dns != nil {
@@ -120,7 +145,7 @@ func (n *Native) prepareBYOK(ctx context.Context) error {
 			n.mu.Unlock()
 		}
 	}
-	if err := n.byokSetup().Run(ctx, "prepare"); err != nil {
+	if err := setup.Run(ctx, "prepare"); err != nil {
 		return err
 	}
 	n.probe.Invalidate()
