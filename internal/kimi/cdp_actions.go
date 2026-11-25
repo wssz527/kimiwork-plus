@@ -551,9 +551,16 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 			case "applied":
 				result.RequiresRestart = false
 				result.RestartDeferred = false
-				if result.RouteCleanupPending && request.DisconnectDirectSourceID != "" &&
-					a.disconnectDirectSourceOnce(ctx, settings, request.DisconnectDirectSourceID) {
-					result.RouteCleanupPending = false
+				if result.RouteCleanupPending && request.DisconnectDirectSourceID != "" {
+					settled, deferred := a.disconnectDirectSourceOnce(ctx, settings, request.DisconnectDirectSourceID)
+					if settled {
+						result.RouteCleanupPending = false
+					} else if deferred {
+						// The disconnect itself wrote pending bytes: the old source is
+						// gone only after the restart the user is now asked for.
+						result.RequiresRestart = true
+						result.RestartDeferred = true
+					}
 				}
 			case "apply-failed":
 				result.OK = false
@@ -570,10 +577,40 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 			}
 		}
 	}
+	// A route cleanup answered inside Electron's post-ready window carries the
+	// revision its own disconnect left behind; the same retry that finishes a
+	// deferred save settles it here.
+	if result.OK && !result.RequiresRestart && result.RouteCleanupPending {
+		a.settleDeferredCleanup(ctx, settings, answer, &result)
+	}
 	// Only an overlay this call opened is closed, and the outcome is recorded
 	// either way: a close that failed means the window may still be up.
 	a.closeIfOpenedInto(ctx, opened, &result)
 	return result, nil
+}
+
+// settleDeferredCleanup finishes a route cleanup Electron answered with
+// `pending` or `deferred`. Only an applied cleanup clears the claim; `deferred`
+// and `apply-failed` keep it and ask for the restart that removes the old
+// source, and every other outcome leaves the removal to the next sync because
+// the replacement itself is already applied.
+func (a *cdpActions) settleDeferredCleanup(ctx context.Context, settings actionTarget, answer map[string]any, result *ImportResult) {
+	scopeToken, _ := answer["cleanupApplyScopeToken"].(string)
+	revision, _ := answer["cleanupApplyRevision"].(string)
+	if scopeToken == "" || revision == "" {
+		return
+	}
+	outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
+	if err != nil {
+		return
+	}
+	switch outcome {
+	case "applied":
+		result.RouteCleanupPending = false
+	case "deferred", "apply-failed":
+		result.RequiresRestart = true
+		result.RestartDeferred = outcome == "deferred"
+	}
 }
 
 // ImportDirect writes the caller's providers and models into a managed custom
@@ -685,9 +722,16 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 			case "applied":
 				result.RequiresRestart = false
 				result.RestartDeferred = false
-				if result.RouteCleanupPending && request.DisconnectGateway &&
-					a.disconnectGatewayOnce(ctx, settings, request.DisconnectGatewayURL) {
-					result.RouteCleanupPending = false
+				if result.RouteCleanupPending && request.DisconnectGateway {
+					settled, deferred := a.disconnectGatewayOnce(ctx, settings, request.DisconnectGatewayURL)
+					if settled {
+						result.RouteCleanupPending = false
+					} else if deferred {
+						// The gateway disconnect itself wrote pending bytes: it is
+						// gone only after the restart the user is now asked for.
+						result.RequiresRestart = true
+						result.RestartDeferred = true
+					}
 				}
 			case "apply-failed":
 				result.OK = false
@@ -703,6 +747,12 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 				result.RestartDeferred = false
 			}
 		}
+	}
+	// The same settlement as the gateway import: a cleanup deferred by the
+	// post-ready window is applied here, and one that stays deferred asks for
+	// the restart that removes the old gateway.
+	if result.OK && !result.RequiresRestart && result.RouteCleanupPending {
+		a.settleDeferredCleanup(ctx, settings, answer, &result)
 	}
 	a.closeIfOpenedInto(ctx, opened, &result)
 	return result, nil
@@ -1250,27 +1300,32 @@ if(typeof api?.revealByok==="function"){
   if(state?.available===false)return {ok:false,code:"feature-disabled"};
 }
 const sources=api?.byokSources;
-const unwrap=result=>result?.ok===true?result.value:null;
+const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS + `
+let hadOtherPending=false;
 const disconnectDirect=async()=>{
-  if(!directSourceID)return true;
-  if(typeof sources?.list!=="function"||typeof sources.disconnect!=="function")return false;
+  if(!directSourceID)return {ok:true,settled:true};
+  if(typeof sources?.list!=="function"||typeof sources.disconnect!=="function")return {ok:false,settled:false};
   const current=unwrap(await sources.list());
-  if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string")return false;
+  if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string")return {ok:false,settled:false};
   let direct=current.sources.find(source=>source.id===directSourceID);
   if(!direct)direct=current.sources.find(source=>source.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
-  if(!direct)return true;
-  if(direct.kind!=="custom")return false;
-  if(direct.quarantined===true||direct.status==="disconnected")return true;
+  if(!direct)return {ok:true,settled:true};
+  if(direct.kind!=="custom")return {ok:false,settled:false};
+  if(direct.quarantined===true||direct.status==="disconnected")return {ok:true,settled:true};
   const reply=await sources.disconnect({sourceId:direct.id,accountRevision:current.accountRevision,
     sourceRevision:direct.revision??null});
-  return reply?.ok===true;
+  return await settleDisconnect(reply,current,hadOtherPending);
 };
 if(typeof api?.importByokModels==="function"){
   const result=await api.importByokModels(token,baseURL);
   const imported=result?.ok===true;
   const requiresRestart=result?.requiresRestart===true;
-  return {ok:imported,code:result?.code,routeCleanupPending:imported&&!!directSourceID&&
-    (requiresRestart||!(await disconnectDirect())),
+  let cleanup={ok:true,settled:true};
+  if(imported&&directSourceID&&!requiresRestart)cleanup=await disconnectDirect();
+  return {ok:imported,code:result?.code,
+    routeCleanupPending:imported&&!!directSourceID&&(requiresRestart||cleanup?.settled!==true),
+    cleanupApplyScopeToken:typeof cleanup?.applyScopeToken==="string"?cleanup.applyScopeToken:"",
+    cleanupApplyRevision:typeof cleanup?.applyRevision==="string"?cleanup.applyRevision:"",
     requiresRestart:requiresRestart,restartDeferred:result?.restartDeferred===true,
     models:Array.isArray(result?.profile?.models)?result.profile.models.length:0};
 }
@@ -1289,7 +1344,7 @@ const ownPreviousLoopback=existing&&existing.kind==="kth"&&
 if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL&&!ownPreviousLoopback))){
   return {ok:false,code:"foreign-url"};
 }
-const hadOtherPending=snapshot.sources.some(source=>{
+hadOtherPending=snapshot.sources.some(source=>{
   if(source.id===existing?.id)return false;
   if(Array.isArray(source.models))return source.models.some(model=>model.status==="pending");
   return snapshot.applyState!==undefined&&!["applied","idle","ready"].includes(snapshot.applyState);
@@ -1364,7 +1419,19 @@ if(status==="deferred"&&!hadOtherPending&&typeof sources.applyPending==="functio
   typeof saved.value?.accountRevision==="string"&&saved.value.accountRevision){
   applyScopeToken=snapshot.scopeToken;applyRevision=saved.value.accountRevision;
 }
-return {ok:true,routeCleanupPending:!!directSourceID&&(status!=="applied"||!(await disconnectDirect())),
+let cleanupSettled=true,cleanupScopeToken="",cleanupRevision="";
+if(directSourceID&&status==="applied"){
+  // The route cleanup runs only after the replacement is applied; within
+  // Electron's post-ready window it comes back pending or deferred, and the
+  // settlement above either finishes it here or hands Go the revision to
+  // apply without restarting Kimi.
+  const cleanup=await disconnectDirect();
+  cleanupSettled=cleanup?.settled===true;
+  cleanupScopeToken=typeof cleanup?.applyScopeToken==="string"?cleanup.applyScopeToken:"";
+  cleanupRevision=typeof cleanup?.applyRevision==="string"?cleanup.applyRevision:"";
+}
+return {ok:true,routeCleanupPending:!!directSourceID&&(status!=="applied"||!cleanupSettled),
+  cleanupApplyScopeToken:cleanupScopeToken,cleanupApplyRevision:cleanupRevision,
   requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount,
   applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })(` + quoteJS(token) + `,` + quoteJS(baseURL) + `,` + quoteJS(disconnectDirectSourceID) + `)`

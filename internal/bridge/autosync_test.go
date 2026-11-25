@@ -833,6 +833,76 @@ func TestAutoSyncObserveLeavesAnExplicitFailureAlone(t *testing.T) {
 	}
 }
 
+// A readback that confirms the catalog settles the finished auto-sync
+// operation strip too: without it the top bar keeps asking for a restart every
+// page already reports as done.
+func TestAutoSyncObserveSettlesTheRestartOperationStrip(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.applied, h.adopted = true, true, true, true })
+	digest := catalogSurfaceDigest(h.doc(t))
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = digest, false
+	h.n.autoSync.setStateLocked(autoSyncRequiresRestart, kimi.NativeRequiresRestart)
+	h.n.autoSync.mu.Unlock()
+	started := time.Now().UnixMilli() - 2000
+	h.n.mu.Lock()
+	h.n.operation = core.Document{"id": "op-1", "action": "auto-sync", "state": autoSyncRequiresRestart,
+		"reason": kimi.NativeRequiresRestart, "startedAt": started, "finishedAt": started}
+	h.n.mu.Unlock()
+
+	h.n.autoSync.observe(integrationValue(h.integration()), h.doc(t))
+
+	if state := h.state(); state != autoSyncSynced {
+		t.Fatalf("an adopted catalog published %q", state)
+	}
+	h.n.mu.Lock()
+	operation := core.Document{}
+	for key, value := range h.n.operation {
+		operation[key] = value
+	}
+	h.n.mu.Unlock()
+	if core.String(operation["state"]) != autoSyncSynced {
+		t.Fatalf("the stale operation strip survived: %+v", operation)
+	}
+	if _, present := operation["reason"]; present {
+		t.Fatalf("the restart reason survived: %+v", operation)
+	}
+	if documentInt64(operation["finishedAt"]) <= started {
+		t.Fatalf("finishedAt was not refreshed: %+v", operation)
+	}
+}
+
+// The same strip is retired when a save reverts to the catalog the running
+// application already adopted. That path never runs the coordinator, so it
+// settles the strip explicitly.
+func TestAutoSyncScheduleSettlesTheRestartOperationStrip(t *testing.T) {
+	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+	doc := h.doc(t)
+	h.n.autoSync.mu.Lock()
+	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = catalogSurfaceDigest(doc), true
+	h.n.autoSync.setStateLocked(autoSyncRequiresRestart, kimi.NativeRequiresRestart)
+	h.n.autoSync.mu.Unlock()
+	h.n.mu.Lock()
+	h.n.operation = core.Document{"id": "op-2", "action": "auto-sync", "state": autoSyncRequiresRestart,
+		"reason": kimi.NativeRequiresRestart, "startedAt": time.Now().UnixMilli()}
+	h.n.mu.Unlock()
+
+	widened := h.doc(t)
+	widened["models"] = append(core.Rows(widened["models"]), autoSyncModel("gpt-beta", "Beta"))
+	h.n.autoSync.schedule("/api/models", widened, doc)
+
+	if state := h.state(); state != autoSyncSynced {
+		t.Fatalf("a reverted save published %q", state)
+	}
+	h.n.mu.Lock()
+	operationState := core.String(h.n.operation["state"])
+	_, hasReason := h.n.operation["reason"]
+	h.n.mu.Unlock()
+	if operationState != autoSyncSynced || hasReason {
+		t.Fatalf("the stale operation strip survived: state=%q reason=%v", operationState, hasReason)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // regression: a background write never launches Kimi and never elevates
 

@@ -267,7 +267,7 @@ const sources=globalThis.clawBridgeAPI?.byokSources;
 if(!sources||typeof sources.list!=="function"||typeof sources.preview!=="function"||typeof sources.save!=="function"||typeof sources.disconnect!=="function"){
   return {ok:false,code:"direct-mode-unsupported"};
 }
-const unwrap=result=>result?.ok===true?result.value:null;
+const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS + `
 const normalizeURL=(value,protocol)=>{
   let text=String(value??"").trim().replace(/\/+$/,"");
   if(protocol==="anthropic")text=text.replace(/\/v1$/,"");
@@ -394,7 +394,7 @@ const officialProviderIDs=source=>{
   return ids;
 };
 const cleanupGateway=async()=>{
-  if(!request.disconnectGateway||status!=="applied")return hadManagedGateway;
+  if(!request.disconnectGateway||status!=="applied")return {settled:hadManagedGateway};
   const current=await readSnapshot();
   if(!current||current.scopeToken!==snapshot.scopeToken)return {error:"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
@@ -402,16 +402,18 @@ const cleanupGateway=async()=>{
   const ids=officialProviderIDs(direct);
   const ready=!direct?.quarantined&&ids&&draftModels.every(wanted=>directModels.some(model=>
     model.providerId===ids.get(wanted.providerId)&&model.model===wanted.model&&model.status==="available"));
-  if(!ready)return hadManagedGateway;
+  if(!ready)return {settled:hadManagedGateway};
   const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
-  if(!ownGateway(gateway))return false;
+  // Nothing of this installation's gateway is left to remove: an inactive or
+  // foreign one is not this cleanup's business.
+  if(!ownGateway(gateway))return {settled:true};
   const reply=await sources.disconnect({sourceId:gateway.id,accountRevision:current.accountRevision,sourceRevision:gateway.revision??null});
-  if(reply?.ok){gatewayDisconnected=true;return false;}
-  return true;
+  if(reply?.ok===true)gatewayDisconnected=true;
+  return await settleDisconnect(reply,current,otherPending);
 };
 let cleanup=await cleanupGateway();
 if(cleanup?.error)return {ok:false,code:cleanup.error};
-let routeCleanupPending=cleanup===true;
+let routeCleanupPending=cleanup?.settled!==true;
 if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
   const current=await readSnapshot();
   if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:"contract-changed"};
@@ -432,15 +434,20 @@ if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
     if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};
     cleanup=await cleanupGateway();
     if(cleanup?.error)return {ok:false,code:cleanup.error};
-    routeCleanupPending=cleanup===true;
+    routeCleanupPending=cleanup?.settled!==true;
   }
 }
-let applyScopeToken="",applyRevision="";
+let applyScopeToken="",applyRevision="",cleanupApplyScopeToken="",cleanupApplyRevision="";
 if(status==="deferred"&&!otherPending&&typeof sources.applyPending==="function"&&
   typeof saved.accountRevision==="string"&&saved.accountRevision){
   applyScopeToken=snapshot.scopeToken;applyRevision=saved.accountRevision;
 }
+if(routeCleanupPending&&cleanup?.settled!==true){
+  cleanupApplyScopeToken=typeof cleanup?.applyScopeToken==="string"?cleanup.applyScopeToken:"";
+  cleanupApplyRevision=typeof cleanup?.applyRevision==="string"?cleanup.applyRevision:"";
+}
 return {ok:true,sourceId:saved.sourceId,gatewayDisconnected:gatewayDisconnected,routeCleanupPending:routeCleanupPending,
+  cleanupApplyScopeToken:cleanupApplyScopeToken,cleanupApplyRevision:cleanupApplyRevision,
   models:draftModels.length,requiresRestart:status!=="applied",restartDeferred:status==="deferred",
   applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })(` + quoteJS(string(encoded)) + `)`, nil

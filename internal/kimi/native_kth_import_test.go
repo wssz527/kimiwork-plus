@@ -979,3 +979,232 @@ func TestDirectImportKeepsTheCleanupClaimWhenTheRetriedCleanupFails(t *testing.T
 		t.Fatalf("gateway cleanup calls = %d", page.gatewayCleanupCalls)
 	}
 }
+
+// A route cleanup answered inside Electron's post-ready window carries the
+// revision its disconnect left behind. The import settles it through the same
+// bounded retry the save itself uses, so the old Direct Mode source disappears
+// without the restart its deferred answer asked for.
+func TestImportSettlesADeferredDirectCleanupAfterTheReplacement(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": false,
+			"routeCleanupPending": true, "cleanupApplyScopeToken": "s1", "cleanupApplyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("an applied cleanup retry must clear every pending claim: %+v", result)
+	}
+	if page.applyPendingCalls != 2 {
+		t.Fatalf("applyPending polls = %d, want the deferred cleanup answer and the applied one", page.applyPendingCalls)
+	}
+	if page.directCleanupCalls != 0 {
+		t.Fatalf("a settled cleanup must not be run again: %d", page.directCleanupCalls)
+	}
+}
+
+func TestImportKeepsTheCleanupRestartWhenTheDirectCleanupStaysDeferred(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": false,
+			"routeCleanupPending": true, "cleanupApplyScopeToken": "s1", "cleanupApplyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RouteCleanupPending || !result.RequiresRestart || !result.RestartDeferred {
+		t.Fatalf("a cleanup that never applies keeps its restart prompt: %+v", result)
+	}
+	if page.applyPendingCalls < 2 {
+		t.Fatalf("the cleanup retry did not poll: %d", page.applyPendingCalls)
+	}
+}
+
+// The save's own deferred answer is applied, and only then is the old source
+// disconnected; that disconnect can land deferred in turn and is settled the
+// same way instead of leaving the removal to the next sync.
+func TestImportSettlesADeferredDisconnectAfterADeferredSave(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}},
+		directCleanupReply: map[string]any{"ok": true, "settled": false,
+			"applyScopeToken": "s1", "applyRevision": "r3"}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("both the save and the cleanup landed: %+v", result)
+	}
+	if page.directCleanupCalls != 1 {
+		t.Fatalf("direct cleanup calls = %d", page.directCleanupCalls)
+	}
+	if page.applyPendingCalls != 3 {
+		t.Fatalf("applyPending polls = %d, want two for the save and one for the cleanup", page.applyPendingCalls)
+	}
+}
+
+func TestImportKeepsTheCleanupRestartWhenTheDeferredDisconnectNeverApplies(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		// The save applies on the first poll; the cleanup's own retry is then
+		// answered by a busy page, which keeps the disconnect deferred.
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"},
+			{"ok": false, "code": "byok-busy"}},
+		directCleanupReply: map[string]any{"ok": true, "settled": false,
+			"applyScopeToken": "s1", "applyRevision": "r3"}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RouteCleanupPending || !result.RequiresRestart || !result.RestartDeferred {
+		t.Fatalf("a deferred disconnect must keep its own restart prompt: %+v", result)
+	}
+	if page.applyPendingCalls != 2 || page.directCleanupCalls != 1 {
+		t.Fatalf("applyPending polls = %d cleanups = %d", page.applyPendingCalls, page.directCleanupCalls)
+	}
+}
+
+// The same settlement on the Direct Mode entry point: the gateway disconnect
+// deferred by the post-ready window is applied in place.
+func TestDirectImportSettlesADeferredGatewayCleanupAfterTheReplacement(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": false, "routeCleanupPending": true,
+			"cleanupApplyScopeToken": "s1", "cleanupApplyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("an applied cleanup retry must clear every pending claim: %+v", result)
+	}
+	if page.applyPendingCalls != 2 {
+		t.Fatalf("applyPending polls = %d", page.applyPendingCalls)
+	}
+	if page.gatewayCleanupCalls != 0 {
+		t.Fatalf("a settled cleanup must not be run again: %d", page.gatewayCleanupCalls)
+	}
+}
+
+func TestDirectImportKeepsTheCleanupRestartWhenTheGatewayCleanupStaysDeferred(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": false, "routeCleanupPending": true,
+			"cleanupApplyScopeToken": "s1", "cleanupApplyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RouteCleanupPending || !result.RequiresRestart || !result.RestartDeferred {
+		t.Fatalf("a cleanup that never applies keeps its restart prompt: %+v", result)
+	}
+}
+
+func TestDirectImportSettlesADeferredDisconnectAfterADeferredSave(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}},
+		gatewayCleanupReply: map[string]any{"ok": true, "settled": false,
+			"applyScopeToken": "s1", "applyRevision": "r3"}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("both the save and the cleanup landed: %+v", result)
+	}
+	if page.gatewayCleanupCalls != 1 || page.applyPendingCalls != 3 {
+		t.Fatalf("gateway cleanups = %d applyPending polls = %d",
+			page.gatewayCleanupCalls, page.applyPendingCalls)
+	}
+}
+
+func TestDirectImportKeepsTheCleanupRestartWhenTheDeferredDisconnectNeverApplies(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"},
+			{"ok": false, "code": "byok-busy"}},
+		gatewayCleanupReply: map[string]any{"ok": true, "settled": false,
+			"applyScopeToken": "s1", "applyRevision": "r3"}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RouteCleanupPending || !result.RequiresRestart || !result.RestartDeferred {
+		t.Fatalf("a deferred disconnect must keep its own restart prompt: %+v", result)
+	}
+	if page.applyPendingCalls != 2 || page.gatewayCleanupCalls != 1 {
+		t.Fatalf("applyPending polls = %d cleanups = %d", page.applyPendingCalls, page.gatewayCleanupCalls)
+	}
+}

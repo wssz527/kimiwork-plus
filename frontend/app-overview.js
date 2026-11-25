@@ -1486,7 +1486,11 @@ function renderOperation(data) {
   const running = isInFlight(op);
   if (op.action === 'auto-sync') {
     const state = op.state || '';
-    if (!running && AUTO_SYNC_QUIET_STATES.has(state)) {
+    /* 顶栏以 integration.autoSync 为准：读回确认目录已生效后，残留的
+       requires_restart 操作记录不该让整条黄色提示继续常驻。 */
+    const liveAutoState = data?.integration?.autoSync?.state || '';
+    const settledByReadback = state === 'requires_restart' && AUTO_SYNC_QUIET_STATES.has(liveAutoState);
+    if (!running && (AUTO_SYNC_QUIET_STATES.has(state) || settledByReadback)) {
       dom.opbar.dataset.running = 'false';
       setHidden(dom.opbar, true);
       return;

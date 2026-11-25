@@ -1332,6 +1332,10 @@ Published as `integration.autoSync` on `GET /api/state`, the states are `idle`,
   runs the import without requiring another save.
 - A write blocked by the compatibility gate, or a deliberate `disconnect-models`,
   is not retried automatically.
+- Once a readback proves the running application adopted the catalog, a finished
+  `auto-sync` operation recorded as `requires_restart` is retired to `synced` and
+  its reason cleared in the same pass, so the top strip cannot keep asking for a
+  restart every page already reports as done.
 - Direct mode's first static hosts authorization is never requested from the
   background. Without it the run ends `failed` with reason
   `direct_prepare_required`; only the explicit resync action can complete the
@@ -1428,7 +1432,18 @@ different scope, `stale` for a revision other than the one the save saw,
 `apply-failed` fails the import with `native_import_apply_failed`;
 `account-changed` stops it as `account-changed`; `deferred`, `stale` and
 `unsupported` leave the restart prompt exactly as the deferred write did, so a
-real running turn is never interrupted. When the retry applies a gateway import
-that still owed a route cleanup, one single-shot
-`disconnectDirectSourceExpression` finishes it; a direct import uses
-`disconnectGatewayExpression` the same way.
+real running turn is never interrupted.
+
+Every page-side `byokSources.disconnect` settles through one shared block. A
+reply without a `status`, or with `status: "applied"`, is done and costs no
+extra call. `status: "pending"` is applied in place through `sources.list()`
+and `applyPending` when no other source holds a pending confirmation. A
+`status: "deferred"` reply travels back as
+`cleanupApplyScopeToken`/`cleanupApplyRevision`, and `ImportModels`/`ImportDirect`
+finish it with the same `retryDeferredApply`. A cleanup that still ends
+`deferred` keeps `routeCleanupPending` and asks for the restart that removes the
+old source (`restartDeferred`); `apply-failed` keeps the cleanup claim and the
+restart prompt without the deferred marker; `stale` and `account-changed` leave
+the removal to the next sync. The deferred-save path uses
+`disconnectDirectSourceExpression` (or `disconnectGatewayExpression` for a
+direct import) with the same settlement.

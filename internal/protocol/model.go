@@ -329,6 +329,20 @@ func KimiCompatibleModelID(id string) string {
 	return kimiCompatibleModelPrefix + hex.EncodeToString(sum[:])
 }
 
+// IsKimiCompatibleModelID reports whether id is the generated form above: the
+// menu-facing alias of a saved model, not a name anyone chose.
+func IsKimiCompatibleModelID(id string) bool {
+	if !strings.HasPrefix(id, kimiCompatibleModelPrefix) {
+		return false
+	}
+	digest := id[len(kimiCompatibleModelPrefix):]
+	if len(digest) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil && strings.ToLower(id) == id
+}
+
 // ValidateModelsAny accepts rows that already went through a JSON decode.
 func ValidateModelsAny(rows []any) ([]Model, error) {
 	raw := make([]json.RawMessage, 0, len(rows))

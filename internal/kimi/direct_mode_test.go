@@ -114,6 +114,7 @@ const custom={id:"byok-src-1",kind:"custom",displayName:"KimiWork + 直连",revi
 const ok=value=>({ok:true,value});
 let saved=false;
 let saveCount=0;
+let disconnectedRevision=null;
 globalThis.seenDraft=null;
 globalThis.seenPreviewRequest=null;
 globalThis.clawBridgeAPI={byokSources:{
@@ -122,7 +123,7 @@ globalThis.clawBridgeAPI={byokSources:{
     custom.providers[0].id=providerId;
     custom.models=[{providerId,model:"model-a",alias:providerId+"/model-a",status:"available"}];
     if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId,model:"catalog-extra",alias:providerId+"/catalog-extra",status:"pending",provenance:"catalog"});
-    return ok({scopeToken:"account-1",accountRevision:saved?"r2":"r1",applyState:globalThis.snapshotApplyState||"applied",
+    return ok({scopeToken:"account-1",accountRevision:disconnectedRevision||(saved?"r2":"r1"),applyState:globalThis.snapshotApplyState||"applied",
     sources:(gatewayConnected?[kth]:[]).concat([custom])});},
   preview(request){
     calls.push("preview");
@@ -137,7 +138,10 @@ globalThis.clawBridgeAPI={byokSources:{
   save(request){calls.push("save");if(globalThis.failSave)return {ok:false,reasonCode:"save-refused"};saveCount++;saved=true;
     return ok({sourceId:"byok-src-1",accountRevision:"r2",status:globalThis.pendingCatalog&&saveCount>1?"applied":"pending"});},
   applyPending(revision){calls.push("apply:"+revision);return ok({status:"applied"});},
-  disconnect(request){calls.push("disconnect:"+request.sourceId);if(globalThis.failDisconnect||(globalThis.pendingCatalog&&saveCount===1))return {ok:false,reasonCode:"disconnect-refused"};gatewayConnected=false;return ok({});},
+  disconnect(request){calls.push("disconnect:"+request.sourceId);if(globalThis.failDisconnect||(globalThis.pendingCatalog&&saveCount===1))return {ok:false,reasonCode:"disconnect-refused"};gatewayConnected=false;
+    if(globalThis.disconnectStatus){disconnectedRevision=globalThis.disconnectRevision||"r3";
+      return ok({status:globalThis.disconnectStatus,accountRevision:disconnectedRevision});}
+    return ok({});},
 }};
 `
 
@@ -1371,5 +1375,62 @@ func TestControllerConfigureRefusesModeChangeDuringImport(t *testing.T) {
 	settings.IntegrationMode = IntegrationModeDirect
 	if err := h.controller.Configure(settings); err != ErrImportBusy {
 		t.Fatalf("mode change during import: %v", err)
+	}
+}
+
+// The same settlement for the gateway cleanup of a Direct Mode import: a
+// `pending` answer is applied in place, a `deferred` one carries the revision
+// the Go retry owns, and a plain applied disconnect stays one call.
+func TestDirectImportSettlesAPendingOrDeferredGatewayDisconnect(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       string
+		wantCalls    string
+		wantPending  bool
+		wantRevision string
+	}{
+		{
+			name: "a pending disconnect is applied in place", status: "pending",
+			wantCalls: "list,preview,save,list,apply:r2,list,disconnect:byok-kth,list,apply:r3",
+		},
+		{
+			name: "a deferred disconnect hands its revision to the retry", status: "deferred",
+			// The re-save branch reads the store once before deciding there is no
+			// pending catalog row of its own to save.
+			wantCalls:   "list,preview,save,list,apply:r2,list,disconnect:byok-kth,list",
+			wantPending: true, wantRevision: "r3",
+		},
+		{
+			name: "an applied disconnect stays one call", status: "applied",
+			wantCalls: "list,preview,save,list,apply:r2,list,disconnect:byok-kth",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validDirectImportRequest()
+			request.DisconnectGateway = true
+			request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+			vm := runDirectExpression(t, request, `globalThis.disconnectStatus="`+tc.status+`";`)
+			result := vm.Get("directResult").ToObject(vm)
+			pending := result.Get("routeCleanupPending") != nil && result.Get("routeCleanupPending").ToBoolean()
+			if !result.Get("ok").ToBoolean() || pending != tc.wantPending {
+				t.Fatalf("result: %v", result.Export())
+			}
+			revision := ""
+			if value := result.Get("cleanupApplyRevision"); value != nil {
+				revision = value.String()
+			}
+			if revision != tc.wantRevision {
+				t.Fatalf("cleanup revision = %q, want %q", revision, tc.wantRevision)
+			}
+			if tc.wantPending {
+				if scope := result.Get("cleanupApplyScopeToken").String(); scope != "account-1" {
+					t.Fatalf("cleanup scope = %q", scope)
+				}
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
 	}
 }

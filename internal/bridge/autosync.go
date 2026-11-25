@@ -236,9 +236,10 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 	previous := catalogSurfaceDigest(prev)
 	target := catalogSurfaceDigest(next)
 	changed := previous != target
+	settled := false
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.stopped {
+		c.mu.Unlock()
 		return
 	}
 	if changed {
@@ -253,18 +254,27 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 			c.stopTimerLocked()
 			if c.syncedAdopted {
 				c.setStateLocked(autoSyncSynced, "")
+				settled = true
 			} else {
 				c.setStateLocked(autoSyncRequiresRestart, kimi.NativeRequiresRestart)
+			}
+			c.mu.Unlock()
+			// Native.mu is never taken while c.mu is held: the coordinator's own
+			// runs publish through both locks in the other order.
+			if settled && c.native != nil {
+				c.native.settleAutoSyncOperation()
 			}
 			return
 		}
 		c.pending, c.target = true, target
 	} else if !c.pending {
 		// Nothing about this save reaches Kimi, and nothing older is waiting.
+		c.mu.Unlock()
 		return
 	}
 	c.setStateLocked(autoSyncScheduled, "")
 	c.armLocked(c.debounce)
+	c.mu.Unlock()
 }
 
 // reset ends everything queued when the user removes the managed models.
@@ -368,18 +378,21 @@ func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Do
 	if c == nil || current == nil {
 		return
 	}
+	settled := false
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.stopped || c.running || c.disconnected {
+		c.mu.Unlock()
 		return
 	}
 	if !current.Applied || !current.Adopted {
+		c.mu.Unlock()
 		return
 	}
 	if c.pending {
 		// The queue owns the next word: adopted evidence about the older surface
 		// says nothing about the save that is still waiting, and cancelling it
 		// here would drop a model removal, a rename or a rotated key.
+		c.mu.Unlock()
 		return
 	}
 	digest := catalogSurfaceDigest(d)
@@ -389,6 +402,7 @@ func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Do
 			// The restart the user was asked for happened.
 			c.syncedAdopted = true
 			c.setStateLocked(autoSyncSynced, "")
+			settled = true
 		}
 	case "", autoSyncIdle:
 		if c.synced == "" {
@@ -397,6 +411,31 @@ func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Do
 			c.setStateLocked(autoSyncSynced, "")
 		}
 	}
+	c.mu.Unlock()
+	// The operation strip belongs to Native, whose lock is never taken while
+	// c.mu is held: a run publishes through both in the other order.
+	if settled && c.native != nil {
+		c.native.settleAutoSyncOperation()
+	}
+}
+
+// settleAutoSyncOperation retires a finished auto-sync operation whose restart
+// a later readback confirmed. Without it the top strip keeps asking for a
+// restart the running application no longer owes, while every page that reads
+// `integration` already says the catalog is in place.
+func (n *Native) settleAutoSyncOperation() {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.operation == nil || core.String(n.operation["action"]) != "auto-sync" ||
+		core.String(n.operation["state"]) != autoSyncRequiresRestart {
+		return
+	}
+	n.operation["state"] = autoSyncSynced
+	delete(n.operation, "reason")
+	n.operation["finishedAt"] = time.Now().UnixMilli()
 }
 
 func (c *autoSyncCoordinator) stopTimerLocked() {

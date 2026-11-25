@@ -12,6 +12,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 const (
@@ -23,6 +24,9 @@ const (
 	trayRecentConversations  = 3
 	trayConversationTitleLen = 28
 	trayUpdatePlaceholder    = "发现新版本 · 前往更新…"
+	// trayUnlistedGatewayModel names a conversation bound to a gateway model the
+	// active catalog no longer lists, instead of showing its digest id.
+	trayUnlistedGatewayModel = "网关模型（目录未列出）"
 )
 
 var trayOfficialModels = map[string]string{
@@ -99,19 +103,31 @@ func trayReadableModelName(alias string, models []kimi.ConversationModel) string
 			return name
 		}
 	}
+	if name := strings.TrimSpace(trayBYOKModelID(alias)); name != "" {
+		// A generated K3-compatible id is a digest, not a name: 64 hex characters
+		// in the tray say nothing about the model. A conversation can outlive the
+		// catalog entry that would have named it (Direct Mode, or a model removed
+		// from the active catalog), so it gets an honest label instead.
+		if protocol.IsKimiCompatibleModelID(name) {
+			return trayUnlistedGatewayModel
+		}
+		return name
+	}
+	return "默认模型"
+}
+
+// trayBYOKModelID returns the model id a BYOK alias addresses, without the
+// provider prefix the official menu adds.
+func trayBYOKModelID(alias string) string {
 	for _, prefix := range trayBYOKPrefixes {
 		if strings.HasPrefix(alias, prefix) {
-			if name := strings.TrimSpace(strings.TrimPrefix(alias, prefix)); name != "" {
-				return name
-			}
+			return strings.TrimPrefix(alias, prefix)
 		}
 	}
 	if match := trayBYOKUUIDPrefix.FindString(alias); match != "" {
-		if name := strings.TrimSpace(alias[len(match):]); name != "" {
-			return name
-		}
+		return alias[len(match):]
 	}
-	return "默认模型"
+	return ""
 }
 
 func trayModelDisplayName(model kimi.ConversationModel, models []kimi.ConversationModel) string {

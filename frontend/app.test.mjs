@@ -5463,6 +5463,15 @@ test('a finished auto-sync no longer sticks on “正在自动同步…” or le
     renderOperation({ operation: { action: 'auto-sync', state } });
     assert.equal(nodes.opbar.hidden, true, state + ' is a quiet finished state');
   }
+  /* 读回确认目录生效后，残留的 requires_restart 操作记录必须让位给
+     integration.autoSync；仍在同步的状态则继续显示这条提示。 */
+  nodes.opbar.hidden = false;
+  renderOperation({ operation: { action: 'auto-sync', state: 'requires_restart' },
+    integration: { autoSync: { state: 'synced' } } });
+  assert.equal(nodes.opbar.hidden, true, 'a settled readback retires the stale restart strip');
+  renderOperation({ operation: { action: 'auto-sync', state: 'requires_restart' },
+    integration: { autoSync: { state: 'syncing' } } });
+  assert.equal(nodes.opbar.hidden, false, 'a live sync keeps the strip visible');
   renderOperation({ operation: { action: 'auto-sync', state: 'running' } });
   assert.equal(nodes.opbar.hidden, false);
   assert.match(nodes.opbarName.textContent, /正在自动同步模型目录/);

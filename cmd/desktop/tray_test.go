@@ -59,10 +59,13 @@ func TestTrayConversationTitleCollapsesAndTruncates(t *testing.T) {
 }
 
 func TestTrayReadableModelNames(t *testing.T) {
+	compatible := "kimi-k3-kwp-" + strings.Repeat("a", 64)
 	models := []kimi.ConversationModel{
 		{Alias: "byok-kth-kimi/kimi-k2", DisplayName: "Kimi K2"},
 		{Alias: "byok-kth-resp/group/glm-5-3-flash"},
 		{Alias: "byok-kth-kimi/new-alias", PreviousAlias: "byok-kth-kimi/old-alias", DisplayName: "迁移模型"},
+		{Alias: "byok-kth-kimi/" + compatible, DisplayName: "K3 网关模型"},
+		{Alias: "byok-123e4567-e89b-12d3-a456-426614174000/" + compatible, DisplayName: "旧网关模型"},
 	}
 	for _, tc := range []struct{ alias, want string }{
 		{"k3-agent", "官方 · K3"},
@@ -72,6 +75,8 @@ func TestTrayReadableModelNames(t *testing.T) {
 		{"byok-kth-kimi/old-alias", "迁移模型"},
 		{"byok-kth-resp/group/glm-5-3-flash", "group/glm-5-3-flash"},
 		{"byok-123e4567-e89b-12d3-a456-426614174000/provider/model", "provider/model"},
+		{"byok-kth-kimi/" + compatible, "K3 网关模型"},
+		{"byok-123e4567-e89b-12d3-a456-426614174000/" + compatible, "旧网关模型"},
 		{"unknown-model", "默认模型"},
 		{"", "默认模型"},
 	} {
@@ -84,6 +89,28 @@ func TestTrayReadableModelNames(t *testing.T) {
 	}
 	if got := trayModelDisplayName(kimi.ConversationModel{Alias: "byok-kth-resp/group/glm-5-3-flash"}, models); got != "group/glm-5-3-flash" {
 		t.Fatalf("readable display name fallback = %q", got)
+	}
+}
+
+// A conversation can outlive the catalog entry that names its model: Direct
+// Mode, or a model removed from the active catalog. The tray then shows an
+// honest label instead of the generated 76-character digest id.
+func TestTrayReadableModelNameHidesUnlistedCompatibleDigests(t *testing.T) {
+	digest := strings.Repeat("0827c74e", 8)
+	for _, alias := range []string{
+		"byok-kth-kimi/kimi-k3-kwp-" + digest,
+		"byok-kth-resp/kimi-k3-kwp-" + digest,
+		"byok-123e4567-e89b-12d3-a456-426614174000/kimi-k3-kwp-" + digest,
+	} {
+		if got := trayReadableModelName(alias, nil); got != "网关模型（目录未列出）" {
+			t.Fatalf("trayReadableModelName(%q) = %q", alias, got)
+		}
+	}
+	if got := trayReadableModelName("byok-kth-kimi/kimi-k3-kwp-short", nil); got != "kimi-k3-kwp-short" {
+		t.Fatalf("a non-digest id was hidden: %q", got)
+	}
+	if got := trayReadableModelName("byok-kth-kimi/kimi-k2", nil); got != "kimi-k2" {
+		t.Fatalf("a readable id changed: %q", got)
 	}
 }
 

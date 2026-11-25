@@ -513,3 +513,176 @@ globalThis.clawBridgeAPI={byokSources:{
 		})
 	}
 }
+
+// A gateway import that switches away from Direct Mode disconnects the old
+// source after the replacement is applied. Electron answers `pending` while a
+// restarted Daimon prepares that write and `deferred` inside its post-ready
+// window; neither may leave the old source connected on disk.
+func TestGatewayImportSettlesAPendingOrDeferredDirectDisconnect(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		otherPending bool
+		saveStatus   string
+		disconnect   string
+		wantCalls    string
+		wantPending  bool
+		wantScope    string
+		wantRevision string
+	}{
+		{
+			name: "a pending disconnect is applied in place", saveStatus: "pending",
+			disconnect: `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:  "list,preview,save,list,apply:r2,list,disconnect,list,apply:r3",
+		},
+		{
+			name: "a deferred disconnect hands its revision to the retry", saveStatus: "pending",
+			disconnect:  `{status:"deferred",accountRevision:"r3"}`,
+			wantCalls:   "list,preview,save,list,apply:r2,list,disconnect",
+			wantPending: true, wantScope: "account", wantRevision: "r3",
+		},
+		{
+			name: "an applied disconnect stays one call", saveStatus: "applied",
+			disconnect: `{status:"applied",accountRevision:"r3"}`,
+			wantCalls:  "list,preview,save,list,disconnect",
+		},
+		{
+			name:         "another source's pending confirmation is never applied",
+			otherPending: true, saveStatus: "applied",
+			disconnect:  `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:   "list,preview,save,list,disconnect",
+			wantPending: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			sources := `[{id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},{id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"}]`
+			if tc.otherPending {
+				sources = `[{id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},{id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"},{id:"other",kind:"registry",models:[{status:"pending"}]}]`
+			}
+			if _, err := vm.RunString(`
+const calls=[];
+let revision="r1";
+const sources=(function(){return ` + sources + `;})();
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok({scopeToken:"account",accountRevision:revision,sources:sources});},
+  preview(){calls.push("preview");return ok({scopeToken:"account",accountRevision:"r1",sourceRevision:"k1",sourceId:"byok-kth",previewId:"preview",canSave:true,candidates:[{id:"m1"}]});},
+  save(){calls.push("save");revision="r2";return ok({sourceId:"byok-kth",accountRevision:"r2",status:"` + tc.saveStatus + `"});},
+  applyPending(applied){calls.push("apply:"+applied);return ok({status:"applied"});},
+  disconnect(request){calls.push("disconnect");revision="r3";return ok(` + tc.disconnect + `);},
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1", "direct-source") + `).then(result=>globalThis.importResult=result);`); err != nil {
+				t.Fatal(err)
+			}
+			result := vm.Get("importResult").ToObject(vm)
+			pending := result.Get("routeCleanupPending") != nil && result.Get("routeCleanupPending").ToBoolean()
+			if result.Get("ok").ToBoolean() != true || pending != tc.wantPending {
+				t.Fatalf("result: %v", result.Export())
+			}
+			scope, appliedRevision := "", ""
+			if value := result.Get("cleanupApplyScopeToken"); value != nil {
+				scope = value.String()
+			}
+			if value := result.Get("cleanupApplyRevision"); value != nil {
+				appliedRevision = value.String()
+			}
+			if scope != tc.wantScope || appliedRevision != tc.wantRevision {
+				t.Fatalf("cleanup scope=%q revision=%q, want %q/%q", scope, appliedRevision, tc.wantScope, tc.wantRevision)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
+	}
+}
+
+// The standalone cleanup expressions are the retry path a deferred apply uses.
+// They must parse and settle their own disconnect replies exactly like the
+// imports do: pending is applied in place, deferred carries the revision Go
+// retries, and a reply without a status stays one call.
+func TestStandaloneDisconnectExpressionsSettleTheirOwnReplies(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		expression   func() string
+		reply        string
+		wantCalls    string
+		wantSettled  bool
+		wantScope    string
+		wantRevision string
+	}{
+		{
+			name:       "a pending direct disconnect is applied in place",
+			expression: func() string { return disconnectDirectSourceExpression("direct-source") },
+			reply:      `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:  "list,disconnect,list,apply:r3", wantSettled: true,
+		},
+		{
+			name:       "a deferred direct disconnect carries its revision",
+			expression: func() string { return disconnectDirectSourceExpression("direct-source") },
+			reply:      `{status:"deferred",accountRevision:"r3"}`,
+			wantCalls:  "list,disconnect",
+			wantScope:  "scope", wantRevision: "r3",
+		},
+		{
+			name:       "an applied gateway disconnect is one call",
+			expression: func() string { return disconnectGatewayExpression("http://127.0.0.1:9100/v1") },
+			reply:      `{status:"applied",accountRevision:"r3"}`,
+			wantCalls:  "list,disconnect", wantSettled: true,
+		},
+		{
+			name:       "a pending gateway disconnect is applied in place",
+			expression: func() string { return disconnectGatewayExpression("http://127.0.0.1:9100/v1") },
+			reply:      `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:  "list,disconnect,list,apply:r3", wantSettled: true,
+		},
+		{
+			name:       "a deferred gateway disconnect carries its revision",
+			expression: func() string { return disconnectGatewayExpression("http://127.0.0.1:9100/v1") },
+			reply:      `{status:"deferred",accountRevision:"r3"}`,
+			wantCalls:  "list,disconnect",
+			wantScope:  "scope", wantRevision: "r3",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			if _, err := vm.RunString(`
+const calls=[];
+let revision="r2";
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok({scopeToken:"scope",accountRevision:revision,sources:[
+    {id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},
+    {id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json",providers:[]}]});},
+  applyPending(applied){calls.push("apply:"+applied);return ok({status:"applied"});},
+  disconnect(){calls.push("disconnect");revision="r3";return ok(` + tc.reply + `);},
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + tc.expression() + `).then(result=>globalThis.cleanupResult=result);`); err != nil {
+				t.Fatal(err)
+			}
+			result := vm.Get("cleanupResult").ToObject(vm)
+			settled := result.Get("settled") != nil && result.Get("settled").ToBoolean()
+			scope, revision := "", ""
+			if value := result.Get("applyScopeToken"); value != nil {
+				scope = value.String()
+			}
+			if value := result.Get("applyRevision"); value != nil {
+				revision = value.String()
+			}
+			if result.Get("ok").ToBoolean() != true || settled != tc.wantSettled ||
+				scope != tc.wantScope || revision != tc.wantRevision {
+				t.Fatalf("result: %v", result.Export())
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
+	}
+}
