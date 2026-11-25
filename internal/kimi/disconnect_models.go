@@ -25,6 +25,12 @@ func (a *cdpActions) DisconnectModels(ctx context.Context, request DisconnectReq
 	if failure != nil {
 		return DisconnectResult{State: failure.State, Reason: failure.Reason}, nil
 	}
+	if err := a.waitForDaimonNotBooting(ctx, nil); err != nil {
+		state, reason, surfaced := classifyActionError(err)
+		result := DisconnectResult{State: state, Reason: reason, Opened: opened}
+		a.closeDisconnectIfOpened(ctx, opened, &result)
+		return result, surfaced
+	}
 	value, err := a.evaluate(ctx, settings.sessionID, disconnectModelsExpression(request.DirectSourceID))
 	if err != nil {
 		if errors.Is(err, ErrSessionInvalid) {

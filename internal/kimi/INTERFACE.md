@@ -1340,3 +1340,59 @@ Published as `integration.autoSync` on `GET /api/state`, the states are `idle`,
 No real-device acceptance result is implied here. These are the implemented state
 transitions, covered by unit and race tests; signed-build GUI behavior belongs to
 the workspace handoff and release notes for the build actually tested.
+
+# Canonical provider id and the startup window (2026-11-25)
+
+## 44. `byok-kth-kimi` is what permits an in-place switch
+
+Kimi 3.2.28 switches between an official model and a BYOK model inside the
+current conversation only while the BYOK provider id of the `kimi` route is
+`byok-kth-kimi`. The official allocator resolves the id from, in order: a
+matching provider, `source.routeBindings[JSON.stringify(["kimi","kimi",null,
+baseUrl])]`, and finally a fresh allocation that is canonical only while no
+provider of that name exists and no `byok-kth-kimi/` alias is blocked. Upgrading
+from an earlier build, switching Direct Mode off, or a different loopback port
+therefore leaves `byok-<uuid>` behind, and the picker starts a new conversation.
+
+`ImportModels` repairs the store before the official preview runs, only in
+gateway mode, only for the account `AccountScope` verified, and only when the
+`byok-kth` source is a `kth` source whose registry and provider addresses are all
+loopback:
+
+- the canonical provider is present but the gateway route is not bound to it:
+  `routeBindings[routeKey]` is set to `byok-kth-kimi`;
+- no live source and no active or pending model uses the prefix, but
+  `blockedAliases` still carries `byok-kth-kimi/` entries: only those entries are
+  deleted;
+- the source is ours while its `kimi` provider is on another id: the source is
+  disconnected through the official `byokSources.disconnect` (and `applyPending`
+  when the reply is `pending`), then the aliases that apply blocked are cleared,
+  and the normal import runs in the same settings overlay.
+
+Every write is a compare-and-swap against the bytes that were read, uses mode
+`0600`, and leaves `secrets`, `ownedResources` and other accounts untouched. A
+disconnect that answers `deferred`/`pending` stops the import with
+`requires-restart` and `model_provider_reset_pending`; a store that keeps a
+non-canonical source after an applied disconnect stops with
+`native_import_store_changed`. A build without `byokSources.disconnect` answers
+`skipped` and imports exactly as before. `kimiK3State` reports
+`provider_mismatch` for this state, which the overview renders as
+`需修复原位切换` with the `connect-kimi` action.
+
+## 45. A write waits for the official runtime to leave its startup window
+
+Electron mounts `work-settings.html` about a second after a restart while Daimon
+still walks `idle -> provisioning -> spawning -> connecting -> ready`. A
+`byokSources.save`, `applyPending` or `disconnect` sent in that window throws
+`busy` in the main process and answers `deferred`, which puts auto-sync straight
+back into `requires_restart`.
+
+`ImportModels`, `ImportDirect` and `DisconnectModels` therefore call
+`waitForDaimonNotBooting` after the settings/Work targets are resolved and before
+the first mutating page call. It reads `kimiAgentAPI.getStatus().state` on
+`/kimi-agent.html` and polls only while the state is `provisioning`, `spawning`,
+`connecting`, `starting` or `restarting`. Any other state, an unreadable state,
+a missing `kimiAgentAPI` or a missing Work target returns immediately, so a build
+without the status API pays nothing. One status read is bounded by two seconds
+and the whole wait by `daimonBootWindow` (15 seconds); the window bounds the wait,
+never the write: once it expires the import runs and its own answer decides.

@@ -151,7 +151,21 @@ var (
 	// rejected exactly that case.
 	settingsReadyWindow = 15 * time.Second
 	settingsReadyStep   = 250 * time.Millisecond
+	// daimonBootWindow bounds how long a write waits for the official runtime to
+	// leave its startup states. Daimon reaches `ready` in 3-5 seconds after a
+	// launch; this is the long tail, not the expected wait.
+	daimonBootWindow = 15 * time.Second
+	// daimonStatusTimeout bounds one status read, so a wedged runtime cannot hold
+	// the write for the whole call timeout.
+	daimonStatusTimeout = 2 * time.Second
 )
+
+// daimonBootStates are the official runtime states a write must not run in:
+// the main process answers `busy` and the source save comes back deferred.
+var daimonBootStates = map[string]bool{
+	"provisioning": true, "spawning": true, "connecting": true,
+	"starting": true, "restarting": true,
+}
 
 func (a *cdpActions) Connected() bool {
 	closed, _ := a.pipe.Closed()
@@ -422,6 +436,33 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 		return *failure, nil
 	}
 
+	// A write sent while Daimon is still provisioning is answered "busy" and
+	// deferred, which is exactly the restart loop this wait ends.
+	if err := a.waitForDaimonNotBooting(ctx, nil); err != nil {
+		state, reason, surfaced := classifyActionError(err)
+		result := ImportResult{State: state, Reason: reason, Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, surfaced
+	}
+	// The official allocator reuses `byok-kth-kimi` only while the store names it
+	// on this source and its route, or names neither anywhere. Repairing that
+	// first is what lets the import below keep in-place model switching.
+	if mode, _ := a.integrationRoute(); mode != IntegrationModeDirect {
+		stop, err := a.repairKthProvider(ctx, settings, current, request.URL)
+		if err != nil {
+			state, reason, surfaced := classifyActionError(err)
+			result := ImportResult{State: state, Reason: reason, Opened: opened}
+			a.closeIfOpenedInto(ctx, opened, &result)
+			return result, surfaced
+		}
+		if stop != nil {
+			result := *stop
+			result.Opened = opened
+			a.closeIfOpenedInto(ctx, opened, &result)
+			return result, nil
+		}
+	}
+
 	// The import itself. The answer reports only what the caller may act on:
 	// whether it applied, whether a restart is still owed, and how many models
 	// the profile now holds. The profile rows, the token and every other native
@@ -501,6 +542,12 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 	}
 	if failure != nil {
 		return *failure, nil
+	}
+	if err := a.waitForDaimonNotBooting(ctx, nil); err != nil {
+		state, reason, surfaced := classifyActionError(err)
+		result := ImportResult{State: state, Reason: reason, Opened: opened}
+		a.closeIfOpenedInto(ctx, opened, &result)
+		return result, surfaced
 	}
 	expression, err := directImportExpression(request)
 	if err != nil {
@@ -750,6 +797,67 @@ func (a *cdpActions) openSettingsWhenReady(ctx context.Context, work actionTarge
 	}
 	return answer == true, true, nil
 }
+
+// waitForDaimonNotBooting holds a write until the official runtime has left its
+// startup states. Electron loads the settings page about a second after a
+// restart, while Daimon is still provisioning; a source save or disconnect sent
+// in that window answers `busy` and comes back deferred, which puts auto-sync
+// straight back into "restart required".
+//
+// It answers only on evidence: a page without the status entry point, an
+// unreadable state or any settled state returns immediately, so a build this
+// probe does not apply to never pays for it.
+func (a *cdpActions) waitForDaimonNotBooting(ctx context.Context, targets []actionTarget) error {
+	work, ok := findPath(targets, "/kimi-agent.html")
+	if !ok {
+		fresh, err := a.targets(ctx)
+		if err != nil {
+			return nil
+		}
+		if work, ok = findPath(fresh, "/kimi-agent.html"); !ok {
+			return nil
+		}
+	}
+	deadline := time.Now().Add(daimonBootWindow)
+	for {
+		if !daimonBootStates[a.daimonState(ctx, &work)] {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			// The window bounds the wait, not the write: the import still runs and
+			// its own answer decides.
+			return nil
+		}
+		if err := a.waitStep(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// daimonState reads the official runtime state without keeping the status
+// object: it carries transport credentials.
+func (a *cdpActions) daimonState(ctx context.Context, work *actionTarget) string {
+	probeCtx, cancel := context.WithTimeout(ctx, daimonStatusTimeout)
+	defer cancel()
+	value, err := a.evaluateTarget(probeCtx, work, daimonStatusExpression)
+	if err != nil {
+		return ""
+	}
+	state, _ := value.(string)
+	return state
+}
+
+// daimonStatusExpression asks the Work shell for the one field this wait needs.
+// A page whose preload has not mounted answers an empty string, which is a
+// state to leave alone rather than to wait on.
+const daimonStatusExpression = `(async()=>{
+const api=globalThis.kimiAgentAPI;
+if(!api||typeof api.getStatus!=="function")return "";
+try{
+  const status=await api.getStatus();
+  return typeof status?.state==="string"?status.state.slice(0,32):"";
+}catch(error){return "";}
+})()`
 
 // waitStep sleeps one poll interval, and ends early when the context or the pipe
 // is finished. A closed pipe must not be polled until a deadline: nothing will

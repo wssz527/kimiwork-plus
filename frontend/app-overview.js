@@ -363,6 +363,13 @@ function overviewState(data) {
       note: '新配置已写入并读回，但旧的服务商来源仍保留着；后台会重试清理，也可到「设置 → 接入与更新 → 高级排障」重新同步一次。在清理完成前不要退出后台服务。', ...base };
   }
   const info = data?.integration || {};
+  /* 官方给这次导入分配了临时来源标识：模型确实导入成功，但下拉框直切会新建
+     空白会话。这里必须排在「已就绪」之前，否则用户会以为可以放心切换。 */
+  if (data?.kimiK3State === 'provider_mismatch') {
+    return { code: 'repair', tone: 'warn', word: '需修复原位切换',
+      note: '模型已导入，但官方使用了临时来源标识，下拉框直切会新建空白会话；点一次「重新同步修复」即可自动恢复原位直切。',
+      ...base, launch: 'connect-kimi', launchLabel: '重新同步修复' };
+  }
   if (auto.state === 'synced' || info.adopted === true || (info.applied === true && info.desktop?.managed === false)) {
     return { code: 'ready', tone: 'ok', word: '已就绪',
       note: '可以在 Kimi 的模型下拉框里任意切换官方与第三方模型，当前对话会保留。', ...base };
@@ -373,7 +380,7 @@ function overviewState(data) {
 
 /* 主动作只表达「此刻点一下能得到什么」：能打开已在运行的 Kimi 就不重启，
    没有模型就先去模型页，不能靠重启解决的事不摆重启按钮。 */
-const OVERVIEW_NAV_ACTIONS = new Set(['restart-kimi', 'open-models', 'open-connection']);
+const OVERVIEW_NAV_ACTIONS = new Set(['restart-kimi', 'open-models', 'open-connection', 'connect-kimi']);
 
 function overviewLaunchAction(data, info) {
   if (OVERVIEW_NAV_ACTIONS.has(info.launch)) return info.launch;
@@ -418,11 +425,13 @@ function renderOverviewStatus(data) {
   if (dom.onboardLaunchHint) {
     const hint = info.code === 'restart'
       ? '点击后会正常退出 Kimi，再沿用当前登录和 Work 数据重新启动，约 2–3 秒。'
-      : info.code === 'takeover'
-        ? '将正常退出当前外部启动的 Kimi，并由本产品受管重启后完成同步。'
-        : info.code === 'empty' || info.code === 'no-eligible'
-          ? '先保存至少一个真实模型；后台会自动把它同步到 Kimi Work。'
-          : '';
+      : info.code === 'repair'
+        ? '将把临时来源标识修正为标准标识并重新写入模型目录，必要时先断开旧的临时来源；无需重启本软件。'
+        : info.code === 'takeover'
+          ? '将正常退出当前外部启动的 Kimi，并由本产品受管重启后完成同步。'
+          : info.code === 'empty' || info.code === 'no-eligible'
+            ? '先保存至少一个真实模型；后台会自动把它同步到 Kimi Work。'
+            : '';
     setHidden(dom.onboardLaunchHint, !hint);
     setText(dom.onboardLaunchHint, hint);
   }

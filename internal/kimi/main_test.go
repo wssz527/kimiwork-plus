@@ -124,6 +124,9 @@ func runFakeCDPChild() int {
 // preload API surface, not a DOM: the actions call these names and nothing else.
 func fakeEvaluate(expression, sessionID string) any {
 	switch {
+	case expression == daimonStatusExpression:
+		// The fake child never models the startup window.
+		return ""
 	case expression == importProbeExpression:
 		// Only the settings overlay carries the import API.
 		return true

@@ -5372,7 +5372,7 @@ function makeOverviewStatusEnv() {
     'const setText = (element, text) => { if (element) element.textContent = text; };',
     'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
     'const isInFlight = op => op?.state === "running";',
-    'const OVERVIEW_NAV_ACTIONS = new Set(["restart-kimi", "open-models", "open-connection"]);',
+    'const OVERVIEW_NAV_ACTIONS = new Set(["restart-kimi", "open-models", "open-connection", "connect-kimi"]);',
     'const OVERVIEW_LAUNCH_LABELS = { "launch-kimi": "启动 Kimi Work", "open-work": "打开 Kimi Work" };',
     'const renderShell = () => {};',
     'const renderOperation = () => {};',
@@ -5532,6 +5532,77 @@ test('a removed takeover survives later read-only operations and direct limits n
   assert.equal(restartBannerState(failedSync), null);
   const waitingLogin = { ...failedSync, integration: { ...failedSync.integration, autoSync: { state: 'waiting_login' } } };
   assert.equal(restartBannerState(waitingLogin), null);
+});
+
+test('a provider mismatch asks for one repair sync instead of reporting ready', () => {
+  const overviewState = makeOverviewState();
+  const data = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { mode: 'gateway', imported: true, applied: true, adopted: true,
+      desktop: { managed: true }, autoSync: { state: 'synced' } },
+    kimiK3State: 'provider_mismatch',
+  };
+  /* 官方用的是临时来源标识：模型确实导入了，但直切会新建会话，不能说已就绪。 */
+  const verdict = overviewState(data);
+  assert.equal(verdict.code, 'repair');
+  assert.equal(verdict.tone, 'warn');
+  assert.equal(verdict.word, '需修复原位切换');
+  assert.equal(verdict.launch, 'connect-kimi');
+  assert.equal(verdict.launchLabel, '重新同步修复');
+  assert.match(verdict.note, /临时来源标识/);
+  assert.match(verdict.note, /重新同步修复/);
+
+  /* 正常就绪保持原样。 */
+  for (const state of ['ready', '']) {
+    const normal = overviewState({ ...data, kimiK3State: state });
+    assert.equal(normal.code, 'ready', state + ' must keep the ready verdict');
+    assert.equal(normal.word, '已就绪');
+    assert.equal(normal.launch, 'launch-kimi');
+  }
+
+  /* 更紧要的状态排在修复之前：还没同步完、要重启时先说那件事。 */
+  assert.equal(overviewState({ ...data, integration: { ...data.integration, autoSync: { state: 'requires_restart' } } }).code, 'restart');
+  assert.equal(overviewState({ ...data, integration: { ...data.integration, autoSync: { state: 'syncing' } } }).code, 'syncing');
+
+  /* 直连模式不消费这个字段。 */
+  const direct = overviewState({
+    integrationMode: 'direct',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true },
+    kimiK3State: 'provider_mismatch',
+    integration: { mode: 'direct', imported: true, applied: true, adopted: true,
+      state: 'ready', aliases: { 'conn/resp/a': 'byok-src-1/model-a' },
+      desktop: { managed: true }, autoSync: { state: 'synced' } },
+    directMode: { supported: true, staticHostsReady: true, eligibleModelIds: ['conn/resp/a'] },
+  });
+  assert.equal(direct.code, 'ready');
+});
+
+test('the overview repair action runs the manual sync through the launch button', () => {
+  const { nodes, state, api } = makeOverviewStatusEnv();
+  state.data = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { mode: 'gateway', imported: true, applied: true, adopted: true,
+      desktop: { managed: true }, autoSync: { state: 'synced' } },
+    kimiK3State: 'provider_mismatch',
+  };
+  api.renderAll();
+  assert.equal(nodes['ob-verdict-word'].textContent, '需修复原位切换');
+  assert.equal(nodes['ob-launch'].dataset.action, 'connect-kimi');
+  assert.match(nodes['ob-launch'].textContent, /重新同步修复/);
+  assert.equal(nodes['ob-launch-hint'].hidden, false);
+  assert.match(nodes['ob-launch-hint'].textContent, /无需重启本软件/);
+  assert.equal(nodes['handoff'].dataset.tone, 'warn');
+
+  /* 正常就绪时按钮回到启动/打开，提示收起。 */
+  state.data = { ...state.data, kimiK3State: 'ready' };
+  api.renderAll();
+  assert.equal(nodes['ob-launch'].dataset.action, 'open-work');
+  assert.equal(nodes['ob-launch-hint'].hidden, true);
 });
 
 test('an empty model list sends the overview action to the models page instead of a launch', () => {
@@ -5826,6 +5897,10 @@ test('reasonText translates every reason code the UI can show', () => {
   const codes = [
     'conversation_kimi_restart_failed',
     'native_import_failed',
+    'native_import_store_changed',
+    'native_import_foreign_source',
+    'native_import_provider_reset_failed',
+    'model_provider_reset_pending',
     'direct_prepare_required',
     'model_sync_write_blocked',
     'configuration_unavailable',

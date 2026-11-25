@@ -61,6 +61,18 @@ type fakePage struct {
 	importReply     map[string]any
 	disconnectReply map[string]any
 	closeFails      bool
+	// daimonStates answers the official runtime status probe in order, so a
+	// page can model the startup window; an exhausted list reports an unreadable
+	// state. daimonStuck holds a single startup state forever.
+	daimonStates []string
+	daimonStuck  bool
+	daimonReads  int
+	// kthDisconnectReply answers the canonical-provider repair; nil answers an
+	// applied disconnect. onKthDisconnect runs when that probe asks, so a test
+	// can write the store the way the official apply would.
+	kthDisconnectReply map[string]any
+	kthDisconnectCalls int
+	onKthDisconnect    func()
 
 	// observations
 	methods       []string
@@ -75,6 +87,7 @@ type fakePage struct {
 	openCalls     int
 	closeCalls    int
 	importCalls   int
+	directImports int
 	activateCalls int
 }
 
@@ -236,6 +249,32 @@ func (p *fakePage) emit(write func(string), message map[string]any) {
 // through their real expressions rather than through a stub.
 func (p *fakePage) actionReply(sessionID, expression string) any {
 	switch {
+	case expression == daimonStatusExpression:
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.daimonReads++
+		if p.daimonStuck {
+			return "provisioning"
+		}
+		if len(p.daimonStates) == 0 {
+			return ""
+		}
+		state := p.daimonStates[0]
+		p.daimonStates = p.daimonStates[1:]
+		return state
+	case expression == kthDisconnectExpression:
+		p.mu.Lock()
+		p.kthDisconnectCalls++
+		reply := p.kthDisconnectReply
+		hook := p.onKthDisconnect
+		p.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		if reply == nil {
+			reply = map[string]any{"ok": true, "status": "applied"}
+		}
+		return reply
 	case expression == importProbeExpression:
 		// Only the settings overlay carries the import API. The Work view has the
 		// settings *open* call; a fake that answered both from every page would
@@ -271,6 +310,11 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 			reply = map[string]any{"ok": true, "models": float64(2), "requiresRestart": false}
 		}
 		return reply
+	case strings.Contains(expression, "const request=JSON.parse(raw);"):
+		p.mu.Lock()
+		p.directImports++
+		p.mu.Unlock()
+		return map[string]any{"ok": true, "sourceId": "byok-src-1", "models": float64(1), "requiresRestart": false}
 	case strings.Contains(expression, "revealByok"):
 		return map[string]any{"available": true}
 	case strings.Contains(expression, "closeSettingsPage") || strings.Contains(expression, "closeKimiWorkSettingPage"):
