@@ -605,8 +605,6 @@ const dom = {
   inspectorTitle: $('inspector-title'),
   inspectorClose: $('inspector-close'),
   modelForm: $('model-form'),
-  mId: $('m-id'),
-  mIdHint: $('m-id-hint'),
   mUpstream: $('m-upstream'),
   mUpstreamHint: $('m-upstream-hint'),
   mConnection: $('m-connection'),
@@ -614,12 +612,9 @@ const dom = {
   mCandidates: $('m-candidates'),
   mSourceField: $('m-source-field'),
   mAdvanced: $('m-advanced'),
-  mProtocolHint: $('m-protocol-hint'),
   mContextHint: $('m-context-hint'),
   mBudgetGroup: $('m-budget-group'),
   mName: $('m-name'),
-  mProtocol: $('m-protocol'),
-  mProtocolGroup: $('m-protocol-group'),
   mContext: $('m-context'),
   mOutput: $('m-output'),
   mTools: $('m-tools'),
@@ -662,6 +657,8 @@ const dom = {
   onboardBase: $('ob-base'),
   onboardName: $('ob-name'),
   onboardId: $('ob-id'),
+  onboardProtocolGroup: $('ob-protocol-group'),
+  onboardProtocolHint: $('ob-protocol-hint'),
   onboardDiscover: $('ob-discover'),
   onboardRecommended: $('ob-recommended'),
   onboardRecommendedHint: $('ob-recommended-hint'),
@@ -718,6 +715,7 @@ const dom = {
   ceKeyEnv: $('ce-keyenv'),
   ceChat: $('ce-chat'),
   ceResponses: $('ce-responses'),
+  ceProtocolHint: $('ce-protocol-hint'),
 
 
   svcPanel: $('svc-panel'),
@@ -868,7 +866,7 @@ const state = {
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [] },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [], protocol: null, protocolTouched: false },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,

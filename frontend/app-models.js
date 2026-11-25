@@ -1,4 +1,4 @@
-import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, discoveryReasonText, protocolLabel, providerPreset, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
+import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, connectionProtocol, connectionProtocolErrors, discoveryReasonText, protocolLabel, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
 import { API, BUDGET_PRESETS, CONNECTION_ID_PATTERN, EFFORT_PATTERN, MODEL_ALIAS_PREFIXES, actionUUID, displayModelId, dom, fmtK, fmtTime, fmtTokens, iconUse, request, setHidden, setText, showToast, state, stripModelAliasPrefix, syncDefaultOptions, syncSelectOptions, truncate } from './app-core.js';
 import { renderActions } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
@@ -47,13 +47,6 @@ function resolveAlias(alias) {
   if (model) return model;
   const stripped = stripModelAliasPrefix(alias);
   return displayModelId(stripped || alias);
-}
-
-function modelFamilyFor(id) {
-  const text = String(id || '').trim();
-  if (!text) return null;
-  const last = text.slice(text.lastIndexOf('/') + 1).toLowerCase();
-  return last.startsWith('kimi-') ? 'chat' : 'responses';
 }
 
 function isCapable(model) {
@@ -129,10 +122,18 @@ function parseEfforts(text) {
 
 function buildModel(input) {
   const errors = [];
-  const id = String(input.id || '').trim();
-  if (!id) errors.push('模型 ID 不能为空。');
+  const base = input.baseEntity && typeof input.baseEntity === 'object' && !Array.isArray(input.baseEntity)
+    ? input.baseEntity : null;
+  /* 已保存模型保留自己的模型 ID 与协议；新模型的 ID 由连接协议生成，
+     协议只来自所属连接，不按模型名或路由前缀猜。 */
+  const id = String((base ? base.id : input.id) || '').trim();
+  if (!id) errors.push('请选择服务商连接并填写服务商模型 ID；系统会自动生成内部模型标识。');
   else if (/[\u0000-\u001f]/.test(id)) errors.push('模型 ID 不能包含控制字符。');
   else if (id.length > 2048) errors.push('模型 ID 过长。');
+  const protocol = base
+    ? (base.protocol === 'chat' || base.protocol === 'responses' ? base.protocol : null)
+    : (input.protocol === 'chat' || input.protocol === 'responses' ? input.protocol : null);
+  if (!protocol) errors.push('所属连接还没有唯一的接口协议；请先在服务商连接里选择 Chat Completions 或 Responses。');
 
   const contextWindow = Number(input.context);
   if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) errors.push('上下文窗口必须是正整数。');
@@ -178,7 +179,7 @@ function buildModel(input) {
   const candidate = {
     id,
     ...(String(input.name || '').trim() ? { name: String(input.name).trim() } : {}),
-    protocol: modelFamilyFor(id) || 'responses',
+    protocol,
     contextWindow,
     ...(maxOutputTokens ? { maxOutputTokens } : {}),
     ...(typeof input.tools === 'boolean' ? { tools: input.tools } : {}),
@@ -195,8 +196,6 @@ function buildModel(input) {
     ...(standbys.length ? { failover: standbys } : {}),
   };
 
-  const base = input.baseEntity && typeof input.baseEntity === 'object' && !Array.isArray(input.baseEntity)
-    ? input.baseEntity : null;
   const values = {
     name: String(input.name || '').trim() || null,
     maxOutputTokens: maxOutputTokens ?? null,
@@ -367,44 +366,23 @@ function catalogueWith(editor, models) {
 
 /* ---------- routing helpers ---------- */
 
-/* 建议的本机路由 ID：连接 + 协议前缀 + 上游 ID 的百分号编码。
-   末段决定协议，因此前缀同时是这份契约的自解释形式；用户仍可手改。 */
+/* 本机模型 ID 由连接 + 唯一协议 + 上游 ID 的百分号编码生成：Chat 用
+   kimi- 前缀，Responses 用 resp- 前缀。协议缺失时不生成，也不默认 Responses。 */
 function routeIdFor(connectionId, upstreamModelId, protocol) {
   const connection = String(connectionId || '').trim();
   const upstream = String(upstreamModelId || '').trim();
   if (!connection || !upstream) return '';
-  const family = protocol || modelFamilyFor(upstream) || 'responses';
-  const prefix = family === 'chat' ? 'kimi-' : 'resp-';
+  if (protocol !== 'chat' && protocol !== 'responses') return '';
+  const prefix = protocol === 'chat' ? 'kimi-' : 'resp-';
   return connection + '/' + prefix + encodeURIComponent(upstream);
 }
 
-/* 换连接或手改上游 ID 时只该改前缀与末段：协议家族沿用当前路由 ID，
-   否则用户已经确认的 Chat/Responses 选择会被「按上游名猜一次」改掉。
-   但连接只允许单一协议时以连接为准——否则会生成一个保存必被拒的 resp-
-   路由。预设协议只在路由与连接都没给出结论时参与。 */
-function draftProtocolFamily(draft) {
-  if (!draft) return null;
-  const currentFamily = modelFamilyFor(draft.id);
-  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
-  const allowed = connection && Array.isArray(connection.protocols) && connection.protocols.length
-    ? connection.protocols : null;
-  if (allowed) {
-    if (allowed.length === 1) return allowed[0];
-    if (currentFamily && allowed.includes(currentFamily)) return currentFamily;
-    return preferredProtocol(allowed);
-  }
-  if (currentFamily) return currentFamily;
-  const preset = providerPreset(draft.providerPresetId) || providerPreset((connection || {}).providerPresetId);
-  const presetProtocols = preset && Array.isArray(preset.protocols) && preset.protocols.length ? preset.protocols : null;
-  if (presetProtocols) return preferredProtocol(presetProtocols);
-  return null;
-}
-
-/* 手输上游模型名或换连接时的默认路由 ID：协议段优先服从连接与预设，
-   都对不上时才按上游名猜。 */
+/* 新模型的建议 ID 只服从所属连接的唯一协议；已保存模型由编辑器保留原 ID，
+   不会走这里重新生成。 */
 function suggestedRouteId(draft) {
   if (!draft) return '';
-  return routeIdFor(draft.connectionId, draft.upstreamModelId, draftProtocolFamily(draft));
+  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
+  return routeIdFor(draft.connectionId, draft.upstreamModelId, connectionProtocol(connection));
 }
 
 function connectionRowsOf(data) {
@@ -523,6 +501,11 @@ function renderModels() {
   if (dom.modelTableWrap) dom.modelTableWrap.scrollTop = scrollTop;
 }
 
+function modelTitle(model) {
+  if (!model) return '未命名模型';
+  return model.name || model.upstreamModelId || '未命名模型';
+}
+
 function buildModelRow(model) {
   const tr = document.createElement('tr');
   tr.dataset.modelId = model.id;
@@ -530,30 +513,25 @@ function buildModelRow(model) {
 
   const idCell = document.createElement('td');
   const id = document.createElement('span');
-  id.className = 'mono cell-id';
-  const shownId = displayModelId(model.id);
-  id.textContent = shownId;
-  id.setAttribute('title', shownId);
+  id.className = 'cell-id';
+  const shownName = modelTitle(model);
+  id.textContent = shownName;
+  id.setAttribute('title', shownName);
   idCell.append(id);
-  if (model.name && model.name !== model.id) {
-    const name = document.createElement('span');
-    name.className = 'cell-name';
-    name.textContent = model.name;
-    idCell.append(name);
-  }
-  /* 路由列把「连接」和「真实上游 ID」放在同一个格里：这两个值一起才说明
-     请求实际去了哪里，缺一个都会让用户以为本机路由 ID 就是上游 ID。 */
+  /* 服务商与真实上游 ID 放在同一格里：这两个值一起才说明请求去了哪里，
+     但不展示本机模型 ID 或兼容别名。 */
   const route = document.createElement('td');
   route.className = 'col-route';
   const routing = routingOf(model);
   const upstream = document.createElement('span');
   upstream.className = 'mono cell-id';
   upstream.textContent = routing.upstream || '—';
-  upstream.setAttribute('title', routing.upstream || '');
+  upstream.setAttribute('title', routing.upstream ? '上游 ID：' + routing.upstream : '');
+  upstream.setAttribute('aria-label', routing.upstream ? '上游 ID ' + routing.upstream : '上游 ID 未知');
   const connection = document.createElement('span');
   connection.className = 'cell-name';
   connection.textContent = routing.connectionId
-    ? connectionLabel(findConnection(state.data, routing.connectionId)) + ' · ' + routing.connectionId
+    ? connectionLabel(findConnection(state.data, routing.connectionId))
     : '旧版单上游';
   route.append(upstream, connection);
 
@@ -561,7 +539,7 @@ function buildModelRow(model) {
   proto.className = 'col-proto';
   const protoTag = document.createElement('span');
   protoTag.className = 'tag mono';
-  protoTag.textContent = model.protocol === 'chat' ? 'chat' : 'responses';
+  protoTag.textContent = model.protocol === 'chat' || model.protocol === 'responses' ? protocolLabel(model.protocol) : '—';
   proto.append(protoTag);
 
   const context = document.createElement('td');
@@ -636,14 +614,14 @@ function buildModelRow(model) {
     edit.type = 'button';
     edit.className = 'iconbtn';
     edit.dataset.rowEdit = model.id;
-    edit.setAttribute('aria-label', '编辑 ' + model.id);
+    edit.setAttribute('aria-label', '编辑 ' + modelTitle(model));
     edit.append(iconUse('i-edit'));
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'iconbtn iconbtn--danger';
     remove.dataset.rowDelete = 'ask';
     remove.dataset.modelId = model.id;
-    remove.setAttribute('aria-label', '删除 ' + model.id);
+    remove.setAttribute('aria-label', '删除 ' + modelTitle(model));
     remove.append(iconUse('i-trash'));
     actions.append(edit, remove);
   }
@@ -809,7 +787,7 @@ function buildCandidateRow(model) {
   if (model.tools === true) parts.push('工具');
   if (model.reasoning === true) parts.push('推理');
   if (Array.isArray(model.inputModalities) && model.inputModalities.includes('image')) parts.push('视觉');
-  if (Array.isArray(model.protocols) && model.protocols.length) parts.push(model.protocols.map(protocolLabel).join('/'));
+  if (Array.isArray(model.protocols) && model.protocols.length) parts.push('上游声明 ' + model.protocols.map(protocolLabel).join('/'));
   facts.textContent = parts.join(' · ') || '上游未提供能力信息';
 
   button.append(head, facts);
@@ -817,42 +795,11 @@ function buildCandidateRow(model) {
   return li;
 }
 
-/* 协议状态必须区分三种情况，M29 的 parser 已经把其中两种解析清楚了：
-   1. 数组（一个或多个）：上游/preset 的真实声明，多值时默认偏好 Responses；
-   2. 显式空数组：端点明确声明不支持任何协议（`supported:false` 或空列表），
-      这是权威判定，UI 不得回退到 preset 再猜一次；
-   3. 字段缺失：parser 已按 M29 合同继承已验证的 preset 协议，缺失只表示
-      「这条公开行没带」，仍按未知处理并要求用户显式选择。
-   把 1 与 2、3 混为一谈会推翻 M29 三轮修正。 */
-function candidateProtocolState(model) {
-  if (!model || !Array.isArray(model.protocols)) return { kind: 'absent', list: [] };
-  const list = model.protocols.filter((value) => value === 'chat' || value === 'responses');
-  return list.length ? { kind: 'declared', list } : { kind: 'explicit-empty', list: [] };
-}
-
-/* 保留旧名，返回声明过的协议（空/缺失都返回 null），调用方需区分时用上面的状态。 */
-function candidateProtocols(model) {
-  const state = candidateProtocolState(model);
-  return state.kind === 'declared' ? state.list : null;
-}
-
-/* 多协议时默认 Responses：与网关默认族一致，用户仍可改选。 */
-function preferredProtocol(protocols) {
-  if (!protocols || !protocols.length) return null;
-  return protocols.includes('responses') ? 'responses' : protocols[0];
-}
-
 function pickCandidate(upstreamId) {
   const editor = state.editor;
   if (!editor || !upstreamId) return;
   const model = (state.picker.models || []).find((row) => row && row.id === upstreamId) || null;
   const draft = editor.draft;
-  const protocolState = candidateProtocolState(model);
-  /* 用户点过协议按钮就是显式选择：新候选仍声明该协议（或根本没声明）时沿用，
-     不因为换了一条模型就把 Chat 悄悄改回 Responses。显式空数组是权威的
-     「不支持」，那种情况下无法保留。 */
-  const manualFamily = draft.protocolSource === 'manual' && draft.protocolConfirmed === true
-    ? modelFamilyFor(draft.id) : null;
   draft.upstreamModelId = upstreamId;
 
   /* 换候选后，上一候选带进来的名称、预算与能力都不再适用。先全部清空，
@@ -867,45 +814,12 @@ function pickCandidate(upstreamId) {
   draft.efforts = [];
   draft.defaultEffort = '';
 
-  const preset = providerPreset(draft.providerPresetId) || providerPreset(
-    (findConnection(state.data, draft.connectionId) || {}).providerPresetId);
-  const presetProtocols = preset && Array.isArray(preset.protocols) && preset.protocols.length ? preset.protocols : null;
-  /* 只有「字段缺失」才允许沿用 preset；显式空数组是权威的「不支持」，不 fallback。 */
-  const chosen = protocolState.kind === 'declared'
-    ? (manualFamily && protocolState.list.includes(manualFamily) ? manualFamily : preferredProtocol(protocolState.list))
-    : protocolState.kind === 'absent'
-      ? (manualFamily || preferredProtocol(presetProtocols))
-      : null;
-  draft.protocolExplicitEmpty = protocolState.kind === 'explicit-empty';
-
-  if (chosen) {
-    /* 声明过协议（一个或多个）就自动生成路由；多协议按偏好选一个，
-       用户可通过协议按钮或直接改路由 ID 覆盖。 */
-    const declared = protocolState.kind === 'declared';
-    const keptManual = chosen === manualFamily;
-    draft.id = routeIdFor(draft.connectionId, upstreamId, chosen);
-    draft.protocolConfirmed = true;
-    draft.protocolSource = keptManual ? 'manual' : declared ? 'discovery' : 'preset';
-    draft.protocolOptions = declared ? protocolState.list : presetProtocols;
-    draft.protocolHint = keptManual
-      ? '已沿用你选择的 ' + protocolLabel(chosen) + ' 生成路由；上游模型 ID 保持不变。'
-      : declared && protocolState.list.length > 1
-        ? '上游声明 ' + protocolState.list.map(protocolLabel).join(' 与 ') + '，已按 ' + protocolLabel(chosen)
-          + ' 生成路由；可切换协议。'
-        : declared ? null
-          : '上游目录没有声明协议，当前按预设「' + (preset ? preset.name || preset.id : '') + '」的 '
-            + protocolLabel(chosen) + ' 填写；请确认后再保存。';
-  } else {
-    draft.id = '';
-    draft.protocolConfirmed = false;
-    draft.protocolSource = null;
-    draft.protocolOptions = null;
-    /* 显式空与缺失要用不同的话说清楚，否则用户会以为只是「目录没写」。 */
-    draft.protocolHint = protocolState.kind === 'explicit-empty'
-      ? '该端点明确声明不支持 Chat 或 Responses 协议，因此没有生成路由。'
-        + '请确认上游能力后手动填写，或改用其他连接。'
-      : '上游目录没有声明协议，因此没有自动生成路由 ID。'
-        + '请选择协议或手动填写路由 ID；协议决定调用 Chat 还是 Responses 接口。';
+  /* 协议只来自所属连接；新模型的模型 ID 由连接协议生成。已保存模型在
+     编辑器里保留自己的 ID 与协议，不因换候选而重绑。 */
+  if (!editor.originalId) {
+    const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
+    draft.protocol = connectionProtocol(connection);
+    draft.id = suggestedRouteId(draft);
   }
   if (model) {
     if (model.name) draft.name = model.name;
@@ -928,36 +842,13 @@ function pickCandidate(upstreamId) {
   }
   editor.serverErrors = [];
   editor.budgetNote = null;
-  if (!chosen && dom.mAdvanced) dom.mAdvanced.open = true;
   fillEditorFields();
   state.picker.open = false;
   renderPicker();
   renderEditor();
   renderModels();
-  const focusTarget = chosen ? dom.mName : dom.mId;
+  const focusTarget = dom.mName || dom.mUpstream;
   if (focusTarget && focusTarget.focus) focusTarget.focus();
-}
-
-/* 显式切换协议：只重写路由 ID 的家族前缀，上游 ID 原样保留。
-   手写路由 ID 仍是高级覆盖手段，不是多协议的必经步骤。 */
-function chooseProtocol(protocol) {
-  const editor = state.editor;
-  if (!editor || !['chat', 'responses'].includes(protocol)) return;
-  const draft = editor.draft;
-  const upstream = String(draft.upstreamModelId || '').trim();
-  draft.protocolSource = 'manual';
-  draft.protocolConfirmed = true;
-  if (upstream && draft.connectionId) {
-    draft.id = routeIdFor(draft.connectionId, upstream, protocol);
-    draft.protocolHint = '已按 ' + protocolLabel(protocol) + ' 生成路由；上游模型 ID 保持不变。';
-    if (dom.mId) dom.mId.value = draft.id;
-  } else {
-    draft.protocolHint = upstream
-      ? '请先选择所属连接，再由协议生成路由。'
-      : '请先填写上游模型 ID，再由协议生成路由。';
-  }
-  renderEditor();
-  renderModels();
 }
 
 /* ---------- candidate search ---------- */
@@ -1174,9 +1065,11 @@ function failoverDraftFrom(failover) {
 }
 
 function modelDraftFrom(model) {
+  const initialConnectionId = defaultConnectionId();
   const draft = model ? {
     id: model.id,
     name: model.name || '',
+    protocol: model.protocol === 'chat' || model.protocol === 'responses' ? model.protocol : null,
     context: String(model.contextWindow || ''),
     output: model.maxOutputTokens ? String(model.maxOutputTokens) : '',
     tools: typeof model.tools === 'boolean' ? model.tools : undefined,
@@ -1195,8 +1088,9 @@ function modelDraftFrom(model) {
     pricing: priceDraftFrom(model.pricing),
     failover: failoverDraftFrom(model.failover),
   } : {
-    id: '', name: '', context: '', output: '', tools: undefined, reasoning: false, vision: false,
-    efforts: [], defaultEffort: '', connectionId: defaultConnectionId(), upstreamModelId: '', upstreamProtocol: '',
+    id: '', name: '', protocol: connectionProtocol(initialConnectionId ? findConnection(state.data, initialConnectionId) : null),
+    context: '', output: '', tools: undefined, reasoning: false, vision: false,
+    efforts: [], defaultEffort: '', connectionId: initialConnectionId, upstreamModelId: '', upstreamProtocol: '',
     upstreamProtocolChoices: upstreamProtocolSupported(state.data) ? ['', 'anthropic'] : null,
     contextLimit: '', metadataSource: null,
     pricing: priceDraftFrom(null), failover: [],
@@ -1250,7 +1144,6 @@ function closeEditor(force) {
 function fillEditorFields() {
   const draft = state.editor && state.editor.draft;
   if (!draft) return;
-  if (dom.mId) dom.mId.value = draft.id;
   if (dom.mName) dom.mName.value = draft.name;
   if (dom.mUpstream) dom.mUpstream.value = draft.upstreamModelId || '';
   if (dom.mContext) dom.mContext.value = draft.context;
@@ -1269,9 +1162,6 @@ function fillEditorFields() {
 function readEditorFields() {
   const draft = state.editor && state.editor.draft;
   if (!draft) return;
-  draft.id = dom.mId ? dom.mId.value : draft.id;
-  /* 手写路由 ID 就是用户显式选择了协议：末段决定 Chat 还是 Responses。 */
-  if (draft.protocolConfirmed === false && String(draft.id || '').trim()) draft.protocolConfirmed = true;
   draft.name = dom.mName ? dom.mName.value : draft.name;
   draft.upstreamModelId = dom.mUpstream ? dom.mUpstream.value : draft.upstreamModelId;
   draft.context = dom.mContext ? dom.mContext.value : draft.context;
@@ -1308,7 +1198,7 @@ function editorDirty() {
 }
 
 const MODEL_DIFF_FIELDS = {
-  id: '模型 ID', name: '名称', contextWindow: '上下文窗口', maxOutputTokens: '最大输出', tools: '工具能力',
+  name: '名称', contextWindow: '上下文窗口', maxOutputTokens: '最大输出', tools: '工具能力',
   reasoning: '思考能力', inputModalities: '图片输入', reasoningEfforts: '思考档位', defaultEffort: '默认档位',
   connectionId: '所属连接', upstreamModelId: '上游模型 ID', upstreamProtocol: '上游 API 格式',
   contextLimit: '上游上下文上限', metadataSource: '元数据来源',
@@ -1337,10 +1227,8 @@ function rebaseEditor() {
   }
   const previous = editor.draft;
   const touched = buildModel(previous).touched;
-  const candidate = buildModel(previous).candidate;
   const next = modelDraftFrom(live);
   const assign = {
-    id: () => { next.id = candidate.id; },
     name: () => { next.name = previous.name; },
     contextWindow: () => { next.context = previous.context; },
     maxOutputTokens: () => { next.output = previous.output; },
@@ -1371,11 +1259,8 @@ function rebaseEditor() {
 /* 这些字段都在「高级」折叠区内：保存被拦下时必须自动展开，否则用户只看到
    保存按钮变灰，却找不到要改哪一行。 */
 const ADVANCED_ERROR_PATTERNS = [
-  /^模型 ID/,
-  /^已存在相同 ID 的模型/,
   /定价/,
   /备用连接/,
-  /当前模型路由 ID 会被解析为/,
 ];
 
 function errorNeedsAdvanced(message) {
@@ -1386,14 +1271,18 @@ function validateEditor(editor) {
   const { model, errors } = buildModel(editor.draft);
   const models = (state.data && state.data.models) || [];
   const duplicate = models.some((row) => row.id === model.id && row.id !== editor.originalId);
-  if (duplicate) errors.push('已存在相同 ID 的模型。');
-  /* 连接若限制了协议，这里提前说明：服务端同样会拒绝，避免用户以为只是保存慢。 */
+  if (duplicate) errors.push('已存在相同的模型记录。');
   const connection = model.connectionId ? findConnection(state.data, model.connectionId) : null;
   if (model.connectionId && !connection) errors.push('所选连接不在已保存的连接列表中。');
-  if (connection && Array.isArray(connection.protocols) && connection.protocols.length
-    && !connection.protocols.includes(model.protocol)) {
-    errors.push('连接「' + connectionLabel(connection) + '」只允许 ' + connection.protocols.map(protocolLabel).join('/')
-      + '，当前模型路由 ID 会被解析为 ' + protocolLabel(model.protocol) + '。');
+  if (!model.connectionId && !editor.originalId) errors.push('请选择服务商连接；新模型的接口协议由连接决定。');
+  /* 连接只允许一种协议：新模型必须跟它一致；已保存模型保持原 ID 与旧协议，
+     连接不兼容时明确说明，不能靠保存时悄悄翻转协议。 */
+  const protocol = connectionProtocol(connection);
+  if (connection && !protocol) {
+    errors.push('连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在服务商连接里选择 Chat Completions 或 Responses。');
+  } else if (connection && protocol && model.protocol && model.protocol !== protocol) {
+    errors.push('连接「' + connectionLabel(connection) + '」现在只使用 ' + protocolLabel(protocol)
+      + '，而这条模型仍按 ' + protocolLabel(model.protocol) + ' 调用上游。为保持原模型 ID 与旧会话绑定，请改选协议相同的连接，或先处理这条模型。');
   }
   if (dom.mAdvanced && errors.some(errorNeedsAdvanced)) dom.mAdvanced.open = true;
   return { model, errors };
@@ -1653,18 +1542,6 @@ function renderEditor() {
   if (dom.workbench) dom.workbench.dataset.open = 'true';
   setText(dom.inspectorTitle, editor.originalId ? '编辑模型' : '新增模型');
 
-  const id = String(editor.draft.id || '').trim();
-  const family = modelFamilyFor(id);
-  const protoButtons = dom.mProtocolGroup ? Array.from(dom.mProtocolGroup.querySelectorAll('[data-protocol]')) : [];
-  protoButtons.forEach((button) => {
-    const active = button.dataset.protocol === family;
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    const allowed = !editor.draft.protocolOptions
-      || editor.draft.protocolOptions.includes(button.dataset.protocol);
-    button.disabled = state.modelsSaving || !allowed;
-    button.setAttribute('title', allowed ? '按 ' + protocolLabel(button.dataset.protocol) + ' 生成路由'
-      : '上游未声明此协议');
-  });
   renderEditorRouting(editor);
   renderBudgetControls(editor);
 
@@ -1701,19 +1578,12 @@ function renderEditor() {
   const { errors } = validateEditor(editor);
   const ready = configReady(state.data);
   const dirty = editorDirty();
-  /* 协议未确认的候选不能被当作已确认能力保存：只有在用户填写了路由 ID
-     （即显式选择了协议）之后才允许保存。 */
-  const protocolPending = editor.draft.protocolConfirmed === false;
 
   if (dom.modelErrors) {
     const messages = (editor.serverErrors || []).concat(errors);
     /* 预算提示与保存错误共用这一个列表：它在 renderBudgetControls 里生成，
        但必须由这里统一渲染，否则会被随后的 replaceChildren 吞掉。 */
     if (editor.budgetNote) messages.unshift(editor.budgetNote);
-    if (protocolPending) {
-      messages.unshift(editor.draft.protocolHint
-        || '上游没有声明协议，请手动填写路由 ID 确认协议后再保存。');
-    }
     if (!ready && state.data) messages.unshift('配置当前不是就绪状态，保存已禁用。请先重启面板。');
     if (editor.confirmClose) messages.unshift('关闭会丢弃未保存的修改。');
     setHidden(dom.modelErrors, messages.length === 0);
@@ -1741,74 +1611,46 @@ function renderEditor() {
     dom.modelErrors.replaceChildren(...nodes);
   }
 
-  if (dom.modelSave) dom.modelSave.disabled = errors.length > 0 || !ready || !dirty || state.modelsSaving || protocolPending;
+  if (dom.modelSave) dom.modelSave.disabled = errors.length > 0 || !ready || !dirty || state.modelsSaving;
   if (dom.modelSave) setText(dom.modelSave, state.modelsSaving ? '正在保存…' : '保存');
   if (dom.modelCancel) setText(dom.modelCancel, editor.confirmClose ? '继续编辑' : '取消');
   setText(dom.modelSaveNote, dirty ? '保存会提交整个模型目录并写入本机网关，后台会自动同步到 Kimi Work。' : '没有未保存的修改。');
 }
 
-/* 路由区：连接下拉 + 上游 ID + 由两者推导的建议路由 ID。
-   建议值只在用户还没手改 ID 时自动填入，避免覆盖手写值。 */
+/* 连接与上游 ID 决定请求去向；模型 ID 只在内部用于路由，不展示也不手改。
+   新模型由连接的唯一协议生成 ID，已保存模型始终保留自己的 ID。 */
 function renderEditorRouting(editor) {
   const draft = editor.draft;
-  /* 协议推导的可见依据就是路由 ID 末段；这里是唯一推导点，提示与按钮共用。 */
-  const family = modelFamilyFor(draft.id);
   const rows = (connectionRowsOf(state.data) || []).filter((row) => !row.legacy);
   const options = rows.length
     ? rows.map((row) => ({ value: row.id, label: row.name + ' · ' + row.id }))
-    : [{ value: '', label: '旧版单上游（无命名连接）' }];
+    : [{ value: '', label: editor.originalId ? '旧版单上游（无命名连接）' : '选择连接' }];
   if (draft.connectionId && !rows.some((row) => row.id === draft.connectionId)) {
     options.push({ value: draft.connectionId, label: draft.connectionId + '（未在已保存连接中）' });
   }
   syncSelectOptions(dom.mConnection, options, draft.connectionId || '');
   if (dom.mConnection) dom.mConnection.disabled = !rows.length || state.modelsSaving;
 
-  const suggested = suggestedRouteId(draft);
-  /* 只有用户明确给了上游 ID 且协议已被确认时，才把建议值自动写进路由 ID。
-     协议待确认（picker 命中未声明协议的候选）时留空，交给用户手填。 */
-  if (suggested && draft.protocolConfirmed !== false && !String(draft.id || '').trim()) {
-    draft.id = suggested;
-    if (dom.mId) dom.mId.value = suggested;
+  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
+  const protocol = connectionProtocol(connection);
+  if (!editor.originalId) {
+    draft.protocol = protocol;
+    draft.id = suggestedRouteId(draft);
   }
   if (dom.mUpstreamHint) {
     const upstream = String(draft.upstreamModelId || '').trim();
-    const id = String(draft.id || '').trim();
     setText(dom.mUpstreamHint, upstream
-      ? '发给上游的 model 值按原样保存：' + upstream
-      : id ? '留空表示与路由 ID 相同（' + id + '）。' : '实际发给上游的 model 值，按原样保留。');
-  }
-  if (dom.mProtocolHint) {
-    const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
-    const restricted = connection && Array.isArray(connection.protocols) && connection.protocols.length
-      ? connection.protocols : null;
-    /* 说明改成「当前可见推导结论 + 原因」：读到什么（路由 ID 末段/上游声明/
-       预设/连接限制）就说什么，不写无条件的规则句。连接限制与当前推导冲突时，
-       在本行内给出该连接实际需要的协议。 */
-    if (draft.protocolHint) setText(dom.mProtocolHint, draft.protocolHint);
-    else if (family && restricted && !restricted.includes(family)) {
-      setText(dom.mProtocolHint, '当前路由 ID 末段推导为 ' + protocolLabel(family)
-        + '，但连接「' + connectionLabel(connection) + '」只允许 '
-        + restricted.map(protocolLabel).join('/') + '；保存前请改用 '
-        + restricted.map(protocolLabel).join(' 或 ') + '。');
-    } else if (family) {
-      setText(dom.mProtocolHint, '由当前路由 ID 末段推导为 ' + protocolLabel(family)
-        + (restricted ? '；连接「' + connectionLabel(connection) + '」允许 ' + restricted.map(protocolLabel).join('/') : '')
-        + '。它只决定本机网关与上游之间的调用格式；网关模式下所有协议模型都能在 Kimi 下拉框原会话切换。');
-    } else if (draft.protocolSource === 'preset') {
-      setText(dom.mProtocolHint, '上游目录未声明协议；当前值来自供应商预设「'
-        + (providerPreset(draft.providerPresetId) ? providerPreset(draft.providerPresetId).name || providerPreset(draft.providerPresetId).id : '')
-        + '」，保存前请确认。');
-    } else if (restricted) {
-      setText(dom.mProtocolHint, '路由 ID 尚未推导出协议；连接「' + connectionLabel(connection) + '」只允许 '
-        + restricted.map(protocolLabel).join('/') + '。');
-    } else {
-      setText(dom.mProtocolHint, '填写路由 ID 后按末段推导协议；当前连接未限制协议。');
-    }
+      ? '实际发送给上游的 model 值，按原样保留：' + upstream
+      : '填写上游会收到的 model 值；接口协议由所属连接决定。');
   }
   if (dom.mConnectionHint) {
-    setText(dom.mConnectionHint, rows.length
-      ? '连接决定请求发往哪个上游；上游模型 ID 决定上游看到的 model 值。'
-      : '还没有命名连接。先在上方「服务商连接」区块添加连接，或使用旧版单上游设置。');
+    if (!rows.length) {
+      setText(dom.mConnectionHint, '还没有命名连接。先在上方「服务商连接」区块添加连接，再选择模型。');
+    } else if (!protocol) {
+      setText(dom.mConnectionHint, '连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在上方服务商连接里选择 Chat Completions 或 Responses。');
+    } else {
+      setText(dom.mConnectionHint, '连接决定请求发往哪个上游；当前使用 ' + protocolLabel(protocol) + '。');
+    }
   }
 }
 
@@ -1874,6 +1716,35 @@ async function saveCatalogue(models, { close = true, message = '已保存，后�
       showToast('还有一条连接没有通过校验。请先在连接编辑器里修正或取消，再保存模型。', 'error');
       return false;
     }
+  }
+  /* 整组保存连接与模型：连接必须各有一个唯一协议，模型不能与所属连接
+     的协议不一致。否则一次模型保存就会把旧模型悄悄改绑到新协议。 */
+  const draftConnections = (state.conns.draft || []).filter((row) => row && !row.legacy);
+  const protocolProblems = connectionProtocolErrors(draftConnections);
+  for (const model of Array.isArray(models) ? models : []) {
+    if (!model || !model.connectionId) continue;
+    const connection = findConnection(data, model.connectionId);
+    const name = model.name || model.upstreamModelId || '未命名模型';
+    if (!connection) {
+      protocolProblems.push('模型「' + name + '」所属的连接不在连接列表中。');
+      continue;
+    }
+    const protocol = connectionProtocol(connection);
+    if (!protocol) {
+      protocolProblems.push('连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；模型「' + name + '」不能保存。请先在服务商连接里选择 Chat Completions 或 Responses。');
+    } else if (model.protocol !== protocol) {
+      protocolProblems.push('模型「' + name + '」仍按 ' + protocolLabel(model.protocol)
+        + ' 调用上游，但连接「' + connectionLabel(connection) + '」现在只使用 ' + protocolLabel(protocol)
+        + '。为保持原模型 ID 与旧会话绑定，本次未保存；请改选协议相同的连接，或先处理这条模型。');
+    }
+  }
+  if (protocolProblems.length) {
+    showToast('连接接口协议或模型协议不一致，未保存。', 'error');
+    if (state.editor) {
+      state.editor.serverErrors = protocolProblems;
+      renderEditor();
+    }
+    return false;
   }
 
   state.modelsSaving = true;
@@ -1952,7 +1823,6 @@ function resetModelSignature() { modelSignature = ''; }
 export {
   applyBudgetPreset,
   catalogueWith,
-  chooseProtocol,
   chooseUpstreamProtocol,
   clearModelQuery,
   closeEditor,
@@ -1973,7 +1843,6 @@ export {
   openPicker,
   pickCandidate,
   pickerScope,
-  preferredProtocol,
   readEditorFields,
   renderEditor,
   renderFailoverRows,
@@ -1982,7 +1851,6 @@ export {
   resetModelSignature,
   resolveAlias,
   routeIdFor,
-  draftProtocolFamily,
   suggestedRouteId,
   errorNeedsAdvanced,
   runConnectionCheck,

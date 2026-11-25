@@ -1,6 +1,6 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionProtocol, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, setOnboardProtocol, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
-import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
+import { applyBudgetPreset, catalogueWith, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, connectionRowsOf, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
 import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 import { mountConversationsPage } from './app-conversations.js';
@@ -1034,8 +1034,10 @@ function bindEvents() {
     }
     if (node.dataset.rowDelete === 'confirm') {
       const id = node.dataset.modelId;
+      const target = ((state.data && state.data.models) || []).find((model) => model.id === id);
+      const label = target ? (target.name || target.upstreamModelId || '该模型') : '该模型';
       const models = ((state.data && state.data.models) || []).filter((model) => model.id !== id);
-      saveCatalogue(models, { close: false, message: '模型 ' + id + ' 已从目录删除并应用。' });
+      saveCatalogue(models, { close: false, message: '模型「' + label + '」已从目录删除并应用。' });
     }
   });
 
@@ -1103,7 +1105,7 @@ function bindEvents() {
   }
   if (dom.modelForm) {
     const fields = {
-      mId: 'id', mName: 'name', mContext: 'contextWindow', mOutput: 'maxOutputTokens',
+      mName: 'name', mContext: 'contextWindow', mOutput: 'maxOutputTokens',
       mTools: 'tools', mReasoning: 'reasoning', mVision: 'inputModalities',
       mEfforts: 'reasoningEfforts', mDefault: 'defaultEffort',
       mConnection: 'connectionId', mUpstream: 'upstreamModelId',
@@ -1212,6 +1214,7 @@ function bindEvents() {
     field.addEventListener('change', () => {
       if (!state.conns.editing) return;
       readConnectionEditor();
+      renderConnections();
     });
   });
 
@@ -1241,10 +1244,10 @@ function bindEvents() {
     /* 旧连接的上限不属于新连接：留着会让预算预设按错误的上限禁用或放行。 */
     editor.draft.contextLimit = '';
     editor.budgetNote = null;
-    if (editor.draft.upstreamModelId) {
-      /* 路由 ID 的协议段沿用用户已确认的选择；但连接只允许单一协议时以连接为准。 */
+    if (!editor.originalId) {
+      const rows = connectionRowsOf(state.data) || [];
+      editor.draft.protocol = connectionProtocol(rows.find((row) => row.id === editor.draft.connectionId) || null);
       editor.draft.id = suggestedRouteId(editor.draft);
-      if (dom.mId) dom.mId.value = editor.draft.id;
     }
     state.picker.models = null;
     state.picker.reason = null;
@@ -1266,27 +1269,14 @@ function bindEvents() {
     /* 换了上游模型，旧模型声明的上限就不再成立。 */
     editor.draft.contextLimit = '';
     editor.budgetNote = null;
-    const suggested = suggestedRouteId(editor.draft);
-    if (suggested && !editor.draft.touched.has('id')) {
-      editor.draft.id = suggested;
-      if (dom.mId) dom.mId.value = suggested;
-      /* 上游模型名足以推导协议时不再要求用户展开高级手动确认：
-         默认按 Responses 生成，高级里仍可切换。 */
-      editor.draft.protocolConfirmed = true;
-      editor.draft.protocolSource = 'derived';
-      editor.draft.protocolHint = '已按连接允许的协议与上游模型名自动推导本地路由；可在「高级」中修改。';
-    }
+    /* 已保存模型保持原 ID；新模型按连接协议重新生成内部 ID。 */
+    if (!editor.originalId) editor.draft.id = suggestedRouteId(editor.draft);
     renderEditor();
   });
   if (dom.mBudgetGroup) dom.mBudgetGroup.addEventListener('click', (event) => {
     const button = event.target && event.target.closest ? event.target.closest('[data-budget]') : null;
     if (!button || button.disabled) return;
     applyBudgetPreset(button.dataset.budget);
-  });
-  if (dom.mProtocolGroup) dom.mProtocolGroup.addEventListener('click', (event) => {
-    const button = event.target && event.target.closest ? event.target.closest('[data-protocol]') : null;
-    if (!button || button.disabled) return;
-    chooseProtocol(button.dataset.protocol);
   });
   if (dom.mUpstreamProtocolGroup) dom.mUpstreamProtocolGroup.addEventListener('click', (event) => {
     const button = event.target && event.target.closest ? event.target.closest('[data-upstream-protocol]') : null;
@@ -1329,7 +1319,11 @@ function bindEvents() {
     renderOnboard();
   });
   if (dom.onboardSelectAll) dom.onboardSelectAll.addEventListener('click', toggleFilteredOnboardModels);
-  if (dom.onboardBatchChat) dom.onboardBatchChat.addEventListener('click', () => applyOnboardBatchProtocol('chat'));
+  if (dom.onboardProtocolGroup) dom.onboardProtocolGroup.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-onboard-protocol]') : null;
+    if (!button || button.disabled) return;
+    setOnboardProtocol(button.dataset.onboardProtocol);
+  });
   if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.addEventListener('click', applyOnboardBatchContext);
   if (dom.onboardSave) dom.onboardSave.addEventListener('click', () => { void saveOnboard(); });
   if (dom.onboardRetryApply) dom.onboardRetryApply.addEventListener('click', () => { void applyConnections(); });

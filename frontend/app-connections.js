@@ -1,5 +1,5 @@
-import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, displayModelId, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
-import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, preferredProtocol, routeIdFor } from './app-models.js';
+import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, renderOverviewStatus, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
 
@@ -342,7 +342,7 @@ function connectionDraftRow(row) {
     providerPresetId: typeof row.providerPresetId === 'string' ? row.providerPresetId : '',
     baseURL: typeof row.baseURL === 'string' ? row.baseURL : '',
     apiKeyEnv: typeof row.apiKeyEnv === 'string' ? row.apiKeyEnv : '',
-    protocols: Array.isArray(row.protocols) ? row.protocols.filter((value) => value === 'chat' || value === 'responses') : null,
+    protocols: Array.isArray(row.protocols) ? row.protocols.slice() : null,
     legacy: row.legacy === true,
     modelCount: Number.isInteger(row.modelCount) ? row.modelCount : null,
     apiKeySet: row.apiKeySet === true,
@@ -356,6 +356,63 @@ function connectionDraftFrom(data) {
   const rows = connectionRowsOf(data);
   if (!rows) return null;
   return rows.map(connectionDraftRow);
+}
+
+/* 一条连接只服务一种接口协议。旧配置可能没有协议或同时保留两种，这里只
+   如实读出唯一值；0 个、多个或含未知值都返回 null，由表单要求用户明确选择。 */
+function connectionProtocol(row) {
+  const list = Array.isArray(row && row.protocols) ? row.protocols : [];
+  if (list.length !== 1) return null;
+  return list[0] === 'chat' || list[0] === 'responses' ? list[0] : null;
+}
+
+function connectionProtocolText(row) {
+  const list = Array.isArray(row && row.protocols) ? row.protocols : [];
+  if (list.length === 1 && (list[0] === 'chat' || list[0] === 'responses')) return protocolLabel(list[0]);
+  if (list.length > 1) return list.map(protocolLabel).join('/') + '（待选择一种）';
+  if (list.length === 1) return '接口协议不受支持';
+  return '未选择';
+}
+
+function connectionProtocolError(row) {
+  const list = Array.isArray(row && row.protocols) ? row.protocols : [];
+  if (list.length === 1 && (list[0] === 'chat' || list[0] === 'responses')) return '';
+  const name = row && (row.name || row.id) ? row.name || row.id : '未命名连接';
+  if (list.length > 1) {
+    return '连接「' + name + '」同时允许 ' + list.map(protocolLabel).join('/')
+      + '；一条连接只能使用一种接口协议，请只保留一种。';
+  }
+  if (list.length === 1) {
+    return '连接「' + name + '」的接口协议不受支持；请选择 Chat Completions 或 Responses。';
+  }
+  return '连接「' + name + '」还没有选择接口协议，请选择 Chat Completions 或 Responses。';
+}
+
+function connectionProtocolErrors(rows) {
+  return (rows || []).filter((row) => row && !row.legacy).map(connectionProtocolError).filter(Boolean);
+}
+
+function connectionModelLabel(model) {
+  if (!model) return '未命名模型';
+  return model.name || model.upstreamModelId || '未命名模型';
+}
+
+/* 连接改协议时，已有模型不能悄悄跟着翻协议：旧路由 ID 与旧会话绑定必须
+   保持。返回具体模型名，供保存前的错误提示逐条列出。 */
+function connectionProtocolConflicts(connectionId, protocol) {
+  if (!connectionId || (protocol !== 'chat' && protocol !== 'responses')) return [];
+  const models = Array.isArray(state.data?.models) ? state.data.models : [];
+  return models.filter((model) => model && model.connectionId === connectionId
+    && model.protocol !== protocol);
+}
+
+function connectionProtocolConflictText(row, conflicts) {
+  const target = protocolLabel(connectionProtocol(row));
+  return '连接「' + (row.name || row.id) + '」现在只使用 ' + target + '，但这些已有模型仍按另一协议调用上游：'
+    + conflicts.map((model) => connectionModelLabel(model) + '（'
+      + (model.protocol === 'chat' || model.protocol === 'responses' ? protocolLabel(model.protocol) : '协议未声明')
+      + '）').join('、')
+    + '。为保持它们的模型 ID 和旧会话绑定，本次未保存；请先移除这些模型或把它们改到协议相同的连接。';
 }
 
 function connectionsSignature(rows) {
@@ -374,17 +431,21 @@ function connectionsDirty() {
 }
 
 /* 提交体只包含契约允许的字段；apiKey 仅在本次输入过时带上，
-   省略即表示保留已保存的旧值。 */
+   省略即表示保留已保存的旧值。protocols 仍按后端的数组契约发送，
+   但只发唯一值：旧配置的多协议或缺失不会在这里被猜成某一个。 */
 function connectionPayload(rows) {
-  return (rows || []).filter((row) => !row.legacy).map((row) => ({
-    id: row.id,
-    name: row.name,
-    ...(row.providerPresetId ? { providerPresetId: row.providerPresetId } : {}),
-    baseURL: row.baseURL,
-    ...(row.apiKeyEnv ? { apiKeyEnv: row.apiKeyEnv } : {}),
-    ...(Array.isArray(row.protocols) && row.protocols.length ? { protocols: row.protocols } : {}),
-    ...(row.apiKey ? { apiKey: row.apiKey } : {}),
-  }));
+  return (rows || []).filter((row) => !row.legacy).map((row) => {
+    const protocol = connectionProtocol(row);
+    return {
+      id: row.id,
+      name: row.name,
+      ...(row.providerPresetId ? { providerPresetId: row.providerPresetId } : {}),
+      baseURL: row.baseURL,
+      ...(row.apiKeyEnv ? { apiKeyEnv: row.apiKeyEnv } : {}),
+      ...(protocol ? { protocols: [protocol] } : {}),
+      ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+    };
+  });
 }
 
 const CONNECTION_ID_HINT = '标识只能使用字母、数字、点、下划线与连字符，且以字母或数字开头。';
@@ -416,7 +477,15 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
   }
   if (apiKey && /[\u0000-\u001f]/.test(apiKey)) errors.push('API Key 不能包含换行或控制字符。');
 
-  const protocols = Array.isArray(draft.protocols) ? draft.protocols.filter((value) => value === 'chat' || value === 'responses') : [];
+  const rawProtocols = Array.isArray(draft.protocols) ? draft.protocols : [];
+  const protocols = protocolList(rawProtocols);
+  if (rawProtocols.length !== 1 || protocols.length !== 1) {
+    errors.push(rawProtocols.length > 1
+      ? '一条连接只能选择一种接口协议；请只保留 Chat Completions 或 Responses。'
+      : rawProtocols.length === 1
+        ? '接口协议必须是 Chat Completions 或 Responses。'
+        : '请选择接口协议：Chat Completions 或 Responses。');
+  }
   return {
     errors,
     value: {
@@ -425,7 +494,7 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
       ...(draft.providerPresetId ? { providerPresetId: draft.providerPresetId } : {}),
       baseURL: base.value || String(draft.baseURL || '').trim(),
       apiKeyEnv: keyEnv,
-      ...(protocols.length ? { protocols } : {}),
+      ...(protocols.length === 1 ? { protocols: [protocols[0]] } : {}),
       apiKey: apiKey.trim(),
       legacy: false,
     },
@@ -468,7 +537,12 @@ function readConnectionEditor() {
   const protocols = [];
   if (dom.ceChat && dom.ceChat.checked) protocols.push('chat');
   if (dom.ceResponses && dom.ceResponses.checked) protocols.push('responses');
-  editing.draft.protocols = protocols.length ? protocols : null;
+  if (protocols.length) editing.draft.protocols = protocols;
+  /* 旧配置的多协议只读保留：用户只是在改名称或地址时，不能因为两个单选
+     都没选中就把「同时允许两种」悄悄改成「未选择」。 */
+  else if (!Array.isArray(editing.draft.protocols) || editing.draft.protocols.length < 2) {
+    editing.draft.protocols = [];
+  }
   if (editing.draft.apiKey) editing.draft.secretSet = true;
 }
 
@@ -486,6 +560,11 @@ function applyConnectionEditor() {
     }
   }
   const { errors, value } = validateConnectionDraft(editing.draft, rows, { originalId: editing.originalId });
+  if (!errors.length) {
+    const protocol = connectionProtocol(value);
+    const conflicts = connectionProtocolConflicts(value.id, protocol);
+    if (conflicts.length) errors.push(connectionProtocolConflictText(value, conflicts));
+  }
   editing.errors = errors;
   if (errors.length) {
     renderConnections();
@@ -519,15 +598,21 @@ function applyProviderPreset(presetId) {
   editing.draft.secretSet = Boolean(editing.baseRow?.apiKeySet);
   editing.keyEdited = false;
   editing.draft.baseURL = typeof preset.baseURL === 'string' ? preset.baseURL : editing.draft.baseURL;
-  if (Array.isArray(preset.protocols) && preset.protocols.length) {
-    editing.draft.protocols = preset.protocols.filter((value) => value === 'chat' || value === 'responses');
+  const presetProtocols = protocolList(preset.protocols);
+  if (presetProtocols.length === 1) {
+    editing.draft.protocols = [presetProtocols[0]];
+  } else if (presetProtocols.length > 1) {
+    /* 多协议预设保留自己的元数据，但当前连接只能选一种：保留用户已经
+       选中的那个，没有选过就留空，绝不默认 Responses。 */
+    const current = connectionProtocol(editing.draft);
+    editing.draft.protocols = current && presetProtocols.includes(current) ? [current] : [];
   }
   if (!editing.draft.name) editing.draft.name = preset.name || '';
   if (!editing.draft.id) editing.draft.id = presetsSuggestedId(preset);
   if (dom.ceBase) dom.ceBase.value = editing.draft.baseURL;
   if (dom.ceKey) dom.ceKey.value = '';
-  if (dom.ceChat) dom.ceChat.checked = (editing.draft.protocols || []).includes('chat');
-  if (dom.ceResponses) dom.ceResponses.checked = (editing.draft.protocols || []).includes('responses');
+  if (dom.ceChat) dom.ceChat.checked = connectionProtocol(editing.draft) === 'chat';
+  if (dom.ceResponses) dom.ceResponses.checked = connectionProtocol(editing.draft) === 'responses';
   if (dom.ceId && editing.originalId === null) dom.ceId.value = editing.draft.id;
   if (dom.ceName) dom.ceName.value = editing.draft.name;
   renderConnections();
@@ -691,6 +776,7 @@ function onboardConnectionValues() {
     baseURL: String(dom.onboardBase ? dom.onboardBase.value : '').trim(),
     apiKey: String(dom.onboardKey ? dom.onboardKey.value : ''),
     providerPresetId: String(dom.onboardPreset ? dom.onboardPreset.value : ''),
+    protocol: onboardProtocol(),
   };
 }
 
@@ -705,6 +791,7 @@ function fillOnboardForm() {
   if (!dom.onboardId) return;
   const target = savedOnboardTarget();
   if (target) {
+    if (!state.onboard.protocolTouched) state.onboard.protocol = connectionProtocol(target);
     if (!isInputActive(dom.onboardId)) dom.onboardId.value = target.id || '';
     if (!isInputActive(dom.onboardName)) dom.onboardName.value = target.name || '';
     if (!isInputActive(dom.onboardBase)) dom.onboardBase.value = target.baseURL || '';
@@ -731,12 +818,11 @@ function fillOnboardForm() {
       .filter((model) => model && model.connectionId && (!target || model.connectionId === target.id));
     if (models.length) {
       state.onboard.discoveryFor = onboardEndpointKey();
-      const limits = connectionProtocolLimits(target);
       state.onboard.discovery = {
         checkedAt: null,
         modelCount: models.length,
         saved: true,
-        models: models.map((model) => savedOnboardModelRow(model, target, limits)),
+        models: models.map((model) => savedOnboardModelRow(model)),
       };
       if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, '已从保存的目录载入 ' + fmtCount(models.length) + ' 个模型。');
     }
@@ -744,20 +830,16 @@ function fillOnboardForm() {
   fillOnboardPresets();
 }
 
-/* 已保存模型回到向导时保留名称、能力、档位、默认档位与来源；协议声明按
-   同一个上游 ID 恢复，绝不再缩成「保存时选的那一个协议」。 */
-function savedOnboardModelRow(model, target, limits) {
+/* 已保存模型回到向导时保留名称、能力、档位、默认档位与来源；协议只作为
+   旧配置的兼容显示保留，不再成为新导入行的协议来源。 */
+function savedOnboardModelRow(model) {
   const upstreamModelId = model.upstreamModelId || model.id;
-  const declared = declaredProtocolsFor(model, target, upstreamModelId);
-  const savedProtocol = protocolList([model.protocol])[0] || null;
   return {
-    key: model.id || upstreamModelId,
+    key: upstreamModelId + (model.protocol ? '#' + model.protocol : ''),
     id: upstreamModelId,
     name: model.name || '',
     upstreamModelId,
-    protocols: declared,
-    protocolOptions: protocolChoicesFor(declared, limits),
-    protocol: savedProtocol || (declared.length ? preferredProtocol(declared) : null),
+    protocol: protocolList([model.protocol])[0] || null,
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxOutputTokens,
     /* 已保存行自己的声明照原样带入：没写过就仍是未知，不补 false。 */
@@ -791,9 +873,6 @@ function filteredOnboardModels() {
     .some((value) => String(value || '').toLowerCase().includes(query)));
 }
 
-/* 两个协议是本产品唯一支持的两种接口；可选集合按这个顺序展示，与首设页一致。 */
-const PROTOCOL_CHOICES = ['chat', 'responses'];
-
 const STANDARD_ONBOARD_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function protocolList(value) {
@@ -802,59 +881,17 @@ function protocolList(value) {
     : [];
 }
 
-/* 连接可以限制自己只服务哪些协议；空数组在连接契约里表示「不限」，因此只有
-   非空列表才构成限制。 */
-function connectionProtocolLimits(connection) {
-  const list = protocolList(connection && connection.protocols);
-  return list.length ? list : null;
+/* 向导的连接协议来自供应商页（连接编辑器或向导里的连接字段），不来自
+   某一行模型，也不按上游模型名或本机路由名猜。 */
+function onboardProtocol() {
+  const value = state.onboard && state.onboard.protocol;
+  return value === 'chat' || value === 'responses' ? value : null;
 }
 
-/* 供应商预设是候选目录的另一份真实声明：按连接的 presetId 与同一个上游 ID
-   找到厂商写明的协议。找不到就返回空，绝不按路由 ID 末段猜。 */
-function presetProtocolsFor(connection, upstreamModelId) {
-  const presetId = connection && connection.providerPresetId;
-  if (!presetId || !upstreamModelId) return [];
-  const preset = providerPresets().find((row) => row && row.id === presetId);
-  const model = preset && Array.isArray(preset.models)
-    ? preset.models.find((row) => row && row.id === upstreamModelId)
-    : null;
-  return protocolList(model && model.protocols);
-}
-
-/* 只返回「真实声明」：已保存行自己的 protocols 字段（包括显式空数组，那是
-   权威的「不支持」，不回退预设），否则用同一上游 ID 的预设声明。 */
-function declaredProtocolsFor(row, connection, upstreamModelId) {
-  if (row && Array.isArray(row.protocols)) return protocolList(row.protocols);
-  return presetProtocolsFor(connection, upstreamModelId);
-}
-
-/* 可选项是声明与连接限制的交集；没有声明时才允许在连接允许范围内由用户
-   显式确认，且不会因此把未声明的能力写进已保存行。 */
-function protocolChoicesFor(declared, allowed) {
-  const base = allowed || PROTOCOL_CHOICES;
-  if (!declared || !declared.length) return base.slice();
-  return declared.filter((value) => allowed ? allowed.includes(value) : true);
-}
-
-/* 用户显式确认协议：只写回这一行的 protocol，真实的 upstreamModelId 与上游 ID
-   都不动；本机路由按既有 route-id 规则在构建时重算。 */
-function assignOnboardProtocol(target, protocol) {
-  if (!target) return false;
-  if (protocol !== 'chat' && protocol !== 'responses') {
-    target.protocol = null;
-    return true;
-  }
-  const choices = Array.isArray(target.protocolOptions)
-    ? target.protocolOptions
-    : Array.isArray(target.protocols) && target.protocols.length ? target.protocols : PROTOCOL_CHOICES;
-  if (!choices.includes(protocol)) return false;
-  target.protocol = protocol;
-  return true;
-}
-
-function chooseOnboardProtocol(key, protocol) {
-  const target = onboardRowByKey(key);
-  if (!assignOnboardProtocol(target, protocol)) return;
+function setOnboardProtocol(protocol) {
+  if (protocol !== 'chat' && protocol !== 'responses') return;
+  state.onboard.protocol = protocol;
+  state.onboard.protocolTouched = true;
   markOnboardEdited();
   renderOnboard();
 }
@@ -866,26 +903,6 @@ function toggleFilteredOnboardModels() {
   rows.forEach((row) => { row.selected = selected; });
   markOnboardEdited();
   renderOnboard();
-}
-
-function applyOnboardBatchProtocol(protocol) {
-  const rows = selectedOnboardModels();
-  let changed = 0;
-  rows.forEach((row) => {
-    if (assignOnboardProtocol(row, protocol)) {
-      row.metadataKind = 'manual';
-      changed++;
-    }
-  });
-  if (!changed) {
-    showToast('已选模型都不允许这个接口协议；请按各行声明调整。', 'error');
-    return;
-  }
-  markOnboardEdited();
-  renderOnboard();
-  const skipped = rows.length - changed;
-  showToast('已为 ' + fmtCount(changed) + ' 个已选模型选择 ' + protocolLabel(protocol)
-    + (skipped ? '；' + fmtCount(skipped) + ' 个因声明或连接限制未改动。' : '。'), skipped ? 'error' : 'ok');
 }
 
 function applyOnboardBatchContext() {
@@ -965,22 +982,16 @@ function onboardRowSource(candidate) {
 }
 
 function onboardRowFrom(candidate, { connection = null } = {}) {
-  const protocols = protocolList(candidate && candidate.protocols);
-  const protocolOptions = protocolChoicesFor(protocols, connectionProtocolLimits(connection));
-  /* 默认协议必须落在用户实际可选项里：连接限制了协议时，上游声明的首选
-     协议可能不可用。 */
-  const protocol = protocolOptions.length
-    ? (protocolOptions.includes(preferredProtocol(protocols)) ? preferredProtocol(protocols) : protocolOptions[0])
-    : null;
+  /* 协议由连接决定；这一行只保留候选自己的名称、预算与能力。上游声明的
+     protocol 不再变成逐行选择，也不再决定新导入模型的协议。 */
   return {
     key: candidate.id,
     id: candidate.id,
     name: candidate.name || '',
     description: candidate.description || '',
     upstreamModelId: candidate.id,
-    protocols,
-    protocolOptions,
-    protocol,
+    protocol: null,
+    connectionProtocol: connectionProtocol(connection),
     contextWindow: candidate.contextWindow,
     maxOutputTokens: candidate.maxOutputTokens,
     tools: typeof candidate.tools === 'boolean' ? candidate.tools : undefined,
@@ -994,23 +1005,19 @@ function onboardRowFrom(candidate, { connection = null } = {}) {
   };
 }
 
-/* 重新读取上游时保留用户自己改过的显示名称与默认档位；默认档位只有在
-   新一轮目录仍声明同一档位时才带回来，避免保存一个上游已不支持的值。 */
+/* 重新读取上游时保留用户自己改过的显示名称与默认档位；同一连接下同一
+   上游 ID 只应有一条模型，出现多条时不猜该沿用哪一个。 */
 function preserveOnboardModelNames(models, savedModels, connectionId) {
   const saved = new Map();
   for (const model of Array.isArray(savedModels) ? savedModels : []) {
     if (!model || model.connectionId !== connectionId || !(model.name || model.defaultEffort)) continue;
     const upstream = model.upstreamModelId || model.id;
-    const keys = [JSON.stringify([upstream, model.protocol || ''])];
-    if (model.protocol) keys.push(JSON.stringify([upstream, '']));
-    for (const key of keys) {
-      const rows = saved.get(key) || [];
-      rows.push(model);
-      saved.set(key, rows);
-    }
+    const rows = saved.get(upstream) || [];
+    rows.push(model);
+    saved.set(upstream, rows);
   }
   return models.map((row) => {
-    const candidates = saved.get(JSON.stringify([row.upstreamModelId, row.protocol || ''])) || [];
+    const candidates = saved.get(row.upstreamModelId) || [];
     if (candidates.length !== 1) return row;
     const previous = candidates[0];
     const next = { ...row };
@@ -1068,13 +1075,11 @@ function currentConnectionLimit(connectionId) {
 /* 新模型只写已知字段；保存已存在的路由（existing）时对清空项显式写 null：
    后端 MergeModels 只把 null 当作删除，省略会保留旧值，取消推理或默认档位
    后就会因为旧档位对不上而 400，或把旧值带回界面。 */
-function buildOnboardRow(row, { existing = false, previousLimit = undefined } = {}) {
+function buildOnboardRow(row, { existing = false, previousLimit = undefined, protocol = null, id = '' } = {}) {
   const context = positiveInteger(row.contextWindow);
-  /* 协议只来自上游声明或用户显式确认；两者都没有时保持为空，由调用方拒绝，
-     绝不按末段规则补一个猜测值。 */
-  const protocol = row.protocol === 'chat' || row.protocol === 'responses'
-    ? row.protocol
-    : (Array.isArray(row.protocols) && row.protocols.length ? preferredProtocol(row.protocols) : null);
+  /* 协议来自连接的唯一选择；这里不接受行内协议，也不按上游名或路由名猜。
+     已保存模型则由调用方传入它原来的 ID 和协议，保持旧会话绑定。 */
+  const chosen = protocol === 'chat' || protocol === 'responses' ? protocol : null;
   /* 上下文上限只取真实已知值：目录声明的上限或连接上记录的上限，未知不编造；
      上限小于本次上下文时不能写入，否则后端会因为窗口超过上限而拒绝保存。 */
   const knownLimit = positiveInteger(row.contextLimit) ?? currentConnectionLimit(row.connectionId);
@@ -1086,10 +1091,10 @@ function buildOnboardRow(row, { existing = false, previousLimit = undefined } = 
   const output = positiveInteger(row.maxOutputTokens);
   const optional = (key, value) => (value !== undefined ? { [key]: value } : (existing ? { [key]: null } : {}));
   return {
-    id: protocol ? routeIdFor(row.connectionId, row.upstreamModelId, protocol) : '',
+    id: id || (chosen ? routeIdFor(row.connectionId, row.upstreamModelId, chosen) : ''),
     upstreamModelId: row.upstreamModelId,
     ...optional('name', name && name !== row.upstreamModelId ? name : undefined),
-    protocol,
+    protocol: chosen,
     contextWindow: context,
     /* 只有用户原本确实有上限时才把「清空」写成 null；没有上限的模型不加这个字段。 */
     ...(contextLimit !== undefined ? { contextLimit } : (existing && hadLimit ? { contextLimit: null } : {})),
@@ -1106,11 +1111,9 @@ function buildOnboardRow(row, { existing = false, previousLimit = undefined } = 
   };
 }
 
-/* 向导只会重存这些已存在路由；据此决定是否需要对清空项写 null。 */
-function existingOnboardRouteIds(connectionId) {
-  return new Set((Array.isArray(state.data?.models) ? state.data.models : [])
-    .filter((model) => model && model.connectionId === connectionId)
-    .map((model) => model.id));
+function onboardExistingModels(connectionId) {
+  return (Array.isArray(state.data?.models) ? state.data.models : [])
+    .filter((model) => model && model.connectionId === connectionId);
 }
 
 function onboardProblems({ models = [] } = {}) {
@@ -1129,11 +1132,18 @@ function onboardProblems({ models = [] } = {}) {
   const saved = savedOnboardRow(values.id);
   const keepKey = Boolean(saved && saved.apiKeySet && normalizeBaseURL(values.baseURL).value === saved.baseURL);
   if (!values.apiKey.trim() && !keepKey) problems.push('请填写 API Key。');
+  const protocol = values.protocol;
+  if (protocol !== 'chat' && protocol !== 'responses') {
+    problems.push('请选择这条连接的接口协议：Chat Completions 或 Responses。');
+  }
   if (!models.length) problems.push('至少勾选 1 个模型。');
-  const blocked = models.filter((row) => !row.protocol);
-  if (blocked.length) {
-    problems.push('这些模型的上游没有声明协议，请为它们各选一个接口协议：'
-      + blocked.map((row) => row.upstreamModelId).join('、') + '。');
+  /* 已有模型不能被这次保存悄悄改成新协议：它们的模型 ID 与旧会话绑定
+     必须保持。这里列出具体模型名并阻止保存。 */
+  if (protocol === 'chat' || protocol === 'responses') {
+    const conflicts = connectionProtocolConflicts(values.id, protocol);
+    if (conflicts.length) {
+      problems.push(connectionProtocolConflictText({ id: values.id, name: values.name, protocols: [protocol] }, conflicts));
+    }
   }
   /* 正整数校验与 buildOnboardRow 用同一个函数：能通过校验的值一定能被
      安全地写进 contextWindow，不会出现界面可保存、后端 400 的组合。 */
@@ -1152,32 +1162,30 @@ function onboardProblems({ models = [] } = {}) {
     problems.push('请为这些模型填写上下文窗口；接口没有返回时不能用猜测值：'
       + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
-  /* 连接限制是保存前已知的真实约束：路由会按所选协议生成，但请求最终会被
-     连接拒绝，所以这里先按同一个限制拦下，不等到保存后才发现。 */
-  const effectiveConnection = saved && (saved.providerPresetId || '') === (values.providerPresetId || '')
-    ? saved : providerPreset(values.providerPresetId);
-  const limits = connectionProtocolLimits({ protocols: onboardConnectionProtocols(values, saved) });
-  if (limits) {
-    const conflicts = models.filter((row) => row.protocol && !limits.includes(row.protocol));
-    if (conflicts.length) {
-      problems.push('连接「' + (effectiveConnection?.name || effectiveConnection?.id || values.name || values.id) + '」只允许 ' + limits.map(protocolLabel).join('/')
-        + '；' + conflicts.map((row) => row.upstreamModelId
-          + ' 当前为 ' + protocolLabel(row.protocol)).join('、')
-        + ' 不在允许范围内。');
-    }
+  /* 同一个连接里同一上游 ID 只对应一条模型；出现多条时无法判断该保留
+     哪一条的旧 ID，列出上游 ID 并停下。 */
+  const previousByUpstream = new Map();
+  const ambiguous = new Set();
+  for (const model of onboardExistingModels(values.id)) {
+    const upstream = model.upstreamModelId || model.id;
+    if (!upstream) continue;
+    if (previousByUpstream.has(upstream)) ambiguous.add(upstream);
+    else previousByUpstream.set(upstream, model);
+  }
+  if (ambiguous.size) {
+    problems.push('连接「' + (values.name || values.id) + '」里同一上游模型有多条已保存记录：'
+      + [...ambiguous].join('、') + '。为避免覆盖旧模型 ID 与旧会话，请先在模型管理中整理这些记录。');
   }
   const ids = new Set();
   const built = [];
-  /* 已存在的路由才需要 null 补丁：新路由没有旧值需要清，省略未知字段即可。 */
-  const previous = existingOnboardRouteIds(values.id);
   for (const row of models) {
     const draft = { ...row, connectionId: values.id };
-    const initial = buildOnboardRow(draft);
-    const previousRow = (Array.isArray(state.data?.models) ? state.data.models : [])
-      .find((saved) => saved && saved.id === initial.id && saved.connectionId === values.id);
-    const model = initial.id && previous.has(initial.id)
-      ? buildOnboardRow(draft, { existing: true, previousLimit: previousRow?.contextLimit }) : initial;
-    if (model.id && ids.has(model.id)) problems.push('模型路由 ID 重复：' + model.id + '。');
+    const previousRow = previousByUpstream.get(row.upstreamModelId);
+    const keepPrevious = previousRow && protocol && previousRow.protocol === protocol;
+    const model = keepPrevious
+      ? buildOnboardRow(draft, { existing: true, protocol, id: previousRow.id, previousLimit: previousRow.contextLimit })
+      : buildOnboardRow(draft, { protocol });
+    if (model.id && ids.has(model.id)) problems.push('同一个上游模型被重复导入：' + row.upstreamModelId + '。');
     if (model.id) ids.add(model.id);
     built.push(model);
   }
@@ -1213,8 +1221,9 @@ function onboardEditingText() {
     && (active.dataset?.onboardName || active.dataset?.onboardBudget));
 }
 
-function renderOnboardModels(rows, { connectionId = '' } = {}) {
+function renderOnboardModels(rows) {
   if (!dom.onboardModels || onboardEditingText()) return;
+  const connectionId = onboardConnectionValues().id;
   const attachedIds = new Set((Array.isArray(state.data?.models) ? state.data.models : [])
     .filter((model) => model && model.connectionId === connectionId)
     .map((model) => model.upstreamModelId || model.id));
@@ -1271,11 +1280,16 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
     const facts = document.createElement('span');
     facts.className = 'onboard__model-facts';
     const parts = [];
-    const declared = Array.isArray(row.protocols) ? row.protocols : [];
+    const protocol = onboardProtocol();
     if (Number(row.contextWindow) > 0) parts.push('上下文 ' + fmtK(row.contextWindow));
     if (Number(row.maxOutputTokens) > 0) parts.push('输出 ' + fmtK(row.maxOutputTokens));
-    if (declared.length) parts.push(declared.map(protocolLabel).join('/'));
-    else parts.push('服务商未声明协议');
+    if (row.protocol && protocol && row.protocol !== protocol) {
+      parts.push('已保存 ' + protocolLabel(row.protocol) + '，与当前连接协议冲突');
+    } else if (protocol) {
+      parts.push('按 ' + protocolLabel(protocol) + ' 接入');
+    } else {
+      parts.push('请先选择连接协议');
+    }
     facts.textContent = parts.join(' · ');
     body.append(head, facts);
     if (row.description) {
@@ -1404,47 +1418,6 @@ function renderOnboardModels(rows, { connectionId = '' } = {}) {
       li.append(defaultField);
     }
 
-    /* 可选项 = 真实声明 ∩ 连接限制；声明过协议时不能换成一个上游没声明的
-       协议，没有声明时才允许用户在连接允许范围内显式确认。已保存但不在
-       声明里的协议保留为「已保存」，不悄悄改成别的协议。 */
-    const protocolField = document.createElement('label');
-    protocolField.className = 'field field--inline onboard__protocol';
-    const protocolLabelNode = document.createElement('span');
-    protocolLabelNode.className = 'field__label';
-    protocolLabelNode.textContent = '接口协议';
-    const select = document.createElement('select');
-    select.dataset.onboardProtocol = key;
-    select.dataset.onboardModel = key;
-    select.dataset.onboardFocus = 'protocol';
-    const choices = Array.isArray(row.protocolOptions)
-      ? row.protocolOptions
-      : (declared.length ? declared : PROTOCOL_CHOICES);
-    const options = [{ value: '', label: '请选择…' }]
-      .concat(choices.map((value) => ({ value, label: protocolLabel(value) })));
-    if (row.protocol && !choices.includes(row.protocol)) {
-      options.push({ value: row.protocol, label: protocolLabel(row.protocol) + '（已保存）' });
-    }
-    syncSelectOptions(select, options, row.protocol || '');
-    select.addEventListener('change', () => {
-      chooseOnboardProtocol(key, select.value);
-    });
-    protocolField.append(protocolLabelNode, select);
-    if (!choices.length) {
-      const conflict = document.createElement('span');
-      conflict.className = 'field__hint onboard__route';
-      conflict.textContent = '连接不允许该上游声明的协议；请先在「连接」页调整允许的接口协议。';
-      protocolField.append(conflict);
-    }
-    if (connectionId && row.upstreamModelId) {
-      const route = document.createElement('span');
-      route.className = 'field__hint onboard__route mono';
-      route.textContent = row.protocol
-        ? '本机路由 ' + displayModelId(routeIdFor(connectionId, row.upstreamModelId, row.protocol))
-        : '选择协议后生成本机路由；上游 ID 保持原样';
-      protocolField.append(route);
-    }
-    li.append(protocolField);
-
     const caps = document.createElement('div');
     caps.className = 'onboard__caps';
     const toggle = (cap, text, disabled = false) => {
@@ -1540,7 +1513,7 @@ function renderOnboard() {
     setText(dom.onboardCatalogueCount, '已勾选 ' + fmtCount(selected.length) + ' / ' + fmtCount(rows.length)
       + (draft.query ? '；当前显示 ' + fmtCount(visibleRows.length) : ''));
   }
-  renderOnboardModels(visibleRows, { connectionId: onboardConnectionValues().id });
+  renderOnboardModels(visibleRows);
   setHidden(dom.onboardModelsEmpty, !rows.length || visibleRows.length > 0);
   if (dom.onboardSelectAll) {
     const allVisible = visibleRows.length > 0 && visibleRows.every((row) => row.selected === true);
@@ -1548,7 +1521,26 @@ function renderOnboard() {
     dom.onboardSelectAll.setAttribute('aria-pressed', allVisible ? 'true' : 'false');
     setText(dom.onboardSelectAll, allVisible ? '取消全选当前结果' : '全选当前结果');
   }
-  if (dom.onboardBatchChat) dom.onboardBatchChat.disabled = busy || !selected.length;
+  const protocol = onboardProtocol();
+  const protocolButtons = dom.onboardProtocolGroup?.querySelectorAll
+    ? Array.from(dom.onboardProtocolGroup.querySelectorAll('[data-onboard-protocol]'))
+    : [];
+  protocolButtons.forEach((button) => {
+    button.setAttribute('aria-pressed', button.dataset.onboardProtocol === protocol ? 'true' : 'false');
+    button.disabled = busy;
+  });
+  if (dom.onboardProtocolHint) {
+    const target = savedOnboardTarget();
+    const savedProtocols = protocolList(target && target.protocols);
+    const presetProtocols = protocolList(providerPreset(dom.onboardPreset?.value || '')?.protocols);
+    setText(dom.onboardProtocolHint, protocol
+      ? '本次新导入的模型按 ' + protocolLabel(protocol) + ' 调用上游；已保存模型保持原模型 ID 与旧会话绑定。'
+      : savedProtocols.length > 1
+        ? '已保存的连接同时允许 ' + savedProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
+        : presetProtocols.length > 1
+          ? '该预设同时提供 ' + presetProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种接口协议。'
+          : '请选择 Chat Completions 或 Responses；一条连接只使用一种接口协议。');
+  }
   if (dom.onboardBatchContext) dom.onboardBatchContext.disabled = busy || !selected.length;
   if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.disabled = busy || !selected.length;
 
@@ -1777,30 +1769,18 @@ function useRecommendedOnboardModels() {
   return models;
 }
 
-/* 保存时连接是整组替换：同 ID 的已保存连接必须带回它的协议限制与
-   apiKeyEnv（Key 引用），否则后端会按默认为它生成新的环境变量名，
-   已保存的 Key 就不再被这个连接引用。新预设的协议由当前预设带入。 */
-function onboardConnectionProtocols(values, saved) {
-  const preset = providerPreset(values.providerPresetId);
-  const presetProtocols = Array.isArray(preset?.protocols)
-    ? preset.protocols.filter((value) => value === 'chat' || value === 'responses')
-    : [];
-  const savedProtocols = Array.isArray(saved?.protocols)
-    ? saved.protocols.filter((value) => value === 'chat' || value === 'responses')
-    : [];
-  if (saved && (saved.providerPresetId || '') === (values.providerPresetId || '')) return savedProtocols;
-  return presetProtocols.length ? presetProtocols : savedProtocols;
-}
-
+/* 保存时连接是整组替换：同 ID 的已保存连接必须带回它的 apiKeyEnv（Key 引用），
+   否则后端会按默认为它生成新的环境变量名，已保存的 Key 就不再被这个连接引用。
+   协议只发送向导里明确选中的唯一值；没有选择时由校验拦下，不发默认值。 */
 function onboardConnectionPayload(values, saved) {
-  const protocols = onboardConnectionProtocols(values, saved);
+  const protocol = values.protocol;
   return {
     id: values.id,
     name: values.name,
     ...(values.providerPresetId ? { providerPresetId: values.providerPresetId } : {}),
     baseURL: values.baseURL,
     ...(saved && saved.apiKeyEnv ? { apiKeyEnv: saved.apiKeyEnv } : {}),
-    ...(protocols.length ? { protocols } : {}),
+    ...(protocol === 'chat' || protocol === 'responses' ? { protocols: [protocol] } : {}),
     ...(values.apiKey.trim() ? { apiKey: values.apiKey.trim() } : {}),
   };
 }
@@ -1815,6 +1795,15 @@ async function saveOnboard() {
       showToast('还有一条连接没有通过校验。请先在连接编辑器里修正或取消，再保存。', 'error');
       return false;
     }
+  }
+  const draftOthers = (state.conns.draft || [])
+    .filter((row) => row && !row.legacy && row.id !== onboardConnectionValues().id);
+  const savedOthers = (connectionRowsOf(data) || [])
+    .filter((row) => row && !row.legacy && row.id !== onboardConnectionValues().id);
+  const otherProtocolProblems = connectionProtocolErrors(draftOthers.length ? draftOthers : savedOthers);
+  if (otherProtocolProblems.length) {
+    renderErrorList(dom.onboardErrors, otherProtocolProblems);
+    return false;
   }
   const selected = selectedOnboardModels();
   const { problems, built, values } = onboardProblems({ models: selected });
@@ -1919,6 +1908,11 @@ function applyOnboardPreset(presetId) {
     return;
   }
   if (preset.baseURL) dom.onboardBase.value = preset.baseURL;
+  const presetProtocols = protocolList(preset.protocols);
+  if (presetProtocols.length === 1) state.onboard.protocol = presetProtocols[0];
+  else if (presetProtocols.length > 1 && !presetProtocols.includes(state.onboard.protocol)) state.onboard.protocol = null;
+  else if (!presetProtocols.length && !state.onboard.protocol) state.onboard.protocol = null;
+  state.onboard.protocolTouched = true;
   const nextId = onboardSuggestedId(preset);
   if (dom.onboardId && nextId
     && staleSuggested(dom.onboardId.value, [savedId, onboardSuggestedId(previousPreset)])) {
@@ -2344,7 +2338,7 @@ function buildConnectionRow(row, index) {
   const models = document.createElement('p');
   models.className = 'conn-row__line muted';
   models.textContent = (row.modelCount === null ? '模型数未知' : row.modelCount + ' 个模型')
-    + (row.protocols && row.protocols.length ? ' · ' + row.protocols.map(protocolLabel).join('/') : '');
+    + ' · ' + connectionProtocolText(row);
   meta.append(keyState, models);
 
   /* 行内检查只探测本行连接；结果与按钮留在同一行，不新增任何导航或诊断页。 */
@@ -2429,8 +2423,17 @@ function renderConnectionEditor({ force = false } = {}) {
   }
   if (dom.ceBase && (force || !isInputActive(dom.ceBase)) && dom.ceBase.value !== (draft.baseURL || '')) dom.ceBase.value = draft.baseURL || '';
   if (dom.ceKeyEnv && (force || !isInputActive(dom.ceKeyEnv)) && dom.ceKeyEnv.value !== (draft.apiKeyEnv || '')) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
-  if (dom.ceChat) dom.ceChat.checked = (draft.protocols || []).includes('chat');
-  if (dom.ceResponses) dom.ceResponses.checked = (draft.protocols || []).includes('responses');
+  const draftProtocol = connectionProtocol(draft);
+  if (dom.ceChat) dom.ceChat.checked = draftProtocol === 'chat';
+  if (dom.ceResponses) dom.ceResponses.checked = draftProtocol === 'responses';
+  if (dom.ceProtocolHint) {
+    const listed = protocolList(draft.protocols);
+    setText(dom.ceProtocolHint, listed.length > 1
+      ? '已保存的连接同时允许 ' + listed.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
+      : draftProtocol
+        ? '当前使用 ' + protocolLabel(draftProtocol) + '；新模型会按它调用上游。'
+        : '请选择 Chat Completions 或 Responses；一条连接只使用一种接口协议。');
+  }
   if (dom.cePreset) {
     const desired = draft.providerPresetId || '';
     if (dom.cePreset.dataset?.providerFlow === 'managed') {
@@ -2490,8 +2493,7 @@ function renderConnectionsDiff() {
     if (before.name !== row.name) lines.push(['连接名称', before.name, row.name]);
     if (before.baseURL !== row.baseURL) lines.push(['上游地址', before.baseURL, row.baseURL]);
     if ((before.protocols || []).join(',') !== (row.protocols || []).join(',')) {
-      lines.push(['协议限制', (before.protocols || []).map(protocolLabel).join('/') || '不限',
-        (row.protocols || []).map(protocolLabel).join('/') || '不限']);
+      lines.push(['接口协议', connectionProtocolText(before), connectionProtocolText(row)]);
     }
     if (row.apiKey) lines.push(['API Key', '已保存（不回显）', '本次将替换']);
   }
@@ -2534,6 +2536,24 @@ async function saveConnections() {
   if (state.conns.editing) {
     applyConnectionEditor();
     if (state.conns.editing) return;
+  }
+  /* 整组连接都会重写：任何一条旧连接没有唯一协议，或仍有模型按另一协议
+     路由时，都不能靠「省略字段」或「随新协议重写」蒙混过去。 */
+  const protocolProblems = [];
+  for (const row of state.conns.draft || []) {
+    if (!row || row.legacy) continue;
+    const protocolError = connectionProtocolError(row);
+    if (protocolError) {
+      protocolProblems.push(protocolError);
+      continue;
+    }
+    const conflicts = connectionProtocolConflicts(row.id, connectionProtocol(row));
+    if (conflicts.length) protocolProblems.push(connectionProtocolConflictText(row, conflicts));
+  }
+  if (protocolProblems.length) {
+    setConnErrors(protocolProblems);
+    showToast('连接接口协议或已有模型协议需要先确认，未保存。', 'error');
+    return;
   }
   const payload = connectionPayload(state.conns.draft);
   if (!payload.length) {
@@ -2611,37 +2631,12 @@ async function saveConnections() {
 }
 
 
-/* 预设列表与面板状态是两条并行请求。已保存目录若先到，协议声明只能按当时
-   已知的连接限制填；预设到达后补一次真实声明（只动声明与可选项，不改用户
-   已选的协议、地址或 Key）。行自己的 protocols 字段仍然优先。 */
-function refreshSavedProtocolDeclarations() {
-  const discovery = state.onboard && state.onboard.discovery;
-  if (!discovery || discovery.saved !== true || !Array.isArray(discovery.models)) return;
-  const target = savedOnboardTarget();
-  if (!target) return;
-  const limits = connectionProtocolLimits(target);
-  const models = Array.isArray(state.data && state.data.models) ? state.data.models : [];
-  let changed = false;
-  discovery.models.forEach((row) => {
-    if (!row || !row.upstreamModelId) return;
-    const model = models.find((entry) => entry
-      && (entry.upstreamModelId || entry.id) === row.upstreamModelId
-      && (!target || entry.connectionId === target.id));
-    if (!model || Array.isArray(model.protocols)) return;
-    const declared = presetProtocolsFor(target, row.upstreamModelId);
-    if (!declared.length) return;
-    row.protocols = declared;
-    row.protocolOptions = protocolChoicesFor(declared, limits);
-    changed = true;
-  });
-  if (changed) renderOnboard();
-}
+/* ---------- exports ---------- */
 
 export {
   applyConnectionEditor,
   applyConnections,
   applyOnboardBatchContext,
-  applyOnboardBatchProtocol,
   applyOnboardPreset,
   applyProviderPreset,
   applyState,
@@ -2651,6 +2646,8 @@ export {
   configReady,
   connectionDraftFrom,
   connectionPayload,
+  connectionProtocol,
+  connectionProtocolErrors,
   connectionsDirty,
   discoverConnectionEditorModels,
   discoverOnboardModels,
@@ -2666,7 +2663,6 @@ export {
   providerPreset,
   readConnectionEditor,
   readServiceForm,
-  refreshSavedProtocolDeclarations,
   renderConnection,
   renderConnectionEditor,
   renderConnections,
@@ -2682,6 +2678,7 @@ export {
   serviceDraftFrom,
   serviceRowOf,
   serviceSignature,
+  setOnboardProtocol,
   toggleFilteredOnboardModels,
   upstreamReasonText,
   useRecommendedOnboardModels,

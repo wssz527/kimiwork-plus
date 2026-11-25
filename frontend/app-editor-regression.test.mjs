@@ -28,31 +28,33 @@ const connectionFunction = name => extractFunction(connectionsSource, name);
 /* 通用控件同步住在 app-core.js：编辑器只调用，不重复实现。 */
 const coreFunction = name => extractFunction(coreSource, name);
 
-const MODEL_HELPERS = ['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf', 'priceDraftFrom',
+const MODEL_HELPERS = ['hasVision', 'parseEfforts', 'metadataSourceOf', 'priceDraftFrom',
   'failoverDraftFrom', 'buildPrice', 'buildFailover', 'buildModel', 'canonicalPrice', 'canonicalFailover',
-  'canonicalModel', 'routeIdFor', 'preferredProtocol', 'draftProtocolFamily', 'suggestedRouteId'].map(modelFunction);
+  'canonicalModel', 'routeIdFor', 'suggestedRouteId'].map(modelFunction);
 
-/* 候选选择与协议推导共用这一整套真实实现：预设与连接只在此处注入。 */
+/* 候选选择与连接协议共用这一整套真实实现：预设与连接只在此处注入。 */
 const PICKER_ENV = `
   const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
   const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
   const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
   ${MODEL_HELPERS.join('\n')}
-  ${['candidateProtocolState', 'preferredProtocol', 'candidateMetadataSource', 'connectionRowsOf',
-    'findConnection', 'candidateMetadataSource', 'fillEditorFields'].map(modelFunction).join('\n')}
-  const protocolLabel = value => value === 'chat' ? 'Chat' : value === 'responses' ? 'Responses' : value;
+  ${['candidateMetadataSource', 'connectionRowsOf', 'findConnection', 'fillEditorFields'].map(modelFunction).join('\n')}
+  const connectionProtocol = row => {
+    const list = row && Array.isArray(row.protocols)
+      ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
+    return list.length === 1 ? list[0] : null;
+  };
   const setHidden = () => {};
   const setText = () => {};
   const renderPicker = () => {};
   const renderModels = () => {};
   const renderEditor = () => {};
-  const providerPreset = id => (state.providers.presets || []).find(preset => preset.id === id) || null;
   const connectionLabel = row => row ? (row.name || row.id || '—') : '—';
   ${modelFunction('pickCandidate')}
   return pickCandidate;
 `;
 
-function makePickerEnv({ models = [], presets = [], connections = [] } = {}) {
+function makePickerEnv({ models = [], presets = [], connections = [{ id: 'conn', protocols: ['responses'] }] } = {}) {
   const element = () => ({ value: '', hidden: false, focused: false, focus() { this.focused = true; } });
   const state = {
     data: { models: [], connections: { saved: connections } },
@@ -61,13 +63,13 @@ function makePickerEnv({ models = [], presets = [], connections = [] } = {}) {
     editor: { originalId: null, draft: null, serverErrors: [], budgetNote: null },
   };
   state.editor.draft = {
-    id: '', name: '', context: '', output: '', tools: undefined, reasoning: false, vision: false,
+    id: '', name: '', protocol: 'responses', context: '', output: '', tools: undefined, reasoning: false, vision: false,
     efforts: [], defaultEffort: '', connectionId: 'conn', upstreamModelId: '', upstreamProtocol: '',
     contextLimit: '', metadataSource: null,
     pricing: { inputPerMillion: '', outputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '' },
     failover: [], touched: new Set(),
   };
-  const dom = { mName: element(), mId: element(), mAdvanced: { open: false }, mEfforts: element() };
+  const dom = { mName: element(), mUpstream: element(), mAdvanced: { open: false }, mEfforts: element() };
   const pickCandidate = new Function('state', 'dom', PICKER_ENV)(state, dom);
   return { state, dom, pickCandidate };
 }
@@ -131,61 +133,55 @@ test('picking a new candidate drops values the previous candidate owned', () => 
   assert.equal(draft.defaultEffort, '');
 });
 
-test('a manual protocol choice survives picking another candidate that declares it', () => {
+test('candidate protocol declarations do not override the connection protocol', () => {
   const env = makePickerEnv({ models: [
-    { id: 'model-a', contextWindow: 1000, protocols: ['chat', 'responses'] },
+    { id: 'model-a', contextWindow: 1000, protocols: ['chat'] },
     { id: 'model-b', contextWindow: 2000, protocols: ['chat', 'responses'] },
-  ] });
+  ], connections: [{ id: 'conn', protocols: ['responses'] }] });
   env.pickCandidate('model-a');
-  /* 用户在协议按钮上显式改成 Chat。 */
   const draft = env.state.editor.draft;
-  draft.protocolSource = 'manual';
-  draft.protocolConfirmed = true;
-  draft.id = 'conn/kimi-model-a';
+  assert.equal(draft.protocol, 'responses');
+  assert.equal(draft.id, 'conn/resp-model-a');
 
   env.pickCandidate('model-b');
-  assert.equal(draft.id, 'conn/kimi-model-b', 'manual Chat must not fall back to Responses');
-  assert.equal(draft.protocolSource, 'manual');
-  assert.match(draft.protocolHint, /沿用你选择的 Chat/);
+  assert.equal(draft.protocol, 'responses', 'the connection protocol must survive a candidate change');
+  assert.equal(draft.id, 'conn/resp-model-b');
 });
 
-test('an explicit-empty protocol is still refused instead of reusing the manual choice', () => {
+test('an explicit-empty candidate declaration still uses the connection protocol', () => {
   const env = makePickerEnv({ models: [{ id: 'model-a', contextWindow: 1000, protocols: [] }] });
   env.pickCandidate('model-a');
   const draft = env.state.editor.draft;
-  assert.equal(draft.id, '');
-  assert.equal(draft.protocolConfirmed, false);
-  assert.match(draft.protocolHint, /明确声明不支持/);
+  assert.equal(draft.protocol, 'responses');
+  assert.equal(draft.id, 'conn/resp-model-a');
 });
 
-test('the suggested route id follows the connection protocol before guessing from the upstream name', () => {
+test('the generated model id follows the single connection protocol without guessing from the name', () => {
   const makeSuggested = (connections = []) => new Function('connections', `
     const state = { data: { connections: { saved: connections } } };
-    const providerPreset = id => (state.providers?.presets || []).find(preset => preset.id === id) || null;
-    ${modelFunction('modelFamilyFor')}
     ${modelFunction('routeIdFor')}
     ${modelFunction('connectionRowsOf')}
     ${modelFunction('findConnection')}
-    ${modelFunction('preferredProtocol')}
-    ${modelFunction('draftProtocolFamily')}
+    const connectionProtocol = row => {
+      const list = row && Array.isArray(row.protocols)
+        ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
+      return list.length === 1 ? list[0] : null;
+    };
     ${modelFunction('suggestedRouteId')}
     return suggestedRouteId;
   `)(connections);
 
-  /* 只允许 Chat 的连接上手输模型名：必须推导 kimi- 前缀，不能再推 resp-。 */
+  /* 只允许 Chat 的连接上手输模型名：必须生成 kimi- 前缀。 */
   const chatOnly = makeSuggested([{ id: 'conn-a', protocols: ['chat'], apiKeySet: true }]);
   assert.equal(chatOnly({ connectionId: 'conn-a', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-a/kimi-deepseek-v4');
   /* 只允许 Responses 时反过来。 */
   const respOnly = makeSuggested([{ id: 'conn-b', protocols: ['responses'], apiKeySet: true }]);
   assert.equal(respOnly({ connectionId: 'conn-b', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-b/resp-deepseek-v4');
-  /* 两条都允许时沿用当前路由已确认的协议，只换前缀与末段。 */
-  const open = makeSuggested([{ id: 'conn-c', protocols: ['chat', 'responses'], apiKeySet: true }]);
-  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'model-a', id: 'conn/kimi-model-a' }), 'conn-c/kimi-model-a');
-  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'model-b', id: 'conn/resp-model-a' }), 'conn-c/resp-model-b');
-  /* 都没给出结论时才按上游名猜。 */
-  assert.equal(open({ connectionId: 'conn-c', upstreamModelId: 'deepseek-v4', id: '' }), 'conn-c/resp-deepseek-v4');
-  /* 连接限制与当前路由冲突时以连接为准，避免生成保存必被拒的路由。 */
-  assert.equal(chatOnly({ connectionId: 'conn-a', upstreamModelId: 'model-b', id: 'conn/resp-model-a' }), 'conn-a/kimi-model-b');
+  /* 旧配置没有唯一协议时不生成，也不按上游名猜一个。 */
+  const ambiguous = makeSuggested([{ id: 'conn-c', protocols: ['chat', 'responses'], apiKeySet: true }]);
+  assert.equal(ambiguous({ connectionId: 'conn-c', upstreamModelId: 'model-a', id: '' }), '');
+  const unrestricted = makeSuggested([{ id: 'conn-d', protocols: [], apiKeySet: true }]);
+  assert.equal(unrestricted({ connectionId: 'conn-d', upstreamModelId: 'deepseek-v4', id: '' }), '');
 });
 
 test('toggling an effort off also clears a default that pointed at it', async () => {
@@ -282,6 +278,33 @@ test('a cleared max output really removes the stored value', () => {
   assert.equal(model.maxOutputTokens, null);
 });
 
+test('editing an existing model keeps its saved id and protocol', () => {
+  const buildModel = new Function(`
+    const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+    const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
+    ${MODEL_HELPERS.join('\n')}
+    return buildModel;
+  `)();
+  const base = {
+    id: 'conn/legacy-route-a', protocol: 'chat', contextWindow: 100000, connectionId: 'conn', name: '旧名称',
+  };
+  const draft = {
+    id: 'conn/resp-new-model', name: '新名称', protocol: 'responses', context: '100000', output: '',
+    tools: undefined, reasoning: false, vision: false, efforts: [], defaultEffort: '',
+    connectionId: 'conn', upstreamModelId: 'new-model', upstreamProtocol: '',
+    contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '', outputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+    failover: [], baseEntity: base, touched: new Set(),
+  };
+  const { model, errors } = buildModel(draft);
+  assert.deepEqual(errors, []);
+  assert.equal(model.id, base.id, 'the saved model id must not be regenerated');
+  assert.equal(model.protocol, 'chat', 'the saved protocol must not be rewritten');
+  assert.equal(model.name, '新名称');
+  assert.equal(model.upstreamModelId, 'new-model');
+});
+
 /* renderEditor 的真实调用顺序：预算控件先跑，随后的统一 errors 渲染是唯一
    写 model-errors 的地方。预算提示必须在最终节点里出现。 */
 function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [], validationErrors = [] } = {}) {
@@ -292,11 +315,11 @@ function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [],
     setAttribute(name, value) { this[name] = value; } });
   const dom = {
     inspector: element('inspector'), workbench: { dataset: {} }, inspectorTitle: element('title'),
-    mProtocolGroup: null, mEffortChips: element('chips'), mEffortGroup: element('group'),
+    mEffortChips: element('chips'), mEffortGroup: element('group'),
     mEffortField: element('effort-field'), mDefault: element('default'), mDefaultField: element('default-field'),
     modelErrors: element('model-errors'), modelSave: element('save'), modelCancel: element('cancel'),
-    modelSaveNote: element('save-note'), mId: element('id'), mUpstreamHint: element('upstream-hint'),
-    mProtocolHint: element('protocol-hint'), mConnection: null, mConnectionHint: element('conn-hint'),
+    modelSaveNote: element('save-note'), mUpstreamHint: element('upstream-hint'),
+    mConnection: null, mConnectionHint: element('conn-hint'),
     mBudgetGroup: element('budget'), mContext: element('context'), mContextHint: element('context-hint'),
     mFailoverRows: element('failover'), mFailoverCount: element('failover-count'), mFailoverAdd: element('add'),
     mUpstreamProtocolField: element('upstream-proto'), mUpstreamProtocolGroup: null,
@@ -310,7 +333,7 @@ function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [],
     serverErrors,
     budgetNote,
     draft: {
-      id: 'conn/resp/model-a', name: '', context: '200000', output: '', tools: undefined,
+      id: 'conn/resp/model-a', name: '', protocol: 'responses', context: '200000', output: '', tools: undefined,
       reasoning, vision: false, efforts: reasoning ? ['low', 'high'] : [], defaultEffort: '',
       connectionId: 'conn', upstreamModelId: 'model-a', upstreamProtocol: '',
       contextLimit: '', metadataSource: null,
@@ -336,6 +359,11 @@ function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [],
       'upstreamProtocolSupported', 'candidateMetadataSource',
       'renderFailoverRows'].map(modelFunction).join('\n')}
     ${['syncDefaultOptions', 'syncSelectOptions'].map(coreFunction).join('\n')}
+    const connectionProtocol = row => {
+      const list = row && Array.isArray(row.protocols)
+        ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
+      return list.length === 1 ? list[0] : null;
+    };
     const protocolLabel = value => value === 'chat' ? 'Chat' : value === 'responses' ? 'Responses' : value;
     const fmtK = String;
     const fmtTokens = String;

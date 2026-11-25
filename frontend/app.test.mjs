@@ -221,17 +221,19 @@ function makeProblems() {
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
     "const CONNECTION_ID_HINT = '标识只能使用字母、数字、点、下划线与连字符，且以字母或数字开头。';",
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    'const onboardConnectionValues = () => ({ id: "myconn", name: "我的供应商", baseURL: "https://api.example.com/v1", apiKey: "sk-test", providerPresetId: "" });',
+    'const onboardConnectionValues = () => ({ id: "myconn", name: "我的供应商", baseURL: "https://api.example.com/v1", apiKey: "sk-test", providerPresetId: "", protocol: state.onboard.protocol });',
     'const savedOnboardRow = () => null;',
     'const currentConnectionLimit = () => undefined;',
-    'const existingOnboardRouteIds = () => new Set();',
-    ...['modelFamilyFor', 'routeIdFor', 'protocolList', 'connectionProtocolLimits', 'preferredProtocol',
-      'positiveInteger', 'buildOnboardRow', 'onboardConnectionProtocols', 'normalizeBaseURL',
-      'protocolLabel', 'onboardProblems'].map(sourceFunction),
+    ...['routeIdFor', 'protocolList', 'connectionProtocol', 'connectionModelLabel',
+      'connectionProtocolConflicts', 'connectionProtocolConflictText', 'positiveInteger', 'buildOnboardRow',
+      'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
     'const providerPreset = () => null;',
     'return onboardProblems;',
   ].join('\n');
-  return new Function('state', code)({ data: { models: [] } });
+  const state = { data: { models: [] }, onboard: { protocol: 'chat' } };
+  const fn = new Function('state', code)(state);
+  fn.state = state;
+  return fn;
 }
 
 function makeRow(id, extra = {}) {
@@ -248,25 +250,167 @@ function makeRow(id, extra = {}) {
   };
 }
 
+test('the model table shows the display name first and never the local route id', () => {
+  const makeEl = (tag = 'div') => ({
+    tag, className: '', textContent: '', dataset: {}, attrs: {}, children: [], hidden: false, disabled: false, type: '',
+    setAttribute(key, value) { this.attrs[key] = String(value); },
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; },
+  });
+  const textOf = (node) => (node.textContent || '') + (node.children || []).map(textOf).join(' ');
+  const code = [
+    'const findConnection = (data, id) => (data.connections.saved || []).find((row) => row.id === id) || null;',
+    ...['modelTitle', 'routingOf', 'connectionLabel', 'protocolLabel', 'hasVision', 'declaredEfforts', 'buildModelRow'].map(sourceFunction),
+    'return buildModelRow;',
+  ].join('\n');
+  const state = { editor: null, deleteId: null, data: { connections: { saved: [{ id: 'conn', name: '服务商 A' }] } } };
+  const build = new Function('document', 'state', 'fmtK', 'iconUse', code)(
+    { createElement: (tag) => makeEl(tag) }, state, String, () => ({}),
+  );
+  const named = build({
+    id: 'conn/kimi-deepseek-v4', name: '显示名', upstreamModelId: 'deepseek-v4', connectionId: 'conn',
+    protocol: 'chat', contextWindow: 128000,
+  });
+  const namedText = textOf(named);
+  assert.match(namedText, /显示名/);
+  assert.match(namedText, /deepseek-v4/);
+  assert.equal(namedText.includes('conn/kimi-deepseek-v4'), false, 'the route id must not be rendered');
+  const unnamed = build({
+    id: 'conn/resp-upstream-only', upstreamModelId: 'upstream-only', connectionId: 'conn',
+    protocol: 'responses', contextWindow: 128000,
+  });
+  const unnamedText = textOf(unnamed);
+  assert.match(unnamedText, /upstream-only/);
+  assert.equal(unnamedText.includes('conn/resp-upstream-only'), false);
+  assert.equal(unnamedText.includes('resp-upstream-only'), false);
+  const edit = named.children.at(-1).children.find((node) => node.attrs?.['aria-label']?.startsWith('编辑'));
+  assert.equal(edit.attrs['aria-label'], '编辑 显示名');
+});
+
+test('a connection draft requires exactly one interface protocol', () => {
+  const code = [
+    'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+    'const CONNECTION_ID_HINT = "hint";',
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    ...['protocolList', 'normalizeBaseURL', 'connectionDraftRow', 'validateConnectionDraft'].map(sourceFunction),
+    'return validateConnectionDraft;',
+  ].join('\n');
+  const validate = new Function(code)();
+  const base = { id: 'conn', name: 'Conn', baseURL: 'https://api.example.com/v1', apiKey: 'sk', secretSet: false };
+  const legacyRow = validate({ ...base, protocols: ['chat', 'responses'] }, [], { originalId: null });
+  assert.equal(legacyRow.errors.some((text) => text.includes('只能选择一种接口协议')), true);
+  const missing = validate({ ...base, protocols: null }, [], { originalId: null });
+  assert.equal(missing.errors.some((text) => text.includes('请选择接口协议')), true);
+  const multiple = validate({ ...base, protocols: ['chat', 'responses'] }, [], { originalId: null });
+  assert.equal(multiple.errors.some((text) => text.includes('只能选择一种接口协议')), true);
+  const single = validate({ ...base, protocols: ['chat'] }, [], { originalId: null });
+  assert.deepEqual(single.errors, []);
+  assert.deepEqual(single.value.protocols, ['chat']);
+  const preserved = new Function(code.replace('return validateConnectionDraft;', 'return connectionDraftRow;'))();
+  assert.deepEqual(preserved({ id: 'old', name: 'Old', protocols: ['chat', 'responses'] }).protocols, ['chat', 'responses']);
+});
+
+test('typing a connection name does not erase a legacy multi-protocol draft', () => {
+  const state = { conns: { editing: { draft: { name: '', protocols: ['chat', 'responses'], apiKey: '', secretSet: false } } } };
+  const dom = {
+    ceName: { value: '新名称' }, ceId: { value: 'conn' }, cePreset: { value: '' },
+    ceBase: { value: 'https://api.example.com/v1' }, ceKey: { value: '' },
+    ceChat: { checked: false }, ceResponses: { checked: false },
+  };
+  const read = new Function('state', 'dom', sourceFunction('readConnectionEditor') + '\nreturn readConnectionEditor;')(state, dom);
+  read();
+  assert.deepEqual(state.conns.editing.draft.protocols, ['chat', 'responses']);
+  assert.equal(state.conns.editing.draft.name, '新名称');
+});
+
+test('the connection editor refuses a protocol change that would rebind existing models', () => {
+  const dom = {
+    ceName: { value: '连接 A' }, ceId: { value: 'conn-a', disabled: false },
+    cePreset: { value: '' }, ceBase: { value: 'https://api.example.com/v1' }, ceKey: { value: '' },
+    ceChat: { checked: true }, ceResponses: { checked: false },
+  };
+  const row = {
+    id: 'conn-a', name: '连接 A', baseURL: 'https://api.example.com/v1', protocols: ['chat'],
+    apiKeySet: true, secretSet: false, apiKey: '', legacy: false,
+  };
+  const state = {
+    data: {
+      revision: 'rev-1',
+      models: [{ id: 'conn-a/resp-old', connectionId: 'conn-a', upstreamModelId: 'old-model', protocol: 'responses', name: '旧模型 A' }],
+    },
+    conns: {
+      baseRevision: 'rev-1',
+      draft: [row],
+      editing: { originalId: 'conn-a', baseRevision: 'rev-1', baseRow: null, draft: { ...row }, errors: [] },
+    },
+  };
+  const code = [
+    'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
+    'const CONNECTION_ID_HINT = "hint";',
+    'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+    ...['protocolList', 'normalizeBaseURL', 'connectionProtocol', 'connectionModelLabel',
+      'connectionProtocolConflicts', 'connectionProtocolConflictText', 'protocolLabel', 'validateConnectionDraft',
+      'readConnectionEditor', 'applyConnectionEditor'].map(sourceFunction),
+    'const renderConnections = () => {};',
+    'const renderConnectionsDiff = () => {};',
+    'return applyConnectionEditor;',
+  ].join('\n');
+  const apply = new Function('state', 'dom', code)(state, dom);
+  apply();
+  assert.equal(state.conns.editing.errors.length, 1);
+  assert.match(state.conns.editing.errors[0], /旧模型 A/);
+  assert.match(state.conns.editing.errors[0], /Responses/);
+  assert.match(state.conns.editing.errors[0], /未保存/);
+  assert.deepEqual(state.conns.draft[0].protocols, ['chat'], 'the saved draft must keep its old protocol');
+});
+
+test('an existing model on the connection blocks a protocol change and is named', () => {
+  const onboardProblems = makeProblems();
+  onboardProblems.state.data.models = [{
+    id: 'myconn/resp-old', connectionId: 'myconn', upstreamModelId: 'old-model', protocol: 'responses', name: '旧模型 A',
+  }];
+  const result = onboardProblems({ models: [makeRow('model-a', { protocol: 'chat', contextWindow: 128000 })] });
+  const conflict = result.problems.find((text) => text.includes('旧模型 A'));
+  assert.ok(conflict, 'the conflict must name the concrete model');
+  assert.match(conflict, /Responses/);
+  assert.match(conflict, /未保存/);
+  assert.match(conflict, /旧会话绑定/);
+});
+
+test('onboarding generates the compatible kimi- or resp- id with a percent-encoded upstream id', () => {
+  const onboardProblems = makeProblems();
+  const chat = onboardProblems({ models: [makeRow('group/model-a', { protocol: 'chat', contextWindow: 128000 })] });
+  assert.equal(chat.built[0].id, 'myconn/kimi-group%2Fmodel-a');
+  assert.equal(chat.built[0].protocol, 'chat');
+  onboardProblems.state.onboard.protocol = 'responses';
+  const responses = onboardProblems({ models: [makeRow('group/model-a', { protocol: 'chat', contextWindow: 128000 })] });
+  assert.equal(responses.built[0].id, 'myconn/resp-group%2Fmodel-a');
+  assert.equal(responses.built[0].protocol, 'responses');
+});
+
 test('onboard validation skips empty route IDs without hiding real duplicates', () => {
   const onboardProblems = makeProblems();
+  onboardProblems.state.onboard.protocol = null;
   const missing = onboardProblems({ models: [makeRow('model-a'), makeRow('model-b'), makeRow('model-c')] });
-  assert.equal(missing.problems.some((text) => text.includes('模型路由 ID 重复')), false);
+  assert.equal(missing.problems.some((text) => text.includes('同一个上游模型被重复导入')), false);
   assert.deepEqual(missing.built.map((model) => model.id), ['', '', '']);
   assert.equal(missing.problems.some((text) => text.includes('接口协议')), true);
 
+  onboardProblems.state.onboard.protocol = 'chat';
   const valid = onboardProblems({ models: [
     makeRow('model-a', { protocol: 'chat', contextWindow: 128000 }),
     makeRow('model-b', { protocol: 'chat', contextWindow: 128000 }),
     makeRow('model-c', { protocol: 'responses', contextWindow: 128000 }),
   ] });
   assert.deepEqual(valid.problems, []);
+  assert.deepEqual(valid.built.map((model) => model.id), ['myconn/kimi-model-a', 'myconn/kimi-model-b', 'myconn/kimi-model-c']);
+  assert.deepEqual(valid.built.map((model) => model.protocol), ['chat', 'chat', 'chat']);
 
   const duplicate = onboardProblems({ models: [
     makeRow('model-a', { protocol: 'chat', contextWindow: 128000 }),
     makeRow('model-a', { protocol: 'chat', contextWindow: 128000 }),
   ] });
-  assert.equal(duplicate.problems.filter((text) => text.includes('模型路由 ID 重复')).length, 1);
+  assert.equal(duplicate.problems.filter((text) => text.includes('同一个上游模型被重复导入')).length, 1);
 });
 
 function makeOnboardEnv(savedConnections, { touched = true } = {}) {
@@ -285,6 +429,8 @@ function makeOnboardEnv(savedConnections, { touched = true } = {}) {
   };
   const code = [
     ...['isInputActive', 'connectionRowsOf', 'savedOnboardTarget', 'onboardTouched', 'fillOnboardForm'].map(sourceFunction),
+    'const protocolList = value => Array.isArray(value) ? value.filter(entry => entry === "chat" || entry === "responses") : [];',
+    'const connectionProtocol = row => { const list = protocolList(row && row.protocols); return list.length === 1 ? list[0] : null; };',
     'const fillOnboardPresets = () => {};',
     'const setText = () => {};',
     'const fmtCount = (value) => String(value);',
@@ -346,12 +492,12 @@ test('onboard discovery inherits missing metadata from the selected preset', asy
   })();
   const code = [
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    'const PROTOCOL_CHOICES = ["chat", "responses"];',
     sourceHelpers,
     ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow', 'discoveryBody',
-      'onboardEndpointKey', 'syncOnboardEndpoint', 'protocolList', 'preferredProtocol', 'connectionProtocolLimits',
-      'protocolChoicesFor', 'providerPresets', 'providerPreset', 'presetOnboardModels', 'mergeOnboardPresetMetadata',
+      'onboardEndpointKey', 'syncOnboardEndpoint', 'protocolList', 'connectionProtocol',
+      'providerPresets', 'providerPreset', 'presetOnboardModels', 'mergeOnboardPresetMetadata',
       'onboardRowSource', 'onboardRowFrom', 'preserveOnboardModelNames', 'discoverOnboardModels'].map(sourceFunction),
+    'const onboardProtocol = () => state.onboard?.protocol === "chat" || state.onboard?.protocol === "responses" ? state.onboard.protocol : null;',
     'return discoverOnboardModels;',
   ].join('\n');
   const discover = new Function('state', 'dom', 'API', 'request', 'setHidden', 'setText', 'showToast', 'fmtCount', 'discoveryReasonText', 'renderOnboard', 'clearOnboardSaveErrors', code)(
@@ -400,21 +546,17 @@ test('discovery retains custom names for saved models on the same connection', (
     { connectionId: 'myconn', upstreamModelId: 'model-a', protocol: 'chat', name: 'Chat name', defaultEffort: 'low' },
     { connectionId: 'myconn', upstreamModelId: 'model-a', protocol: 'responses', name: 'Responses name', defaultEffort: 'high' },
   ];
-  const separated = preserve([
+  const ambiguous = preserve([
     { upstreamModelId: 'model-a', protocol: 'responses', name: 'Upstream', efforts: ['low', 'high'] },
-    { upstreamModelId: 'model-a', protocol: 'chat', name: 'Upstream', efforts: ['low', 'high'] },
   ], dual, 'myconn');
-  assert.equal(separated[0].name, 'Responses name');
-  assert.equal(separated[0].defaultEffort, 'high');
-  assert.equal(separated[1].name, 'Chat name');
-  assert.equal(separated[1].defaultEffort, 'low');
+  /* 同一上游出现多条旧记录时无法判断该沿用哪一条，保持上游名称。 */
+  assert.equal(ambiguous[0].name, 'Upstream');
+  assert.equal(ambiguous[0].defaultEffort, undefined);
 });
 
 test('saved onboarding rows keep the default effort for edit and resave', () => {
   const code = [
-    'const PROTOCOL_CHOICES = ["chat", "responses"];',
-    ...['positiveInteger', 'protocolList', 'preferredProtocol', 'protocolChoicesFor', 'providerPresets',
-      'presetProtocolsFor', 'declaredProtocolsFor', 'savedOnboardModelRow'].map(sourceFunction),
+    ...['positiveInteger', 'protocolList', 'savedOnboardModelRow'].map(sourceFunction),
     'return savedOnboardModelRow;',
   ].join('\n');
   const build = new Function('state', code)({ providers: { presets: [] } });
@@ -499,9 +641,10 @@ test('recommended preset models keep names, context, output, capabilities and ef
     'const PROTOCOL_CHOICES = ["chat", "responses"];',
     sourceHelpers,
     ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow',
-      'onboardEndpointKey', 'protocolList', 'preferredProtocol', 'connectionProtocolLimits',
-      'protocolChoicesFor', 'providerPresets', 'providerPreset', 'presetOnboardModels', 'presetMetadataSource',
+      'onboardEndpointKey', 'protocolList', 'connectionProtocol',
+      'providerPresets', 'providerPreset', 'presetOnboardModels', 'presetMetadataSource',
       'onboardRowSource', 'onboardRowFrom', 'useRecommendedOnboardModels'].map(sourceFunction),
+    'const onboardProtocol = () => state.onboard?.protocol === "chat" || state.onboard?.protocol === "responses" ? state.onboard.protocol : null;',
     'const renderOnboard = () => {};',
     'const clearOnboardSaveErrors = () => {};',
     'return useRecommendedOnboardModels;',
@@ -679,6 +822,7 @@ test('switching presets replaces stale suggested ids but keeps a hand-edited one
     sourceFunction('onboardSuggestedId'),
     sourceFunction('onboardSuggestedName'),
     sourceFunction('staleSuggested'),
+    sourceFunction('protocolList'),
     sourceFunction('applyOnboardPreset'),
     'const setText = () => {};',
     'const renderOnboard = () => {};',
@@ -724,28 +868,21 @@ test('switching presets replaces stale suggested ids but keeps a hand-edited one
   assert.equal(custom.dom.onboardName.value, 'My Second');
 });
 
-test('onboarding keeps the saved apiKeyEnv and brings the preset protocols', () => {
-  const state = { providers: { presets: [{ id: 'p', protocols: ['chat', 'responses'] }] } };
+test('onboarding sends the selected protocol as a single value and keeps the saved apiKeyEnv', () => {
   const code = [
-    sourceFunction('providerPresets'),
-    sourceFunction('providerPreset'),
-    sourceFunction('onboardConnectionProtocols'),
     sourceFunction('onboardConnectionPayload'),
     'return onboardConnectionPayload;',
   ].join('\n');
-  const build = new Function('state', code)(state);
-  const values = { id: 'conn', name: 'Conn', providerPresetId: 'p', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new' };
+  const build = new Function(code)();
+  const values = { id: 'conn', name: 'Conn', providerPresetId: 'p', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new', protocol: 'chat' };
   const withSaved = build(values, { id: 'conn', apiKeyEnv: 'CONN_API_KEY', protocols: ['chat'] });
   assert.equal(withSaved.apiKeyEnv, 'CONN_API_KEY');
-  assert.deepEqual(withSaved.protocols, ['chat', 'responses']);
-  const narrowed = build(values, { id: 'conn', providerPresetId: 'p', protocols: ['chat'] });
-  assert.deepEqual(narrowed.protocols, ['chat']);
-  const withoutSaved = build({ ...values, providerPresetId: '' }, null);
-  assert.equal('apiKeyEnv' in withoutSaved, false);
-  assert.equal('protocols' in withoutSaved, false);
-  assert.equal(withoutSaved.apiKey, 'sk-new');
-  const savedOnly = build({ ...values, providerPresetId: '' }, { id: 'conn', apiKeyEnv: 'CONN_API_KEY', protocols: ['responses'] });
-  assert.deepEqual(savedOnly.protocols, ['responses']);
+  assert.deepEqual(withSaved.protocols, ['chat']);
+  const withoutProtocol = build({ ...values, protocol: null }, null);
+  assert.equal('protocols' in withoutProtocol, false);
+  assert.equal(withoutProtocol.apiKey, 'sk-new');
+  const responses = build({ ...values, protocol: 'responses' }, { id: 'conn', apiKeyEnv: 'CONN_API_KEY', protocols: ['chat'] });
+  assert.deepEqual(responses.protocols, ['responses']);
 });
 
 test('a successful onboarding save resets the connection draft baseline and the old catalogue', async () => {
@@ -761,7 +898,7 @@ test('a successful onboarding save resets the connection draft baseline and the 
     stateReadEpoch: 0, key: 'session',
   };
   const dom = { onboardKey: { value: 'sk' }, onboardDisclosure: { open: true } };
-  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'return saveOnboard;'].join('\n');
+  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'const onboardConnectionValues = () => ({ id: "conn" });', 'const connectionProtocolErrors = () => [];', 'return saveOnboard;'].join('\n');
   const save = new Function(
     'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
     'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
@@ -822,21 +959,20 @@ test('a row without its own metadata source is not attributed to the upstream ca
   assert.equal(discovery.sourceURL, 'https://api.example.invalid/v1/models');
 });
 
-test('the default protocol comes from the options the connection actually allows', () => {
+test('import rows take the connection protocol instead of per-model declarations', () => {
   const code = [
-    'const PROTOCOL_CHOICES = ["chat", "responses"];',
-    ...['protocolList', 'preferredProtocol', 'connectionProtocolLimits', 'protocolChoicesFor', 'onboardRowSource'].map(sourceFunction),
-    sourceFunction('onboardRowFrom'),
+    ...['protocolList', 'connectionProtocol', 'onboardRowSource', 'onboardRowFrom'].map(sourceFunction),
     'return onboardRowFrom;',
   ].join('\n');
   const build = new Function('document', code)(undefined);
-  /* 上游声明两个协议、连接只允许 chat：默认值必须是可选的 chat。 */
   const limited = build({ id: 'model-a', protocols: ['chat', 'responses'] }, { connection: { protocols: ['chat'] } });
-  assert.deepEqual(limited.protocolOptions, ['chat']);
-  assert.equal(limited.protocol, 'chat');
-  /* 没有连接限制时仍按既有偏好选 responses。 */
-  const open = build({ id: 'model-b', protocols: ['chat', 'responses'] }, { connection: null });
-  assert.equal(open.protocol, 'responses');
+  assert.equal(limited.connectionProtocol, 'chat');
+  assert.equal(limited.protocol, null);
+  assert.equal('protocolOptions' in limited, false);
+  const open = build({ id: 'model-b', protocols: ['chat'] }, { connection: { protocols: ['responses'] } });
+  assert.equal(open.connectionProtocol, 'responses');
+  const none = build({ id: 'model-c', protocols: ['responses'] }, { connection: null });
+  assert.equal(none.connectionProtocol, null);
 });
 
 test('a hand-typed name keeps its raw value until save trims it', () => {
@@ -875,20 +1011,20 @@ test('resaving an unchanged saved model keeps its real context limit', () => {
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
     "const CONNECTION_ID_HINT = 'hint';",
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    'const state = { data: { models: [{ id: "conn/resp-model-a", connectionId: "conn", contextLimit: 200000 }] } };',
+    'const state = { data: { models: [{ id: "conn/resp-model-a", connectionId: "conn", upstreamModelId: "model-a", protocol: "responses", contextLimit: 200000 }] } };',
     "const dom = {};",
-    "const onboardConnectionValues = () => ({ id: 'conn', name: 'C', baseURL: 'https://api.example.com/v1', apiKey: 'sk' });",
+    "const onboardConnectionValues = () => ({ id: 'conn', name: 'C', baseURL: 'https://api.example.com/v1', apiKey: 'sk', protocol: 'responses' });",
     "const savedOnboardRow = () => ({ id: 'conn', apiKeySet: true, baseURL: 'https://api.example.com/v1' });",
-    ...['positiveInteger', 'currentConnectionLimit', 'existingOnboardRouteIds', 'modelFamilyFor', 'routeIdFor',
-      'protocolList', 'connectionProtocolLimits', 'protocolChoicesFor', 'preferredProtocol', 'buildOnboardRow',
-      'onboardConnectionProtocols', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
-    'const providerPreset = () => null;',
+    ...['positiveInteger', 'currentConnectionLimit', 'routeIdFor', 'protocolList', 'connectionProtocol',
+      'connectionModelLabel', 'connectionProtocolConflicts', 'connectionProtocolConflictText',
+      'buildOnboardRow', 'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
     'return onboardProblems;',
   ].join('\n');
   const onboardProblems = new Function(code)();
   const built = onboardProblems({ models: [makeRow('model-a', {
     protocol: 'responses', contextWindow: 100000, contextLimit: 200000, efforts: ['low'], selected: true,
   })] }).built[0];
+  assert.equal(built.id, 'conn/resp-model-a', 'an existing model keeps its saved id');
   assert.equal(built.contextLimit, 200000);
   const rediscovered = onboardProblems({ models: [makeRow('model-a', {
     protocol: 'responses', contextWindow: 300000, selected: true,
@@ -922,29 +1058,15 @@ test('select all applies only to the current search results and toggles them off
   assert.deepEqual(state.onboard.discovery.models.map((row) => row.selected), [false, false, false]);
 });
 
-test('batch protocol is explicit and respects declarations and unselected rows', () => {
-  const state = { onboard: { touched: false, discovery: { models: [
-    makeRow('allowed', { selected: true, protocolOptions: ['chat'] }),
-    makeRow('responses-only', { selected: true, protocols: ['responses'], protocolOptions: ['responses'], protocol: 'responses' }),
-    makeRow('unselected', { selected: false, protocolOptions: ['chat'] }),
-  ] } } };
-  const messages = [];
-  const code = [
-    'const PROTOCOL_CHOICES = ["chat", "responses"];',
-    ...['onboardModelRows', 'selectedOnboardModels', 'assignOnboardProtocol', 'applyOnboardBatchProtocol', 'protocolLabel'].map(sourceFunction),
-    'const markOnboardEdited = () => { state.onboard.touched = true; };',
-    'const fmtCount = (value) => String(value);',
-    'const renderOnboard = () => {};',
-    'const showToast = (message) => messages.push(message);',
-    'return applyOnboardBatchProtocol;',
-  ].join('\n');
-  const apply = new Function('state', 'messages', code)(state, messages);
-  apply('chat');
-  assert.equal(state.onboard.discovery.models[0].protocol, 'chat');
-  assert.equal(state.onboard.discovery.models[1].protocol, 'responses');
-  assert.equal(state.onboard.discovery.models[2].protocol, null);
-  assert.equal(state.onboard.touched, true);
-  assert.match(messages.at(-1), /1 个因声明或连接限制未改动/);
+test('the import wizard has no per-model or batch protocol switch', () => {
+  assert.equal(htmlSource.includes('ob-batch-chat'), false);
+  assert.equal(source.includes('applyOnboardBatchProtocol'), false);
+  assert.equal(source.includes('assignOnboardProtocol'), false);
+  assert.equal(htmlSource.includes('data-onboard-protocol="chat"'), true, 'the connection-level protocol stays in the provider form');
+  const renderBody = sourceFunction('renderOnboardModels');
+  assert.equal(renderBody.includes('data-onboard-protocol'), false, 'model rows must not carry a protocol selector');
+  assert.equal(renderBody.includes('接口协议'), false, 'model rows must not offer a protocol choice');
+  assert.equal(renderBody.includes('本机路由'), false, 'model rows must not print a local route id');
 });
 
 test('batch context changes only selected rows and rejects unknown values', () => {
@@ -1063,6 +1185,8 @@ test('a successful onboarding save closes the form and shows the saved model cat
   const code = [
     sourceFunction('saveOnboard'),
     'const clearOnboardSaveErrors = () => {};',
+    'const onboardConnectionValues = () => ({ id: "conn" });',
+    'const connectionProtocolErrors = () => [];',
     'return saveOnboard;',
   ].join('\n');
   const save = new Function(
@@ -1093,7 +1217,7 @@ test('a failed onboarding save keeps the form and the key', async () => {
     stateReadEpoch: 0, key: 'session',
   };
   const dom = { onboardKey: { value: 'sk-typed' }, onboardDisclosure: { open: true } };
-  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'return saveOnboard;'].join('\n');
+  const code = [sourceFunction('saveOnboard'), 'const clearOnboardSaveErrors = () => {};', 'const onboardConnectionValues = () => ({ id: "conn" });', 'const connectionProtocolErrors = () => [];', 'return saveOnboard;'].join('\n');
   const save = new Function(
     'state', 'dom', 'API', 'selectedOnboardModels', 'onboardProblems', 'connectionPayload', 'connectionRowsOf',
     'mergeOnboardModels', 'request', 'adoptState', 'renderAll', 'renderOnboard', 'renderActions', 'showToast',
@@ -1441,18 +1565,24 @@ test('index.html lays out six top-level tabs, the merged model page, the convers
 
   const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
   const advanced = form.indexOf('id="m-advanced"');
-  assert.match(form.slice(advanced, form.indexOf('</summary>', advanced)), /高级：上游接口协议、定价与故障转移备用连接/);
+  assert.match(form.slice(advanced, form.indexOf('</summary>', advanced)), /高级：上游 API 格式、定价与故障转移备用连接/);
   for (const id of ['m-name', 'm-connection', 'm-candidates', 'm-upstream', 'm-tools', 'm-reasoning', 'm-vision',
     'm-context', 'm-output', 'm-effort-field', 'm-default']) {
     const position = form.indexOf(`id="${id}"`);
     assert.ok(position >= 0, 'missing ' + id);
     assert.ok(position < advanced, id + ' must stay in the default editor, not inside advanced settings');
   }
-  for (const id of ['m-id', 'm-protocol-group', 'm-price-input', 'm-failover-rows']) {
+  for (const id of ['m-price-input', 'm-failover-rows']) {
     const position = form.indexOf(`id="${id}"`);
     assert.ok(position > advanced, id + ' belongs to the advanced disclosure');
   }
-  assert.match(htmlSource, /所有协议模型都能在 Kimi 下拉框原会话切换/);
+  for (const id of ['m-id', 'm-protocol-group']) {
+    assert.equal(form.includes(`id="${id}"`), false, id + ' must not expose the local route id or a per-model protocol switch');
+  }
+  assert.match(htmlSource, /<th scope="col">模型<\/th>/);
+  assert.match(htmlSource, /<th scope="col" class="col-route">服务商 · 上游模型 ID<\/th>/);
+  assert.equal(htmlSource.includes('<th scope="col">模型 ID</th>'), false);
+  assert.match(htmlSource, /网关模式下所有协议模型都会自动支持在 Kimi 下拉框原会话切换/);
 });
 
 test('computeOverviewIssue prioritizes gateway, connection apply, budget, integration and recent failures', () => {
@@ -1519,16 +1649,19 @@ function makeSaveEnv({ applySucceeds = true } = {}) {
     data: { revision: 'rev-1', configuration: { state: 'ready' }, models: [], connections: { saved: [], restartRequired: false } },
     editor: { baseRevision: 'rev-1' },
     conns: {
-      editing: { draft: { id: 'draft-conn', name: '草稿连接', baseURL: 'https://api.example.com/v1' }, errors: [] },
-      draft: [{ id: 'saved-conn', name: '已保存', baseURL: 'https://saved.example.com/v1' }],
+      editing: { draft: { id: 'draft-conn', name: '草稿连接', baseURL: 'https://api.example.com/v1', protocols: ['chat'] }, errors: [] },
+      draft: [{ id: 'saved-conn', name: '已保存', baseURL: 'https://saved.example.com/v1', protocols: ['chat'] }],
     },
   };
   const dom = {};
   const code = [
     sourceFunction('saveCatalogue'),
     sourceFunction('connectionPayload'),
+    sourceFunction('protocolList'),
+    sourceFunction('connectionProtocol'),
     ...['connectionRowsOf', 'connectionDraftRow', 'connectionDraftFrom',
       'connectionsSignature', 'savedConnectionsSignature'].map(sourceFunction),
+    'const connectionProtocolErrors = () => [];',
     'const configReady = data => data.configuration?.state === "ready";',
     'const applyConnectionEditor = () => {',
     '  if (!applySucceeds) { state.conns.editing.errors = ["草稿无效"]; return; }',
@@ -1581,7 +1714,7 @@ function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
     key: 'session', stateReadEpoch: 0, stateReadSeq: 0, modelsSaving: false, connsSaving: false, lastSync: 0,
     data: {
       revision: 'rev-1', configuration: { state: 'ready' },
-      models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM-5.3 Flash' }],
+      models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', protocol: 'chat', name: 'GLM-5.3 Flash' }],
       connections: {
         saved: [
           { id: 'glm', name: 'GLM 官方', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'], apiKeySet: true },
@@ -1598,7 +1731,10 @@ function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
   const dom = {};
   const code = [
     ...['saveCatalogue', 'saveConnections', 'connectionPayload', 'connectionDraftFrom',
-      'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature',
+      'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature', 'protocolList',
+      'connectionProtocol', 'connectionProtocolError', 'connectionProtocolErrors',
+      'connectionModelLabel', 'connectionProtocolConflicts', 'connectionProtocolConflictText',
+      'findConnection', 'connectionLabel', 'protocolLabel',
       'savedConnectionsSignature', 'connectionsDirty', 'adoptState'].map(sourceFunction),
     'const configReady = data => data.configuration?.state === "ready";',
     "const draftFromSaved = () => ({ mode: 'inherit', model: null, effort: null, models: [] });",
@@ -1633,7 +1769,7 @@ function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
 test('a model save adopts the committed connection baseline instead of keeping the draft dirty', async () => {
   const committed = {
     revision: 'rev-2', configuration: { state: 'ready' },
-    models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }],
+    models: [{ id: 'glm/chat/glm-5.3', connectionId: 'glm', protocol: 'chat', name: 'GLM 新名' }],
     connections: {
       saved: [
         { id: 'glm', name: 'GLM 新名', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'], apiKeySet: true },
@@ -1651,7 +1787,7 @@ test('a model save adopts the committed connection baseline instead of keeping t
   env.state.conns.draft = env.state.conns.draft.map(row => (row.id === 'glm' ? { ...row, name: 'GLM 新名' } : row));
   env.state.conns.dirty = true;
 
-  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }]);
+  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', protocol: 'chat', name: 'GLM 新名' }]);
   assert.equal(ok, true);
   const sent = env.calls.find(call => call.path === '/api/workspace');
   assert.equal(sent.body.revision, 'rev-1');
@@ -1669,19 +1805,31 @@ test('a model save adopts the committed connection baseline instead of keeping t
   assert.equal(second.body.revision, 'rev-2');
 });
 
-/* 会话在请求途中被替换时，返回的状态属于旧会话：既不采纳新基线，
-   也不清掉用户正在编辑的草稿。 */
+test('changing a connection protocol is blocked with the concrete model names', async () => {
+  const env = makeCatalogueSaveEnv([{ revision: 'rev-2', configuration: { state: 'ready' }, models: [], connections: { saved: [] } }]);
+  env.adoptState(env.state.data, { initial: true });
+  env.state.conns.draft = env.state.conns.draft.map((row) => (row.id === 'glm'
+    ? { ...row, protocols: ['responses'] }
+    : row));
+  await env.saveConnections();
+  assert.equal(env.calls.some((call) => call.path === '/api/workspace'), false, 'a protocol change must not be submitted');
+  const errors = env.state.conns.errors.join(' ');
+  assert.match(errors, /GLM-5\.3 Flash/, 'the blocked model must be named');
+  assert.match(errors, /Responses/);
+  assert.match(errors, /未保存/);
+});
+
 test('a stale model save reply leaves the connection draft untouched', async () => {
   const committed = {
     revision: 'rev-2', configuration: { state: 'ready' }, models: [],
-    connections: { saved: [{ id: 'glm', name: 'GLM 新名', baseURL: 'https://open.bigmodel.cn/api/paas/v4' }] },
+    connections: { saved: [{ id: 'glm', name: 'GLM 新名', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'] }] },
   };
   const env = makeCatalogueSaveEnv([committed], { onRequest: (state) => { state.key = 'other-session'; } });
   env.adoptState(env.state.data, { initial: true });
   const baseBefore = env.state.conns.base;
   env.state.conns.draft = env.state.conns.draft.map(row => (row.id === 'glm' ? { ...row, name: '本地未保存' } : row));
 
-  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', name: 'GLM 新名' }]);
+  const ok = await env.saveCatalogue([{ id: 'glm/chat/glm-5.3', connectionId: 'glm', protocol: 'chat', name: 'GLM 新名' }]);
   assert.notEqual(ok, true);
   assert.equal(env.state.conns.baseRevision, 'rev-1');
   assert.equal(env.state.conns.base, baseBefore);
@@ -1699,7 +1847,7 @@ function makeModelDraft() {
     "const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];",
     'const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;',
     'const MAX_EFFORTS = 12;',
-    ...['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf',
+    ...['hasVision', 'parseEfforts', 'metadataSourceOf',
       'priceDraftFrom', 'failoverDraftFrom', 'buildPrice', 'buildFailover',
       'buildModel', 'canonicalPrice', 'canonicalFailover', 'canonicalModel'].map(sourceFunction),
     'return { buildModel, canonicalModel, priceDraftFrom, failoverDraftFrom };',
@@ -1799,7 +1947,7 @@ test('a standby cannot duplicate the primary connection or exceed the limit', ()
   const { buildModel } = makeModelDraft();
   const make = failover => ({
     id: 'conn/resp/model-a', name: '', context: '200000', output: '', tools: undefined,
-    reasoning: false, vision: false, efforts: [], defaultEffort: '', connectionId: 'conn',
+    reasoning: false, vision: false, efforts: [], defaultEffort: '', connectionId: 'conn', protocol: 'responses',
     upstreamModelId: '', upstreamProtocol: '', contextLimit: '', metadataSource: null,
     pricing: null, failover, baseEntity: null, touched: new Set(),
   });
@@ -1988,6 +2136,7 @@ test('rebaseEditor preserves touched pricing and failover edits', () => {
       models: [{
         id: 'conn/chat/model-a',
         connectionId: 'conn',
+        protocol: 'chat',
         contextWindow: 128000,
         name: '服务端新名',
         pricing: { inputPerMillion: 1, outputPerMillion: 2 },
@@ -2004,10 +2153,13 @@ test('rebaseEditor preserves touched pricing and failover edits', () => {
     'const dom = {};',
     'const findModel = id => state.data.models.find(row => row.id === id) || null;',
     'const upstreamProtocolSupported = () => false;',
+    'const connectionProtocol = () => null;',
+    'const findConnection = () => null;',
+    'const defaultConnectionId = () => "";',
     'const fillEditorFields = () => {};',
     'const renderEditor = () => {};',
     'const showToast = () => {};',
-    ...['modelFamilyFor', 'hasVision', 'parseEfforts', 'metadataSourceOf',
+    ...['hasVision', 'parseEfforts', 'metadataSourceOf',
       'priceDraftFrom', 'failoverDraftFrom', 'buildPrice', 'buildFailover',
       'canonicalFailover', 'buildModel', 'modelDraftFrom', 'rebaseEditor'].map(sourceFunction),
     'return rebaseEditor;',
@@ -2016,6 +2168,7 @@ test('rebaseEditor preserves touched pricing and failover edits', () => {
   const base = {
     id: 'conn/chat/model-a',
     connectionId: 'conn',
+    protocol: 'chat',
     contextWindow: 128000,
     name: '旧名',
     pricing: { inputPerMillion: 1, outputPerMillion: 2 },
@@ -2029,6 +2182,7 @@ test('rebaseEditor preserves touched pricing and failover edits', () => {
     draft: {
       id: base.id,
       name: '旧名',
+      protocol: 'chat',
       context: '128000',
       output: '',
       tools: undefined,
@@ -4275,6 +4429,9 @@ test('connectionDraftFrom preserves credentialError through connection row rende
     const fmtMs = n => n + 'ms';
     const providerPreset = () => null;
     ${sourceFunction('connectionRowsOf')}
+    ${sourceFunction('protocolList')}
+    ${sourceFunction('connectionProtocol')}
+    ${sourceFunction('connectionProtocolText')}
     ${sourceFunction('connectionDraftRow')}
     ${sourceFunction('connectionDraftFrom')}
     ${sourceFunction('connectionsSignature')}
@@ -4386,6 +4543,7 @@ test('renderConnectionEditor protects active or composing inputs, respects manag
     cePreset: { value: '', dataset: { providerFlow: 'managed' }, dispatchEvent(ev) { dispatched.push(ev.type); } },
     cePresetHint: { textContent: '' },
     ceKeyHint: { textContent: '' },
+    ceProtocolHint: { textContent: '' },
     connEditorTest: { disabled: false, hidden: false, textContent: '' },
   };
   const documentStub = { activeElement: dom.ceName };
@@ -4412,6 +4570,10 @@ test('renderConnectionEditor protects active or composing inputs, respects manag
     ${sourceFunction('providerPresetLabel')}
     ${sourceFunction('providerPresetOptions')}
     ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('protocolList')}
+    ${sourceFunction('connectionProtocol')}
+    ${sourceFunction('connectionProtocolText')}
+    ${sourceFunction('protocolLabel')}
     ${sourceFunction('renderConnectionEditor')}
     ${sourceFunction('applyProviderPreset')}
     return { renderConnectionEditor, applyProviderPreset };
@@ -4815,6 +4977,7 @@ test('openConnectionEditor forces field populate even when an input is focused o
     cePreset: { value: 'old', dataset: {} },
     cePresetHint: { textContent: '' },
     ceKeyHint: { textContent: '' },
+    ceProtocolHint: { textContent: '' },
     connEditorTest: { disabled: false, hidden: false, textContent: '' },
   };
   const documentStub = { activeElement: dom.ceName };
@@ -4847,6 +5010,10 @@ test('openConnectionEditor forces field populate even when an input is focused o
     ${sourceFunction('providerPresetLabel')}
     ${sourceFunction('providerPresetOptions')}
     ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('protocolList')}
+    ${sourceFunction('connectionProtocol')}
+    ${sourceFunction('connectionProtocolText')}
+    ${sourceFunction('protocolLabel')}
     ${sourceFunction('validateConnectionDraft')}
     ${sourceFunction('openConnectionEditor')}
     ${sourceFunction('closeConnectionEditor')}
@@ -5818,6 +5985,7 @@ test('a save blocked by an advanced field opens the advanced drawer', () => {
     ${patterns}
     const buildModel = draft => ({ model: { id: draft.id, connectionId: '', protocol: 'responses' }, errors: draft.errors.slice() });
     const findConnection = () => null;
+    const connectionProtocol = () => 'responses';
     const connectionLabel = () => '';
     const protocolLabel = value => value;
     ${sourceFunction('errorNeedsAdvanced')}
