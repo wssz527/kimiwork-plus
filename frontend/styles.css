@@ -966,6 +966,7 @@ input[type="url"] { width: 100%; min-height: 40px; padding: 8px 11px; border: 1p
 .conv-meta { display: flex; flex-wrap: wrap; align-items: center; margin-top: 5px; color: var(--ink-4); font-size: 12px; }
 .conv-workspace { color: var(--ink-3); }
 .conv-model { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; color: var(--ink-3); font-size: 12px; }
+.conv-model-hint { margin-top: 5px; }
 .conv-badge { border-color: var(--accent-rule); background: var(--accent-soft); color: var(--accent); }
 .conv-actions { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
 .conv-actions .field { min-width: 148px; }

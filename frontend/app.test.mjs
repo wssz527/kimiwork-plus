@@ -38,7 +38,7 @@ const DIRECT_REASON_SOURCE = (() => {
   assert.notEqual(end, -1, 'unterminated DIRECT_REASON table');
   return source.slice(start, end + 3);
 })();
-const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'directModeOf',
+const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'integrationModeLabel', 'integrationModeTransition', 'integrationModeSyncText', 'directModeOf',
   'directHasNoEligibleModels', 'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
   'directRestartRequired', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
@@ -2409,12 +2409,12 @@ test('direct mode reports the unsynced, ready, and zero-gateway states without a
   });
   assert.equal(pending.code, 'pending');
   assert.equal(pending.tone, 'warn');
-  assert.equal(pending.word, '待写入直连配置');
-  assert.match(pending.note, /重新同步模型目录/);
+  assert.equal(pending.word, '等待自动写入直连配置');
+  assert.match(pending.note, /等待后台自动同步/);
   assert.doesNotMatch(pending.note, /重启/);
 
   /* 只要 integration.mode 还不是 direct，就必须说「待写入」。 */
-  assert.equal(syncState({ integrationMode: 'direct', models, integration: {} }).word, '待写入直连配置');
+  assert.equal(syncState({ integrationMode: 'direct', models, integration: {} }).word, '等待自动写入直连配置');
 
   /* 已同步且静态 hosts 就绪：直连已就绪，不需要后台服务。 */
   const ready = syncState({
@@ -2474,7 +2474,7 @@ test('skipped direct models still count as synced once the eligible set is impor
       eligibleModels: 1, totalModels: 2 },
   });
   assert.equal(swapped.code, 'pending');
-  assert.equal(swapped.word, '待写入直连配置');
+  assert.equal(swapped.word, '等待自动写入直连配置');
 });
 
 test('a ready direct alias set without applied evidence is still pending', () => {
@@ -2489,7 +2489,7 @@ test('a ready direct alias set without applied evidence is still pending', () =>
       aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' } },
   });
   assert.equal(adoptedOnly.code, 'pending');
-  assert.equal(adoptedOnly.word, '待写入直连配置');
+  assert.equal(adoptedOnly.word, '等待自动写入直连配置');
 
   /* 旧后端没有 eligibleModelIds：readback.modelAliases 覆盖了这次 spec 也算完成。 */
   const legacy = syncState({
@@ -2604,7 +2604,7 @@ test('a successful direct sync is a ready state, not an overview problem', () =>
   assert.equal(compute({ gateway: { state: 'stopped' } }).title, '本机网关未运行');
   /* 直连未写入时仍然要说出下一步，不能被当成正常。 */
   const pending = compute({ ...readyData, gateway: { state: 'running' }, integration: { mode: 'gateway' } });
-  assert.equal(pending.title, '待写入直连配置');
+  assert.equal(pending.title, '等待自动写入直连配置');
 
   const cleanup = compute({ ...readyData, directMode: { ...readyData.directMode, routeCleanupPending: true } });
   assert.equal(cleanup.title, '切换收尾未完成');
@@ -2821,14 +2821,12 @@ test('the models sync bar names the pending direct write and the gateway fallbac
   /* 直连已选、官方 Kimi 还是网关：说明下一步是写入直连配置。 */
   render({ integrationMode: 'direct', models, integration: { mode: 'gateway' } });
   assert.equal(nodes['workspace-sync-state'].textContent, '等待自动写入直连配置');
-  assert.match(nodes['workspace-sync-note'].textContent, /自动写入服务商地址与静态 hosts/);
-  assert.match(nodes['workspace-sync-note'].textContent, /之后可退出本软件/);
-  assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
+  assert.match(nodes['workspace-sync-note'].textContent, /已保存为零网关直连模式.*当前仍为本机网关模式.*等待后台自动同步/);
 
   /* 切回网关、官方 Kimi 仍是直连：说明下一步是恢复网关路由。 */
   render({ integrationMode: 'gateway', models, integration: { mode: 'direct' } });
-  assert.equal(nodes['workspace-sync-state'].textContent, '待切回网关并同步');
-  assert.match(nodes['workspace-sync-note'].textContent, /恢复为本机网关路由/);
+  assert.equal(nodes['workspace-sync-state'].textContent, '等待自动同步网关模式');
+  assert.match(nodes['workspace-sync-note'].textContent, /已保存为本机网关模式.*当前仍为零网关直连模式.*等待后台自动同步/);
 
   /* 直连已同步并跳过了一个模型：仍然显示已同步，并强调可以退出后台。 */
   render({
@@ -3050,19 +3048,41 @@ test('direct mode keeps budget reminders out of the overview issue card', () => 
   assert.equal(compute({ gateway: { state: 'running' }, budget }).title, '已达到预算上限');
 });
 
-function makeIntegrationModeEnv() {
+function makeIntegrationModeEnv({ saveMode } = {}) {
+  const document = { activeElement: null };
+  const makeControl = (id) => ({
+    id, textContent: '', hidden: false, disabled: false, dataset: {}, setAttribute() {},
+    classList: { add() {}, toggle() {} },
+    listeners: {}, addEventListener(name, listener) { this.listeners[name] = listener; },
+    fire(name, event = {}) { this.listeners[name]?.({ target: this, ...event }); },
+    focus() { document.activeElement = this; },
+  });
+  const timers = new Map();
+  let timerIndex = 0;
+  const window = {
+    setTimeout(callback, delay) { timers.set(++timerIndex, { callback, delay }); return timerIndex; },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const posts = [];
+  const adopted = [];
+  const state = { pendingAction: null, modelsSaving: false, connsSaving: false, integrationModeConfirm: null };
   const nodes = {};
   for (const id of ['integration-mode-state', 'direct-mode-notice', 'direct-mode-support', 'direct-mode-hosts',
-    'native-sync-label', 'native-sync', 'native-recover']) {
-    nodes[id] = { id, textContent: '', hidden: false, disabled: false, dataset: {}, setAttribute() {},
-      classList: { add() {}, toggle() {} } };
+    'native-sync-label', 'native-sync', 'native-recover', 'integration-mode-group', 'integration-mode-confirm',
+    'integration-mode-confirm-text', 'integration-mode-cancel', 'integration-mode-submit']) {
+    nodes[id] = makeControl(id);
   }
   nodes['native-sync'].dataset.action = 'connect-kimi';
   nodes['native-recover'].dataset.action = 'prepare-native';
+  nodes['integration-mode-confirm'].hidden = true;
   const dom = {
-    modeGateway: { value: 'gateway', checked: false, disabled: false },
-    modeDirect: { value: 'direct', checked: false, disabled: false },
-    integrationModeGroup: null,
+    modeGateway: { ...makeControl('mode-gateway'), name: 'integration-mode', value: 'gateway', checked: true },
+    modeDirect: { ...makeControl('mode-direct'), name: 'integration-mode', value: 'direct', checked: false },
+    integrationModeGroup: nodes['integration-mode-group'],
+    integrationModeConfirm: nodes['integration-mode-confirm'],
+    integrationModeConfirmText: nodes['integration-mode-confirm-text'],
+    integrationModeCancel: nodes['integration-mode-cancel'],
+    integrationModeSubmit: nodes['integration-mode-submit'],
     integrationModeState: nodes['integration-mode-state'],
     nativeSyncLabel: nodes['native-sync-label'],
     nativeSync: nodes['native-sync'],
@@ -3073,11 +3093,23 @@ function makeIntegrationModeEnv() {
     directModeBypassed: null,
     directModeSkipped: null,
   };
+  dom.integrationModeConfirm.contains = node => node === dom.integrationModeCancel || node === dom.integrationModeSubmit;
+  state.actionButtons = [dom.nativeSync, dom.nativeRecover];
+  const request = async (path, options) => {
+    posts.push([path, options]);
+    if (saveMode) return saveMode(options.body);
+    return { state: { ...state.data, integrationMode: options.body.mode, revision: 'saved' } };
+  };
+  const app = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const code = [
     ...INTEGRATION_HELPERS,
-    'let integrationModeSaving = false;',
-    'const integrationModeBusy = data => integrationModeSaving || data?.operation?.state === "running";',
-    'const state = { actionButtons: [dom.nativeSync, dom.nativeRecover], pendingAction: null, modelsSaving: false, connsSaving: false };',
+    'let integrationModeSaving = null;',
+    'const INTEGRATION_MODES = ["gateway", "direct"];',
+    'const API = { integrationMode: "/api/integration-mode" };',
+    'const showToast = () => {};',
+    'const handleSaveFailure = error => { throw error; };',
+    'const adoptState = (data, options) => { state.data = data; adopted.push(options); };',
+    'const renderAll = () => { renderIntegrationMode(state.data); renderActions(state.data); };',
     'const onboardBusy = () => false;',
     'const renderOnboard = () => {};',
     'const renderOnboardOverview = () => {};',
@@ -3090,16 +3122,22 @@ function makeIntegrationModeEnv() {
     'const DIRECT_BYPASS_WORD = {};',
     'const DIRECT_SKIP_REASON = {};',
     sourceFunction('isInFlight'),
-    sourceFunction('renderIntegrationMode'),
+    ...['integrationModeBusy', 'integrationModeContext', 'clearIntegrationModeConfirm', 'cancelIntegrationModeConfirm',
+      'requestIntegrationModeConfirm', 'confirmIntegrationMode', 'renderIntegrationMode', 'chooseIntegrationMode'].map(sourceFunction),
     sourceFunction('renderActions'),
+    app.slice(app.indexOf('  /* 选择卡片只请求确认'), app.indexOf('  /* 子代理目标 */')),
     'return { renderIntegrationMode, renderActions };',
   ].join('\n');
-  const renderers = new Function('dom', code)(dom);
+  const renderers = new Function('dom', 'state', 'request', 'window', 'document', 'adopted', code)(dom, state, request, window, document, adopted);
   const render = data => {
+    state.data = data;
     renderers.renderIntegrationMode(data);
     renderers.renderActions(data);
   };
-  return { nodes, dom, renderers, render };
+  const choose = (mode) => dom.integrationModeGroup.fire('change', {
+    target: mode === 'gateway' ? dom.modeGateway : mode === 'direct' ? dom.modeDirect : { name: 'integration-mode', value: mode },
+  });
+  return { nodes, dom, renderers, render, state, document, timers, posts, adopted, choose };
 }
 
 test('the settings notice and sync button both name the pending cleanup', () => {
@@ -4873,6 +4911,8 @@ test('inline disconnect confirm is cleared by runAction, chooseIntegrationMode, 
     const renderOnboardOverview = () => {};
     const configReady = () => true;
     const savedIntegrationMode = (d) => d?.integrationMode || 'gateway';
+    const integrationModeLabel = mode => mode;
+    const integrationModeSyncText = () => '';
     const directRestartRequired = () => false;
     const integrationModeBusy = () => integrationModeSaving;
     const renderIntegrationMode = () => {};
@@ -6197,4 +6237,169 @@ test('reverse alias migration uses the original catalog target after confirmatio
   assert.deepEqual(env.calls.find(call => call[1]?.method === 'POST')[1].body, {
     targetModelAlias: original, thinkingLevel: '', migratePreviousAlias: true, restartKimi: true,
   });
+});
+
+/* ---------- 接入模式确认与状态 ---------- */
+
+function modeFixture(mode = 'gateway') {
+  return { revision: 'rev-1', integrationMode: mode, accounts: { currentId: 'one' },
+    integration: { mode, accountDigest: 'verified-one', state: 'ready', applied: true } };
+}
+
+function assertModeSelection(env, mode) {
+  assert.equal(env.dom.modeGateway.checked, mode === 'gateway');
+  assert.equal(env.dom.modeDirect.checked, mode === 'direct');
+}
+
+for (const [from, to] of [['gateway', 'direct'], ['direct', 'gateway']]) {
+  test(`mode ${from} to ${to} saves once after confirmation and preserves selection across polls`, async () => {
+    let finishSave;
+    const env = makeIntegrationModeEnv({ saveMode: () => new Promise(resolve => { finishSave = resolve; }) });
+    const original = modeFixture(from);
+    env.render(original);
+    env.choose(to);
+    assertModeSelection(env, to);
+    assert.equal(env.dom.integrationModeConfirm.hidden, false);
+    assert.equal(env.document.activeElement, env.dom.integrationModeCancel);
+    const copy = env.dom.integrationModeConfirmText.textContent;
+    if (to === 'direct') {
+      assert.match(copy, /跨服务商换模会新开对话.*会话.*托盘.*静态 hosts.*授权.*重启/);
+    } else {
+      assert.match(copy, /后台会自动同步.*不会自动重启/);
+    }
+    const timer = env.state.integrationModeConfirm.timer;
+    env.render({ ...original, integration: { ...original.integration, autoSync: { state: 'idle' } } });
+    assertModeSelection(env, to);
+    assert.equal(env.state.integrationModeConfirm.timer, timer);
+    assert.equal(env.document.activeElement, env.dom.integrationModeCancel);
+    assert.equal(env.posts.length, 0);
+    env.dom.integrationModeSubmit.fire('click');
+    env.dom.integrationModeSubmit.fire('click');
+    assert.deepEqual(env.posts, [['/api/integration-mode', { method: 'POST', body: { revision: 'rev-1', mode: to } }]]);
+    assert.equal(env.dom.integrationModeConfirm.hidden, true);
+    assert.equal(env.timers.size, 0);
+    env.render(original);
+    assertModeSelection(env, to);
+    assert.equal(env.dom.modeGateway.disabled, true);
+    finishSave({ state: { ...original, revision: 'rev-2', integrationMode: to } });
+    await flushConversation();
+    assertModeSelection(env, to);
+    assert.equal(env.dom.modeGateway.disabled, false);
+    assert.deepEqual(env.adopted, [{ external: true }]);
+  });
+}
+
+test('mode confirmation cancels with button, Escape, timeout, or a newer context', () => {
+  const env = makeIntegrationModeEnv();
+  const original = modeFixture();
+  env.render(original);
+  for (const cancel of [
+    () => env.dom.integrationModeCancel.fire('click'),
+    () => env.dom.integrationModeConfirm.fire('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} }),
+    () => {
+      const timer = env.timers.get(env.state.integrationModeConfirm.timer);
+      assert.equal(timer.delay, 10000);
+      timer.callback();
+    },
+  ]) {
+    env.choose('direct');
+    cancel();
+    assertModeSelection(env, 'gateway');
+    assert.equal(env.dom.integrationModeConfirm.hidden, true);
+    assert.equal(env.document.activeElement, env.dom.modeGateway);
+    assert.equal(env.timers.size, 0);
+    assert.equal(env.state.integrationModeConfirm, null);
+    env.dom.integrationModeSubmit.fire('click');
+  }
+  for (const changed of [
+    { ...original, revision: 'rev-2' },
+    { ...original, accounts: { currentId: 'two' } },
+    { ...original, integration: { ...original.integration, accountDigest: 'different-native-account' } },
+    { ...original, operation: { state: 'running', id: 'started' } },
+    { ...original, operation: { state: 'done', id: 'completed-between-polls' } },
+  ]) {
+    env.render(original);
+    env.choose('direct');
+    env.render(changed);
+    assertModeSelection(env, 'gateway');
+    assert.equal(env.dom.integrationModeConfirm.hidden, true);
+    assert.equal(env.timers.size, 0);
+    env.dom.integrationModeSubmit.fire('click');
+  }
+  assert.equal(env.posts.length, 0);
+});
+
+test('selecting the saved mode, an invalid mode, or selecting during an operation opens no mode confirmation', () => {
+  const env = makeIntegrationModeEnv();
+  const original = modeFixture();
+  env.render(original);
+  env.choose('gateway');
+  env.choose('other');
+  assert.equal(env.timers.size, 0);
+  assert.equal(env.dom.integrationModeConfirm.hidden, true);
+  env.choose('direct');
+  env.state.pendingAction = 'restart-kimi';
+  env.renderers.renderActions(original);
+  assertModeSelection(env, 'gateway');
+  env.choose('direct');
+  env.dom.integrationModeSubmit.fire('click');
+  assert.equal(env.timers.size, 0);
+  assert.equal(env.dom.integrationModeConfirm.hidden, true);
+  assert.equal(env.posts.length, 0);
+});
+
+test('the static settings markup defaults to the gateway and the overview always shows the mode', () => {
+  assert.match(htmlSource, /<input\b[^>]*id="mode-gateway"[^>]*\bchecked\b[^>]*>/);
+  assert.doesNotMatch(htmlSource, /<input\b[^>]*id="mode-direct"[^>]*\bchecked\b[^>]*>/);
+  assert.match(htmlSource, /id="fact-gateway-mode">正在读取接入模式/);
+  assert.doesNotMatch(source, /\bwindow\.confirm\s*\(/);
+  const el = { textContent: '', hidden: true };
+  const render = new Function('el', [...INTEGRATION_HELPERS,
+    'const dom = { factGatewayMode: el };',
+    'const setHidden = (element, hidden) => { element.hidden = hidden; };',
+    'const setText = (element, text) => { element.textContent = text; };',
+    sourceFunction('renderGatewayModeFact'), 'return renderGatewayModeFact;',
+  ].join('\n'))(el);
+  render(modeFixture());
+  assert.equal(el.hidden, false);
+  assert.equal(el.textContent, '本机网关模式');
+  render(modeFixture('direct'));
+  assert.equal(el.hidden, false);
+  assert.match(el.textContent, /零网关直连模式/);
+  for (const [saved, effective, expected] of [
+    ['gateway', 'direct', /已保存为本机网关模式.*当前仍为零网关直连模式/],
+    ['direct', 'gateway', /已保存为零网关直连模式.*当前仍为本机网关模式/],
+  ]) {
+    const fixture = modeFixture(saved);
+    const data = { ...fixture, integration: { ...fixture.integration, mode: effective, autoSync: { state: 'syncing' } } };
+    render(data);
+    assert.match(el.textContent, expected);
+    assert.match(el.textContent, /后台正在自动同步/);
+    const settings = makeIntegrationModeEnv();
+    settings.render(data);
+    assert.match(settings.dom.integrationModeState.textContent, expected);
+    assert.match(settings.dom.integrationModeState.textContent, /后台正在自动同步/);
+    render({ ...data, integration: { ...data.integration, applied: false, autoSync: { state: 'scheduled' } } });
+    assert.match(el.textContent, /当前生效模式待确认.*等待后台自动同步/);
+    assert.doesNotMatch(el.textContent, /当前仍为/);
+  }
+});
+
+test('only the exact K2.8 Preview row in gateway mode explains the two official menu steps', async () => {
+  const conversations = ['k2d8-preview', 'k3-agent', 'kimi-k2.8', 'byok-other/k2d8-preview'].map((modelAlias, index) => ({
+    conversationKey: 'k' + index, title: '会话 ' + index, modelAlias,
+  }));
+  const rowHints = env => env.ui.list.children.map(row => findNode(row, node => node.className === 'hint conv-model-hint')?.textContent);
+  const env = makeConversationPageEnv({ conversations });
+  await env.page.refresh();
+  const [k28, ...other] = rowHints(env);
+  assert.match(k28, /先切到 K3 或 K3\.1 Pro，再选第三方模型.*一步完成/);
+  assert.ok(other.every(hint => hint === undefined));
+  assert.match(env.ui.guideText.textContent, /可在 Kimi 内先点 K3\.1 Pro/);
+  for (const state of [{ integrationMode: 'direct' }, { integrationMode: 'gateway', integration: { mode: 'direct' } }]) {
+    const switched = makeConversationPageEnv({ conversations });
+    Object.assign(switched.state.data, state);
+    await switched.page.refresh();
+    assert.ok(rowHints(switched).every(hint => hint === undefined));
+  }
 });

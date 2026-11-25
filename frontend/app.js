@@ -1,7 +1,7 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardBatchProtocol, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, refreshSavedProtocolDeclarations, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, catalogueWith, chooseProtocol, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
-import { chooseIntegrationMode, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 import { mountConversationsPage } from './app-conversations.js';
 
@@ -48,6 +48,7 @@ function setView(view, { persist = true } = {}) {
   view = VIEW_ALIASES[view] || view;
   if (!VIEW_COPY[view]) view = 'overview';
   const apply = () => {
+    if (state.integrationModeConfirm && view !== 'maintenance') cancelIntegrationModeConfirm();
     state.view = view;
     if (document.body) document.body.dataset.view = view;
     Object.keys(VIEW_COPY).forEach((name) => {
@@ -698,6 +699,7 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-subtab-group][data-subtab]').forEach((button) => {
     button.addEventListener('click', () => {
+      if (button.dataset.subtabGroup === 'maintenance' && button.dataset.subtab !== 'connection') cancelIntegrationModeConfirm();
       setSubtab(button.dataset.subtabGroup, button.dataset.subtab);
     });
   });
@@ -929,13 +931,24 @@ function bindEvents() {
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
 
-  /* 接入模式：切换只保存偏好，写入官方 Kimi 仍由「重新同步模型目录」完成。 */
-  if (dom.integrationModeGroup) dom.integrationModeGroup.addEventListener('change', (event) => {
+  /* 选择卡片只请求确认，确认后的保存回执使旧轮询结果失效。 */
+  dom.integrationModeGroup?.addEventListener('change', (event) => {
     const target = event.target;
-    if (!target || target.name !== 'integration-mode') return;
-    void chooseIntegrationMode(target.value, {
+    if (target?.name === 'integration-mode') requestIntegrationModeConfirm(target.value);
+  });
+  const cancelModeChange = () => cancelIntegrationModeConfirm({ restoreFocus: true });
+  const cancelModeOnEscape = (event) => {
+    if (event.key !== 'Escape' || !state.integrationModeConfirm) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelModeChange();
+  };
+  dom.integrationModeGroup?.addEventListener('keydown', cancelModeOnEscape);
+  dom.integrationModeConfirm?.addEventListener('keydown', cancelModeOnEscape);
+  dom.integrationModeCancel?.addEventListener('click', cancelModeChange);
+  dom.integrationModeSubmit?.addEventListener('click', () => {
+    void confirmIntegrationMode({
       onSaved: (next) => {
-        /* 成功回执就是最新状态：直接采纳，避免轮询把模式与提示短暂改回旧值。 */
         adoptState(next, { external: true });
         renderAll();
       },

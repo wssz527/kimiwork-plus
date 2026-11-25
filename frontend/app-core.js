@@ -383,7 +383,7 @@ const DIAG_REASON = {
    native_import_/native_ 前缀，主程序自己用下划线代码。三者指向同一张表，
    归一化后查一次，文案才不会按调用路径变来变去。 */
 const DIRECT_REASON = {
-  direct_import_required: '直连配置还没有写入官方 Kimi；请在模型与服务商页点「重新同步模型目录」。',
+  direct_import_required: '直连配置已保存，等待后台写入官方 Kimi。',
   direct_prepare_required: '直连模式需要先完成一次静态 hosts 系统授权；请在设置页点击「重新同步模型目录」完成授权。',
   direct_mode_unsupported: '当前官方 Kimi 版本不支持原生直连（需要 3.2.28+ 的 byokSources v3 存储）；可改用本机网关模式。',
   direct_preview_refused: '官方 Kimi 拒绝了这次直连写入，现有配置未被改动；请确认官方窗口没有正在同步或编辑模型源，再重新同步。',
@@ -808,6 +808,10 @@ const dom = {
   modeGateway: $('mode-gateway'),
   modeDirect: $('mode-direct'),
   integrationModeState: $('integration-mode-state'),
+  integrationModeConfirm: $('integration-mode-confirm'),
+  integrationModeConfirmText: $('integration-mode-confirm-text'),
+  integrationModeCancel: $('integration-mode-cancel'),
+  integrationModeSubmit: $('integration-mode-submit'),
   directModeNotice: $('direct-mode-notice'),
   directModeSupport: $('direct-mode-support'),
   directModeHosts: $('direct-mode-hosts'),
@@ -881,6 +885,7 @@ const state = {
   subagentSaving: false,
   subagentErrors: [],
   reachable: null,
+  integrationModeConfirm: null,
   pendingAction: null,
   pendingOpId: null,
   lastSync: null,

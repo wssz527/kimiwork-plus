@@ -134,7 +134,7 @@
             <span class="overview-card__label">本机网关</span>
             <strong class="overview-card__value"><span class="dot" id="fact-gateway-dot" data-tone="neutral"></span><span id="fact-gateway">…</span></strong>
             <p class="overview-card__meta mono" id="fact-gateway-url">…</p>
-            <p class="overview-card__meta" id="fact-gateway-mode" hidden></p>
+            <p class="overview-card__meta" id="fact-gateway-mode">正在读取接入模式…</p>
           </article>
 
           <article class="overview-card">
@@ -390,11 +390,11 @@
       </div>
       <div class="subtab-pane" id="settings-pane-connection" data-subtab-group="maintenance" data-subtab-pane="connection" role="tabpanel" aria-labelledby="settings-tab-connection" hidden>
 <section class="band" id="native-panel">
-  <div class="band__head"><div><h2>Kimi 接入</h2><p>只接入本机官方桌面 Work；选择接入方式后，保存的模型会在后台自动同步到 Kimi。</p></div></div>
+  <div class="band__head"><div><h2>Kimi 接入</h2><p>只接入本机官方桌面 Work；确认接入方式后，保存的模型会在后台自动同步到 Kimi。</p></div></div>
   <fieldset class="choices choices--mode" id="integration-mode-group">
     <legend class="field__label">接入模式</legend>
     <label class="choice" for="mode-gateway">
-      <input type="radio" name="integration-mode" id="mode-gateway" value="gateway">
+      <input type="radio" name="integration-mode" id="mode-gateway" value="gateway" checked>
       <span class="choice__body">
         <span class="choice__title">本机网关模式（推荐）</span>
         <span class="choice__note">在 Kimi 官方模型下拉框内可与 K3、K3.1 Pro 及所有第三方模型任意原会话互切、不新建对话；完整支持用量账本、预算保护、故障转移、子代理接管与免改系统 DNS。</span>
@@ -408,6 +408,13 @@
       </span>
     </label>
   </fieldset>
+  <div class="inline-confirm" id="integration-mode-confirm" role="region" aria-label="确认切换接入模式" aria-describedby="integration-mode-confirm-text" hidden>
+    <p class="inline-confirm__text" id="integration-mode-confirm-text"></p>
+    <div class="inline-confirm__actions">
+      <button class="btn btn--quiet btn--sm" id="integration-mode-cancel" type="button">取消</button>
+      <button class="btn btn--primary btn--sm" id="integration-mode-submit" type="button">确认切换</button>
+    </div>
+  </div>
   <p class="note" id="integration-mode-state" role="status" hidden></p>
   <div class="direct-notice" id="direct-mode-notice" hidden>
     <p class="direct-notice__head">直连模式说明</p>
@@ -416,7 +423,7 @@
     <p class="direct-notice__line" id="direct-mode-tradeoff">直连模式下 API Key 交由官方 Kimi 本机安全存储托管，请求不经过本机网关；token 用量会只读采集自 Kimi Work 本地会话记录（不提供耗时与首字节延迟），预算拦截、故障转移、共享指令与网关侧联网搜索不会生效，思考翻译与多账号切换仍需打开本软件。</p>
     <p class="direct-notice__line" id="direct-mode-bypassed" hidden></p>
     <p class="direct-notice__line" id="direct-mode-skipped" hidden></p>
-    <p class="hint" id="direct-mode-hint">官方更新或更改模型后，再打开本软件同步一次即可。</p>
+    <p class="hint" id="direct-mode-hint">模型更改保存后会自动同步。官方更新后如提示同步失败，可在下方重试。</p>
   </div>
   <p class="note" id="native-state" role="status">正在检查接入…</p>
   <p class="verdict" id="native-remote" role="status" hidden><span class="dot" id="native-remote-dot" data-tone="neutral"></span><span>接入范围</span><strong id="native-remote-word">仅桌面</strong><span class="verdict__note" id="native-remote-note">只接入本机官方 Kimi 桌面 Work，不同步到 Kimi 手机端。</span></p>

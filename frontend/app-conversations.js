@@ -448,6 +448,12 @@ function mountConversationsPage() {
     badge.textContent = humanizeConversationModel(conversation.modelAlias, models, state.data?.models, conversation.migrationTargetAlias);
     modelLine.append(badge);
     main.append(titleRow, meta, modelLine);
+    if (conversation.modelAlias === 'k2d8-preview' && savedIntegrationMode(state.data) === 'gateway' && state.data?.integration?.mode !== 'direct') {
+      const hint = document.createElement('p');
+      hint.className = 'hint conv-model-hint';
+      hint.textContent = '在官方菜单中，先切到 K3 或 K3.1 Pro，再选第三方模型。在此切换可一步完成。';
+      main.append(hint);
+    }
 
     const actions = document.createElement('div');
     actions.className = 'conv-actions';
@@ -885,7 +891,7 @@ function mountConversationsPage() {
     const signature = JSON.stringify([
       next?.revision, next?.accounts?.currentId, next?.accounts?.state, next?.profile?.mode,
       next?.kimiProcess?.running, next?.kimiProcess?.state, next?.integrationMode,
-      next?.integration?.state, next?.integration?.imported,
+      next?.integration?.mode, next?.integration?.state, next?.integration?.imported,
     ]);
     if (signature === lastSignature) return;
     const changed = lastSignature !== '';
