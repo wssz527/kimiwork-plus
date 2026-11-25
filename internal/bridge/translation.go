@@ -167,7 +167,11 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 		return nil, errors.New("translation_connection_anthropic_only")
 	}
 	support := "model-protocol"
-	if ps, ok := connection["protocols"].([]any); ok {
+	// A connection that names a protocol decides whether it can answer a Chat
+	// request at all. An empty declaration is a legacy row and falls back to the
+	// model's own route, which is what it always did; claiming "declared" for an
+	// empty list would report a Chat capability nobody stated.
+	if ps, ok := connection["protocols"].([]any); ok && len(ps) > 0 {
 		support = "declared"
 		chat := false
 		for _, p := range ps {

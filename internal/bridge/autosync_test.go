@@ -63,6 +63,9 @@ func TestCatalogSurfaceDigestIgnoresGatewayOnlyFields(t *testing.T) {
 		"connection name": func(d core.Document) {
 			core.Object(core.Rows(d["connections"])[0])["name"] = "Renamed"
 		},
+		"upstream id of a named model": func(d core.Document) {
+			core.Object(core.Rows(d["models"])[0])["upstreamModelId"] = "new-upstream"
+		},
 		"base url": func(d core.Document) {
 			core.Object(core.Rows(d["connections"])[0])["baseURL"] = "https://beta.example/v1"
 		},
@@ -82,6 +85,17 @@ func TestCatalogSurfaceDigestIgnoresGatewayOnlyFields(t *testing.T) {
 		if got := catalogSurfaceDigest(next); got != want {
 			t.Fatalf("%s changed the Kimi catalog digest", name)
 		}
+	}
+}
+
+func TestCatalogSurfaceDigestTracksUpstreamIDOfUnnamedModel(t *testing.T) {
+	d := autoSyncGatewayDoc()
+	model := core.Object(core.Rows(d["models"])[0])
+	delete(model, "name")
+	before := catalogSurfaceDigest(d)
+	model["upstreamModelId"] = "new-upstream"
+	if catalogSurfaceDigest(d) == before {
+		t.Fatal("the new display name did not change the Kimi catalog digest")
 	}
 }
 

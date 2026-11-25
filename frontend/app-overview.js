@@ -1,5 +1,5 @@
 import { applyState, configInfo, configReady, credentialAuthPending, onboardBusy, renderOnboard } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, DIRECT_BYPASS_WORD, DIRECT_SKIP_REASON, GUIDE_DISMISSED_STORE, INTEGRATION_MODES, POLICY_MODE_WORD, catalogModelLabel, directReasonText, displayModelId, dom, fmtCount, fmtDuration, fmtK, fmtMs, fmtTime, fmtTokens, reasonText, request, revealWorkspaceSection, setDot, setHidden, setText, showToast, state } from './app-core.js';
 import { connectionRowsOf } from './app-models.js';
 import { clearDisconnectConfirm, handleSaveFailure, loadState, runAction, setView } from './app.js';
 
@@ -871,7 +871,7 @@ function renderOverviewSubagents(data) {
     return;
   }
   if (mode === 'force') {
-    const model = configured.model ? displayModelId(configured.model) : '已指定';
+    const model = configured.model ? catalogModelLabel(data, configured.model) : '已指定';
     setText(dom.overviewSubagentsValue, '固定 · ' + model);
     setText(dom.overviewSubagentsNote, runtimeState === 'file-applied' || runtimeState === 'loaded'
       ? '已写入 Kimi Work config.toml，新建会话生效。'
@@ -883,7 +883,7 @@ function renderOverviewSubagents(data) {
   const roles = configured.roles && typeof configured.roles === 'object' ? configured.roles : {};
   const assigned = ['plan', 'coder', 'explore'].filter((key) => typeof roles[key] === 'string' && roles[key].trim());
   const parts = [];
-  if (configured.model) parts.push('默认 ' + displayModelId(configured.model));
+  if (configured.model) parts.push('默认 ' + catalogModelLabel(data, configured.model));
   if (assigned.length) parts.push('角色 ' + assigned.join('/'));
   parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已写入 config.toml' : '待写入配置');
   setText(dom.overviewSubagentsNote, parts.join(' · '));

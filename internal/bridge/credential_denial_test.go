@@ -18,7 +18,7 @@ func TestCredentialDenialKeepsPanelAvailable(t *testing.T) {
 	}
 	s := &Service{Store: store, Keys: CacheKeys(testKeys{})}
 	_, rev, _ := store.Read()
-	_, err = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "fixture", "name": "Fixture", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"}}})
+	_, err = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "fixture", "name": "Fixture", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}

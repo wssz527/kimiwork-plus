@@ -99,6 +99,59 @@ func BaseURL(raw string) (string, error) {
 	}
 	return strings.TrimRight(u.String(), "/"), nil
 }
+
+// Connection wire protocols. One supplier address speaks exactly one of them:
+// the declaration belongs to the connection, every model on it follows it, and
+// the routing id behind a model never decides the wire against it.
+const (
+	ConnectionProtocolChat      = "chat"
+	ConnectionProtocolResponses = "responses"
+)
+
+// ParseConnectionProtocols reads the wires a connection declares. A document
+// saved before a connection named a protocol has none — and one written by an
+// older release may still name both — so this reader never fails on a shape it
+// can serve: those documents keep the per-model routing they always had. Only
+// values this build does not know at all are refused here; requiring exactly one
+// wire is the save path's job (MergeConnections), because that is where a
+// document is created.
+func ParseConnectionProtocols(c map[string]any) ([]string, error) {
+	raw, exists := c["protocols"]
+	if !exists || raw == nil {
+		return nil, nil
+	}
+	var rows []string
+	switch values := raw.(type) {
+	case []any:
+		rows = make([]string, 0, len(values))
+		for _, value := range values {
+			rows = append(rows, String(value))
+		}
+	case []string:
+		rows = values
+	default:
+		return nil, errors.New("invalid_connection_protocols")
+	}
+	for _, protocol := range rows {
+		if protocol != ConnectionProtocolChat && protocol != ConnectionProtocolResponses {
+			return nil, errors.New("invalid_connection_protocols")
+		}
+	}
+	return rows, nil
+}
+
+// ConnectionProtocol is the single wire this connection declares, or the empty
+// string for a connection saved before declarations existed. A shape this build
+// refuses to save is also read as undeclared: a document written by an older
+// release must keep importing exactly as it did.
+func ConnectionProtocol(c map[string]any) string {
+	protocols, err := ParseConnectionProtocols(c)
+	if err != nil || len(protocols) != 1 {
+		return ""
+	}
+	return protocols[0]
+}
+
 func Validate(d Document) error {
 	connections := map[string]map[string]any{}
 	envs := map[string]bool{}
@@ -137,10 +190,12 @@ func Validate(d Document) error {
 		if !envPattern.MatchString(env) || envs[env] {
 			return errors.New("invalid_connections")
 		}
-		for _, p := range Rows(c["protocols"]) {
-			if p != "chat" && p != "responses" {
-				return errors.New("invalid_connections")
-			}
+		// A connection saved before this rule may carry no protocol at all, and an
+		// older release may have stored both wires; both are read as they always
+		// were, so an upgrade never refuses to start or blocks an unrelated save.
+		// Requiring exactly one is enforced where a connection is saved.
+		if _, e := ParseConnectionProtocols(c); e != nil {
+			return e
 		}
 		connections[id] = c
 		envs[env] = true
@@ -302,6 +357,15 @@ func MergeConnections(d Document, input []any) (map[string]*string, error) {
 	out := make([]any, 0, len(input))
 	keys := map[string]*string{}
 	ids := map[string]bool{}
+	narrowedToChat := map[string]bool{}
+	// existing is the catalog before this save: its rows are what an omitted
+	// protocol is carried forward from, and what tells a new connection from an
+	// edited one.
+	existing := map[string]map[string]any{}
+	for _, v := range Rows(d["connections"]) {
+		old := Object(v)
+		existing[String(old["id"])] = old
+	}
 	allowed := map[string]bool{"id": true, "name": true, "providerPresetId": true, "baseURL": true, "apiKeyEnv": true, "protocols": true}
 	for _, v := range input {
 		row := Object(v)
@@ -314,6 +378,39 @@ func MergeConnections(d Document, input []any) (map[string]*string, error) {
 			}
 		}
 		id := String(c["id"])
+		// The protocol is the supplier's, so a save must state it once. What an
+		// existing connection already declares is carried forward when the save
+		// does not restate it, which is what lets an unrelated edit save without
+		// the panel resending a choice it did not change. A legacy row stored with
+		// both wires is carried forward too — keeping it readable is what lets an
+		// old document be edited at all — but a save that states two is refused.
+		protocols, e := ParseConnectionProtocols(c)
+		if e != nil {
+			return nil, e
+		}
+		if len(protocols) > 1 {
+			return nil, errors.New("invalid_connection_protocols")
+		}
+		if previous := existing[id]; previous != nil && len(protocols) == 1 && protocols[0] == ConnectionProtocolChat {
+			narrowedToChat[id] = ConnectionProtocol(previous) != ConnectionProtocolChat
+		}
+		if len(protocols) == 0 && existing[id] != nil {
+			if protocols, e = ParseConnectionProtocols(existing[id]); e != nil {
+				return nil, e
+			}
+		}
+		if len(protocols) == 0 {
+			if existing[id] == nil {
+				return nil, errors.New("connection_protocol_required")
+			}
+			delete(c, "protocols")
+		} else {
+			rows := make([]any, 0, len(protocols))
+			for _, protocol := range protocols {
+				rows = append(rows, protocol)
+			}
+			c["protocols"] = rows
+		}
 		env := String(c["apiKeyEnv"])
 		if env == "" {
 			env = KeyEnv(id)
@@ -343,9 +440,13 @@ func MergeConnections(d Document, input []any) (map[string]*string, error) {
 		out = append(out, c)
 	}
 	for _, v := range Rows(d["models"]) {
-		for _, id := range modelConnections(Object(v)) {
+		model := Object(v)
+		for _, id := range modelConnections(model) {
 			if !ids[id] {
 				return nil, errors.New("connection_in_use")
+			}
+			if narrowedToChat[id] && String(model["protocol"]) == ConnectionProtocolResponses {
+				return nil, errors.New("invalid_connection_protocol_in_use")
 			}
 		}
 	}

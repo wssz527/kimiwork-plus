@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/ledger"
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 type testKeys map[string]string
@@ -78,7 +80,7 @@ func TestControlGatewayLedgerRestart(t *testing.T) {
 		return res.StatusCode, d
 	}
 	_, rev, _ := store.Read()
-	code, result := call("POST", "/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "mock", "name": "Local fixture", "baseURL": upstream.URL, "apiKey": "synthetic-key"}}}, s.Endpoint.Key, true)
+	code, result := call("POST", "/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "mock", "name": "Local fixture", "baseURL": upstream.URL, "apiKey": "synthetic-key", "protocols": []any{"chat"}}}}, s.Endpoint.Key, true)
 	if code != 200 {
 		t.Fatal(code, result)
 	}
@@ -159,5 +161,166 @@ func TestControlGatewayLedgerRestart(t *testing.T) {
 	code, result = call("GET", "/api/usage/export", nil, s.Endpoint.Key, false)
 	if code != 200 || core.Object(result["summary"])["totalTokens"] != float64(250) {
 		t.Fatal(code, result)
+	}
+}
+
+// The single-protocol rule must hold through the real save path and the live
+// gateway: a connection saved as `responses` receives a Kimi Chat request on
+// `/responses`, with the reply bridged back to the Chat shape Kimi parses.
+func TestRuntimeServesAChatRequestOnTheConnectionsDeclaredWire(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","model":"vendor-model","status":"completed",`+
+			`"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"bridged"}]}]}`)
+	}))
+	defer upstream.Close()
+	dir := filepath.Join(t.TempDir(), "state")
+	store, err := core.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := CacheKeys(testKeys{"KIMI_WORK_LOCAL_KEY": "synthetic-key"})
+	runtime, err := NewRuntime(dir, store, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Store: store, Keys: keys, StateDir: dir, Gateway: runtime, OnConfig: runtime.Apply}
+	if err = s.Start("0"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	_, revision, _ := store.Read()
+	if _, err = s.configure("/api/connections", core.Document{"revision": revision, "connections": []any{
+		core.Document{"id": "local", "name": "Local", "baseURL": upstream.URL,
+			"apiKey": "synthetic-key", "protocols": []any{"responses"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, revision, _ = store.Read()
+	if _, err = s.configure("/api/models", core.Document{"revision": revision, "models": []any{
+		core.Document{"id": "kimi-local", "protocol": "chat", "contextWindow": 32000,
+			"connectionId": "local", "upstreamModelId": "vendor-model"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	request, _ := http.NewRequest("POST", s.Endpoint.URL+"/v1/chat/completions", strings.NewReader(
+		`{"model":"kimi-local","messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer "+runtime.Token())
+	request.Header.Set("Content-Type", "application/json")
+	reply, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Body.Close()
+	body, _ := io.ReadAll(reply.Body)
+	if reply.StatusCode != 200 || !strings.Contains(string(body), "bridged") {
+		t.Fatalf("status %d body %s", reply.StatusCode, body)
+	}
+	mu.Lock()
+	captured := append([]string(nil), paths...)
+	mu.Unlock()
+	if len(captured) != 1 || captured[0] != "/responses" {
+		t.Fatalf("upstream paths = %v", captured)
+	}
+}
+
+// A document written before a connection named one protocol may list both. It
+// must load, keep working exactly as it did, and never be rewritten in the
+// background: the user is asked to choose only when they save that connection.
+func TestRuntimeKeepsALegacyMultiProtocolConnection(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/responses" {
+			_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","model":"vendor-gpt","status":"completed",`+
+				`"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"bridged"}]}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"chat-answered"}}]}`)
+	}))
+	defer upstream.Close()
+	dir := filepath.Join(t.TempDir(), "state")
+	store, err := core.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := core.Document{
+		"connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": upstream.URL,
+			"apiKeyEnv": "KIMI_WORK_LOCAL_KEY", "protocols": []any{"chat", "responses"}}},
+		"models": []any{
+			core.Document{"id": "kimi-local", "protocol": "chat", "contextWindow": 32000,
+				"connectionId": "local", "upstreamModelId": "vendor-chat"},
+			core.Document{"id": "vendor/gpt", "protocol": "responses", "contextWindow": 32000,
+				"connectionId": "local", "upstreamModelId": "vendor-gpt"},
+		},
+	}
+	if err = core.AtomicJSON(filepath.Join(dir, "gateway.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	keys := CacheKeys(testKeys{"KIMI_WORK_LOCAL_KEY": "synthetic-key"})
+	runtime, err := NewRuntime(dir, store, keys)
+	if err != nil {
+		t.Fatalf("a legacy document did not load: %v", err)
+	}
+	s := &Service{Store: store, Keys: keys, StateDir: dir, Gateway: runtime, OnConfig: runtime.Apply}
+	if err = s.Start("0"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	call := func(path, body string) (int, string) {
+		t.Helper()
+		request, _ := http.NewRequest("POST", s.Endpoint.URL+path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+runtime.Token())
+		request.Header.Set("Content-Type", "application/json")
+		reply, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reply.Body.Close()
+		raw, _ := io.ReadAll(reply.Body)
+		return reply.StatusCode, string(raw)
+	}
+	if status, body := call("/v1/chat/completions",
+		`{"model":"kimi-local","messages":[{"role":"user","content":"hello"}]}`); status != 200 || !strings.Contains(body, "chat-answered") {
+		t.Fatalf("chat model: %d %s", status, body)
+	}
+	compatible := `{"model":"` + protocol.KimiCompatibleModelID("vendor/gpt") + `","messages":[{"role":"user","content":"hello"}]}`
+	if status, body := call("/v1/chat/completions", compatible); status != 200 || !strings.Contains(body, "bridged") {
+		t.Fatalf("responses model through the Chat compatibility route: %d %s", status, body)
+	}
+	if status, body := call("/v1/responses",
+		`{"model":"vendor/gpt","input":"hello"}`); status != 200 || !strings.Contains(body, "bridged") {
+		t.Fatalf("responses route: %d %s", status, body)
+	}
+	mu.Lock()
+	captured := append([]string(nil), paths...)
+	mu.Unlock()
+	want := []string{"/chat/completions", "/responses", "/responses"}
+	if len(captured) != len(want) {
+		t.Fatalf("upstream paths = %v", captured)
+	}
+	for index, path := range want {
+		if captured[index] != path {
+			t.Fatalf("upstream paths = %v, want %v", captured, want)
+		}
+	}
+	stored, _, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(core.Rows(core.Object(core.Rows(stored["connections"])[0])["protocols"])) != 2 {
+		t.Fatalf("the legacy declaration was rewritten: %#v", stored["connections"])
 	}
 }

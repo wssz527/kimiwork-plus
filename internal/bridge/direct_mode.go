@@ -68,9 +68,10 @@ func directProtocolFor(wire, providerPresetID string) string {
 	return ""
 }
 
-// directWire is the protocol a model is actually served over. A model may state
-// an upstream protocol that differs from its Kimi-facing route, and the upstream
-// is what direct import has to reproduce.
+// directWire is the protocol a model is served over on a connection that
+// declares none. A connection that names one decides for every model on it, so
+// this rule is reached only by documents saved before declarations existed;
+// those keep importing exactly as they did.
 func directWire(row map[string]any) string {
 	if value := core.String(row["upstreamProtocol"]); value != "" {
 		return value
@@ -214,7 +215,17 @@ func buildDirectPlan(d core.Document, availability ...map[string]bool) directPla
 			plan.skip(id, directSkipMissingAPIKey)
 			continue
 		}
-		protocol := directProtocolFor(directWire(row), core.String(connection["providerPresetId"]))
+		wire := directWire(row)
+		// A connection that names chat or responses decides the wire for every
+		// model on it, so a model id that maps to the other Kimi route is imported
+		// on the connection's wire rather than split into a second provider.
+		// `upstreamProtocol` is the one exception: a Messages row is a model-level
+		// format this build keeps exactly as it was, because a connection can only
+		// declare one of the two OpenAI wires.
+		if declared := core.ConnectionProtocol(connection); declared != "" && core.String(row["upstreamProtocol"]) == "" {
+			wire = declared
+		}
+		protocol := directProtocolFor(wire, core.String(connection["providerPresetId"]))
 		if protocol == "" {
 			plan.skip(id, directSkipUnsupportedProtocol)
 			continue
@@ -318,13 +329,13 @@ func directModelOf(row map[string]any, id string) kimi.DirectModel {
 	if video {
 		capabilities = append(capabilities, "video_in")
 	}
-	displayName := strings.TrimSpace(core.String(row["name"]))
-	if displayName == "" {
-		displayName = id
-	}
 	upstream := core.String(row["upstreamModelId"])
 	if upstream == "" {
 		upstream = id
+	}
+	displayName := strings.TrimSpace(core.String(row["name"]))
+	if displayName == "" {
+		displayName = upstream
 	}
 	model := kimi.DirectModel{
 		ID:             id,

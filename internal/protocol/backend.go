@@ -43,6 +43,16 @@ type Endpoint struct {
 	Protocols []string
 }
 
+// declaredProtocol is the one wire this connection's supplier speaks. An empty
+// answer means the connection was saved before a connection named a protocol,
+// and that document keeps the per-model routing it always had.
+func (e *Endpoint) declaredProtocol() string {
+	if e == nil || len(e.Protocols) != 1 {
+		return ""
+	}
+	return e.Protocols[0]
+}
+
 // ValidateBaseURL enforces that a base URL is configuration, not input:
 // credentials in the URL, query strings and fragments are rejected rather than
 // quietly stripped.
@@ -170,21 +180,23 @@ func (b *HTTPBackend) Request(ctx context.Context, route string, payload []byte,
 	if options.Model != nil && options.Model.IsAnthropic() {
 		// The row's own protocol names the family the connection must speak, so a
 		// Chat request served from a Messages row is allowed when the endpoint
-		// lists either wire.
+		// lists either wire. A Messages upstream stays a row-level format: it is
+		// carried by `upstreamProtocol` on the model, not by the connection.
 		if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, route) &&
 			!contains(endpoint.Protocols, options.Model.Protocol) {
 			return nil, ErrInvalidProtocol
 		}
 		return b.anthropic(ctx, route, payload, options, endpoint)
 	}
-	if route == ProtocolChat && responsesUpstream(options.Model, endpoint) {
-		if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, ProtocolResponses) {
+	wire := upstreamWire(route, options.Model, endpoint)
+	if wire != route {
+		// The only conversion this process performs between the two Kimi routes
+		// and the two OpenAI wires is Chat in, Responses out. Everything else is a
+		// request the connection cannot answer.
+		if route != ProtocolChat || wire != ProtocolResponses {
 			return nil, ErrInvalidProtocol
 		}
 		return b.responsesFromChat(ctx, payload, options, endpoint)
-	}
-	if len(endpoint.Protocols) > 0 && !contains(endpoint.Protocols, route) {
-		return nil, ErrInvalidProtocol
 	}
 	path := "/chat/completions"
 	if route == ProtocolResponses {
@@ -232,6 +244,22 @@ func responsesUpstream(model *Model, endpoint *Endpoint) bool {
 		return false
 	}
 	return true
+}
+
+// upstreamWire is the wire one attempt is actually sent on. A connection that
+// declares a protocol decides it for every model on it: the declaration is the
+// supplier's contract, so a Chat request on a Responses connection is bridged
+// and a Chat connection is never asked to answer `/responses`, whatever route
+// family the model id maps to. A connection saved before declarations existed
+// keeps the per-model rule it always had.
+func upstreamWire(route string, model *Model, endpoint *Endpoint) string {
+	if declared := endpoint.declaredProtocol(); declared != "" {
+		return declared
+	}
+	if route == ProtocolChat && responsesUpstream(model, endpoint) {
+		return ProtocolResponses
+	}
+	return route
 }
 
 type preSendError struct {

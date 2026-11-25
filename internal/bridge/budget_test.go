@@ -124,7 +124,7 @@ func (f *budgetFixture) configure(t *testing.T, models []any, budget core.Docume
 	}
 	code, result := f.call(t, "POST", "/api/connections", core.Document{"revision": rev,
 		"connections": []any{core.Document{"id": "work", "name": "Local fixture",
-			"baseURL": f.upstream.URL, "apiKey": "synthetic-key"}}}, f.service.Endpoint.Key, true)
+			"baseURL": f.upstream.URL, "apiKey": "synthetic-key", "protocols": []any{"chat"}}}}, f.service.Endpoint.Key, true)
 	if code != 200 {
 		t.Fatalf("connections: %d %v", code, result)
 	}
@@ -530,8 +530,8 @@ func TestModelSaveKeepsFailoverAndPricing(t *testing.T) {
 	defer second.Close()
 	_, rev, _ := f.store.Read()
 	code, result := f.call(t, "POST", "/api/connections", core.Document{"revision": rev, "connections": []any{
-		core.Document{"id": "work", "name": "Primary", "baseURL": f.upstream.URL, "apiKey": "synthetic-key"},
-		core.Document{"id": "backup", "name": "Backup", "baseURL": second.URL, "apiKey": "vendor-key"}}},
+		core.Document{"id": "work", "name": "Primary", "baseURL": f.upstream.URL, "apiKey": "synthetic-key", "protocols": []any{"chat"}},
+		core.Document{"id": "backup", "name": "Backup", "baseURL": second.URL, "apiKey": "vendor-key", "protocols": []any{"chat"}}}},
 		f.service.Endpoint.Key, true)
 	if code != 200 {
 		t.Fatalf("connections %d %v", code, result)
@@ -612,8 +612,8 @@ func TestFailoverIsRecordedUnderTheConnectionThatAnswered(t *testing.T) {
 	defer backup.Close()
 	_, rev, _ := f.store.Read()
 	code, result := f.call(t, "POST", "/api/connections", core.Document{"revision": rev, "connections": []any{
-		core.Document{"id": "work", "name": "Primary", "baseURL": f.upstream.URL, "apiKey": "synthetic-key"},
-		core.Document{"id": "backup", "name": "Backup", "baseURL": backup.URL, "apiKey": "vendor-key"}}},
+		core.Document{"id": "work", "name": "Primary", "baseURL": f.upstream.URL, "apiKey": "synthetic-key", "protocols": []any{"chat"}},
+		core.Document{"id": "backup", "name": "Backup", "baseURL": backup.URL, "apiKey": "vendor-key", "protocols": []any{"chat"}}}},
 		f.service.Endpoint.Key, true)
 	if code != 200 {
 		t.Fatalf("connections %d %v", code, result)

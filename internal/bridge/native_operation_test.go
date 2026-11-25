@@ -36,7 +36,7 @@ func TestNativeCheckUpstreamReturnsNamedConnectionResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = store.Update(rev, func(d core.Document) error {
-		_, err := core.MergeConnections(d, []any{core.Document{"id": "named", "name": "Named", "baseURL": upstream.URL + "/v1"}})
+		_, err := core.MergeConnections(d, []any{core.Document{"id": "named", "name": "Named", "baseURL": upstream.URL + "/v1", "protocols": []any{"chat"}}})
 		return err
 	})
 	if err != nil {

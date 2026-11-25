@@ -52,7 +52,7 @@ func TestHTTPConfigurationAndIsolation(t *testing.T) {
 		t.Fatal(code, state)
 	}
 	rev := core.String(state["revision"])
-	body := `{"revision":"` + rev + `","connections":[{"id":"local","name":"Local","baseURL":"http://127.0.0.1:9999/v1"}]}`
+	body := `{"revision":"` + rev + `","connections":[{"id":"local","name":"Local","baseURL":"http://127.0.0.1:9999/v1","protocols":["responses"]}]}`
 	if code, _ = call("POST", "/api/connections", body, s.Endpoint.Key, ""); code != 403 {
 		t.Fatal(code)
 	}

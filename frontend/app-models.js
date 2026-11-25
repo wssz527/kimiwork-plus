@@ -411,7 +411,7 @@ function connectionsChanged(data) {
   return Boolean(data && data.connections && data.connections.restartRequired);
 }
 
-/* 路由与上游 ID 都按原样展示：任何大小写或分隔符改写都会让请求打到不存在的模型。 */
+/* 旧模型在没有显式上游 ID 时直接使用保存的 ID 请求上游。 */
 function routingOf(model) {
   if (!model) return { connection: null, connectionId: null, upstream: null, legacy: true };
   const connectionId = typeof model.connectionId === 'string' && model.connectionId ? model.connectionId : null;
@@ -429,7 +429,7 @@ function routingOf(model) {
 
 function matchesQuery(model, needle) {
   if (!needle) return true;
-  const fields = [model.id, displayModelId(model.id), model.name, model.protocol,
+  const fields = [model.name, routingOf(model).upstream,
     ...(Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : [])]
     .filter((value) => typeof value === 'string');
   return fields.some((value) => value.toLowerCase().includes(needle));
@@ -503,7 +503,7 @@ function renderModels() {
 
 function modelTitle(model) {
   if (!model) return '未命名模型';
-  return model.name || model.upstreamModelId || '未命名模型';
+  return model.name || model.upstreamModelId || model.id || '未命名模型';
 }
 
 function buildModelRow(model) {
@@ -534,13 +534,6 @@ function buildModelRow(model) {
     ? connectionLabel(findConnection(state.data, routing.connectionId))
     : '旧版单上游';
   route.append(upstream, connection);
-
-  const proto = document.createElement('td');
-  proto.className = 'col-proto';
-  const protoTag = document.createElement('span');
-  protoTag.className = 'tag mono';
-  protoTag.textContent = model.protocol === 'chat' || model.protocol === 'responses' ? protocolLabel(model.protocol) : '—';
-  proto.append(protoTag);
 
   const context = document.createElement('td');
   context.className = 'num mono';
@@ -626,7 +619,7 @@ function buildModelRow(model) {
     actions.append(edit, remove);
   }
 
-  tr.append(idCell, route, proto, context, output, caps, efforts, actions);
+  tr.append(idCell, route, context, output, caps, efforts, actions);
   return tr;
 }
 
@@ -1628,8 +1621,6 @@ function renderEditorRouting(editor) {
 
   const connection = draft.connectionId ? draftConnection(draft.connectionId) : null;
   const protocol = draft.connectionId ? draftConnectionProtocol(draft.connectionId) : null;
-  const base = editor.draft.baseEntity || null;
-  const baseProtocol = base && (base.protocol === 'chat' || base.protocol === 'responses') ? base.protocol : null;
   if (!editor.originalId) {
     draft.protocol = protocol;
     draft.id = suggestedRouteId(draft);
@@ -1644,16 +1635,9 @@ function renderEditorRouting(editor) {
     if (!rows.length) {
       setText(dom.mConnectionHint, '还没有命名连接。先在上方「服务商连接」区块添加连接，再选择模型。');
     } else if (protocol) {
-      /* 连接换了协议不改写已保存模型：它保留原 ID 与原协议记录，由网关按
-         连接当前的协议调用上游。这里只说明事实，不宣称重绑。 */
-      setText(dom.mConnectionHint, editor.originalId && baseProtocol && baseProtocol !== protocol
-        ? '连接当前按 ' + protocolLabel(protocol) + ' 调用上游；这条已保存模型保留原模型 ID 与 '
-          + protocolLabel(baseProtocol) + ' 路由。'
-        : '连接决定请求发往哪个上游；当前使用 ' + protocolLabel(protocol) + '。');
+      setText(dom.mConnectionHint, '服务商接口协议为 ' + protocolLabel(protocol) + '。');
     } else if (editor.originalId) {
-      setText(dom.mConnectionHint, '这条已保存模型保留原模型 ID 与'
-        + (baseProtocol ? ' ' + protocolLabel(baseProtocol) + ' 路由' : '协议记录')
-        + '；连接还没有唯一的接口协议，新导入的模型需要先选择一种。');
+      setText(dom.mConnectionHint, '这个服务商仍使用历史协议设置。导入新模型时请选择一种协议。');
     } else {
       setText(dom.mConnectionHint, '连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在上方服务商连接里选择 Chat Completions 或 Responses。');
     }

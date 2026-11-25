@@ -89,7 +89,7 @@ func TestConnectionWithoutKeyAndSubagentPolicy(t *testing.T) {
 	}
 	s := &Service{Store: store, Keys: keys, OnConfig: runtime.Apply, Gateway: runtime}
 	_, rev, _ := store.Read()
-	if _, e = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "empty", "name": "Empty", "baseURL": "http://127.0.0.1:9999/v1"}}}); e != nil {
+	if _, e = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "empty", "name": "Empty", "baseURL": "http://127.0.0.1:9999/v1", "protocols": []any{"chat"}}}}); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = NewRuntime(dir, store, keys); e != nil {

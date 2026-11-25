@@ -79,7 +79,7 @@ func TestRuntimeAppliesKimiK3Compatibility(t *testing.T) {
 	generated := protocol.KimiCompatibleModelID("kimi-alpha")
 	status, catalog := call("GET", "/v1/models/api.json", "")
 	if status != http.StatusOK || !strings.Contains(catalog, `"`+generated+`"`) ||
-		!strings.Contains(catalog, `"name":"kimi-alpha"`) {
+		!strings.Contains(catalog, `"name":"alpha-real"`) {
 		t.Fatalf("enabled catalog: %d %s", status, catalog)
 	}
 

@@ -93,9 +93,12 @@ func decodeNativeCatalog(t *testing.T, body []byte) nativeCatalog {
 
 func TestNativeCatalogCompatibleOffersEveryRowFromOneKimiGroup(t *testing.T) {
 	display := "DeepSeek V4.1 Flash · Magpie"
+	upstream := "vendor/upstream-model"
+	responses := responsesModel("vendor/responses")
+	responses.UpstreamModelID = &upstream
 	models := []protocol.Model{
 		chatModel("kimi-alpha", func(m *protocol.Model) { m.Name = &display }),
-		responsesModel("vendor/responses"),
+		responses,
 		chatModel("vendor/kimi-beta"),
 	}
 	const api = "http://127.0.0.1:1234/v1"
@@ -107,8 +110,8 @@ func TestNativeCatalogCompatibleOffersEveryRowFromOneKimiGroup(t *testing.T) {
 	if plain.Kimi.Models["kimi-alpha"].Name != display {
 		t.Fatalf("plain display name = %q", plain.Kimi.Models["kimi-alpha"].Name)
 	}
-	if _, ok := plain.Responses.Models["vendor/responses"]; !ok {
-		t.Fatalf("plain responses group = %v", plain.Responses.Models)
+	if got := plain.Responses.Models["vendor/responses"].Name; got != upstream {
+		t.Fatalf("plain responses display fallback = %q, want %q", got, upstream)
 	}
 
 	body := protocol.NativeCatalogCompatible(models, api)
@@ -135,8 +138,8 @@ func TestNativeCatalogCompatibleOffersEveryRowFromOneKimiGroup(t *testing.T) {
 	if got := compatible.Kimi.Models[betaKey].Name; got != "vendor/kimi-beta" {
 		t.Fatalf("display fallback = %q", got)
 	}
-	if got := compatible.Kimi.Models[responsesKey].Name; got != "vendor/responses" {
-		t.Fatalf("responses display fallback = %q", got)
+	if got := compatible.Kimi.Models[responsesKey].Name; got != upstream {
+		t.Fatalf("compatible responses display fallback = %q, want %q", got, upstream)
 	}
 	if _, ok := compatible.Kimi.Models["kimi-alpha"]; ok {
 		t.Fatalf("the saved id is still advertised under the opt-in: %v", compatible.Kimi.Models)
@@ -239,7 +242,7 @@ func TestGatewayRoutesCompatibleChatIDs(t *testing.T) {
 	if _, ok := catalog.Kimi.Models[compatible]; !ok {
 		t.Fatalf("catalog does not offer %q: %+v", compatible, catalog.Kimi.Models)
 	}
-	if got := catalog.Kimi.Models[compatible].Name; got != "kimi-alpha" {
+	if got := catalog.Kimi.Models[compatible].Name; got != upstreamID {
 		t.Fatalf("display name = %q", got)
 	}
 

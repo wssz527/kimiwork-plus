@@ -755,7 +755,7 @@ func nativeCatalog(models []Model, api string, compatible bool) []byte {
 func nativeModel(model Model) []byte {
 	var b bytes.Buffer
 	b.WriteString(`{"name":`)
-	name := model.ID
+	name := model.UpstreamID()
 	if model.Name != nil && *model.Name != "" {
 		name = *model.Name
 	}

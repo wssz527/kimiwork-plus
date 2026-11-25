@@ -64,7 +64,7 @@ func TestQuotaUIAndTranslationSettings(t *testing.T) {
 	}
 	s := &Service{Store: store, Keys: keys, StateDir: dir, Gateway: runtime, Extra: runtime.Action, OnConfig: runtime.Apply}
 	_, rev, _ := store.Read()
-	_, e = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"}}})
+	_, e = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -125,7 +125,7 @@ func TestDiscoveryDoesNotSendSavedKeyToAnotherEndpoint(t *testing.T) {
 	keys := CacheKeys(testKeys{})
 	s := &Service{Store: store, Keys: keys}
 	_, rev, _ := store.Read()
-	_, e := s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "saved-secret"}}})
+	_, e := s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "saved-secret", "protocols": []any{"chat"}}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -150,7 +150,7 @@ func TestCredentialStageDoesNotReplaceCurrentOnConflict(t *testing.T) {
 	keys := CacheKeys(testKeys{})
 	s := &Service{Store: store, Keys: keys}
 	_, rev, _ := store.Read()
-	_, e := s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "old"}}})
+	_, e := s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "old", "protocols": []any{"chat"}}}})
 	if e != nil {
 		t.Fatal(e)
 	}

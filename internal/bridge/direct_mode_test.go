@@ -130,10 +130,19 @@ func TestDirectPlanLabelsOneConnectionServingTwoProtocols(t *testing.T) {
 func TestDirectPlanKeepsSingleProtocolNameBare(t *testing.T) {
 	document := directDocument(
 		[]any{directConnection("solo", "Solo", "deepseek", "https://solo.example/v1", "chat")},
-		[]any{directModel("deepseek-v4-flash", "solo", "responses")})
+		[]any{directModel("deepseek-v4-flash", "solo", "responses", "upstreamModelId", "group/deepseek-v4-flash")})
 	plan := buildDirectPlan(document)
 	if len(plan.providers) != 1 || plan.providers[0].displayName != "Solo" {
 		t.Fatalf("providers = %+v", plan.providers)
+	}
+	// The id maps to the Responses route, but the connection names Chat, so the
+	// import follows the connection rather than the name.
+	if plan.providers[0].protocol != "openai" {
+		t.Fatalf("provider protocol = %q", plan.providers[0].protocol)
+	}
+	model := plan.providers[0].models[0]
+	if model.ID != "deepseek-v4-flash" || model.Model != "group/deepseek-v4-flash" || model.DisplayName != model.Model {
+		t.Fatalf("unnamed model = %+v", model)
 	}
 }
 
@@ -289,7 +298,7 @@ func TestDirectModelDropsUnknownDefaultEffort(t *testing.T) {
 
 func TestDirectSpecIsNilInGatewayMode(t *testing.T) {
 	document := directDocument(
-		[]any{directConnection("ok", "Ok", "deepseek", "https://ok.example/v1", "chat")},
+		[]any{directConnection("ok", "Ok", "deepseek", "https://ok.example/v1", "responses")},
 		[]any{directModel("deepseek-v4-flash", "ok", "responses")})
 	if spec := buildDirectSpec(document); spec != nil {
 		t.Fatalf("gateway mode built a direct spec: %+v", spec)
@@ -943,5 +952,60 @@ func TestNativeDirectModeCleanupRequiresAnAppliedReplacement(t *testing.T) {
 	receipt = settledNativeImportReceipt(current, receipt)
 	if current.RouteCleanupPending || receipt.RouteCleanupPending || receipt.RequiresRestart || receipt.RestartDeferred {
 		t.Fatalf("settled direct state kept stale pending evidence: %+v %+v", current, receipt)
+	}
+}
+
+// The connection names the wire; a model id that maps to the other Kimi route
+// follows it instead of splitting the connection into a second provider.
+func TestDirectPlanObeysTheConnectionProtocolOverTheRowRoute(t *testing.T) {
+	document := directDocument(
+		[]any{
+			directConnection("typed", "Typed", "deepseek", "https://typed.example/v1", "responses"),
+			directConnection("chatty", "Chatty", "deepseek", "https://chatty.example/v1", "chat"),
+		},
+		[]any{
+			directModel("kimi-typed", "typed", "chat"),
+			directModel("typed-responses", "typed", "responses"),
+			directModel("chatty-responses", "chatty", "responses"),
+		})
+	plan := buildDirectPlan(document)
+	if len(plan.providers) != 2 {
+		t.Fatalf("one connection per wire was split: %+v", plan.providers)
+	}
+	providers := map[string]*directProviderPlan{}
+	for _, provider := range plan.providers {
+		providers[provider.connectionID] = provider
+	}
+	if provider := providers["typed"]; provider == nil || provider.protocol != "openai_responses" || len(provider.models) != 2 || provider.displayName != "Typed" {
+		t.Fatalf("responses connection = %+v", provider)
+	}
+	if provider := providers["chatty"]; provider == nil || provider.protocol != "openai" || len(provider.models) != 1 || provider.displayName != "Chatty" {
+		t.Fatalf("chat connection = %+v", provider)
+	}
+	if reasons := skippedReasons(plan); len(reasons) != 0 {
+		t.Fatalf("a legal model was skipped: %+v", reasons)
+	}
+}
+
+// `upstreamProtocol` is a model-level format, not a connection protocol, so an
+// Anthropic row keeps its own provider: making it disappear would remove a
+// capability the connection cannot express.
+func TestDirectPlanKeepsAnthropicRowsOnADeclaredConnection(t *testing.T) {
+	document := directDocument(
+		[]any{directConnection("mixed", "Mixed", "", "https://mixed.example/v1", "chat")},
+		[]any{
+			directModel("kimi-mixed", "mixed", "chat"),
+			directModel("claude-mixed", "mixed", "responses", "upstreamProtocol", "anthropic"),
+		})
+	plan := buildDirectPlan(document)
+	protocols := map[string]string{}
+	for _, provider := range plan.providers {
+		protocols[provider.protocol] = provider.displayName
+	}
+	if plan.eligible() != 2 || len(plan.skipped) != 0 {
+		t.Fatalf("plan = %+v", plan.skipped)
+	}
+	if protocols["openai"] != "Mixed (Chat)" || protocols["anthropic"] != "Mixed (Anthropic)" {
+		t.Fatalf("providers = %+v", protocols)
 	}
 }

@@ -1,5 +1,5 @@
 import { configInfo, configReady } from './app-connections.js';
-import { API, POLICY_MODE_WORD, POLICY_TRANSPORT_WORD, RUNTIME_STATE, displayModelId, dom, fmtCount, fmtTime, iconUse, modelLabel, renderErrorList, request, setDot, setHidden, setText, showToast, state, syncSelectOptions } from './app-core.js';
+import { API, POLICY_MODE_WORD, POLICY_TRANSPORT_WORD, RUNTIME_STATE, catalogModelLabel, dom, fmtCount, fmtTime, iconUse, modelLabel, renderErrorList, request, setDot, setHidden, setText, showToast, state, syncSelectOptions } from './app-core.js';
 import { declaredEfforts, findModel, isCapable, modelIdFromAlias, modelSignature, resolveAlias } from './app-models.js';
 import { isInFlight } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
@@ -299,7 +299,11 @@ function evaluateBinding(data) {
 function renderPoolList(draft, capable) {
   if (!dom.saPoolList) return;
   const pool = draft.mode === 'pool' && Array.isArray(draft.models) ? draft.models : [];
-  const signature = JSON.stringify([pool, draft.model || null, state.subagentSaving]);
+  const signature = JSON.stringify([
+    pool, draft.model || null, state.subagentSaving,
+    (state.data && Array.isArray(state.data.models) ? state.data.models : [])
+      .map((model) => [model.id, model.name || '', model.upstreamModelId || '', model.tools === true]),
+  ]);
   if (dom.saPoolList.dataset.signature === signature) return;
   dom.saPoolList.dataset.signature = signature;
   const rows = pool.map((row) => {
@@ -310,9 +314,9 @@ function renderPoolList(draft, capable) {
     head.className = 'pool__head';
     const id = document.createElement('span');
     id.className = 'mono cell-id';
-    const shownId = displayModelId(row.id);
-    id.textContent = shownId;
-    id.setAttribute('title', shownId);
+    const shownName = catalogModelLabel(state.data, row.id);
+    id.textContent = shownName;
+    id.setAttribute('title', shownName);
     head.append(id);
     if (row.id === draft.model) {
       const flag = document.createElement('span');
@@ -320,11 +324,11 @@ function renderPoolList(draft, capable) {
       flag.textContent = '默认';
       head.append(flag);
     }
-    if (model && model.name && model.name !== row.id) {
-      const name = document.createElement('span');
-      name.className = 'pool__name';
-      name.textContent = model.name;
-      head.append(name);
+    if (!model) {
+      const missing = document.createElement('span');
+      missing.className = 'pool__name';
+      missing.textContent = '不在目录';
+      head.append(missing);
     }
     const note = document.createElement('p');
     note.className = 'pool__note';
@@ -333,7 +337,7 @@ function renderPoolList(draft, capable) {
     remove.type = 'button';
     remove.className = 'iconbtn iconbtn--danger pool__remove';
     remove.dataset.poolRemove = row.id;
-    remove.setAttribute('aria-label', '从池中移除 ' + row.id);
+    remove.setAttribute('aria-label', '从池中移除 ' + shownName);
     remove.disabled = state.subagentSaving;
     remove.append(iconUse('i-trash'));
     item.append(head, note, remove);
@@ -393,10 +397,10 @@ function renderSubagents() {
     const roles = normalizeRoles(draft.roles);
     const modelOptions = (emptyLabel, currentValue) => {
       const opts = [{ value: '', label: emptyLabel }].concat(capable.map((model) => ({
-        value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
+        value: model.id, label: modelLabel(model),
       })));
       if (currentValue && !capable.some((model) => model.id === currentValue)) {
-        opts.push({ value: currentValue, label: '（不在目录）' + displayModelId(currentValue) });
+        opts.push({ value: currentValue, label: catalogModelLabel(state.data, currentValue) + '（不在目录）' });
       }
       return opts;
     };
@@ -421,7 +425,7 @@ function renderSubagents() {
     syncSelectOptions(dom.saPoolAdd, [{ value: '',
       label: missingCapable ? '目录中没有声明支持工具的模型' : '选择要加入的模型',
     }].concat(remaining.map((model) => ({
-      value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
+      value: model.id, label: modelLabel(model),
     }))), pendingAdd);
     if (dom.saPoolAdd) dom.saPoolAdd.disabled = !ready || busy || state.subagentSaving
       || missingCapable || poolIds.size >= 32;
@@ -433,7 +437,7 @@ function renderSubagents() {
     const defaultOptions = poolIds.size
       ? Array.from(poolIds).map((id) => {
         const model = capable.find((entry) => entry.id === id) || null;
-        return { value: id, label: modelLabel(model, id) + ' · ' + displayModelId(id) };
+        return { value: id, label: catalogModelLabel(state.data, id) + (model ? '' : '（不在目录）') };
       })
       : [{ value: '', label: '先选择默认子代理或加入候选模型' }];
     syncSelectOptions(dom.saPoolDefault, defaultOptions, draft.model || '');
@@ -452,16 +456,18 @@ function renderSubagents() {
       : '候选 ' + poolIds.size + ' / 32 · 只能加入声明支持工具调用的模型。');
     if (dom.saEffortHint) setText(dom.saEffortHint, '模型池不设统一思考档位，各模型使用自身默认档位。');
   } else {
-    const modelSignature = JSON.stringify([capable.map((model) => [model.id, model.name || '']), draft.model]);
+    const modelSignature = JSON.stringify([
+      capable.map((model) => [model.id, modelLabel(model)]), draft.model, catalogModelLabel(data, draft.model),
+    ]);
     if (modelSignature !== saModelSignature) {
       saModelSignature = modelSignature;
       const options = [{ value: '',
         label: capable.length ? '选择模型' : '目录中没有声明支持工具的模型',
       }].concat(capable.map((model) => ({
-        value: model.id, label: modelLabel(model, model.id) + ' · ' + displayModelId(model.id),
+        value: model.id, label: modelLabel(model),
       })));
       if (draft.model && !capable.some((model) => model.id === draft.model)) {
-        options.push({ value: draft.model, label: '（不在目录）' + displayModelId(draft.model) });
+        options.push({ value: draft.model, label: catalogModelLabel(state.data, draft.model) + '（不在目录）' });
       }
       if (dom.saModel) {
         dom.saModel.replaceChildren(...options.map((option) => {
@@ -530,14 +536,14 @@ function renderSubagents() {
   const runtime = (data.subagents && data.subagents.runtime) || {};
   const configPath = data.subagents && typeof data.subagents.configPath === 'string' ? data.subagents.configPath : '';
   const savedRoles = SUBAGENT_ROLES.filter((role) => saved.roles && saved.roles[role.key])
-    .map((role) => role.key + '=' + displayModelId(saved.roles[role.key]));
+    .map((role) => role.key + '=' + catalogModelLabel(state.data, saved.roles[role.key]));
   setText(dom.saSavedMode, POLICY_MODE_WORD[saved.mode] || saved.mode);
   setText(dom.saSavedSub, saved.mode === 'inherit' ? '跟随主模型 · 未写入目标'
     : saved.mode === 'pool'
-      ? [saved.model ? '默认 ' + displayModelId(saved.model) : '未指定默认',
+      ? [saved.model ? '默认 ' + catalogModelLabel(state.data, saved.model) : '未指定默认',
         savedRoles.length ? savedRoles.join(' · ') : '',
         saved.models.length + ' 个候选'].filter(Boolean).join(' · ')
-      : (saved.model ? displayModelId(saved.model) : '未选择') + (saved.effort ? ' · 档位 ' + saved.effort : ' · 档位自动'));
+      : (saved.model ? catalogModelLabel(state.data, saved.model) : '未选择') + (saved.effort ? ' · 档位 ' + saved.effort : ' · 档位自动'));
   setText(dom.saPolicyMode, POLICY_MODE_WORD[policy.mode] || policy.mode || '—');
   setText(dom.saPolicySub, policy.mode === 'blocked'
     ? '策略文件里存在阻止项或外来归属冲突，未被覆盖，保存已拒绝'

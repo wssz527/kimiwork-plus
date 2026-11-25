@@ -702,7 +702,7 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--sunk); color: var
   .toolbar__count { order: 3; margin-left: 0; }
   .toolbar #model-new { order: 4; margin-left: auto; }
   .table--models { min-width: 0; table-layout: fixed; }
-  .table--models .col-route, .table--models .col-proto, .table--models .col-cap, .table--models .col-efforts, .table--models .col-out { display: none; }
+  .table--models .col-route, .table--models .col-cap, .table--models .col-efforts, .table--models .col-out { display: none; }
   .table--models th:first-child, .table--models td:first-child { width: auto; }
   .table--models .col-actions { width: 82px; }
   #recent-table { min-width: 520px; }

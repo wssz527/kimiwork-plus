@@ -30,7 +30,7 @@ func prepareStaged(t *testing.T, s *Service, store *core.Store) (core.Document, 
 	}
 	var staged []string
 	d, rev, err := store.Prepare(rev, func(d core.Document) error {
-		changes, err := core.MergeConnections(d, []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"}})
+		changes, err := core.MergeConnections(d, []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}}})
 		if err != nil {
 			return err
 		}
@@ -76,7 +76,7 @@ func TestConfigureDiscardsStagedCredentialsAfterExternalConflict(t *testing.T) {
 			keys := &conflictingWriteKeys{testKeys: testKeys{"existing": "retained"}, path: filepath.Join(dir, "gateway.json"), document: external}
 			service := &Service{Store: store, StateDir: dir, Keys: CacheKeys(keys)}
 			_, err = service.configure(endpoint, core.Document{"revision": rev, "models": []any{}, "connections": []any{
-				core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"},
+				core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}},
 			}})
 			if !errors.Is(err, core.ErrConflict) {
 				t.Fatalf("external conflict not reported: %v", err)
@@ -161,7 +161,7 @@ func TestCommittedConfigurationKeepsItsCredentialWhenApplyFails(t *testing.T) {
 	keys := CacheKeys(testKeys{})
 	s := &Service{Store: store, StateDir: dir, Keys: keys, OnConfig: func(core.Document) error { return errors.New("apply_failed") }}
 	_, rev, _ := store.Read()
-	_, err = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"}}})
+	_, err = s.configure("/api/connections", core.Document{"revision": rev, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}}}})
 	if err == nil || err.Error() != "apply_failed" {
 		t.Fatalf("apply failure not reported: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestFailedStageLeavesNoCredentialOrReference(t *testing.T) {
 	keys := &alwaysFailingWriteKeys{}
 	s := &Service{Store: store, StateDir: dir, Keys: keys}
 	_, rev, _ := store.Read()
-	_, err = s.configure("/api/workspace", core.Document{"revision": rev, "models": []any{}, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic"}}})
+	_, err = s.configure("/api/workspace", core.Document{"revision": rev, "models": []any{}, "connections": []any{core.Document{"id": "local", "name": "Local", "baseURL": "http://127.0.0.1:9999/v1", "apiKey": "synthetic", "protocols": []any{"chat"}}}})
 	if err == nil || err.Error() != "denied" {
 		t.Fatalf("the failing store staged a credential: %v", err)
 	}

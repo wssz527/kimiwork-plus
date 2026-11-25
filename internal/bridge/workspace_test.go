@@ -40,7 +40,7 @@ func TestWorkspaceSavesConnectionsAndModelsAtomically(t *testing.T) {
 		return res.StatusCode, out
 	}
 	_, revision, _ := store.Read()
-	body := core.Document{"revision": revision, "connections": []any{core.Document{"id": "first", "name": "First", "baseURL": "http://127.0.0.1:9999/v1"}}, "models": []any{core.Document{"id": "first/model", "connectionId": "first", "protocol": "responses", "contextWindow": 32000}}}
+	body := core.Document{"revision": revision, "connections": []any{core.Document{"id": "first", "name": "First", "baseURL": "http://127.0.0.1:9999/v1", "protocols": []any{"responses"}}}, "models": []any{core.Document{"id": "first/model", "connectionId": "first", "protocol": "responses", "contextWindow": 32000}}}
 	if status, result := call(body); status != 200 {
 		t.Fatal(status, result)
 	}
@@ -49,7 +49,15 @@ func TestWorkspaceSavesConnectionsAndModelsAtomically(t *testing.T) {
 		t.Fatal(before)
 	}
 	body["revision"] = revision
-	body["connections"] = []any{core.Document{"id": "second", "name": "Second", "baseURL": "http://127.0.0.1:9998/v1"}}
+	first := core.Object(core.Rows(body["connections"])[0])
+	first["protocols"] = []any{"chat"}
+	if status, result := call(body); status != http.StatusBadRequest || core.Object(result["error"])["code"] != "invalid_connection_protocol_in_use" {
+		t.Fatal("protocol change would break the existing Responses route", status, result)
+	}
+	if after, current, err := store.Read(); err != nil || current != revision || core.Revision(before) != core.Revision(after) {
+		t.Fatal("rejected protocol change modified the workspace", current, err)
+	}
+	body["connections"] = []any{core.Document{"id": "second", "name": "Second", "baseURL": "http://127.0.0.1:9998/v1", "protocols": []any{"responses"}}}
 	body["models"] = []any{core.Document{"id": "second/model", "connectionId": "missing", "protocol": "responses", "contextWindow": 32000}}
 	if status, result := call(body); status < 400 {
 		t.Fatal("invalid model accepted", status, result)

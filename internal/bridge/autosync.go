@@ -105,7 +105,11 @@ func catalogSurfaceDigest(d core.Document) string {
 		if !compatible {
 			key = core.String(row["protocol"]) + "/" + id
 		}
-		line("model", key, core.String(row["name"]),
+		name := core.String(row["name"])
+		if name == "" {
+			name = core.String(row["upstreamModelId"])
+		}
+		line("model", key, name,
 			strconv.FormatInt(jsonInt(row["contextWindow"]), 10), strconv.FormatInt(jsonInt(row["maxOutputTokens"]), 10),
 			strconv.FormatBool(row["tools"] == true), strconv.FormatBool(row["reasoning"] == true),
 			digestList(row["inputModalities"]), digestList(row["reasoningEfforts"]), core.String(row["defaultEffort"]))

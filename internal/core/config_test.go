@@ -175,3 +175,190 @@ func TestValidateRefusesKimiCompatibleIDCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A connection saved before a protocol was part of the contract carries none,
+// and that document must keep loading: the gateway still serves it with the
+// per-model routing it always had. Only a save that adds or edits a connection
+// is asked for a choice.
+func TestValidateKeepsLegacyConnectionsWithoutAProtocol(t *testing.T) {
+	for name, extra := range map[string]Document{
+		"absent": {},
+		"null":   {"protocols": nil},
+		"empty":  {"protocols": []any{}},
+	} {
+		row := Document{"id": "vendor", "name": "Vendor", "baseURL": "https://vendor.example/v1"}
+		for key, value := range extra {
+			row[key] = value
+		}
+		if err := Validate(Document{"connections": []any{row}, "models": []any{}}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestValidateReadsOneProtocolAndKeepsLegacyLists(t *testing.T) {
+	connection := func(protocols any) Document {
+		return Document{"connections": []any{Document{"id": "vendor", "name": "Vendor",
+			"baseURL": "https://vendor.example/v1", "protocols": protocols}}, "models": []any{}}
+	}
+	for _, protocol := range []string{ConnectionProtocolChat, ConnectionProtocolResponses} {
+		if err := Validate(connection([]any{protocol})); err != nil {
+			t.Fatalf("%s: %v", protocol, err)
+		}
+	}
+	// An older release could store both wires on one connection. That document
+	// must still load, with the routing it always had, or an upgrade would refuse
+	// to start on a file the user never touched. The save path is what refuses
+	// to write such a row again.
+	for name, protocols := range map[string]any{
+		"both wires":     []any{"chat", "responses"},
+		"the same twice": []any{"chat", "chat"},
+	} {
+		if err := Validate(connection(protocols)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	for name, protocols := range map[string]any{
+		"unknown":       []any{"anthropic"},
+		"not a list":    "chat",
+		"wrong element": []any{float64(1)},
+	} {
+		if err := Validate(connection(protocols)); err == nil || err.Error() != "invalid_connection_protocols" {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestMergeConnectionsRequiresAProtocolForANewConnection(t *testing.T) {
+	d := Document{"connections": []any{}, "models": []any{}}
+	row := func(extra Document) Document {
+		out := Document{"id": "vendor", "name": "Vendor", "baseURL": "https://vendor.example/v1"}
+		for key, value := range extra {
+			out[key] = value
+		}
+		return out
+	}
+	if _, err := MergeConnections(d, []any{row(nil)}); err == nil || err.Error() != "connection_protocol_required" {
+		t.Fatalf("a new connection without a protocol was accepted: %v", err)
+	}
+	if _, err := MergeConnections(d, []any{row(Document{"protocols": []any{}})}); err == nil || err.Error() != "connection_protocol_required" {
+		t.Fatalf("an empty declaration was accepted for a new connection: %v", err)
+	}
+	for name, protocols := range map[string]any{
+		"both wires": []any{"chat", "responses"},
+		"unknown":    []any{"anthropic"},
+		"not a list": "chat",
+	} {
+		if _, err := MergeConnections(d, []any{row(Document{"protocols": protocols})}); err == nil || err.Error() != "invalid_connection_protocols" {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if len(Rows(d["connections"])) != 0 {
+		t.Fatalf("a refused save wrote connections: %#v", d["connections"])
+	}
+	if _, err := MergeConnections(d, []any{row(Document{"protocols": []any{ConnectionProtocolResponses}})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(d); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConnectionProtocol(Object(Rows(d["connections"])[0])); got != ConnectionProtocolResponses {
+		t.Fatalf("stored protocol = %q", got)
+	}
+}
+
+func TestMergeConnectionsKeepsADeclaredProtocolUnlessItChanges(t *testing.T) {
+	d := Document{
+		"connections": []any{Document{"id": "vendor", "name": "Vendor", "baseURL": "https://vendor.example/v1",
+			"apiKeyEnv": "VENDOR_KEY", "protocols": []any{ConnectionProtocolChat}}},
+		"models": []any{},
+	}
+	edit := func(extra Document) Document {
+		out := Document{"id": "vendor", "name": "Vendor", "baseURL": "https://vendor.example/v1", "apiKeyEnv": "VENDOR_KEY"}
+		for key, value := range extra {
+			out[key] = value
+		}
+		return out
+	}
+	// An edit that does not restate the protocol — the shape an older panel sends
+	// for a rename — keeps the declaration instead of silently widening the
+	// connection to every wire.
+	for name, extra := range map[string]Document{"omitted": nil, "empty list": {"protocols": []any{}}} {
+		if _, err := MergeConnections(d, []any{edit(extra)}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		stored := Object(Rows(d["connections"])[0])
+		if got := ConnectionProtocol(stored); got != ConnectionProtocolChat {
+			t.Fatalf("%s: declaration = %q", name, got)
+		}
+		if stored["name"] != "Vendor" {
+			t.Fatalf("%s: the edit was not applied: %#v", name, stored)
+		}
+	}
+	// The user's explicit choice is what moves it.
+	if _, err := MergeConnections(d, []any{edit(Document{"protocols": []any{ConnectionProtocolResponses}})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConnectionProtocol(Object(Rows(d["connections"])[0])); got != ConnectionProtocolResponses {
+		t.Fatalf("protocol change = %q", got)
+	}
+}
+
+func TestMergeConnectionsLeavesALegacyConnectionUndeclared(t *testing.T) {
+	d := Document{
+		"connections": []any{Document{"id": "legacy", "name": "Legacy",
+			"baseURL": "https://legacy.example/v1", "apiKeyEnv": "LEGACY_KEY"}},
+		"models": []any{},
+	}
+	if _, err := MergeConnections(d, []any{Document{"id": "legacy", "name": "Legacy Renamed",
+		"baseURL": "https://legacy.example/v1", "apiKeyEnv": "LEGACY_KEY"}}); err != nil {
+		t.Fatalf("an unrelated edit of a legacy connection was refused: %v", err)
+	}
+	row := Object(Rows(d["connections"])[0])
+	if _, exists := row["protocols"]; exists {
+		t.Fatalf("a protocol was invented for a legacy connection: %#v", row)
+	}
+	if row["name"] != "Legacy Renamed" {
+		t.Fatalf("the edit was not applied: %#v", row)
+	}
+	if err := Validate(d); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A legacy row stored with both wires is not this save's statement, so an
+// unrelated edit keeps it as it is instead of blocking the whole document.
+func TestMergeConnectionsCarriesALegacyProtocolListForward(t *testing.T) {
+	d := Document{
+		"connections": []any{Document{"id": "legacy", "name": "Legacy", "baseURL": "https://legacy.example/v1",
+			"apiKeyEnv": "LEGACY_KEY", "protocols": []any{"chat", "responses"}}},
+		"models": []any{},
+	}
+	if _, err := MergeConnections(d, []any{Document{"id": "legacy", "name": "Legacy Renamed",
+		"baseURL": "https://legacy.example/v1", "apiKeyEnv": "LEGACY_KEY"}}); err != nil {
+		t.Fatalf("an unrelated edit was refused: %v", err)
+	}
+	row := Object(Rows(d["connections"])[0])
+	if len(Rows(row["protocols"])) != 2 || row["name"] != "Legacy Renamed" {
+		t.Fatalf("legacy protocols were not carried forward: %#v", row)
+	}
+	if err := Validate(d); err != nil {
+		t.Fatalf("the carried document no longer loads: %v", err)
+	}
+	next := Document{"id": "legacy", "name": "Legacy", "baseURL": "https://legacy.example/v1",
+		"apiKeyEnv": "LEGACY_KEY", "protocols": []any{ConnectionProtocolChat}}
+	d["models"] = []any{Document{"id": "legacy/resp-model", "connectionId": "legacy", "protocol": "responses", "contextWindow": 32000}}
+	if _, err := MergeConnections(d, []any{next}); ErrorCode(err) != "invalid_connection_protocol_in_use" {
+		t.Fatalf("narrowing a live Responses route to Chat: %v", err)
+	}
+	if got := Rows(Object(Rows(d["connections"])[0])["protocols"]); len(got) != 2 {
+		t.Fatalf("a rejected change modified the stored protocols: %v", got)
+	}
+	d["models"] = []any{}
+	if _, err := MergeConnections(d, []any{next}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConnectionProtocol(Object(Rows(d["connections"])[0])); got != ConnectionProtocolChat {
+		t.Fatalf("explicit choice = %q", got)
+	}
+}

@@ -137,7 +137,7 @@ func reply(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, e error) {
 	code := core.ErrorCode(e)
 	status := 503
-	if strings.HasPrefix(code, "invalid_") || code == "protocol_conflict" || code == "context_window_exceeds_limit" || code == "kimi_k3_model_id_conflict" {
+	if strings.HasPrefix(code, "invalid_") || code == "protocol_conflict" || code == "context_window_exceeds_limit" || code == "kimi_k3_model_id_conflict" || code == "connection_protocol_required" {
 		status = 400
 	}
 	switch code {
@@ -190,6 +190,12 @@ func message(code string) string {
 		return "此项原生能力当前不可用，请检查后台服务状态后重试。"
 	case "connection_in_use":
 		return "仍有模型使用此连接，请先修改模型。"
+	case "connection_protocol_required":
+		return "请为该连接选择接口协议（Chat 或 Responses）后再保存。"
+	case "invalid_connection_protocols":
+		return "一个连接只能选择一种接口协议，且必须是 Chat 或 Responses。"
+	case "invalid_connection_protocol_in_use":
+		return "这条连接仍有已保存的模型使用 Responses。改成 Chat Completions 会中断已有会话，请保留现有协议或先为这些模型更换连接。"
 	case "operation_busy":
 		return "上一次操作仍在进行，请稍后重试。"
 	case "credentials_unavailable":

@@ -296,8 +296,12 @@ test('a connection draft requires exactly one interface protocol', () => {
   ].join('\n');
   const validate = new Function(code)();
   const base = { id: 'conn', name: 'Conn', baseURL: 'https://api.example.com/v1', apiKey: 'sk', secretSet: false };
-  const legacyRow = validate({ ...base, protocols: ['chat', 'responses'] }, [], { originalId: null });
-  assert.equal(legacyRow.errors.some((text) => text.includes('只能选择一种接口协议')), true);
+  for (const protocols of [[], ['chat', 'responses']]) {
+    const saved = { ...base, protocols };
+    const renamed = validate({ ...saved, name: 'Renamed' }, [saved], { originalId: saved.id });
+    assert.deepEqual(renamed.errors, []);
+    assert.deepEqual(renamed.value.protocols || [], protocols);
+  }
   const missing = validate({ ...base, protocols: null }, [], { originalId: null });
   assert.equal(missing.errors.some((text) => text.includes('请选择接口协议')), true);
   const multiple = validate({ ...base, protocols: ['chat', 'responses'] }, [], { originalId: null });
@@ -1737,7 +1741,7 @@ function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
   const code = [
     ...['saveCatalogue', 'saveConnections', 'connectionPayload', 'connectionDraftFrom',
       'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature', 'protocolList',
-      'connectionProtocol', 'connectionProtocolError', 'connectionProtocolErrors',
+      'connectionProtocol',
       'findConnection', 'connectionLabel', 'protocolLabel',
       'savedConnectionsSignature', 'connectionsDirty', 'adoptState'].map(sourceFunction),
     'const configReady = data => data.configuration?.state === "ready";',
@@ -1825,8 +1829,7 @@ test('a connection protocol change is submitted and leaves legacy rows alone', a
   const sent = env.calls.find((call) => call.path === '/api/workspace');
   assert.ok(sent, 'a protocol change is a normal save');
   assert.deepEqual(sent.body.connections.find((row) => row.id === 'glm').protocols, ['responses']);
-  /* 另一条没动过的旧连接原样带回：缺省或双协议既不阻断保存，也不会被清空。 */
-  assert.deepEqual(sent.body.connections.find((row) => row.id === 'ds').protocols, ['chat', 'responses']);
+  assert.equal(Object.hasOwn(sent.body.connections.find((row) => row.id === 'ds'), 'protocols'), false);
   /* 已有模型行保持原 ID 与原协议，不随连接换协议改写。 */
   assert.deepEqual(sent.body.models, committed.models);
 });
@@ -3194,6 +3197,81 @@ test('resolveAlias unwraps prefixed aliases and falls back to the bare route id'
   assert.equal(resolveAlias(''), '');
 });
 
+test('subagent options, saved summaries and pool rows use names while preserving route ids as values', () => {
+  const makeEl = (tag = 'div') => ({
+    tag, className: '', textContent: '', dataset: {}, attrs: {}, children: [], hidden: false, disabled: false, type: '', value: '',
+    setAttribute(key, value) { this.attrs[key] = String(value); },
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; },
+  });
+  const textOf = (node) => (node.textContent || '') + (node.children || []).map(textOf).join(' ');
+  const models = [
+    { id: 'magpie/kimi-group%2Fdeepseek-v4', name: 'DeepSeek V4', upstreamModelId: 'group/deepseek-v4', tools: true },
+    { id: 'magpie/resp-glm', upstreamModelId: 'glm-5.3-flash', tools: true },
+  ];
+  const state = {
+    data: { models }, subagentSaving: false,
+    draft: { mode: 'pool', model: models[0].id, models: [{ id: models[0].id, description: '编码' }] },
+  };
+  const dom = { saPoolList: makeEl(), saPoolDefault: makeEl(), saPoolAdd: makeEl(),
+    saRoleDefault: makeEl(), saRolePlan: makeEl(), saRoleCoder: makeEl(), saRoleExplore: makeEl(),
+    saModel: makeEl(), saSavedSub: makeEl(), saSavedMode: makeEl() };
+  const code = [
+    sourceFunction('displayModelId'), sourceFunction('modelLabel'), sourceFunction('catalogModelLabel'),
+    'const SUBAGENT_ROLES = [{ key: "plan" }, { key: "coder" }, { key: "explore" }];',
+    'const POLICY_MODE_WORD = {}; const POLICY_TRANSPORT_WORD = {}; const RUNTIME_STATE = {};',
+    'const configReady = () => true; const isInFlight = () => false; const isCapable = model => model?.tools === true;',
+    'const declaredEfforts = () => []; const findModel = id => state.data.models.find(model => model.id === id) || null;',
+    'const capableModels = () => state.data.models.filter(model => model.tools === true);',
+    'const setText = (node, text) => { if (node) node.textContent = text; };',
+    'const setHidden = (node, hidden) => { if (node) node.hidden = Boolean(hidden); };',
+    'const setDot = () => {}; const renderErrorList = () => {}; const iconUse = () => makeEl();',
+    'const fmtCount = String; const fmtTime = String;',
+    sourceFunction('poolDraftIds'), sourceFunction('emptyRoles'), sourceFunction('normalizeRoles'),
+    'const evaluateSubagentDraft = () => ({ problems: [], notes: [] });',
+    'const evaluateBinding = () => ({});',
+    'const modelIdFromAlias = () => null; const resolveAlias = () => null;',
+    sourceFunction('syncSelectOptions'), sourceFunction('renderPoolList'),
+    sourceFunction('savedTarget'),
+    sourceFunction('renderSubagents').replace(sourceFunction('renderPoolList'), ''),
+    'return renderSubagents;',
+  ].join('\n');
+  const render = new Function('state', 'dom', 'document', 'makeEl', code)(state, dom, { createElement: makeEl }, makeEl);
+  const data = state.data = {
+    configuration: { state: 'ready' }, models,
+    subagents: { configured: { mode: 'pool', model: models[0].id,
+      models: [{ id: models[0].id, description: '编码' }], roles: { plan: models[0].id } }, policy: {}, runtime: {} },
+  };
+  render();
+  for (const select of [dom.saRoleDefault, dom.saPoolAdd, dom.saPoolDefault]) {
+    const named = select.children.find((node) => node.value === models[0].id);
+    if (named) {
+      assert.equal(named.textContent, 'DeepSeek V4');
+      assert.equal(named.textContent.includes('magpie/'), false);
+    }
+    const unnamed = select.children.find((node) => node.value === models[1].id);
+    if (unnamed) assert.equal(unnamed.textContent, 'glm-5.3-flash');
+  }
+  assert.equal(textOf(dom.saPoolList).includes('magpie/'), false);
+  assert.match(textOf(dom.saPoolList), /DeepSeek V4/);
+  assert.match(dom.saSavedSub.textContent, /默认 DeepSeek V4/);
+  assert.doesNotMatch(dom.saSavedSub.textContent, /magpie\//);
+  state.data = { ...data, models: models.map((model) => model.id === models[0].id ? { ...model, name: 'DeepSeek 新名称' } : model) };
+  render();
+  assert.match(textOf(dom.saPoolList), /DeepSeek 新名称/);
+  assert.doesNotMatch(textOf(dom.saPoolList), /DeepSeek V4/);
+
+  const overviewDom = { overviewSubagentsDot: {}, overviewSubagentsValue: {}, overviewSubagentsNote: {} };
+  const renderOverview = new Function('dom', 'POLICY_MODE_WORD', 'setDot', 'setText', 'fmtCount',
+    [sourceFunction('displayModelId'), sourceFunction('modelLabel'), sourceFunction('catalogModelLabel'),
+      sourceFunction('renderOverviewSubagents'), 'return renderOverviewSubagents;'].join('\n'))(
+    overviewDom, {}, () => {}, (node, text) => { node.textContent = text; }, String,
+  );
+  renderOverview({ models, subagents: { configured: { mode: 'force', model: models[0].id }, policy: {}, runtime: { state: 'file-applied' } } });
+  assert.equal(overviewDom.overviewSubagentsValue.textContent, '固定 · DeepSeek V4');
+  assert.doesNotMatch(overviewDom.overviewSubagentsValue.textContent, /magpie\//);
+});
+
 test('direct mode keeps budget reminders out of the overview issue card', () => {
   const compute = new Function(`
     const displayModelId = id => id;
@@ -4154,7 +4232,8 @@ test('4-step quickstart guide tracks real state, auto-collapses once ready, and 
 test('app.js wires subagents view rendering and release link external browser endpoint', () => {
   assert.match(source, /if \(view === 'subagents'\) renderSubagents\(\);/);
   assert.match(source, /request\('\/api\/updates\/open-release',\s*\{\s*method:\s*'POST',\s*body:\s*\{\s*\}\s*\}\)/);
-  assert.match(source, /const signature = JSON\.stringify\(\[pool, draft\.model \|\| null, state\.subagentSaving\]\);/);
+  assert.equal(source.includes('displayModelId(saved.model)'), false, 'saved subagent summaries use catalogue names');
+  assert.match(source, /model\.tools === true/);
   assert.match(source, /已保存为继承主模型，但配置文件存在冲突未被覆盖/);
 });
 

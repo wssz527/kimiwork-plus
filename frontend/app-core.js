@@ -1223,8 +1223,13 @@ function displayModelId(id) {
 
 function modelLabel(model, alias) {
   if (!model) return typeof alias === 'string' && alias ? displayModelId(alias) : '—';
-  if (model.name && model.name !== model.id) return model.name;
-  return displayModelId(model.id);
+  return model.name || model.upstreamModelId || model.id || '未命名模型';
+}
+
+function catalogModelLabel(data, id) {
+  const models = data && Array.isArray(data.models) ? data.models : [];
+  const model = models.find((entry) => entry && entry.id === id) || null;
+  return modelLabel(model, id);
 }
 
 function reasonText(code) {
@@ -1386,6 +1391,7 @@ export {
   VIEW_STORE,
   actionUUID,
   applyTheme,
+  catalogModelLabel,
   clearKey,
   displayModelId,
   directReasonText,

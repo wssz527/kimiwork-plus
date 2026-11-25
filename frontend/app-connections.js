@@ -374,24 +374,6 @@ function connectionProtocolText(row) {
   return '未选择';
 }
 
-function connectionProtocolError(row) {
-  const list = Array.isArray(row && row.protocols) ? row.protocols : [];
-  if (list.length === 1 && (list[0] === 'chat' || list[0] === 'responses')) return '';
-  const name = row && (row.name || row.id) ? row.name || row.id : '未命名连接';
-  if (list.length > 1) {
-    return '连接「' + name + '」同时允许 ' + list.map(protocolLabel).join('/')
-      + '；一条连接只能使用一种接口协议，请只保留一种。';
-  }
-  if (list.length === 1) {
-    return '连接「' + name + '」的接口协议不受支持；请选择 Chat Completions 或 Responses。';
-  }
-  return '连接「' + name + '」还没有选择接口协议，请选择 Chat Completions 或 Responses。';
-}
-
-function connectionProtocolErrors(rows) {
-  return (rows || []).filter((row) => row && !row.legacy).map(connectionProtocolError).filter(Boolean);
-}
-
 /* 模型编辑器与向导都在同一页：协议的“当前草稿”可能来自连接编辑器尚未保存
    的 state.conns.draft，也可能来自向导自己的 state.onboard.protocol。这里
    只提供一个读取入口，避免模型编辑器退回 state.data 里的旧协议。 */
@@ -444,22 +426,16 @@ function connectionsDirty() {
   return connectionsSignature(state.conns.draft || []) !== state.conns.base;
 }
 
-/* 提交体只包含契约允许的字段；apiKey 仅在本次输入过时带上，
-   省略即表示保留已保存的旧值。protocols 仍按后端的数组契约发送。
-   单协议连接只发那一个值；没有唯一协议的行只会是「本次没改动」的旧配置，
-   这时把原来的数组原样带回——整组重写会重建连接对象，省略就等于删掉它
-   记录过的历史协议。 */
 function connectionPayload(rows) {
   return (rows || []).filter((row) => !row.legacy).map((row) => {
     const protocol = connectionProtocol(row);
-    const original = Array.isArray(row.protocols) ? row.protocols : [];
     return {
       id: row.id,
       name: row.name,
       ...(row.providerPresetId ? { providerPresetId: row.providerPresetId } : {}),
       baseURL: row.baseURL,
       ...(row.apiKeyEnv ? { apiKeyEnv: row.apiKeyEnv } : {}),
-      ...(protocol ? { protocols: [protocol] } : (original.length ? { protocols: original } : {})),
+      ...(protocol ? { protocols: [protocol] } : {}),
       ...(row.apiKey ? { apiKey: row.apiKey } : {}),
     };
   });
@@ -496,7 +472,11 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
 
   const rawProtocols = Array.isArray(draft.protocols) ? draft.protocols : [];
   const protocols = protocolList(rawProtocols);
-  if (rawProtocols.length !== 1 || protocols.length !== 1) {
+  const previous = (rows || []).find((row) => !row.legacy && row.id === originalId);
+  const previousProtocols = Array.isArray(previous?.protocols) ? previous.protocols : [];
+  const keepsLegacy = previous && previousProtocols.length !== 1
+    && JSON.stringify(rawProtocols) === JSON.stringify(previousProtocols);
+  if (!keepsLegacy && (rawProtocols.length !== 1 || protocols.length !== 1)) {
     errors.push(rawProtocols.length > 1
       ? '一条连接只能选择一种接口协议；请只保留 Chat Completions 或 Responses。'
       : rawProtocols.length === 1
@@ -511,7 +491,7 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
       ...(draft.providerPresetId ? { providerPresetId: draft.providerPresetId } : {}),
       baseURL: base.value || String(draft.baseURL || '').trim(),
       apiKeyEnv: keyEnv,
-      ...(protocols.length === 1 ? { protocols: [protocols[0]] } : {}),
+      ...(protocols.length ? { protocols } : {}),
       apiKey: apiKey.trim(),
       legacy: false,
     },
@@ -1174,9 +1154,7 @@ function onboardProblems({ models = [] } = {}) {
     problems.push('请为这些模型填写上下文窗口；接口没有返回时不能用猜测值：'
       + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
-  /* 已有模型不能被这次保存悄悄改写：它们的模型 ID 与旧会话绑定必须保持，
-     旧记录里的协议也原样带回。协议差异由网关处理（单协议连接会让旧模型经
-     该协议的上游答复），这里不因此阻止保存。 */
+  /* 沿用已有记录，让重新导入保留旧会话绑定。 */
   const previousByUpstream = new Map();
   for (const model of onboardExistingModels(values.id)) {
     const upstream = model.upstreamModelId || model.id;
@@ -1310,17 +1288,8 @@ function renderOnboardModels(rows) {
     const facts = document.createElement('span');
     facts.className = 'onboard__model-facts';
     const parts = [];
-    const protocol = onboardProtocol();
     if (Number(row.contextWindow) > 0) parts.push('上下文 ' + fmtK(row.contextWindow));
     if (Number(row.maxOutputTokens) > 0) parts.push('输出 ' + fmtK(row.maxOutputTokens));
-    if (row.protocol && protocol && row.protocol !== protocol) {
-      parts.push('已保存为 ' + protocolLabel(row.protocol) + '；连接当前按 '
-        + protocolLabel(protocol) + ' 调用上游，模型 ID 保持不变');
-    } else if (protocol) {
-      parts.push('按 ' + protocolLabel(protocol) + ' 接入');
-    } else {
-      parts.push('请先选择连接协议');
-    }
     facts.textContent = parts.join(' · ');
     body.append(head, facts);
     if (row.description) {
@@ -1565,7 +1534,7 @@ function renderOnboard() {
     const savedProtocols = protocolList(target && target.protocols);
     const presetProtocols = protocolList(providerPreset(dom.onboardPreset?.value || '')?.protocols);
     setText(dom.onboardProtocolHint, protocol
-      ? '本次新导入的模型按 ' + protocolLabel(protocol) + ' 调用上游；已保存模型保持原模型 ID 与旧会话绑定。'
+      ? '本次导入使用 ' + protocolLabel(protocol) + '。'
       : savedProtocols.length > 1
         ? '已保存的连接同时允许 ' + savedProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
         : presetProtocols.length > 1
@@ -2450,12 +2419,11 @@ function renderConnectionEditor({ force = false } = {}) {
   if (dom.ceChat) dom.ceChat.checked = draftProtocol === 'chat';
   if (dom.ceResponses) dom.ceResponses.checked = draftProtocol === 'responses';
   if (dom.ceProtocolHint) {
-    const listed = protocolList(draft.protocols);
-    setText(dom.ceProtocolHint, listed.length > 1
-      ? '已保存的连接同时允许 ' + listed.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
-      : draftProtocol
-        ? '当前使用 ' + protocolLabel(draftProtocol) + '；新模型按它生成路由，已保存模型保留原模型 ID，改协议后经新的上游协议调用。'
-        : '请选择 Chat Completions 或 Responses；一条连接只使用一种接口协议。');
+    setText(dom.ceProtocolHint, draftProtocol
+      ? '此连接使用 ' + protocolLabel(draftProtocol) + '。'
+      : editing.originalId
+        ? '继续沿用历史协议。导入新模型时请选择一种协议。'
+        : '请选择 Chat Completions 或 Responses。');
   }
   if (dom.cePreset) {
     const desired = draft.providerPresetId || '';
@@ -2560,23 +2528,6 @@ async function saveConnections() {
     applyConnectionEditor();
     if (state.conns.editing) return;
   }
-  /* 整组连接都会重写，但协议只属于这次新增或改动的连接：用户改的是这条连接
-     的地址、名称或模型时，别的连接历史上缺协议、双协议都不该拦住这次保存。
-     没改动的行原样回传自己的协议数组，不会被整组重写顺手抹掉。 */
-  const baseline = new Map((connectionDraftFrom(data) || [])
-    .filter((row) => row && !row.legacy)
-    .map((row) => [row.id, row]));
-  const changed = (state.conns.draft || []).filter((row) => {
-    if (!row || row.legacy) return false;
-    const before = baseline.get(row.id);
-    return !before || connectionsSignature([row]) !== connectionsSignature([before]);
-  });
-  const protocolProblems = connectionProtocolErrors(changed);
-  if (protocolProblems.length) {
-    setConnErrors(protocolProblems);
-    showToast('连接接口协议需要先确认，未保存。', 'error');
-    return;
-  }
   const payload = connectionPayload(state.conns.draft);
   if (!payload.length) {
     showToast('至少保留一条命名连接；如需退回旧配置，请先添加连接再移除旧上游。', 'error');
@@ -2669,7 +2620,6 @@ export {
   connectionDraftFrom,
   connectionPayload,
   connectionProtocol,
-  connectionProtocolErrors,
   connectionsDirty,
   discoverConnectionEditorModels,
   discoverOnboardModels,
