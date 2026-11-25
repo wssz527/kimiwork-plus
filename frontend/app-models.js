@@ -1,4 +1,4 @@
-import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, connectionProtocol, connectionProtocolErrors, discoveryReasonText, protocolLabel, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
+import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, discoveryReasonText, draftConnection, draftConnectionProtocol, protocolLabel, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
 import { API, BUDGET_PRESETS, CONNECTION_ID_PATTERN, EFFORT_PATTERN, MODEL_ALIAS_PREFIXES, actionUUID, displayModelId, dom, fmtK, fmtTime, fmtTokens, iconUse, request, setHidden, setText, showToast, state, stripModelAliasPrefix, syncDefaultOptions, syncSelectOptions, truncate } from './app-core.js';
 import { renderActions } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
@@ -377,12 +377,12 @@ function routeIdFor(connectionId, upstreamModelId, protocol) {
   return connection + '/' + prefix + encodeURIComponent(upstream);
 }
 
-/* 新模型的建议 ID 只服从所属连接的唯一协议；已保存模型由编辑器保留原 ID，
-   不会走这里重新生成。 */
+/* 新模型的建议 ID 只服从所属连接的当前协议（含尚未保存的草稿）；已保存模型
+   由编辑器保留原 ID，不会走这里重新生成。 */
 function suggestedRouteId(draft) {
   if (!draft) return '';
-  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
-  return routeIdFor(draft.connectionId, draft.upstreamModelId, connectionProtocol(connection));
+  return routeIdFor(draft.connectionId, draft.upstreamModelId,
+    draft.connectionId ? draftConnectionProtocol(draft.connectionId) : null);
 }
 
 function connectionRowsOf(data) {
@@ -817,8 +817,7 @@ function pickCandidate(upstreamId) {
   /* 协议只来自所属连接；新模型的模型 ID 由连接协议生成。已保存模型在
      编辑器里保留自己的 ID 与协议，不因换候选而重绑。 */
   if (!editor.originalId) {
-    const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
-    draft.protocol = connectionProtocol(connection);
+    draft.protocol = draft.connectionId ? draftConnectionProtocol(draft.connectionId) : null;
     draft.id = suggestedRouteId(draft);
   }
   if (model) {
@@ -1088,7 +1087,7 @@ function modelDraftFrom(model) {
     pricing: priceDraftFrom(model.pricing),
     failover: failoverDraftFrom(model.failover),
   } : {
-    id: '', name: '', protocol: connectionProtocol(initialConnectionId ? findConnection(state.data, initialConnectionId) : null),
+    id: '', name: '', protocol: initialConnectionId ? draftConnectionProtocol(initialConnectionId) : null,
     context: '', output: '', tools: undefined, reasoning: false, vision: false,
     efforts: [], defaultEffort: '', connectionId: initialConnectionId, upstreamModelId: '', upstreamProtocol: '',
     upstreamProtocolChoices: upstreamProtocolSupported(state.data) ? ['', 'anthropic'] : null,
@@ -1272,17 +1271,13 @@ function validateEditor(editor) {
   const models = (state.data && state.data.models) || [];
   const duplicate = models.some((row) => row.id === model.id && row.id !== editor.originalId);
   if (duplicate) errors.push('已存在相同的模型记录。');
-  const connection = model.connectionId ? findConnection(state.data, model.connectionId) : null;
-  if (model.connectionId && !connection) errors.push('所选连接不在已保存的连接列表中。');
+  const connection = model.connectionId ? draftConnection(model.connectionId) : null;
+  if (model.connectionId && !connection) errors.push('所选连接不在连接列表中。');
   if (!model.connectionId && !editor.originalId) errors.push('请选择服务商连接；新模型的接口协议由连接决定。');
-  /* 连接只允许一种协议：新模型必须跟它一致；已保存模型保持原 ID 与旧协议，
-     连接不兼容时明确说明，不能靠保存时悄悄翻转协议。 */
-  const protocol = connectionProtocol(connection);
-  if (connection && !protocol) {
+  /* 连接只决定新模型的 ID 与协议。已保存模型保留原 ID 与原协议记录：连接
+     换了协议时由网关按连接当前的协议调用上游，不在这里改写，也不阻止保存。 */
+  if (!editor.originalId && connection && !draftConnectionProtocol(model.connectionId)) {
     errors.push('连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在服务商连接里选择 Chat Completions 或 Responses。');
-  } else if (connection && protocol && model.protocol && model.protocol !== protocol) {
-    errors.push('连接「' + connectionLabel(connection) + '」现在只使用 ' + protocolLabel(protocol)
-      + '，而这条模型仍按 ' + protocolLabel(model.protocol) + ' 调用上游。为保持原模型 ID 与旧会话绑定，请改选协议相同的连接，或先处理这条模型。');
   }
   if (dom.mAdvanced && errors.some(errorNeedsAdvanced)) dom.mAdvanced.open = true;
   return { model, errors };
@@ -1631,8 +1626,10 @@ function renderEditorRouting(editor) {
   syncSelectOptions(dom.mConnection, options, draft.connectionId || '');
   if (dom.mConnection) dom.mConnection.disabled = !rows.length || state.modelsSaving;
 
-  const connection = draft.connectionId ? findConnection(state.data, draft.connectionId) : null;
-  const protocol = connectionProtocol(connection);
+  const connection = draft.connectionId ? draftConnection(draft.connectionId) : null;
+  const protocol = draft.connectionId ? draftConnectionProtocol(draft.connectionId) : null;
+  const base = editor.draft.baseEntity || null;
+  const baseProtocol = base && (base.protocol === 'chat' || base.protocol === 'responses') ? base.protocol : null;
   if (!editor.originalId) {
     draft.protocol = protocol;
     draft.id = suggestedRouteId(draft);
@@ -1646,10 +1643,19 @@ function renderEditorRouting(editor) {
   if (dom.mConnectionHint) {
     if (!rows.length) {
       setText(dom.mConnectionHint, '还没有命名连接。先在上方「服务商连接」区块添加连接，再选择模型。');
-    } else if (!protocol) {
-      setText(dom.mConnectionHint, '连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在上方服务商连接里选择 Chat Completions 或 Responses。');
+    } else if (protocol) {
+      /* 连接换了协议不改写已保存模型：它保留原 ID 与原协议记录，由网关按
+         连接当前的协议调用上游。这里只说明事实，不宣称重绑。 */
+      setText(dom.mConnectionHint, editor.originalId && baseProtocol && baseProtocol !== protocol
+        ? '连接当前按 ' + protocolLabel(protocol) + ' 调用上游；这条已保存模型保留原模型 ID 与 '
+          + protocolLabel(baseProtocol) + ' 路由。'
+        : '连接决定请求发往哪个上游；当前使用 ' + protocolLabel(protocol) + '。');
+    } else if (editor.originalId) {
+      setText(dom.mConnectionHint, '这条已保存模型保留原模型 ID 与'
+        + (baseProtocol ? ' ' + protocolLabel(baseProtocol) + ' 路由' : '协议记录')
+        + '；连接还没有唯一的接口协议，新导入的模型需要先选择一种。');
     } else {
-      setText(dom.mConnectionHint, '连接决定请求发往哪个上游；当前使用 ' + protocolLabel(protocol) + '。');
+      setText(dom.mConnectionHint, '连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；请先在上方服务商连接里选择 Chat Completions 或 Responses。');
     }
   }
 }
@@ -1717,36 +1723,6 @@ async function saveCatalogue(models, { close = true, message = '已保存，后�
       return false;
     }
   }
-  /* 整组保存连接与模型：连接必须各有一个唯一协议，模型不能与所属连接
-     的协议不一致。否则一次模型保存就会把旧模型悄悄改绑到新协议。 */
-  const draftConnections = (state.conns.draft || []).filter((row) => row && !row.legacy);
-  const protocolProblems = connectionProtocolErrors(draftConnections);
-  for (const model of Array.isArray(models) ? models : []) {
-    if (!model || !model.connectionId) continue;
-    const connection = findConnection(data, model.connectionId);
-    const name = model.name || model.upstreamModelId || '未命名模型';
-    if (!connection) {
-      protocolProblems.push('模型「' + name + '」所属的连接不在连接列表中。');
-      continue;
-    }
-    const protocol = connectionProtocol(connection);
-    if (!protocol) {
-      protocolProblems.push('连接「' + connectionLabel(connection) + '」还没有唯一的接口协议；模型「' + name + '」不能保存。请先在服务商连接里选择 Chat Completions 或 Responses。');
-    } else if (model.protocol !== protocol) {
-      protocolProblems.push('模型「' + name + '」仍按 ' + protocolLabel(model.protocol)
-        + ' 调用上游，但连接「' + connectionLabel(connection) + '」现在只使用 ' + protocolLabel(protocol)
-        + '。为保持原模型 ID 与旧会话绑定，本次未保存；请改选协议相同的连接，或先处理这条模型。');
-    }
-  }
-  if (protocolProblems.length) {
-    showToast('连接接口协议或模型协议不一致，未保存。', 'error');
-    if (state.editor) {
-      state.editor.serverErrors = protocolProblems;
-      renderEditor();
-    }
-    return false;
-  }
-
   state.modelsSaving = true;
   const epoch = state.stateReadEpoch;
   const key = state.key;

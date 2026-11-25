@@ -392,27 +392,41 @@ function connectionProtocolErrors(rows) {
   return (rows || []).filter((row) => row && !row.legacy).map(connectionProtocolError).filter(Boolean);
 }
 
-function connectionModelLabel(model) {
-  if (!model) return '未命名模型';
-  return model.name || model.upstreamModelId || '未命名模型';
+/* 模型编辑器与向导都在同一页：协议的“当前草稿”可能来自连接编辑器尚未保存
+   的 state.conns.draft，也可能来自向导自己的 state.onboard.protocol。这里
+   只提供一个读取入口，避免模型编辑器退回 state.data 里的旧协议。 */
+function draftConnection(connectionId) {
+  const id = String(connectionId || '').trim();
+  if (!id) return null;
+  const draft = (Array.isArray(state.conns?.draft) ? state.conns.draft : [])
+    .find((row) => row && !row.legacy && row.id === id);
+  if (draft) return draft;
+  return (connectionRowsOf(state.data) || []).find((row) => row && !row.legacy && row.id === id) || null;
 }
 
-/* 连接改协议时，已有模型不能悄悄跟着翻协议：旧路由 ID 与旧会话绑定必须
-   保持。返回具体模型名，供保存前的错误提示逐条列出。 */
-function connectionProtocolConflicts(connectionId, protocol) {
-  if (!connectionId || (protocol !== 'chat' && protocol !== 'responses')) return [];
-  const models = Array.isArray(state.data?.models) ? state.data.models : [];
-  return models.filter((model) => model && model.connectionId === connectionId
-    && model.protocol !== protocol);
+function draftConnectionProtocol(connectionId) {
+  const id = String(connectionId || '').trim();
+  if (!id) return null;
+  const protocol = connectionProtocol(draftConnection(id));
+  if (protocol) return protocol;
+  const onboardId = String(dom.onboardId?.value || '').trim();
+  if (onboardId && onboardId === id && state.onboard?.protocolTouched) {
+    const value = state.onboard.protocol;
+    if (value === 'chat' || value === 'responses') return value;
+  }
+  return null;
 }
 
-function connectionProtocolConflictText(row, conflicts) {
-  const target = protocolLabel(connectionProtocol(row));
-  return '连接「' + (row.name || row.id) + '」现在只使用 ' + target + '，但这些已有模型仍按另一协议调用上游：'
-    + conflicts.map((model) => connectionModelLabel(model) + '（'
-      + (model.protocol === 'chat' || model.protocol === 'responses' ? protocolLabel(model.protocol) : '协议未声明')
-      + '）').join('、')
-    + '。为保持它们的模型 ID 和旧会话绑定，本次未保存；请先移除这些模型或把它们改到协议相同的连接。';
+/* 向导里的协议选择也属于连接草稿：已保存连接存在草稿行时一并写入，
+   这样连接编辑器、模型编辑器和向导看到的是同一个值。 */
+function syncOnboardProtocolToDraft(protocol) {
+  const id = String(dom.onboardId?.value || '').trim();
+  if (!id || !Array.isArray(state.conns?.draft)) return;
+  const index = state.conns.draft.findIndex((row) => row && !row.legacy && row.id === id);
+  if (index < 0) return;
+  const next = state.conns.draft.slice();
+  next[index] = { ...next[index], protocols: protocol === 'chat' || protocol === 'responses' ? [protocol] : [] };
+  state.conns.draft = next;
 }
 
 function connectionsSignature(rows) {
@@ -431,18 +445,21 @@ function connectionsDirty() {
 }
 
 /* 提交体只包含契约允许的字段；apiKey 仅在本次输入过时带上，
-   省略即表示保留已保存的旧值。protocols 仍按后端的数组契约发送，
-   但只发唯一值：旧配置的多协议或缺失不会在这里被猜成某一个。 */
+   省略即表示保留已保存的旧值。protocols 仍按后端的数组契约发送。
+   单协议连接只发那一个值；没有唯一协议的行只会是「本次没改动」的旧配置，
+   这时把原来的数组原样带回——整组重写会重建连接对象，省略就等于删掉它
+   记录过的历史协议。 */
 function connectionPayload(rows) {
   return (rows || []).filter((row) => !row.legacy).map((row) => {
     const protocol = connectionProtocol(row);
+    const original = Array.isArray(row.protocols) ? row.protocols : [];
     return {
       id: row.id,
       name: row.name,
       ...(row.providerPresetId ? { providerPresetId: row.providerPresetId } : {}),
       baseURL: row.baseURL,
       ...(row.apiKeyEnv ? { apiKeyEnv: row.apiKeyEnv } : {}),
-      ...(protocol ? { protocols: [protocol] } : {}),
+      ...(protocol ? { protocols: [protocol] } : (original.length ? { protocols: original } : {})),
       ...(row.apiKey ? { apiKey: row.apiKey } : {}),
     };
   });
@@ -560,11 +577,6 @@ function applyConnectionEditor() {
     }
   }
   const { errors, value } = validateConnectionDraft(editing.draft, rows, { originalId: editing.originalId });
-  if (!errors.length) {
-    const protocol = connectionProtocol(value);
-    const conflicts = connectionProtocolConflicts(value.id, protocol);
-    if (conflicts.length) errors.push(connectionProtocolConflictText(value, conflicts));
-  }
   editing.errors = errors;
   if (errors.length) {
     renderConnections();
@@ -582,6 +594,13 @@ function applyConnectionEditor() {
   if (index >= 0) next[index] = stored;
   else next.push(stored);
   state.conns.draft = next;
+  /* 同一页的向导与连接编辑器共用一个协议草稿：连接编辑器改了协议，
+     向导里针对这条连接的协议选择也要跟着走。 */
+  if (String(dom.onboardId?.value || '').trim() === stored.id) {
+    const protocol = connectionProtocol(stored);
+    state.onboard.protocol = protocol;
+    state.onboard.protocolTouched = Boolean(protocol);
+  }
   state.conns.editing = null;
   renderConnections();
   renderConnectionsDiff();
@@ -892,6 +911,7 @@ function setOnboardProtocol(protocol) {
   if (protocol !== 'chat' && protocol !== 'responses') return;
   state.onboard.protocol = protocol;
   state.onboard.protocolTouched = true;
+  syncOnboardProtocolToDraft(protocol);
   markOnboardEdited();
   renderOnboard();
 }
@@ -1137,14 +1157,6 @@ function onboardProblems({ models = [] } = {}) {
     problems.push('请选择这条连接的接口协议：Chat Completions 或 Responses。');
   }
   if (!models.length) problems.push('至少勾选 1 个模型。');
-  /* 已有模型不能被这次保存悄悄改成新协议：它们的模型 ID 与旧会话绑定
-     必须保持。这里列出具体模型名并阻止保存。 */
-  if (protocol === 'chat' || protocol === 'responses') {
-    const conflicts = connectionProtocolConflicts(values.id, protocol);
-    if (conflicts.length) {
-      problems.push(connectionProtocolConflictText({ id: values.id, name: values.name, protocols: [protocol] }, conflicts));
-    }
-  }
   /* 正整数校验与 buildOnboardRow 用同一个函数：能通过校验的值一定能被
      安全地写进 contextWindow，不会出现界面可保存、后端 400 的组合。 */
   const invalidContext = models.filter(row => row.contextWindow !== undefined
@@ -1162,34 +1174,52 @@ function onboardProblems({ models = [] } = {}) {
     problems.push('请为这些模型填写上下文窗口；接口没有返回时不能用猜测值：'
       + missingContext.map(row => row.upstreamModelId).join('、') + '。');
   }
-  /* 同一个连接里同一上游 ID 只对应一条模型；出现多条时无法判断该保留
-     哪一条的旧 ID，列出上游 ID 并停下。 */
+  /* 已有模型不能被这次保存悄悄改写：它们的模型 ID 与旧会话绑定必须保持，
+     旧记录里的协议也原样带回。协议差异由网关处理（单协议连接会让旧模型经
+     该协议的上游答复），这里不因此阻止保存。 */
   const previousByUpstream = new Map();
-  const ambiguous = new Set();
   for (const model of onboardExistingModels(values.id)) {
     const upstream = model.upstreamModelId || model.id;
     if (!upstream) continue;
-    if (previousByUpstream.has(upstream)) ambiguous.add(upstream);
-    else previousByUpstream.set(upstream, model);
+    if (!previousByUpstream.has(upstream)) previousByUpstream.set(upstream, []);
+    previousByUpstream.get(upstream).push(model);
   }
-  if (ambiguous.size) {
-    problems.push('连接「' + (values.name || values.id) + '」里同一上游模型有多条已保存记录：'
-      + [...ambiguous].join('、') + '。为避免覆盖旧模型 ID 与旧会话，请先在模型管理中整理这些记录。');
-  }
-  const ids = new Set();
   const built = [];
+  const ids = new Set();
   for (const row of models) {
     const draft = { ...row, connectionId: values.id };
-    const previousRow = previousByUpstream.get(row.upstreamModelId);
-    const keepPrevious = previousRow && protocol && previousRow.protocol === protocol;
-    const model = keepPrevious
-      ? buildOnboardRow(draft, { existing: true, protocol, id: previousRow.id, previousLimit: previousRow.contextLimit })
+    const previous = previousOnboardModel(previousByUpstream.get(row.upstreamModelId), row.protocol, protocol);
+    const model = previous
+      ? buildOnboardRow(draft, {
+        existing: true,
+        protocol: previous.protocol,
+        id: previous.id,
+        previousLimit: previous.contextLimit,
+      })
       : buildOnboardRow(draft, { protocol });
+    /* 两行指向同一个上游时会生成同一个路由 ID；后端会以 invalid_models 拒绝，
+       这里给出能对上的说明。这条检查与连接协议无关。 */
     if (model.id && ids.has(model.id)) problems.push('同一个上游模型被重复导入：' + row.upstreamModelId + '。');
     if (model.id) ids.add(model.id);
     built.push(model);
   }
   return { problems, built, values };
+}
+
+/* 同一个上游模型可能留着多条历史记录。这次保存要挑出应该沿用的那一条：
+   先按目录行自己的协议，再按连接当前协议，最后退到该上游的第一条记录。
+   无论挑中哪一条，都用它原来的 ID 与协议，绝不另建新 ID。 */
+function previousOnboardModel(rows, wanted, connection) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  if (wanted) {
+    const match = rows.find((row) => row.protocol === wanted);
+    if (match) return match;
+  }
+  if (connection) {
+    const match = rows.find((row) => row.protocol === connection);
+    if (match) return match;
+  }
+  return rows[0];
 }
 
 /* 向导只会重新声明连接与模型能力，不会谈定价与备用连接。用向导重存一条已有
@@ -1284,7 +1314,8 @@ function renderOnboardModels(rows) {
     if (Number(row.contextWindow) > 0) parts.push('上下文 ' + fmtK(row.contextWindow));
     if (Number(row.maxOutputTokens) > 0) parts.push('输出 ' + fmtK(row.maxOutputTokens));
     if (row.protocol && protocol && row.protocol !== protocol) {
-      parts.push('已保存 ' + protocolLabel(row.protocol) + '，与当前连接协议冲突');
+      parts.push('已保存为 ' + protocolLabel(row.protocol) + '；连接当前按 '
+        + protocolLabel(protocol) + ' 调用上游，模型 ID 保持不变');
     } else if (protocol) {
       parts.push('按 ' + protocolLabel(protocol) + ' 接入');
     } else {
@@ -1796,15 +1827,6 @@ async function saveOnboard() {
       return false;
     }
   }
-  const draftOthers = (state.conns.draft || [])
-    .filter((row) => row && !row.legacy && row.id !== onboardConnectionValues().id);
-  const savedOthers = (connectionRowsOf(data) || [])
-    .filter((row) => row && !row.legacy && row.id !== onboardConnectionValues().id);
-  const otherProtocolProblems = connectionProtocolErrors(draftOthers.length ? draftOthers : savedOthers);
-  if (otherProtocolProblems.length) {
-    renderErrorList(dom.onboardErrors, otherProtocolProblems);
-    return false;
-  }
   const selected = selectedOnboardModels();
   const { problems, built, values } = onboardProblems({ models: selected });
   if (problems.length) {
@@ -1926,6 +1948,7 @@ function applyOnboardPreset(presetId) {
   if (dom.onboardPresetHint) setText(dom.onboardPresetHint, preset.name
     ? '已套用「' + preset.name + '」的地址与已知协议；仍可改为自定义地址。'
     : '已套用预设地址；仍可改为自定义地址。');
+  syncOnboardProtocolToDraft(state.onboard.protocol);
   renderOnboard();
 }
 
@@ -2431,7 +2454,7 @@ function renderConnectionEditor({ force = false } = {}) {
     setText(dom.ceProtocolHint, listed.length > 1
       ? '已保存的连接同时允许 ' + listed.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
       : draftProtocol
-        ? '当前使用 ' + protocolLabel(draftProtocol) + '；新模型会按它调用上游。'
+        ? '当前使用 ' + protocolLabel(draftProtocol) + '；新模型按它生成路由，已保存模型保留原模型 ID，改协议后经新的上游协议调用。'
         : '请选择 Chat Completions 或 Responses；一条连接只使用一种接口协议。');
   }
   if (dom.cePreset) {
@@ -2537,22 +2560,21 @@ async function saveConnections() {
     applyConnectionEditor();
     if (state.conns.editing) return;
   }
-  /* 整组连接都会重写：任何一条旧连接没有唯一协议，或仍有模型按另一协议
-     路由时，都不能靠「省略字段」或「随新协议重写」蒙混过去。 */
-  const protocolProblems = [];
-  for (const row of state.conns.draft || []) {
-    if (!row || row.legacy) continue;
-    const protocolError = connectionProtocolError(row);
-    if (protocolError) {
-      protocolProblems.push(protocolError);
-      continue;
-    }
-    const conflicts = connectionProtocolConflicts(row.id, connectionProtocol(row));
-    if (conflicts.length) protocolProblems.push(connectionProtocolConflictText(row, conflicts));
-  }
+  /* 整组连接都会重写，但协议只属于这次新增或改动的连接：用户改的是这条连接
+     的地址、名称或模型时，别的连接历史上缺协议、双协议都不该拦住这次保存。
+     没改动的行原样回传自己的协议数组，不会被整组重写顺手抹掉。 */
+  const baseline = new Map((connectionDraftFrom(data) || [])
+    .filter((row) => row && !row.legacy)
+    .map((row) => [row.id, row]));
+  const changed = (state.conns.draft || []).filter((row) => {
+    if (!row || row.legacy) return false;
+    const before = baseline.get(row.id);
+    return !before || connectionsSignature([row]) !== connectionsSignature([before]);
+  });
+  const protocolProblems = connectionProtocolErrors(changed);
   if (protocolProblems.length) {
     setConnErrors(protocolProblems);
-    showToast('连接接口协议或已有模型协议需要先确认，未保存。', 'error');
+    showToast('连接接口协议需要先确认，未保存。', 'error');
     return;
   }
   const payload = connectionPayload(state.conns.draft);
@@ -2652,6 +2674,8 @@ export {
   discoverConnectionEditorModels,
   discoverOnboardModels,
   discoveryReasonText,
+  draftConnection,
+  draftConnectionProtocol,
   fillOnboardForm,
   fillOnboardPresets,
   fillServiceForm,

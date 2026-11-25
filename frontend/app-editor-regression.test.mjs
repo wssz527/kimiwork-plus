@@ -39,11 +39,7 @@ const PICKER_ENV = `
   const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
   ${MODEL_HELPERS.join('\n')}
   ${['candidateMetadataSource', 'connectionRowsOf', 'findConnection', 'fillEditorFields'].map(modelFunction).join('\n')}
-  const connectionProtocol = row => {
-    const list = row && Array.isArray(row.protocols)
-      ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
-    return list.length === 1 ? list[0] : null;
-  };
+  ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
   const setHidden = () => {};
   const setText = () => {};
   const renderPicker = () => {};
@@ -159,14 +155,11 @@ test('an explicit-empty candidate declaration still uses the connection protocol
 test('the generated model id follows the single connection protocol without guessing from the name', () => {
   const makeSuggested = (connections = []) => new Function('connections', `
     const state = { data: { connections: { saved: connections } } };
+    const dom = {};
     ${modelFunction('routeIdFor')}
     ${modelFunction('connectionRowsOf')}
     ${modelFunction('findConnection')}
-    const connectionProtocol = row => {
-      const list = row && Array.isArray(row.protocols)
-        ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
-      return list.length === 1 ? list[0] : null;
-    };
+    ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
     ${modelFunction('suggestedRouteId')}
     return suggestedRouteId;
   `)(connections);
@@ -305,6 +298,73 @@ test('editing an existing model keeps its saved id and protocol', () => {
   assert.equal(model.upstreamModelId, 'new-model');
 });
 
+/* 连接换了协议不改写已保存模型：编辑名称、能力或定价时，编辑器不能因为
+   model.protocol 与连接当前协议不同而拒绝保存；新导入仍按连接协议生成。 */
+test('validateEditor saves an existing model across a connection protocol change', () => {
+  const code = `
+    const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+    const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
+    ${MODEL_HELPERS.join('\n')}
+    ${['connectionRowsOf', 'findConnection', 'connectionLabel'].map(modelFunction).join('\n')}
+    ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
+    ${modelFunction('validateEditor')}
+    return validateEditor;
+  `;
+  const base = { id: 'conn/resp-old', protocol: 'responses', contextWindow: 200000, connectionId: 'conn', name: '旧模型' };
+  const draft = {
+    id: base.id, name: '新名称', context: '200000', output: '', tools: true, reasoning: false, vision: false,
+    efforts: [], defaultEffort: '', connectionId: 'conn', upstreamModelId: 'old-model', upstreamProtocol: '',
+    contextLimit: '', metadataSource: null,
+    pricing: { inputPerMillion: '1', outputPerMillion: '2', cachedInputPerMillion: '', cacheWritePerMillion: '' },
+    failover: [], baseEntity: base, touched: new Set(),
+  };
+  const state = {
+    data: {
+      models: [base],
+      connections: { saved: [{ id: 'conn', name: 'Conn', protocols: ['chat'], apiKeySet: true }] },
+    },
+    conns: { draft: [{ id: 'conn', name: 'Conn', baseURL: 'https://api.example.com/v1', protocols: ['chat'], legacy: false }] },
+    onboard: {},
+  };
+  const validate = new Function('state', 'dom', code)(state, {});
+  const { model, errors } = validate({ originalId: base.id, draft });
+  assert.deepEqual(errors, []);
+  assert.equal(model.id, base.id);
+  assert.equal(model.protocol, 'responses');
+  assert.equal(model.pricing.inputPerMillion, 1);
+
+  /* 模型行引用了列表里没有的连接时仍然拦下。 */
+  const orphan = validate({ originalId: null, draft: { ...draft, connectionId: 'gone', baseEntity: null } });
+  assert.equal(orphan.errors.some((text) => text.includes('不在连接列表中')), true);
+});
+
+/* 同页草稿：连接编辑器还没保存的协议修改必须被模型编辑器读到，而不是
+   退回 state.data 里的旧协议。 */
+test('the model editor follows an unsaved connection protocol change', () => {
+  const code = `
+    const dom = { onboardId: { value: '' } };
+    ${modelFunction('routeIdFor')}
+    ${modelFunction('connectionRowsOf')}
+    ${modelFunction('findConnection')}
+    ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
+    ${modelFunction('suggestedRouteId')}
+    return { draftConnectionProtocol, suggestedRouteId };
+  `;
+  const state = {
+    data: { connections: { saved: [{ id: 'conn', name: 'Conn', protocols: ['chat'] }] } },
+    conns: { draft: [{ id: 'conn', name: 'Conn', protocols: ['responses'], legacy: false }] },
+    onboard: {},
+  };
+  const api = new Function('state', code)(state);
+  assert.equal(api.draftConnectionProtocol('conn'), 'responses');
+  assert.equal(api.suggestedRouteId({ connectionId: 'conn', upstreamModelId: 'model-a' }), 'conn/resp-model-a');
+  /* 草稿里协议被清空后不再猜一个值。 */
+  state.conns.draft = [{ id: 'conn', name: 'Conn', protocols: [], legacy: false }];
+  assert.equal(api.draftConnectionProtocol('conn'), null);
+  assert.equal(api.suggestedRouteId({ connectionId: 'conn', upstreamModelId: 'model-a' }), '');
+});
+
 /* renderEditor 的真实调用顺序：预算控件先跑，随后的统一 errors 渲染是唯一
    写 model-errors 的地方。预算提示必须在最终节点里出现。 */
 function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [], validationErrors = [] } = {}) {
@@ -359,11 +419,7 @@ function makeRenderEnv({ reasoning = true, budgetNote = null, serverErrors = [],
       'upstreamProtocolSupported', 'candidateMetadataSource',
       'renderFailoverRows'].map(modelFunction).join('\n')}
     ${['syncDefaultOptions', 'syncSelectOptions'].map(coreFunction).join('\n')}
-    const connectionProtocol = row => {
-      const list = row && Array.isArray(row.protocols)
-        ? row.protocols.filter(value => value === 'chat' || value === 'responses') : [];
-      return list.length === 1 ? list[0] : null;
-    };
+    ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
     const protocolLabel = value => value === 'chat' ? 'Chat' : value === 'responses' ? 'Responses' : value;
     const fmtK = String;
     const fmtTokens = String;

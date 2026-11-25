@@ -224,9 +224,8 @@ function makeProblems() {
     'const onboardConnectionValues = () => ({ id: "myconn", name: "我的供应商", baseURL: "https://api.example.com/v1", apiKey: "sk-test", providerPresetId: "", protocol: state.onboard.protocol });',
     'const savedOnboardRow = () => null;',
     'const currentConnectionLimit = () => undefined;',
-    ...['routeIdFor', 'protocolList', 'connectionProtocol', 'connectionModelLabel',
-      'connectionProtocolConflicts', 'connectionProtocolConflictText', 'positiveInteger', 'buildOnboardRow',
-      'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
+    ...['routeIdFor', 'protocolList', 'connectionProtocol', 'positiveInteger', 'buildOnboardRow',
+      'previousOnboardModel', 'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
     'const providerPreset = () => null;',
     'return onboardProblems;',
   ].join('\n');
@@ -323,21 +322,21 @@ test('typing a connection name does not erase a legacy multi-protocol draft', ()
   assert.equal(state.conns.editing.draft.name, '新名称');
 });
 
-test('the connection editor refuses a protocol change that would rebind existing models', () => {
+test('saving a connection protocol change leaves existing model rows untouched', () => {
   const dom = {
     ceName: { value: '连接 A' }, ceId: { value: 'conn-a', disabled: false },
     cePreset: { value: '' }, ceBase: { value: 'https://api.example.com/v1' }, ceKey: { value: '' },
-    ceChat: { checked: true }, ceResponses: { checked: false },
+    ceChat: { checked: false }, ceResponses: { checked: true },
+    onboardId: { value: 'conn-a' },
   };
   const row = {
     id: 'conn-a', name: '连接 A', baseURL: 'https://api.example.com/v1', protocols: ['chat'],
     apiKeySet: true, secretSet: false, apiKey: '', legacy: false,
   };
+  const models = [{ id: 'conn-a/kimi-old', connectionId: 'conn-a', upstreamModelId: 'old-model', protocol: 'chat', name: '旧模型 A' }];
   const state = {
-    data: {
-      revision: 'rev-1',
-      models: [{ id: 'conn-a/resp-old', connectionId: 'conn-a', upstreamModelId: 'old-model', protocol: 'responses', name: '旧模型 A' }],
-    },
+    data: { revision: 'rev-1', models },
+    onboard: { protocol: 'chat', protocolTouched: true },
     conns: {
       baseRevision: 'rev-1',
       draft: [row],
@@ -348,8 +347,7 @@ test('the connection editor refuses a protocol change that would rebind existing
     'const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;',
     'const CONNECTION_ID_HINT = "hint";',
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    ...['protocolList', 'normalizeBaseURL', 'connectionProtocol', 'connectionModelLabel',
-      'connectionProtocolConflicts', 'connectionProtocolConflictText', 'protocolLabel', 'validateConnectionDraft',
+    ...['protocolList', 'normalizeBaseURL', 'connectionProtocol', 'protocolLabel', 'validateConnectionDraft',
       'readConnectionEditor', 'applyConnectionEditor'].map(sourceFunction),
     'const renderConnections = () => {};',
     'const renderConnectionsDiff = () => {};',
@@ -357,24 +355,30 @@ test('the connection editor refuses a protocol change that would rebind existing
   ].join('\n');
   const apply = new Function('state', 'dom', code)(state, dom);
   apply();
-  assert.equal(state.conns.editing.errors.length, 1);
-  assert.match(state.conns.editing.errors[0], /旧模型 A/);
-  assert.match(state.conns.editing.errors[0], /Responses/);
-  assert.match(state.conns.editing.errors[0], /未保存/);
-  assert.deepEqual(state.conns.draft[0].protocols, ['chat'], 'the saved draft must keep its old protocol');
+  /* 已有模型按原协议保留自己的路由；连接换协议只改变上游的调用方式，
+     不是保存故障，也不需要改写模型行。 */
+  assert.equal(state.conns.editing, null);
+  assert.deepEqual(state.conns.draft[0].protocols, ['responses']);
+  assert.deepEqual(state.data.models, models);
+  assert.equal(state.onboard.protocol, 'responses', 'the wizard must read the same draft protocol');
 });
 
-test('an existing model on the connection blocks a protocol change and is named', () => {
+test('an existing responses row saved on a chat connection keeps its id and protocol', () => {
   const onboardProblems = makeProblems();
   onboardProblems.state.data.models = [{
     id: 'myconn/resp-old', connectionId: 'myconn', upstreamModelId: 'old-model', protocol: 'responses', name: '旧模型 A',
   }];
-  const result = onboardProblems({ models: [makeRow('model-a', { protocol: 'chat', contextWindow: 128000 })] });
-  const conflict = result.problems.find((text) => text.includes('旧模型 A'));
-  assert.ok(conflict, 'the conflict must name the concrete model');
-  assert.match(conflict, /Responses/);
-  assert.match(conflict, /未保存/);
-  assert.match(conflict, /旧会话绑定/);
+  const result = onboardProblems({ models: [makeRow('old-model', { contextWindow: 128000 })] });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.built[0].id, 'myconn/resp-old');
+  assert.equal(result.built[0].protocol, 'responses');
+  /* 同一批里新导入的模型仍按连接当前协议生成 ID。 */
+  const fresh = onboardProblems({ models: [
+    makeRow('old-model', { contextWindow: 128000 }),
+    makeRow('model-a', { contextWindow: 128000 }),
+  ] });
+  assert.equal(fresh.built[1].id, 'myconn/kimi-model-a');
+  assert.equal(fresh.built[1].protocol, 'chat');
 });
 
 test('onboarding generates the compatible kimi- or resp- id with a percent-encoded upstream id', () => {
@@ -823,6 +827,7 @@ test('switching presets replaces stale suggested ids but keeps a hand-edited one
     sourceFunction('onboardSuggestedName'),
     sourceFunction('staleSuggested'),
     sourceFunction('protocolList'),
+    sourceFunction('syncOnboardProtocolToDraft'),
     sourceFunction('applyOnboardPreset'),
     'const setText = () => {};',
     'const renderOnboard = () => {};',
@@ -837,6 +842,7 @@ test('switching presets replaces stale suggested ids but keeps a hand-edited one
       ] },
       data: { connections: { saved: saved ? [saved] : [] } },
       onboard: { touched: false },
+      conns: { draft: [] },
     };
     const dom = {
       onboardBase: { value: '' }, onboardId: { value: id }, onboardName: { value: name },
@@ -1016,8 +1022,7 @@ test('resaving an unchanged saved model keeps its real context limit', () => {
     "const onboardConnectionValues = () => ({ id: 'conn', name: 'C', baseURL: 'https://api.example.com/v1', apiKey: 'sk', protocol: 'responses' });",
     "const savedOnboardRow = () => ({ id: 'conn', apiKeySet: true, baseURL: 'https://api.example.com/v1' });",
     ...['positiveInteger', 'currentConnectionLimit', 'routeIdFor', 'protocolList', 'connectionProtocol',
-      'connectionModelLabel', 'connectionProtocolConflicts', 'connectionProtocolConflictText',
-      'buildOnboardRow', 'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
+      'previousOnboardModel', 'buildOnboardRow', 'onboardExistingModels', 'normalizeBaseURL', 'protocolLabel', 'onboardProblems'].map(sourceFunction),
     'return onboardProblems;',
   ].join('\n');
   const onboardProblems = new Function(code)();
@@ -1733,7 +1738,6 @@ function makeCatalogueSaveEnv(serverStates, { onRequest = null } = {}) {
     ...['saveCatalogue', 'saveConnections', 'connectionPayload', 'connectionDraftFrom',
       'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature', 'protocolList',
       'connectionProtocol', 'connectionProtocolError', 'connectionProtocolErrors',
-      'connectionModelLabel', 'connectionProtocolConflicts', 'connectionProtocolConflictText',
       'findConnection', 'connectionLabel', 'protocolLabel',
       'savedConnectionsSignature', 'connectionsDirty', 'adoptState'].map(sourceFunction),
     'const configReady = data => data.configuration?.state === "ready";',
@@ -1805,18 +1809,26 @@ test('a model save adopts the committed connection baseline instead of keeping t
   assert.equal(second.body.revision, 'rev-2');
 });
 
-test('changing a connection protocol is blocked with the concrete model names', async () => {
-  const env = makeCatalogueSaveEnv([{ revision: 'rev-2', configuration: { state: 'ready' }, models: [], connections: { saved: [] } }]);
-  env.adoptState(env.state.data, { initial: true });
-  env.state.conns.draft = env.state.conns.draft.map((row) => (row.id === 'glm'
-    ? { ...row, protocols: ['responses'] }
-    : row));
+test('a connection protocol change is submitted and leaves legacy rows alone', async () => {
+  const committed = {
+    revision: 'rev-2', configuration: { state: 'ready' },
+    models: [{ id: 'glm/resp-glm-5.3', connectionId: 'glm', protocol: 'responses', name: 'GLM-5.3 Flash' }],
+    connections: { saved: [
+      { id: 'glm', name: 'GLM 官方', baseURL: 'https://open.bigmodel.cn/api/paas/v4', protocols: ['chat'], apiKeySet: true },
+      { id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat', 'responses'], apiKeySet: true },
+    ] },
+  };
+  const env = makeCatalogueSaveEnv([committed]);
+  env.adoptState(committed, { initial: true });
+  env.state.conns.draft = env.state.conns.draft.map((row) => (row.id === 'glm' ? { ...row, protocols: ['responses'] } : row));
   await env.saveConnections();
-  assert.equal(env.calls.some((call) => call.path === '/api/workspace'), false, 'a protocol change must not be submitted');
-  const errors = env.state.conns.errors.join(' ');
-  assert.match(errors, /GLM-5\.3 Flash/, 'the blocked model must be named');
-  assert.match(errors, /Responses/);
-  assert.match(errors, /未保存/);
+  const sent = env.calls.find((call) => call.path === '/api/workspace');
+  assert.ok(sent, 'a protocol change is a normal save');
+  assert.deepEqual(sent.body.connections.find((row) => row.id === 'glm').protocols, ['responses']);
+  /* 另一条没动过的旧连接原样带回：缺省或双协议既不阻断保存，也不会被清空。 */
+  assert.deepEqual(sent.body.connections.find((row) => row.id === 'ds').protocols, ['chat', 'responses']);
+  /* 已有模型行保持原 ID 与原协议，不随连接换协议改写。 */
+  assert.deepEqual(sent.body.models, committed.models);
 });
 
 test('a stale model save reply leaves the connection draft untouched', async () => {
