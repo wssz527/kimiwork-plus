@@ -280,10 +280,13 @@ unknown value is `gateway`; the two import directions refuse each other
 (`native_import_direct_mode`, `native_import_gateway_mode`). Switching either way
 applies and verifies the new source before disconnecting the previous managed
 source. If Kimi's background catalog discovery races the first direct cleanup,
-the same action re-saves the exact manual draft once, but only when no other
-source has a pending confirmation. Unrequested catalog discoveries do not block
-readback; a pending manual model still does. Any remaining cleanup failure is
-reported as `route_cleanup_pending` and is retried by the next explicit sync. If
+the page re-saves the exact manual draft when the pending models belong to the
+managed direct source. If discovery advances the account revision during Go's
+cleanup poll, `ImportDirect` retries the import once in the same account using
+the saved source ID. Both paths guard `applyPending` against pending confirmations
+from other sources. Unrequested catalog discoveries do not block readback. A
+pending manual model still does. Any remaining cleanup failure is reported as
+`route_cleanup_pending` and is retried by the next explicit sync. If
 the gateway reconcile has already replaced the direct intent, the retry recovers
 the still-connected managed custom source from the current account's v3 store;
 disconnected or quarantined rows do not require cleanup. A failed new import
@@ -1358,10 +1361,9 @@ provider of that name exists and no `byok-kth-kimi/` alias is blocked. Upgrading
 from an earlier build, switching Direct Mode off, or a different loopback port
 therefore leaves `byok-<uuid>` behind, and the picker starts a new conversation.
 
-`ImportModels` repairs the store before the official preview runs, only in
-gateway mode, only for the account `AccountScope` verified, and only when the
-`byok-kth` source is a `kth` source whose registry and provider addresses are all
-loopback:
+`ImportModels` repairs the store before the official preview runs in gateway
+mode for the account `AccountScope` verified. Repairs to a live `byok-kth`
+source require a `kth` source with loopback registry and provider addresses.
 
 - the canonical provider is present but the gateway route is not bound to it:
   `routeBindings[routeKey]` is set to `byok-kth-kimi`;
@@ -1374,6 +1376,18 @@ loopback:
   fires its own post-restart model refresh (`onDaimonReady` → `promote()`) that
   writes the pre-disconnect bytes back, and only then the aliases that apply
   blocked are cleared and the normal import runs in the same settings overlay.
+- no live `byok-kth` source remains, `active` still holds the canonical provider
+  or one of its model aliases, and `pending` contains neither. The repair
+  checks the page's account revision and calls `applyPending` only when the
+  remaining pending confirmations belong to the managed direct source being
+  replaced. That source is identified by the recorded ID or the managed
+  display name. A deferred apply is polled against the same scope and revision.
+  After an applied reply the repair waits one poll step, then scans again to
+  verify the canonical provider was released and clear its blocked aliases.
+  Foreign pending confirmations, an unsettled apply, or an occupied provider
+  after the wait stop the import with `requires-restart` and
+  `model_provider_reset_pending`. The direct source stays connected until the
+  new gateway import applies.
 
 The preview itself is the last guard: Electron can also restore the store
 between the repair and the preview. A preview whose `source.providers` carries a
@@ -1444,7 +1458,8 @@ confirmation. `ImportModels`/`ImportDirect` use that revision to finish the
 cleanup with `retryDeferredApply`. A cleanup that still ends
 `deferred` keeps `routeCleanupPending` and asks for the restart that removes the
 old source (`restartDeferred`); `apply-failed` keeps the cleanup claim and the
-restart prompt without the deferred marker; `stale` and `account-changed` leave
-the removal to the next sync. The deferred-save path uses
-`disconnectDirectSourceExpression` (or `disconnectGatewayExpression` for a
-direct import) with the same settlement.
+restart prompt without the deferred marker. On `stale`, `ImportDirect` can
+replay the manual draft once using the saved source ID and the cleanup's account
+scope. Further staleness and a changed account leave the removal to the next
+sync. The deferred-save path uses `disconnectDirectSourceExpression` (or
+`disconnectGatewayExpression` for a direct import) with the same settlement.

@@ -319,6 +319,37 @@ func TestKthScanFindsAProviderStuckOnARandomID(t *testing.T) {
 	}
 }
 
+func TestKthScanFindsAnOrphanProviderWithPendingRemoval(t *testing.T) {
+	baseURL := "http://127.0.0.1:9100/v1"
+	for _, tc := range []struct {
+		name string
+		edit func(account, active, pending map[string]any)
+		want bool
+	}{
+		{name: "provider and model", want: true},
+		{"active provider only", func(_, active, _ map[string]any) { delete(active, "models") }, true},
+		{"active model only", func(_, active, _ map[string]any) { delete(active, "providers") }, true},
+		{"no active provider or model", func(account, _, _ map[string]any) { delete(account, "active") }, false},
+		{"no pending snapshot", func(account, _, _ map[string]any) { delete(account, "pending") }, false},
+		{"null pending snapshot", func(account, _, _ map[string]any) { account["pending"] = nil }, false},
+		{"pending retains provider", func(_, active, pending map[string]any) { pending["providers"] = active["providers"] }, false},
+		{"pending retains model", func(_, active, pending map[string]any) { pending["models"] = active["models"] }, false},
+		{"live gateway source", func(account, _, _ map[string]any) { account["sources"] = kthTestAccount(baseURL, nil)["sources"] }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := kthTestAccount(baseURL, nil)
+			account["sources"] = []any{map[string]any{"id": directSourceID, "kind": "custom"}}
+			if tc.edit != nil {
+				tc.edit(account, mapField(account, "active"), mapField(account, "pending"))
+			}
+			scan := scanKthStore(kthTestStore("account", account), "account", baseURL)
+			if scan.needsPendingSettle() != tc.want {
+				t.Fatalf("needsPendingSettle = %v, want %v", scan.needsPendingSettle(), tc.want)
+			}
+		})
+	}
+}
+
 func TestKthScanIgnoresAStuckProviderOnAForeignSource(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any){
 		"remote registry": func(account map[string]any) {

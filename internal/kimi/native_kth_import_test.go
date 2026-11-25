@@ -3,10 +3,13 @@ package kimi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dop251/goja"
 )
 
 // The import entry points below are the ones auto-sync calls. Each test drives
@@ -83,6 +86,135 @@ func TestImportClearsTheBlockedAliasesBeforeTheOfficialImport(t *testing.T) {
 	}
 	if page.kthDisconnectCalls != 0 {
 		t.Fatalf("a source that is not there was disconnected: %d", page.kthDisconnectCalls)
+	}
+}
+
+func TestImportSettlesAnOrphanProviderBeforeGatewayPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup, calls, reason string
+		state                      string
+		deferred                   bool
+	}{
+		{"applied by recorded ID", "", "apply:rev-Y,preview,save,disconnect", "", ImportStateAccepted, false},
+		{"deferred by managed name", `direct.id="replaced-id";direct.displayName=managedName;deferOnce=true;`, "apply:rev-Y,apply:rev-Y,preview,save,disconnect", "", ImportStateAccepted, false},
+		{"foreign pending", `foreignPending=true;`, "", "model_provider_reset_pending", ImportStateRequiresRestart, false},
+		{"foreign pending with managed name", `foreignPending=true;foreign.displayName=managedName;`, "", "model_provider_reset_pending", ImportStateRequiresRestart, false},
+		{"revision changes before apply", `revision="newer-revision";`, "", "model_provider_reset_pending", ImportStateRequiresRestart, false},
+		{"store still occupied", `keepOrphan=true;`, "apply:rev-Y", "model_provider_reset_pending", ImportStateRequiresRestart, false},
+		{"apply refused", `failApply=true;`, "apply:rev-Y", "native_import_provider_reset_failed", ImportStateFailed, false},
+		{"account changes during retry", `deferOnce=true;changeScope=true;`, "apply:rev-Y", NativeAccountChanged, ImportStateAccountChanged, false},
+		{"apply stays deferred", `deferAlways=true;`, "apply:rev-Y,apply:rev-Y", "model_provider_reset_pending", ImportStateRequiresRestart, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortDeferredApply(t, 0)
+			home := kthTestHome(t)
+			accountKey := AccountScope(home)
+			baseURL := "http://127.0.0.1:9100/v1"
+			store := directStoreFixture(accountKey)
+			account := mapField(mapField(store, "accounts"), accountKey)
+			active := mapField(account, "active")
+			providers := active["providers"].([]any)
+			catalog := make([]any, 18)
+			for i := range catalog {
+				model := fmt.Sprintf("catalog-%d", i)
+				catalog[i] = map[string]any{"alias": "prov-1/" + model, "providerId": "prov-1",
+					"sourceId": directSourceID, "model": model, "provenance": "catalog"}
+			}
+			account["revision"] = "rev-Y"
+			account["pending"] = map[string]any{"applyState": "prepared", "providers": providers, "models": catalog}
+			active["providers"] = append(providers, map[string]any{"id": kthProviderID, "sourceId": kthSourceID})
+			blockedAlias := kthAliasPrefix + "old-model"
+			active["models"] = append(active["models"].([]any), map[string]any{"alias": blockedAlias, "sourceId": kthSourceID})
+			account["blockedAliases"] = map[string]any{blockedAlias: "disconnected", "foreign/model": "delisted"}
+			original := kthTestWrite(t, home, store)
+			file := filepath.Join(home, NativeWorkStore)
+			vm := goja.New()
+			if err := vm.Set("managedName", DirectDisplayName); err != nil {
+				t.Fatal(err)
+			}
+			if err := vm.Set("promotePending", func() {
+				account["active"] = account["pending"]
+				delete(account, "pending")
+				account["revision"] = "rev-after-apply"
+				raw, err := json.Marshal(store)
+				if err == nil {
+					err = os.WriteFile(file, raw, 0o600)
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := vm.Set("canonicalAvailable", func() bool {
+				scan := kthStoreState(home, accountKey, baseURL)
+				return scan.valid && !scan.canonical && !scan.modeled && len(scan.blocked) == 0 &&
+					len(modelRows(mapField(scan.account, "active"))) == 18 && mapField(scan.account, "pending") == nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := vm.RunString(`
+const calls=[];
+let revision="rev-Y", scope="scope", gatewayApplied=false, directConnected=true;
+let foreignPending=false, deferOnce=false, deferAlways=false, keepOrphan=false, failApply=false, changeScope=false;
+const ok=value=>({ok:true,value});
+const direct={id:"byok-src-1",kind:"custom",displayName:"Renamed Direct",revision:"direct-rev",
+  models:Array.from({length:18},(_,i)=>({model:"catalog-"+i,provenance:"catalog",status:"pending"}))};
+const foreign={id:"other-source",kind:"custom",models:[{model:"unconfirmed",status:"pending"}]};
+globalThis.clawBridgeAPI={byokSources:{
+  list(){return ok({scopeToken:scope,accountRevision:revision,sources:(directConnected?[direct]:[]).concat(foreignPending?[foreign]:[])});},
+  applyPending(expected){
+    calls.push("apply:"+expected);
+    if(expected!==revision||foreignPending||!directConnected)throw new Error("unsafe pending apply");
+    if(failApply)return {ok:false,reasonCode:"apply-failed"};
+    if(deferOnce||deferAlways){deferOnce=false;if(changeScope)scope="another";return ok({status:"deferred"});}
+    if(!keepOrphan)promotePending();
+    revision="rev-after-apply";
+    for(const model of direct.models)model.status="available";
+    return ok({status:"applied"});
+  },
+  preview(request){
+    calls.push("preview");
+    if(request.accountRevision!==revision||!directConnected||request.draft.kind!=="kth")throw new Error("unsafe gateway preview");
+    const id=canonicalAvailable()?"byok-kth-kimi":"byok-random";
+    return ok({previewId:"preview",sourceId:"byok-kth",scopeToken:scope,accountRevision:revision,sourceRevision:null,
+      canSave:true,candidates:[{id:"gateway-model"}],source:{providers:[{id,protocol:"kimi"}]}});
+  },
+  discard(){calls.push("discard");},
+  save(){calls.push("save");gatewayApplied=true;return ok({sourceId:"byok-kth",status:"applied"});},
+  disconnect(request){
+    calls.push("disconnect");
+    if(!gatewayApplied||request.sourceId!==direct.id)throw new Error("direct source disconnected prematurely");
+    directConnected=false;
+    return ok({status:"applied"});
+  },
+}};
+` + tc.setup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := &fakePage{surface: "work", actions: true, importAPI: true, evaluateAction: executeSourceActions(t, vm)}
+			result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+				URL: baseURL, Token: "gateway-token", ExpectedAccountKey: accountKey, DisconnectDirectSourceID: directSourceID,
+			})
+			accepted := tc.state == ImportStateAccepted
+			if err != nil || result.State != tc.state || result.Reason != tc.reason || result.OK != accepted ||
+				result.RequiresRestart != (tc.state == ImportStateRequiresRestart) || result.RouteCleanupPending || result.RestartDeferred != tc.deferred {
+				t.Errorf("gateway import: %+v, %v", result, err)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.calls {
+				t.Errorf("page calls: %v, want %q (%v)", calls, tc.calls, err)
+			}
+			if accepted {
+				blocked := mapField(kthTestAccountOf(t, home), "blockedAliases")
+				if _, exists := blocked[blockedAlias]; exists || blocked["foreign/model"] != "delisted" {
+					t.Errorf("unexpected blocked aliases: %v", blocked)
+				}
+			} else if raw, err := os.ReadFile(file); err != nil || string(raw) != string(original) {
+				t.Errorf("stopped repair changed the store: %v", err)
+			}
+		})
 	}
 }
 

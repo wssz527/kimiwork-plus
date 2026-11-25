@@ -152,7 +152,7 @@ func runDirectExpression(t *testing.T, request DirectImportRequest, setup string
 	if _, err := vm.RunString(setup + directExpressionMock); err != nil {
 		t.Fatal(err)
 	}
-	expression, err := directImportExpression(request)
+	expression, err := directImportExpression(request, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +160,159 @@ func runDirectExpression(t *testing.T, request DirectImportRequest, setup string
 		t.Fatal(err)
 	}
 	return vm
+}
+
+func executeSourceActions(t *testing.T, vm *goja.Runtime) func(string) (any, bool) {
+	t.Helper()
+	return func(expression string) (any, bool) {
+		if !strings.HasPrefix(expression, "(async(") || !strings.Contains(expression, "byokSources") {
+			return nil, false
+		}
+		value, err := vm.RunString(expression)
+		if err != nil {
+			t.Errorf("evaluate source action: %v", err)
+			return nil, true
+		}
+		promise, ok := value.Export().(*goja.Promise)
+		if !ok || promise.State() != goja.PromiseStateFulfilled {
+			t.Errorf("source action did not complete: %v", value)
+			if ok && promise.State() == goja.PromiseStateRejected {
+				t.Log(promise.Result())
+			}
+			return nil, true
+		}
+		return promise.Result().Export(), true
+	}
+}
+
+func TestImportDirectResavesManualDraftWhenGatewayCleanupBecomesStale(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup, calls string
+		restart, cleanup   bool
+	}{
+		{"catalog refresh during polling", "", "preview:,save,disconnect,preview:direct-id,save,apply:manual-2", false, false},
+		{"catalog refresh before disconnect", `refreshEarly=true;`, "preview:,save,disconnect,preview:direct-id,save,apply:manual-2", false, false},
+		{"replacement save also deferred", `deferResave=true;`, "preview:,save,disconnect,preview:direct-id,save,apply:manual-2", false, false},
+		{"foreign pending during polling", `foreignPending=true;`, "preview:,save,disconnect,preview:direct-id,save", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortDeferredApply(t, 100*time.Millisecond)
+			home := kthTestHome(t)
+			request := validDirectImportRequest()
+			request.ExistingSourceID = ""
+			request.DisconnectGateway = true
+			request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+			for _, name := range []string{"model-b", "model-c"} {
+				model := request.Models[0]
+				model.ID, model.Model = name, name
+				request.Models = append(request.Models, model)
+			}
+			vm := goja.New()
+			_, err := vm.RunString(`
+const calls=[];
+let refreshEarly=false, deferResave=false, foreignPending=false;
+let revision="initial", saves=0, refreshOnList=false, gatewayListed=true, gatewayActive=true;
+let draft, active=[], pending=null;
+const manual=()=>draft.models.map(model=>({...model,status:"available"}));
+const refresh=()=>Array.from({length:18},(_,i)=>({model:"catalog-"+i,provenance:"catalog",status:"pending"}));
+const ok=value=>({ok:true,value});
+const sourceID="direct-id";
+const gateway={id:"byok-kth",kind:"kth",registryUrl:"http://127.0.0.1:9100/v1/models/api.json",models:[]};
+const custom=()=>({id:sourceID,kind:"custom",revision:"direct-rev",displayName:"Renamed Direct",
+  providers:[{id:"official-direct-provider",protocol:"openai",baseUrl:"https://api.example.com/v1"}],
+  models:active.concat(pending?.filter(model=>model.provenance==="catalog")||[])});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){
+    const rows=(gatewayListed?[gateway]:[]).concat(saves?[custom()]:[]);
+    if(foreignPending&&!gatewayListed)rows.push({id:"foreign",kind:"custom",models:[{status:"pending"}]});
+    return ok({scopeToken:"scope",accountRevision:revision,sources:rows});
+  },
+  preview(request){
+    calls.push("preview:"+(request.sourceId||""));
+    if(request.accountRevision!==revision||request.sourceId!==(saves?sourceID:undefined)||
+       request.draft.models.length!==3||request.draft.models.some(model=>model.provenance!=="manual")){
+      throw new Error("preview did not use the latest manual draft and source ID");
+    }
+    draft=request.draft;
+    return ok({previewId:"preview",scopeToken:"scope",accountRevision:revision,sourceRevision:request.sourceRevision,canSave:true});
+  },
+  save(){
+    calls.push("save");
+    saves++;
+    revision="manual-"+saves;
+    if(saves===1){
+      active=manual().map(model=>({...model,providerId:"official-direct-provider"}));
+      if(refreshEarly){revision="before-disconnect";pending=refresh();}
+      return ok({sourceId:sourceID,status:"applied",accountRevision:revision});
+    }
+    pending=manual();
+    return ok({sourceId:sourceID,status:deferResave?"deferred":"pending",accountRevision:revision});
+  },
+  disconnect(request){
+    calls.push("disconnect");
+    if(request.sourceId!==gateway.id||request.accountRevision!==revision)throw new Error("wrong gateway revision");
+    gatewayListed=false;
+    revision="rev-X";
+    refreshOnList=!refreshEarly;
+    return ok({status:"deferred",accountRevision:revision});
+  },
+  applyPending(expected){
+    calls.push("apply:"+expected);
+    if(expected!==revision||foreignPending)throw new Error("unsafe pending apply");
+    active=pending;
+    pending=null;
+    gatewayActive=false;
+    return ok({status:"applied"});
+  },
+}};
+` + tc.setup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evaluate := executeSourceActions(t, vm)
+			page := &fakePage{surface: "work", actions: true, importAPI: true, evaluateAction: func(expression string) (any, bool) {
+				if strings.Contains(expression, "applyPending(expectedRevision)") {
+					if _, err := vm.RunString(`if(refreshOnList){refreshOnList=false;revision="rev-Y";pending=refresh();}`); err != nil {
+						t.Error(err)
+					}
+				}
+				return evaluate(expression)
+			}}
+			result, err := kthImportActions(t, home, page).ImportDirect(kthImportContext(t), request)
+			if err != nil || !result.OK || result.SourceID != "direct-id" || result.Models != 3 ||
+				result.RequiresRestart != tc.restart || result.RouteCleanupPending != tc.cleanup || result.RestartDeferred {
+				t.Errorf("direct import: %+v, %v", result, err)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.calls {
+				t.Errorf("page calls: %v, want %q (%v)", calls, tc.calls, err)
+			}
+			state, err := vm.RunString(`!gatewayListed && gatewayActive===foreignPending && (foreignPending ? pending?.length===3 : pending===null && active.length===3 && active.every(model=>model.provenance==="manual"))`)
+			if err != nil || !state.ToBoolean() {
+				t.Errorf("unexpected active/pending state: %v, %v", state, err)
+			}
+		})
+	}
+}
+
+func TestImportDirectStopsAfterOneStaleCleanupReplay(t *testing.T) {
+	shortDeferredApply(t, 100*time.Millisecond)
+	home := kthTestHome(t)
+	request := validDirectImportRequest()
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": directSourceID, "routeCleanupPending": true,
+			"cleanupApplyScopeToken": "scope", "cleanupApplyRevision": "revision"}},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "stale"}},
+	}
+	result, err := kthImportActions(t, home, page).ImportDirect(kthImportContext(t), request)
+	if err != nil || !result.OK || !result.RouteCleanupPending || result.RequiresRestart {
+		t.Fatalf("stale replay: %+v, %v", result, err)
+	}
+	if page.directImports != 2 || page.applyPendingCalls != 2 {
+		t.Fatalf("imports = %d, cleanup probes = %d", page.directImports, page.applyPendingCalls)
+	}
 }
 
 func validDirectImportRequest() DirectImportRequest {
@@ -297,7 +450,7 @@ func TestDirectImportExpressionRejectsABuildWithoutByokSources(t *testing.T) {
 	if _, err := vm.RunString(`globalThis.clawBridgeAPI={};`); err != nil {
 		t.Fatal(err)
 	}
-	expression, err := directImportExpression(validDirectImportRequest())
+	expression, err := directImportExpression(validDirectImportRequest(), "")
 	if err != nil {
 		t.Fatal(err)
 	}

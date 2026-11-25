@@ -253,15 +253,14 @@ func normalizeDirectURL(value, protocol string) string {
 
 // directImportExpression is the page-side import. It runs one `byokSources`
 // conversation: find the managed source, preview, save, apply, verify, then
-// optionally disconnect the old gateway. The draft carries exactly the fields
-// Kimi 3.2.28 allows; an
-// unknown key is refused by the page's own schema check.
-func directImportExpression(request DirectImportRequest) (string, error) {
+// optionally disconnect the old gateway. A cleanup replay is pinned to the
+// original page scope. The draft carries exactly the fields Kimi 3.2.28 allows.
+func directImportExpression(request DirectImportRequest, cleanupScopeToken string) (string, error) {
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	return `(async(raw)=>{
+	return `(async(raw,cleanupScopeToken)=>{
 const request=JSON.parse(raw);
 const sources=globalThis.clawBridgeAPI?.byokSources;
 if(!sources||typeof sources.list!=="function"||typeof sources.preview!=="function"||typeof sources.save!=="function"||typeof sources.disconnect!=="function"){
@@ -281,6 +280,7 @@ const readSnapshot=async()=>{
 };
 let snapshot=await readSnapshot();
 if(!snapshot)return {ok:false,code:"contract-changed"};
+if(cleanupScopeToken&&snapshot.scopeToken!==cleanupScopeToken)return {ok:false,code:"account-changed"};
 let gatewayDisconnected=false;
 const ownGateway=source=>{
   if(!source||expectedGateway===""||source.quarantined===true||source.status==="disconnected")return false;
@@ -332,11 +332,12 @@ const draftModels=wantedModels.map(model=>{
   return entry;
 });
 const draft={kind:"custom",displayName:request.displayName||"` + DirectDisplayName + `",providers:draftProviders,models:draftModels};
-const otherPending=snapshot.sources.some(source=>{
-  if(source.id===existing?.id)return false;
+const hasOtherPending=(current,sourceID)=>current.sources.some(source=>{
+  if(source.id===sourceID)return false;
   if(Array.isArray(source.models))return source.models.some(model=>model.status==="pending");
-  return snapshot.applyState!==undefined&&!["applied","idle","ready"].includes(snapshot.applyState);
+  return current.applyState!==undefined&&!["applied","idle","ready"].includes(current.applyState);
 });
+let allowApply=!hasOtherPending(snapshot,existing?.id);
 const importDraft=async(current,existing,allowApply)=>{
   const previewRequest={accountRevision:current.accountRevision,sourceRevision:existing?.revision??null,draft:draft};
   if(existing)previewRequest.sourceId=existing.id;
@@ -358,7 +359,7 @@ const importDraft=async(current,existing,allowApply)=>{
   }
   return {saved:saved.value,status:status};
 };
-let imported=await importDraft(snapshot,existing,!otherPending);
+let imported=await importDraft(snapshot,existing,allowApply);
 if(imported.previewFailed&&imported.error==="byok-invalid-source"&&existing){
   // Kimi 3.2.28 can retain an old defaultEffort when a draft omits it.
   // A fresh provider identity avoids that merge within the same source save.
@@ -373,7 +374,7 @@ if(imported.previewFailed&&imported.error==="byok-invalid-source"&&existing){
   if(replacements.size){
     for(const provider of draft.providers)provider.id=replacements.get(provider.id)||provider.id;
     for(const model of draft.models)model.providerId=replacements.get(model.providerId)||model.providerId;
-    imported=await importDraft(snapshot,existing,!otherPending);
+    imported=await importDraft(snapshot,existing,allowApply);
   }
 }
 if(imported.error)return {ok:false,code:imported.error};
@@ -407,30 +408,29 @@ const cleanupGateway=async()=>{
   // Nothing of this installation's gateway is left to remove: an inactive or
   // foreign one is not this cleanup's business.
   if(!ownGateway(gateway))return {settled:true};
-  const cleanupOtherPending=current.sources.some(source=>source.id!==gateway.id&&
-    (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
+  const cleanupOtherPending=hasOtherPending(current,gateway.id);
   const reply=await sources.disconnect({sourceId:gateway.id,accountRevision:current.accountRevision,sourceRevision:gateway.revision??null});
   if(reply?.ok===true)gatewayDisconnected=true;
   return await settleDisconnect(reply,current,cleanupOtherPending);
 };
 let cleanup=await cleanupGateway();
 if(cleanup?.error)return {ok:false,code:cleanup.error};
-let routeCleanupPending=cleanup?.settled!==true;
+let routeCleanupPending=cleanup?.settled!==true||(!!cleanupScopeToken&&status!=="applied");
 if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
   const current=await readSnapshot();
   if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
   const directModels=Array.isArray(direct?.models)?direct.models:[];
   const directPending=directModels.some(model=>model.status==="pending");
-  const foreignPending=current.sources.some(source=>source.id!==saved.sourceId&&
-    (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
+  const foreignPending=hasOtherPending(current,saved.sourceId);
   // A background catalog refresh can race the first disconnect. Re-save only
   // our exact manual draft when no other source has a pending confirmation.
   const ids=officialProviderIDs(direct);
   if(ids&&directPending&&!foreignPending){
+    allowApply=true;
     for(const provider of draft.providers)provider.id=ids.get(provider.id);
     for(const model of draft.models)model.providerId=ids.get(model.providerId);
-    imported=await importDraft(current,direct,true);
+    imported=await importDraft(current,direct,allowApply);
     if(imported.error)return {ok:false,code:imported.error};
     saved=imported.saved;status=imported.status;
     if(["applied","pending","deferred"].indexOf(status)<0)return {ok:false,code:"import-failed"};
@@ -440,7 +440,7 @@ if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
   }
 }
 let applyScopeToken="",applyRevision="",cleanupApplyScopeToken="",cleanupApplyRevision="";
-if(status==="deferred"&&!otherPending&&typeof sources.applyPending==="function"&&
+if(status==="deferred"&&allowApply&&typeof sources.applyPending==="function"&&
   typeof saved.accountRevision==="string"&&saved.accountRevision){
   applyScopeToken=snapshot.scopeToken;applyRevision=saved.accountRevision;
 }
@@ -452,7 +452,7 @@ return {ok:true,sourceId:saved.sourceId,gatewayDisconnected:gatewayDisconnected,
   cleanupApplyScopeToken:cleanupApplyScopeToken,cleanupApplyRevision:cleanupApplyRevision,
   models:draftModels.length,requiresRestart:status!=="applied",restartDeferred:status==="deferred",
   applyScopeToken:applyScopeToken,applyRevision:applyRevision};
-})(` + quoteJS(string(encoded)) + `)`, nil
+})(` + quoteJS(string(encoded)) + `,` + quoteJS(cleanupScopeToken) + `)`, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -21,11 +21,9 @@ import (
 // `byok-<uuid>` provider, and the model picker opens a new conversation instead
 // of switching in place.
 //
-// The repair below puts the store back in the shape the official allocator can
-// answer from. It acts on the signed-in account only, on a byok-kth source that
-// points at loopback, and never on secrets, owned resources or another account.
-// Every write is a compare-and-swap against the bytes that were read: a
-// concurrent writer wins and this call reports that it changed nothing.
+// The repair below acts on the signed-in account only. A live byok-kth source
+// must point at loopback. Direct store edits compare-and-swap against the bytes
+// that were read and preserve secrets, owned resources and other accounts.
 
 const (
 	kthSourceID   = "byok-kth"
@@ -46,17 +44,18 @@ const (
 // one: the official disconnect may leave it behind, and an import that follows
 // must still see the account as free.
 type kthStoreScan struct {
-	valid     bool
-	account   map[string]any
-	source    map[string]any
-	routeKey  string
-	present   bool
-	owned     bool
-	canonical bool
-	stuck     string
-	bound     bool
-	modeled   bool
-	blocked   []string
+	valid         bool
+	account       map[string]any
+	source        map[string]any
+	routeKey      string
+	present       bool
+	owned         bool
+	canonical     bool
+	stuck         string
+	bound         bool
+	modeled       bool
+	orphanPending bool
+	blocked       []string
 }
 
 // needsDisconnect reports a byok-kth source this product owns whose kimi
@@ -76,6 +75,10 @@ func (s kthStoreScan) needsRebind() bool {
 // from minting `byok-kth-kimi` again after the source is gone.
 func (s kthStoreScan) needsBlockedCleanup() bool {
 	return !s.present && !s.modeled && len(s.blocked) > 0
+}
+
+func (s kthStoreScan) needsPendingSettle() bool {
+	return s.orphanPending
 }
 
 func scanKthStore(store map[string]any, accountKey, baseURL string) kthStoreScan {
@@ -101,12 +104,11 @@ func scanKthStore(store map[string]any, accountKey, baseURL string) kthStoreScan
 	if scan.owned && !scan.canonical {
 		scan.stuck = kimi
 	}
-	for _, alias := range kthModelAliases(account) {
-		if strings.HasPrefix(alias, kthAliasPrefix) {
-			scan.modeled = true
-			break
-		}
-	}
+	active, pending := mapField(account, "active"), mapField(account, "pending")
+	activeModeled, pendingModeled := kthSnapshotModeled(active), kthSnapshotModeled(pending)
+	scan.modeled = activeModeled || pendingModeled
+	scan.orphanPending = !scan.present && pending != nil &&
+		(activeModeled || kthSnapshotHasProvider(active)) && !pendingModeled && !kthSnapshotHasProvider(pending)
 	blocked := mapField(account, "blockedAliases")
 	for alias := range blocked {
 		if strings.HasPrefix(alias, kthAliasPrefix) {
@@ -231,16 +233,24 @@ func kthProviderProtocol(provider map[string]any) string {
 	return firstNonEmpty(stringField(provider, "protocol"), stringField(provider, "type"))
 }
 
-func kthModelAliases(account map[string]any) []string {
-	var out []string
-	for _, group := range []string{"active", "pending"} {
-		for _, row := range modelRows(mapField(account, group)) {
-			if alias := stringField(row, "alias"); alias != "" {
-				out = append(out, alias)
-			}
+func kthSnapshotModeled(snapshot map[string]any) bool {
+	for _, row := range modelRows(snapshot) {
+		if strings.HasPrefix(stringField(row, "alias"), kthAliasPrefix) {
+			return true
 		}
 	}
-	return out
+	return false
+}
+
+func kthSnapshotHasProvider(snapshot map[string]any) bool {
+	rows, _ := snapshot["providers"].([]any)
+	for _, row := range rows {
+		provider, _ := row.(map[string]any)
+		if stringField(provider, "id") == kthProviderID {
+			return true
+		}
+	}
+	return false
 }
 
 // kimiRouteKey is the exact compact key the official store uses for the kimi
@@ -395,9 +405,34 @@ if(status==="deferred"&&!hadOtherPending&&typeof sources.applyPending==="functio
 return {ok:true,status:status,applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })()`
 
-// kthResetAnswer is what the official disconnect offered: a build without the
-// source API, or a result the import must stop for. Reaching the end without
-// either means the source is gone and the import may run.
+func kthSettlePendingExpression(directSourceID, expectedRevision string) string {
+	return `(async(directSourceID,expectedRevision)=>{
+const sources=globalThis.clawBridgeAPI?.byokSources;
+if(typeof sources?.list!=="function"||typeof sources.applyPending!=="function")return {ok:false,code:"contract-changed"};
+const reply=await sources.list();
+const current=reply?.ok===true?reply.value:null;
+if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string"||
+  typeof current.accountRevision!=="string"||!current.accountRevision)return {ok:false,code:"contract-changed"};
+if(!expectedRevision||current.accountRevision!==expectedRevision||current.sources.some(source=>
+  source?.id==="byok-kth"&&source.quarantined!==true&&source.status!=="disconnected"))return {ok:true,status:"pending"};
+const direct=current.sources.find(source=>directSourceID&&source?.id===directSourceID)||
+  current.sources.find(source=>source?.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
+const otherPending=current.sources.some(source=>{
+  if(source?.id==="byok-kth"||(source===direct&&source?.kind==="custom"))return false;
+  if(Array.isArray(source?.models))return source.models.some(model=>model?.status==="pending");
+  return current.applyState!==undefined&&!["applied","idle","ready"].includes(current.applyState);
+});
+if(otherPending)return {ok:true,status:"pending"};
+const applied=await sources.applyPending(current.accountRevision);
+if(applied?.ok!==true)return {ok:false,code:applied?.reasonCode||"apply-failed"};
+const status=typeof applied.value?.status==="string"?applied.value.status:"";
+if(status==="failed"||status==="apply-failed")return {ok:false,code:"apply-failed"};
+return {ok:true,status:status,applyScopeToken:current.scopeToken,applyRevision:current.accountRevision};
+})(` + quoteJS(directSourceID) + `,` + quoteJS(expectedRevision) + `)`
+}
+
+// kthResetAnswer reports a skipped legacy disconnect or a result the import
+// must stop for. An empty answer means the reset applied.
 type kthResetAnswer struct {
 	skipped bool
 	stop    *ImportResult
@@ -413,17 +448,18 @@ type kthResetAnswer struct {
 // against `applyPending` while the official window settles; only when it stays
 // deferred does the import ask for the restart that applies it. The blocked
 // aliases the disconnect leaves behind are cleared in the same call, so the
-// import that follows allocates `byok-kth-kimi` again.
-func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarget, account, baseURL string) (*ImportResult, error) {
-	disconnected := false
-	for pass := 0; pass < kthRepairPasses; pass++ {
+// import that follows allocates `byok-kth-kimi` again. A gateway already removed
+// from sources can still need its pending removal applied before this cleanup.
+func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarget, account, baseURL, disconnectDirectSourceID string) (*ImportResult, error) {
+	disconnected, settledPending := false, false
+	for pass := 0; pass < kthRepairPasses; {
 		scan := kthStoreState(a.kimiHome, account, baseURL)
 		if !scan.valid {
 			return nil, nil
 		}
 		switch {
 		case scan.needsDisconnect() && !disconnected:
-			reset, err := a.disconnectStuckKthProvider(ctx, settings)
+			reset, err := a.kthProviderReset(ctx, settings, kthDisconnectExpression)
 			if err != nil || reset.stop != nil {
 				return reset.stop, err
 			}
@@ -445,6 +481,19 @@ func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarge
 			// The official API reported an applied disconnect but the store still
 			// holds the source. Importing now would mint another random id.
 			return &ImportResult{State: ImportStateFailed, Reason: "native_import_store_changed"}, nil
+		case scan.needsPendingSettle() && !settledPending:
+			expression := kthSettlePendingExpression(disconnectDirectSourceID, stringField(scan.account, "revision"))
+			reset, err := a.kthProviderReset(ctx, settings, expression)
+			if err != nil || reset.stop != nil {
+				return reset.stop, err
+			}
+			if err := a.waitStep(ctx); err != nil {
+				return nil, err
+			}
+			settledPending = true
+			continue
+		case scan.needsPendingSettle():
+			return kthProviderResetPending(false), nil
 		case scan.needsRebind():
 			if _, err := rebindKthRouteBinding(a.kimiHome, account, baseURL); err != nil {
 				if err := a.waitStep(ctx); err != nil {
@@ -460,6 +509,7 @@ func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarge
 		default:
 			return nil, nil
 		}
+		pass++
 	}
 	// The store kept changing under every pass. Proceeding would let the
 	// official allocator mint a random id, so the import stops and the next sync
@@ -467,11 +517,8 @@ func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarge
 	return &ImportResult{State: ImportStateFailed, Reason: "native_import_store_changed"}, nil
 }
 
-// disconnectStuckKthProvider runs the official disconnect. A stop result means
-// the import must not run: either the page refused, or the official apply is
-// deferred until a restart.
-func (a *cdpActions) disconnectStuckKthProvider(ctx context.Context, settings actionTarget) (kthResetAnswer, error) {
-	value, err := a.evaluate(ctx, settings.sessionID, kthDisconnectExpression)
+func (a *cdpActions) kthProviderReset(ctx context.Context, settings actionTarget, expression string) (kthResetAnswer, error) {
+	value, err := a.evaluate(ctx, settings.sessionID, expression)
 	if err != nil {
 		if errors.Is(err, ErrSessionInvalid) {
 			a.dropSession(settings.targetID)
@@ -490,8 +537,11 @@ func (a *cdpActions) disconnectStuckKthProvider(ctx context.Context, settings ac
 		code, _ := answer["code"].(string)
 		state := ImportStateFailed
 		reason := kthResetFailureReason(code)
-		if reason == NativeContractChanged {
+		switch reason {
+		case NativeContractChanged:
 			state = ImportStateContractChanged
+		case NativeAccountChanged:
+			state = ImportStateAccountChanged
 		}
 		return kthResetAnswer{stop: &ImportResult{State: state, Reason: reason}}, nil
 	}
@@ -521,20 +571,23 @@ func (a *cdpActions) disconnectStuckKthProvider(ctx context.Context, settings ac
 		}
 	}
 	if status != "applied" {
-		return kthResetAnswer{stop: &ImportResult{State: ImportStateRequiresRestart,
-			Reason: "model_provider_reset_pending", RequiresRestart: true,
-			RestartDeferred: status == "deferred"}}, nil
+		return kthResetAnswer{stop: kthProviderResetPending(status == "deferred")}, nil
 	}
 	return kthResetAnswer{}, nil
 }
 
+func kthProviderResetPending(deferred bool) *ImportResult {
+	return &ImportResult{State: ImportStateRequiresRestart, Reason: "model_provider_reset_pending",
+		RequiresRestart: true, RestartDeferred: deferred}
+}
+
 // kthResetFailureReason maps a page code onto the vocabulary the panel renders.
-// A page code carries no instruction for the user, so everything except a
-// changed contract or a foreign source is one retryable failure.
 func kthResetFailureReason(code string) string {
 	switch strings.ReplaceAll(safeActionCode(code), "-", "_") {
 	case "contract_changed":
 		return NativeContractChanged
+	case "account_changed":
+		return NativeAccountChanged
 	case "foreign_source":
 		return "native_import_foreign_source"
 	}

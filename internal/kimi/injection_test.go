@@ -25,6 +25,7 @@ type fakePage struct {
 	// actions models the official preload API the CDP actions call. It is off by
 	// default so every existing test keeps the behaviour it was written for.
 	actions                bool
+	evaluateAction         func(string) (any, bool)
 	importAPI              bool
 	hideSettings           bool
 	settingsOpen           bool
@@ -263,6 +264,11 @@ func (p *fakePage) emit(write func(string), message map[string]any) {
 // same surface main_test.go's fake child speaks, so the actions are exercised
 // through their real expressions rather than through a stub.
 func (p *fakePage) actionReply(sessionID, expression string) any {
+	if p.evaluateAction != nil {
+		if value, handled := p.evaluateAction(expression); handled {
+			return value
+		}
+	}
 	switch {
 	case expression == daimonStatusExpression:
 		p.mu.Lock()

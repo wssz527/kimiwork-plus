@@ -462,7 +462,7 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	var result ImportResult
 	for attempt := 0; attempt < attempts; attempt++ {
 		if mode != IntegrationModeDirect {
-			stop, err := a.repairKthProvider(ctx, settings, current, request.URL)
+			stop, err := a.repairKthProvider(ctx, settings, current, request.URL, request.DisconnectDirectSourceID)
 			if err != nil {
 				state, reason, surfaced := classifyActionError(err)
 				result := ImportResult{State: state, Reason: reason, Opened: opened}
@@ -585,19 +585,19 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 // settleDeferredCleanup finishes a route cleanup Electron answered with
 // `pending` or `deferred`. Only an applied cleanup clears the claim; `deferred`
 // and `apply-failed` keep it and ask for the restart that removes the old
-// source, and every other outcome leaves the removal to the next sync because
-// the replacement itself is already applied.
-func (a *cdpActions) settleDeferredCleanup(ctx context.Context, settings actionTarget, answer map[string]any, result *ImportResult) {
+// source. The caller can recover a stale cleanup from the returned outcome.
+func (a *cdpActions) settleDeferredCleanup(ctx context.Context, settings actionTarget, answer map[string]any, result *ImportResult) string {
 	scopeToken, _ := answer["cleanupApplyScopeToken"].(string)
 	revision, _ := answer["cleanupApplyRevision"].(string)
 	if scopeToken == "" || revision == "" {
-		return
+		return ""
 	}
 	outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
 	if err != nil {
-		return
+		return ""
 	}
 	recordCleanupOutcome(result, outcome)
+	return outcome
 }
 
 func recordCleanupOutcome(result *ImportResult, outcome string) {
@@ -648,11 +648,24 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 		a.closeIfOpenedInto(ctx, opened, &result)
 		return result, surfaced
 	}
-	expression, err := directImportExpression(request)
+	result, retryScopeToken, err := a.importDirectOnce(ctx, settings, request, "")
+	if retryScopeToken != "" && request.DisconnectGateway {
+		if request.ExistingSourceID == "" {
+			request.ExistingSourceID = result.SourceID
+		}
+		result, _, err = a.importDirectOnce(ctx, settings, request, retryScopeToken)
+	}
+	result.Opened = opened
+	a.closeIfOpenedInto(ctx, opened, &result)
+	return result, err
+}
+
+// importDirectOnce returns the scope token for a cleanup whose revision became stale.
+func (a *cdpActions) importDirectOnce(ctx context.Context, settings actionTarget, request DirectImportRequest, cleanupScopeToken string) (ImportResult, string, error) {
+	expression, err := directImportExpression(request, cleanupScopeToken)
 	if err != nil {
-		result := ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request", Opened: opened}
-		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, nil
+		result := ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request"}
+		return result, "", nil
 	}
 	value, err := a.evaluateBounded(ctx, settings.sessionID, expression, maxDirectExpression)
 	if err != nil {
@@ -660,16 +673,15 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 			a.dropSession(settings.targetID)
 		}
 		state, reason, surfaced := classifyActionError(err)
-		result := ImportResult{State: state, Reason: reason, Opened: opened}
+		result := ImportResult{State: state, Reason: reason}
 		if err.Error() == "native_bridge_expression_too_large" || errors.Is(err, ErrMessageTooLarge) {
 			result.State, result.Reason = ImportStateFailed, "direct_catalog_too_large"
 			surfaced = nil
 		}
-		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, surfaced
+		return result, "", surfaced
 	}
 	answer, _ := value.(map[string]any)
-	result := ImportResult{Opened: opened}
+	result := ImportResult{}
 	if ok, _ := answer["ok"].(bool); ok {
 		result.SourceID, _ = answer["sourceId"].(string)
 		if result.SourceID == "" {
@@ -696,8 +708,11 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 		code, _ := answer["code"].(string)
 		result.State = ImportStateFailed
 		result.Reason = directImportFailureReason(code)
-		if result.Reason == NativeContractChanged || result.Reason == "direct_mode_unsupported" {
+		switch result.Reason {
+		case NativeContractChanged, "direct_mode_unsupported":
 			result.State = ImportStateContractChanged
+		case NativeAccountChanged:
+			result.State = ImportStateAccountChanged
 		}
 	}
 	// The apply may have landed inside the post-ready window and answered
@@ -711,9 +726,8 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 			outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
 			if err != nil {
 				state, reason, surfaced := classifyActionError(err)
-				result := ImportResult{State: state, Reason: reason, Opened: opened}
-				a.closeIfOpenedInto(ctx, opened, &result)
-				return result, surfaced
+				result := ImportResult{State: state, Reason: reason}
+				return result, "", surfaced
 			}
 			switch outcome {
 			case "applied":
@@ -738,14 +752,14 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 			}
 		}
 	}
-	// The same settlement as the gateway import: a cleanup deferred by the
-	// post-ready window is applied here, and one that stays deferred asks for
-	// the restart that removes the old gateway.
 	if result.OK && !result.RequiresRestart && result.RouteCleanupPending {
-		a.settleDeferredCleanup(ctx, settings, answer, &result)
+		outcome := a.settleDeferredCleanup(ctx, settings, answer, &result)
+		if outcome == "stale" {
+			scopeToken, _ := answer["cleanupApplyScopeToken"].(string)
+			return result, scopeToken, nil
+		}
 	}
-	a.closeIfOpenedInto(ctx, opened, &result)
-	return result, nil
+	return result, "", nil
 }
 
 // resolveImportTarget finds the page that carries the import API, opening the
@@ -1461,6 +1475,8 @@ func directImportFailureReason(code string) string {
 		return "direct_gateway_disconnect_failed"
 	case "import_failed":
 		return "direct_import_failed"
+	case "account_changed":
+		return NativeAccountChanged
 	}
 	return "native_import_" + code
 }
