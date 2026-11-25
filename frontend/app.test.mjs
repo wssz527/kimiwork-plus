@@ -5900,6 +5900,8 @@ test('reasonText translates every reason code the UI can show', () => {
     'native_import_store_changed',
     'native_import_foreign_source',
     'native_import_provider_reset_failed',
+    'native_import_non_canonical_provider',
+    'native_import_apply_failed',
     'model_provider_reset_pending',
     'direct_prepare_required',
     'model_sync_write_blocked',
@@ -5919,6 +5921,13 @@ test('reasonText translates every reason code the UI can show', () => {
   assert.match(reasonText('configuration_unavailable'), /尚未读取到本机配置/);
   assert.match(reasonText('direct_prepare_required'), /静态 hosts 系统授权/);
   assert.match(reasonText('conversation_kimi_restart_failed'), /Kimi 未能自动重新打开/);
+  const nonCanonical = reasonText('native_import_non_canonical_provider');
+  assert.match(nonCanonical, /原位切换/);
+  assert.match(nonCanonical, /重新同步/);
+  assert.doesNotMatch(nonCanonical, /native_import/);
+  const applyFailed = reasonText('native_import_apply_failed');
+  assert.match(applyFailed, /生效/);
+  assert.doesNotMatch(applyFailed, /native_import/);
 });
 
 test('the workspace bar offers a manual resync when static hosts are still missing', () => {

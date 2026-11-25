@@ -355,6 +355,8 @@ const DIAG_REASON = {
   native_import_store_changed: '官方模型配置在你操作的同时被其他进程改写，本次未继续写入；稍后会自动重试。',
   native_import_foreign_source: '官方模型来源不属于本产品，未断开也未改写；请先到官方 Kimi 核对模型来源。',
   native_import_provider_reset_failed: '官方模型来源在修复过程中发生变化，本次未继续写入；请重试一次，仍失败请查看诊断信息。',
+  native_import_non_canonical_provider: '官方 Kimi 仍保留旧的随机模型来源 ID，原位切换修复未完成；本次未写入重复来源。请稍后重新同步，仍失败请查看诊断信息。',
+  native_import_apply_failed: '模型配置已提交，但官方 Kimi 未完成生效操作；请稍后重新同步，仍失败请正常重启 Kimi。',
   model_provider_reset_pending: '官方模型来源已提交重建，但 Kimi Work 正在处理任务，尚未生效；请正常重启 Kimi 完成修复。',
   kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
   kimi_not_running: '官方 Kimi 当前未运行。请先打开 Kimi Work 后再继续。',

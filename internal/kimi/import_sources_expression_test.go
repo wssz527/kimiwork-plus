@@ -296,3 +296,220 @@ func boolString(value bool) string {
 	}
 	return "false"
 }
+
+// A preview that would mint a random provider id is the one way an import can
+// pass every revision check and still lose in-place switching. The page drops
+// such a preview instead of saving it.
+func TestSourceImportNeverSavesANonCanonicalProviderPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		providers  string
+		disconnect string
+		wantOK     bool
+		wantCode   string
+		wantCalls  string
+	}{
+		{
+			name:       "a random provider id is discarded before save",
+			providers:  `source:{providers:[{id:"byok-0b6e0d5f",protocol:"kimi",baseUrl:"http://127.0.0.1:9100/v1"}]},`,
+			disconnect: `disconnect(request){calls.push("disconnect");return ok({});},`,
+			wantCode:   "non-canonical-provider",
+			wantCalls:  "list,preview,discard:preview",
+		},
+		{
+			name:       "the canonical provider id is saved",
+			providers:  `source:{providers:[{id:"byok-kth-kimi",protocol:"kimi",baseUrl:"http://127.0.0.1:9100/v1"}]},`,
+			disconnect: `disconnect(request){calls.push("disconnect");return ok({});},`,
+			wantOK:     true,
+			wantCalls:  "list,preview,save,list,apply:after",
+		},
+		{
+			name:       "a preview without source providers keeps the released behaviour",
+			providers:  `source:{notices:[]},`,
+			disconnect: `disconnect(request){calls.push("disconnect");return ok({});},`,
+			wantOK:     true,
+			wantCalls:  "list,preview,save,list,apply:after",
+		},
+		{
+			name:       "a preview with only other protocols is saved",
+			providers:  `source:{providers:[{id:"byok-kth-resp",protocol:"openai_responses"}]},`,
+			disconnect: `disconnect(request){calls.push("disconnect");return ok({});},`,
+			wantOK:     true,
+			wantCalls:  "list,preview,save,list,apply:after",
+		},
+		{
+			name:       "a build without the source disconnect keeps the released behaviour",
+			providers:  `source:{providers:[{id:"byok-0b6e0d5f",protocol:"kimi"}]},`,
+			disconnect: ``,
+			wantOK:     true,
+			wantCalls:  "list,preview,save,list,apply:after",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			if _, err := vm.RunString(`
+const calls=[];
+let saved=false;
+const initial={scopeToken:"account",accountRevision:"before",sources:[{id:"byok-kth",kind:"kth",revision:"source",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"}]};
+const updated={...initial,accountRevision:"after"};
+const preview={scopeToken:"account",accountRevision:"before",sourceRevision:"source",sourceId:"byok-kth",
+  previewId:"preview",canSave:true,candidates:[{id:"m1",modelId:"m1"}],` + tc.providers + `};
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok(saved?updated:initial);},
+  preview(){calls.push("preview");return ok(preview);},
+  discard(id){calls.push("discard:"+id);},
+  save(){calls.push("save");saved=true;return ok({sourceId:"byok-kth",accountRevision:"after",status:"pending"});},
+  applyPending(revision){calls.push("apply:"+revision);return ok({status:"applied"});},
+  ` + tc.disconnect + `
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1", "") + `).then(result=>globalThis.importResult=result);`); err != nil {
+				t.Fatal(err)
+			}
+			result := vm.Get("importResult").ToObject(vm)
+			if result.Get("ok").ToBoolean() != tc.wantOK {
+				t.Fatalf("result: %v", result.Export())
+			}
+			code := ""
+			if value := result.Get("code"); value != nil {
+				code = value.String()
+			}
+			if code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", code, tc.wantCode)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
+	}
+}
+
+// `deferred` is what Electron answers inside its post-ready window. The page
+// hands the caller the revision to apply later, but only for a save this import
+// owns: another source's pending work must keep its own confirmation.
+func TestSourceImportEmitsApplyCredentialsOnlyForAFreshDeferredSave(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		saveStatus   string
+		otherPending bool
+		wantScope    string
+		wantRevision string
+		wantCalls    string
+	}{
+		{name: "the apply itself comes back deferred", saveStatus: "pending",
+			wantScope: "account", wantRevision: "after", wantCalls: "list,preview,save,list,apply:after"},
+		{name: "a fresh deferred save", saveStatus: "deferred",
+			wantScope: "account", wantRevision: "after", wantCalls: "list,preview,save"},
+		{name: "another source is pending", saveStatus: "deferred", otherPending: true,
+			wantCalls: "list,preview,save"},
+		{name: "an applied save asks for nothing", saveStatus: "applied",
+			wantCalls: "list,preview,save"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			sources := `[{id:"byok-kth",kind:"kth",revision:"source",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"}]`
+			if tc.otherPending {
+				sources = `[{id:"byok-kth",kind:"kth",revision:"source",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"},{id:"other",kind:"registry",models:[{status:"pending"}]}]`
+			}
+			if _, err := vm.RunString(`
+const calls=[];
+let saved=false;
+const initial={scopeToken:"account",accountRevision:"before",sources:` + sources + `};
+const updated={...initial,accountRevision:"after"};
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok(saved?updated:initial);},
+  preview(){calls.push("preview");return ok({scopeToken:"account",accountRevision:"before",sourceRevision:"source",sourceId:"byok-kth",previewId:"preview",canSave:true,candidates:[{id:"m1"}]});},
+  discard(){calls.push("discard");},
+  save(){calls.push("save");saved=true;return ok({sourceId:"byok-kth",accountRevision:"after",status:"` + tc.saveStatus + `"});},
+  applyPending(revision){calls.push("apply:"+revision);return ok({status:"deferred"});},
+  disconnect(){return ok({});},
+}};
+`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + importExpression("fixture", "http://127.0.0.1:9100/v1", "") + `).then(result=>globalThis.importResult=result);`); err != nil {
+				t.Fatal(err)
+			}
+			result := vm.Get("importResult").ToObject(vm)
+			scope, revision := "", ""
+			if value := result.Get("applyScopeToken"); value != nil {
+				scope = value.String()
+			}
+			if value := result.Get("applyRevision"); value != nil {
+				revision = value.String()
+			}
+			if scope != tc.wantScope || revision != tc.wantRevision {
+				t.Fatalf("apply scope=%q revision=%q, want %q/%q", scope, revision, tc.wantScope, tc.wantRevision)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
+	}
+}
+
+// The Go retry loop trusts this expression's own guards: it must never apply a
+// revision that belongs to another account or to newer bytes than the save saw.
+func TestApplyPendingExpressionGuardsTheAccountAndRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      string
+		wantOK     bool
+		wantStatus string
+		wantCode   string
+		wantCalls  string
+	}{
+		{name: "matching revision applies", wantOK: true, wantStatus: "applied", wantCalls: "list,apply:revision"},
+		{name: "another account aborts", setup: `globalThis.clawBridgeAPI.byokSources.list=()=>{calls.push("list");return ok({scopeToken:"another",accountRevision:"revision"});};`,
+			wantCode: "account-changed", wantCalls: "list"},
+		{name: "a changed revision is stale", setup: `globalThis.clawBridgeAPI.byokSources.list=()=>{calls.push("list");return ok({scopeToken:"account",accountRevision:"newer"});};`,
+			wantCode: "stale", wantCalls: "list"},
+		{name: "a build without applyPending is unsupported",
+			setup:    `delete globalThis.clawBridgeAPI.byokSources.applyPending;`,
+			wantCode: "unsupported", wantCalls: ""},
+		{name: "an apply failure is reported",
+			setup:    `globalThis.clawBridgeAPI.byokSources.applyPending=()=>{calls.push("apply:revision");return {ok:false,reasonCode:"byok-busy"};};`,
+			wantCode: "byok-busy", wantCalls: "list,apply:revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := goja.New()
+			if _, err := vm.RunString(`
+const calls=[];
+const ok=value=>({ok:true,value});
+globalThis.clawBridgeAPI={byokSources:{
+  list(){calls.push("list");return ok({scopeToken:"account",accountRevision:"revision",sources:[]});},
+  applyPending(revision){calls.push("apply:"+revision);return ok({status:"applied"});},
+}};
+` + tc.setup); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := vm.RunString(`(` + applyPendingExpression("account", "revision") + `).then(result=>globalThis.applyResult=result);`); err != nil {
+				t.Fatal(err)
+			}
+			result := vm.Get("applyResult").ToObject(vm)
+			if result.Get("ok").ToBoolean() != tc.wantOK {
+				t.Fatalf("result: %v", result.Export())
+			}
+			status, code := "", ""
+			if value := result.Get("status"); value != nil {
+				status = value.String()
+			}
+			if value := result.Get("code"); value != nil {
+				code = value.String()
+			}
+			if status != tc.wantStatus || code != tc.wantCode {
+				t.Fatalf("status=%q code=%q, want %q/%q", status, code, tc.wantStatus, tc.wantCode)
+			}
+			calls, err := vm.RunString(`calls.join(",")`)
+			if err != nil || calls.String() != tc.wantCalls {
+				t.Fatalf("calls = %v, want %s, err=%v", calls, tc.wantCalls, err)
+			}
+		})
+	}
+}

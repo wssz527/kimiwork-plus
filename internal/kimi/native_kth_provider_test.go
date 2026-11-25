@@ -563,11 +563,11 @@ let status="applied";
 let revision="a1";
 const kthDefaultSource={id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"};
 const kthCurrentSource=()=>globalThis.kthSource===undefined?kthDefaultSource:globalThis.kthSource;
-const otherSources=globalThis.kthOtherSources||[];
 const ok=value=>({ok:true,value});
 globalThis.clawBridgeAPI={byokSources:{
   list(){calls.push("list");
     const rows=(connected?[kthCurrentSource()]:[]).filter(Boolean);
+    const otherSources=globalThis.kthOtherSources||[];
     return ok({scopeToken:"s1",accountRevision:revision,applyState:"applied",sources:rows.concat(otherSources)});},
   disconnect(request){calls.push("disconnect:"+request.sourceId);
     if(globalThis.kthRefuse)return {ok:false,reasonCode:"byok-busy"};
@@ -650,5 +650,37 @@ func TestKthDisconnectExpressionSkipsALegacyBuildAndReportsARefusal(t *testing.T
 	refused := vm.Get("kthResult").ToObject(vm)
 	if refused.Get("ok").ToBoolean() || refused.Get("code").String() != "byok-busy" {
 		t.Fatalf("refusal: %v", refused.Export())
+	}
+}
+
+// The page cannot apply a deferred reset itself: the Go side owns the bounded
+// wait. It only hands over the revision to apply, and only when no other source
+// has pending work of its own.
+func TestKthDisconnectEmitsApplyCredentialsOnlyForAFreshDeferredReset(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		setup        string
+		wantScope    string
+		wantRevision string
+	}{
+		{name: "a deferred disconnect", setup: `status="deferred";`, wantScope: "s1", wantRevision: "a2"},
+		{name: "an applied disconnect", setup: ``},
+		{name: "another source is pending",
+			setup: `status="deferred";globalThis.kthOtherSources=[{id:"other",kind:"registry",models:[{status:"pending"}]}];`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm, _ := runKthDisconnectExpression(t, tc.setup)
+			result := vm.Get("kthResult").ToObject(vm)
+			scope, revision := "", ""
+			if value := result.Get("applyScopeToken"); value != nil {
+				scope = value.String()
+			}
+			if value := result.Get("applyRevision"); value != nil {
+				revision = value.String()
+			}
+			if scope != tc.wantScope || revision != tc.wantRevision {
+				t.Fatalf("apply scope=%q revision=%q, want %q/%q", scope, revision, tc.wantScope, tc.wantRevision)
+			}
+		})
 	}
 }

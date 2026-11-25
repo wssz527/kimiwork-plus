@@ -387,7 +387,12 @@ if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function
   status=typeof applied.value?.status==="string"?applied.value.status:"";
 }
 if(status==="failed"||status==="apply-failed")return {ok:false,code:"apply-failed"};
-return {ok:true,status:status};
+let applyScopeToken="",applyRevision="";
+if(status==="deferred"&&!hadOtherPending&&typeof sources.applyPending==="function"&&
+  typeof disconnected.value?.accountRevision==="string"&&disconnected.value.accountRevision){
+  applyScopeToken=snapshot.scopeToken;applyRevision=disconnected.value.accountRevision;
+}
+return {ok:true,status:status,applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })()`
 
 // kthResetAnswer is what the official disconnect offered: a build without the
@@ -403,10 +408,12 @@ type kthResetAnswer struct {
 // and nil when the import may proceed.
 //
 // A source that is stuck on a non-canonical id is disconnected through the
-// official API first; a deferred disconnect leaves the store untouched and asks
-// for the restart that applies it. The blocked aliases the disconnect leaves
-// behind are cleared in the same call, so the import that follows allocates
-// `byok-kth-kimi` again.
+// official API first; the wait after it lets Electron's own post-restart model
+// refresh finish before the store is scanned. A deferred disconnect is retried
+// against `applyPending` while the official window settles; only when it stays
+// deferred does the import ask for the restart that applies it. The blocked
+// aliases the disconnect leaves behind are cleared in the same call, so the
+// import that follows allocates `byok-kth-kimi` again.
 func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarget, account, baseURL string) (*ImportResult, error) {
 	disconnected := false
 	for pass := 0; pass < kthRepairPasses; pass++ {
@@ -424,6 +431,14 @@ func (a *cdpActions) repairKthProvider(ctx context.Context, settings actionTarge
 				// A build without byokSources allocates through its own importer:
 				// there is nothing here to repair and the import is unchanged.
 				return nil, nil
+			}
+			// Electron stops and restarts Daimon for an applied disconnect and
+			// fires its own `onDaimonReady` model refresh asynchronously. That
+			// refresh writes the store back from the bytes it read before the
+			// disconnect, restoring `blockedAliases` seconds later. One step lets
+			// it land before the scan below decides what still needs clearing.
+			if err := a.waitStep(ctx); err != nil {
+				return nil, err
 			}
 			disconnected = true
 		case scan.needsDisconnect():
@@ -480,7 +495,32 @@ func (a *cdpActions) disconnectStuckKthProvider(ctx context.Context, settings ac
 		}
 		return kthResetAnswer{stop: &ImportResult{State: state, Reason: reason}}, nil
 	}
-	if status, _ := answer["status"].(string); status != "applied" {
+	status, _ := answer["status"].(string)
+	if status == "deferred" {
+		scopeToken, _ := answer["applyScopeToken"].(string)
+		revision, _ := answer["applyRevision"].(string)
+		if scopeToken != "" && revision != "" {
+			// The disconnect was written but the post-ready window answered
+			// `busy`. Applying it a moment later repairs the provider without
+			// restarting Kimi, so the import may continue in this call.
+			outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
+			if err != nil {
+				state, reason, surfaced := classifyActionError(err)
+				return kthResetAnswer{stop: &ImportResult{State: state, Reason: reason}}, surfaced
+			}
+			switch outcome {
+			case "applied":
+				return kthResetAnswer{}, nil
+			case "account-changed":
+				return kthResetAnswer{stop: &ImportResult{State: ImportStateAccountChanged,
+					Reason: NativeAccountChanged}}, nil
+			case "apply-failed":
+				return kthResetAnswer{stop: &ImportResult{State: ImportStateFailed,
+					Reason: "native_import_provider_reset_failed"}}, nil
+			}
+		}
+	}
+	if status != "applied" {
 		return kthResetAnswer{stop: &ImportResult{State: ImportStateRequiresRestart,
 			Reason: "model_provider_reset_pending", RequiresRestart: true,
 			RestartDeferred: status == "deferred"}}, nil

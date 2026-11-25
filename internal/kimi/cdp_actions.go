@@ -447,63 +447,128 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	// The official allocator reuses `byok-kth-kimi` only while the store names it
 	// on this source and its route, or names neither anywhere. Repairing that
 	// first is what lets the import below keep in-place model switching.
-	if mode, _ := a.integrationRoute(); mode != IntegrationModeDirect {
-		stop, err := a.repairKthProvider(ctx, settings, current, request.URL)
+	//
+	// The repair is not a guarantee: Electron's own post-restart model refresh
+	// can write a preview's source back to a random id between the repair and
+	// the save. Such a preview is discarded, never saved, and the repair runs
+	// again on the bytes Electron left behind.
+	mode, _ := a.integrationRoute()
+	attempts := 1
+	if mode != IntegrationModeDirect {
+		attempts = kthRepairPasses
+	}
+	expression := importExpression(request.Token, request.URL, request.DisconnectDirectSourceID)
+	var answer map[string]any
+	var result ImportResult
+	for attempt := 0; attempt < attempts; attempt++ {
+		if mode != IntegrationModeDirect {
+			stop, err := a.repairKthProvider(ctx, settings, current, request.URL)
+			if err != nil {
+				state, reason, surfaced := classifyActionError(err)
+				result := ImportResult{State: state, Reason: reason, Opened: opened}
+				a.closeIfOpenedInto(ctx, opened, &result)
+				return result, surfaced
+			}
+			if stop != nil {
+				result := *stop
+				result.Opened = opened
+				a.closeIfOpenedInto(ctx, opened, &result)
+				return result, nil
+			}
+		}
+		// The import itself. The answer reports only what the caller may act on:
+		// whether it applied, whether a restart is still owed, and how many models
+		// the profile now holds. The profile rows, the token and every other native
+		// field stay in the page.
+		value, err := a.evaluate(ctx, settings.sessionID, expression)
 		if err != nil {
+			if errors.Is(err, ErrSessionInvalid) {
+				a.dropSession(settings.targetID)
+			}
 			state, reason, surfaced := classifyActionError(err)
 			result := ImportResult{State: state, Reason: reason, Opened: opened}
 			a.closeIfOpenedInto(ctx, opened, &result)
 			return result, surfaced
 		}
-		if stop != nil {
-			result := *stop
-			result.Opened = opened
-			a.closeIfOpenedInto(ctx, opened, &result)
-			return result, nil
+		answer, _ = value.(map[string]any)
+		result = ImportResult{Opened: opened}
+		code := ""
+		if ok, _ := answer["ok"].(bool); ok {
+			result.OK = true
+			if count, ok := answer["models"].(float64); ok {
+				result.Models = int(count)
+			}
+			if restart, ok := answer["requiresRestart"].(bool); ok {
+				result.RequiresRestart = restart
+			}
+			if deferred, ok := answer["restartDeferred"].(bool); ok {
+				result.RestartDeferred = deferred
+			}
+			if pending, ok := answer["routeCleanupPending"].(bool); ok {
+				result.RouteCleanupPending = pending
+			}
+			// The page's own word: accepted. The controller grades this against a
+			// readback before anything is called applied.
+			result.State = ImportStateAccepted
+		} else {
+			code, _ = answer["code"].(string)
+			if code == "" {
+				code = "import-failed"
+			}
+			result.State = ImportStateFailed
+			result.Reason = "native_import_" + safeActionCode(code)
+			if code == "non-canonical-provider" {
+				result.Reason = "native_import_non_canonical_provider"
+			}
 		}
+		if code == "non-canonical-provider" && attempt+1 < attempts {
+			if err := a.waitStep(ctx); err != nil {
+				state, reason, surfaced := classifyActionError(err)
+				result := ImportResult{State: state, Reason: reason, Opened: opened}
+				a.closeIfOpenedInto(ctx, opened, &result)
+				return result, surfaced
+			}
+			continue
+		}
+		break
 	}
-
-	// The import itself. The answer reports only what the caller may act on:
-	// whether it applied, whether a restart is still owed, and how many models
-	// the profile now holds. The profile rows, the token and every other native
-	// field stay in the page.
-	expression := importExpression(request.Token, request.URL, request.DisconnectDirectSourceID)
-	value, err := a.evaluate(ctx, settings.sessionID, expression)
-	if err != nil {
-		if errors.Is(err, ErrSessionInvalid) {
-			a.dropSession(settings.targetID)
+	// A save that landed inside the post-ready window answered `deferred` with
+	// its pending revision still on disk. Applying it now avoids a Kimi restart
+	// the user does not need; anything short of "applied" keeps the restart
+	// prompt, so a real running turn is never interrupted.
+	if result.OK && result.RestartDeferred {
+		scopeToken, _ := answer["applyScopeToken"].(string)
+		revision, _ := answer["applyRevision"].(string)
+		if scopeToken != "" && revision != "" {
+			outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
+			if err != nil {
+				state, reason, surfaced := classifyActionError(err)
+				result := ImportResult{State: state, Reason: reason, Opened: opened}
+				a.closeIfOpenedInto(ctx, opened, &result)
+				return result, surfaced
+			}
+			switch outcome {
+			case "applied":
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+				if result.RouteCleanupPending && request.DisconnectDirectSourceID != "" &&
+					a.disconnectDirectSourceOnce(ctx, settings, request.DisconnectDirectSourceID) {
+					result.RouteCleanupPending = false
+				}
+			case "apply-failed":
+				result.OK = false
+				result.State = ImportStateFailed
+				result.Reason = "native_import_apply_failed"
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+			case "account-changed":
+				result.OK = false
+				result.State = ImportStateAccountChanged
+				result.Reason = NativeAccountChanged
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+			}
 		}
-		state, reason, surfaced := classifyActionError(err)
-		result := ImportResult{State: state, Reason: reason, Opened: opened}
-		a.closeIfOpenedInto(ctx, opened, &result)
-		return result, surfaced
-	}
-	answer, _ := value.(map[string]any)
-	result := ImportResult{Opened: opened}
-	if ok, _ := answer["ok"].(bool); ok {
-		result.OK = true
-		if count, ok := answer["models"].(float64); ok {
-			result.Models = int(count)
-		}
-		if restart, ok := answer["requiresRestart"].(bool); ok {
-			result.RequiresRestart = restart
-		}
-		if deferred, ok := answer["restartDeferred"].(bool); ok {
-			result.RestartDeferred = deferred
-		}
-		if pending, ok := answer["routeCleanupPending"].(bool); ok {
-			result.RouteCleanupPending = pending
-		}
-		// The page's own word: accepted. The controller grades this against a
-		// readback before anything is called applied.
-		result.State = ImportStateAccepted
-	} else {
-		code, _ := answer["code"].(string)
-		if code == "" {
-			code = "import-failed"
-		}
-		result.State = ImportStateFailed
-		result.Reason = "native_import_" + safeActionCode(code)
 	}
 	// Only an overlay this call opened is closed, and the outcome is recorded
 	// either way: a close that failed means the window may still be up.
@@ -599,6 +664,44 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 		result.Reason = directImportFailureReason(code)
 		if result.Reason == NativeContractChanged || result.Reason == "direct_mode_unsupported" {
 			result.State = ImportStateContractChanged
+		}
+	}
+	// The apply may have landed inside the post-ready window and answered
+	// `deferred`. Applying the pending revision now finishes the import without
+	// the restart the deferred answer asked for; every other outcome keeps the
+	// restart prompt intact.
+	if result.OK && result.RestartDeferred {
+		scopeToken, _ := answer["applyScopeToken"].(string)
+		revision, _ := answer["applyRevision"].(string)
+		if scopeToken != "" && revision != "" {
+			outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
+			if err != nil {
+				state, reason, surfaced := classifyActionError(err)
+				result := ImportResult{State: state, Reason: reason, Opened: opened}
+				a.closeIfOpenedInto(ctx, opened, &result)
+				return result, surfaced
+			}
+			switch outcome {
+			case "applied":
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+				if result.RouteCleanupPending && request.DisconnectGateway &&
+					a.disconnectGatewayOnce(ctx, settings, request.DisconnectGatewayURL) {
+					result.RouteCleanupPending = false
+				}
+			case "apply-failed":
+				result.OK = false
+				result.State = ImportStateFailed
+				result.Reason = directImportFailureReason("apply-failed")
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+			case "account-changed":
+				result.OK = false
+				result.State = ImportStateAccountChanged
+				result.Reason = NativeAccountChanged
+				result.RequiresRestart = false
+				result.RestartDeferred = false
+			}
 		}
 	}
 	a.closeIfOpenedInto(ctx, opened, &result)
@@ -1232,6 +1335,17 @@ if(hasRouteSelection(preview)){
   }
   modelCount=selected.length;
 }
+// Electron's post-restart model refresh can rewrite the store while this
+// preview is in flight, putting a random byok-<uuid> back on the kimi route.
+// Saving that preview would mint a provider that cannot switch in place, so the
+// preview is dropped and the caller repairs the store and previews again.
+if(typeof sources.disconnect==="function"&&Array.isArray(preview?.source?.providers)){
+  const kimiProviders=preview.source.providers.filter(p=>p?.protocol==="kimi"&&typeof p?.id==="string"&&p.id);
+  if(kimiProviders.length&&!kimiProviders.some(p=>p.id==="byok-kth-kimi")){
+    if(typeof sources.discard==="function")await sources.discard(preview.previewId);
+    return {ok:false,code:"non-canonical-provider"};
+  }
+}
 const saved=await sources.save({previewId:preview.previewId,accountRevision:preview.accountRevision,sourceRevision:preview.sourceRevision});
 if(!saved?.ok||saved.value?.sourceId!==preview.sourceId)return {ok:false,code:saved?.reasonCode||"import-failed"};
 let status=saved.value.status;
@@ -1245,8 +1359,14 @@ if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function
   status=applied.value?.status;
 }
 if(!["applied","pending","deferred"].includes(status))return {ok:false,code:"import-failed"};
+let applyScopeToken="",applyRevision="";
+if(status==="deferred"&&!hadOtherPending&&typeof sources.applyPending==="function"&&
+  typeof saved.value?.accountRevision==="string"&&saved.value.accountRevision){
+  applyScopeToken=snapshot.scopeToken;applyRevision=saved.value.accountRevision;
+}
 return {ok:true,routeCleanupPending:!!directSourceID&&(status!=="applied"||!(await disconnectDirect())),
-  requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount};
+  requiresRestart:status!=="applied",restartDeferred:status==="deferred",models:modelCount,
+  applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })(` + quoteJS(token) + `,` + quoteJS(baseURL) + `,` + quoteJS(disconnectDirectSourceID) + `)`
 }
 

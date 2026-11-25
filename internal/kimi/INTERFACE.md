@@ -1366,18 +1366,31 @@ loopback:
   deleted;
 - the source is ours while its `kimi` provider is on another id: the source is
   disconnected through the official `byokSources.disconnect` (and `applyPending`
-  when the reply is `pending`), then the aliases that apply blocked are cleared,
-  and the normal import runs in the same settings overlay.
+  when the reply is `pending`), one poll step is waited out because Electron
+  fires its own post-restart model refresh (`onDaimonReady` → `promote()`) that
+  writes the pre-disconnect bytes back, and only then the aliases that apply
+  blocked are cleared and the normal import runs in the same settings overlay.
+
+The preview itself is the last guard: Electron can also restore the store
+between the repair and the preview. A preview whose `source.providers` carries a
+`kimi` provider on any id but `byok-kth-kimi` is discarded, never saved, so a
+random `byok-<uuid>` cannot be minted; `ImportModels` then runs the repair and
+preview again, up to `kthRepairPasses` (3) attempts. A preview without
+`source.providers` (older builds) or without a kimi provider skips the check.
+When every attempt still offers a non-canonical provider the import stops with
+`failed` / `native_import_non_canonical_provider`.
+
+A build without `byokSources.disconnect` answers `skipped` and imports exactly
+as before.
 
 Every write is a compare-and-swap against the bytes that were read, uses mode
 `0600`, and leaves `secrets`, `ownedResources` and other accounts untouched. A
-disconnect that answers `deferred`/`pending` stops the import with
-`requires-restart` and `model_provider_reset_pending`; a store that keeps a
+disconnect that stays `deferred` after its `applyPending` retry stops the import
+with `requires-restart` and `model_provider_reset_pending`; a store that keeps a
 non-canonical source after an applied disconnect stops with
-`native_import_store_changed`. A build without `byokSources.disconnect` answers
-`skipped` and imports exactly as before. `kimiK3State` reports
-`provider_mismatch` for this state, which the overview renders as
-`需修复原位切换` with the `connect-kimi` action.
+`native_import_store_changed`. `kimiK3State` reports `provider_mismatch` for
+this state, which the overview renders as `需修复原位切换` with the `connect-kimi`
+action.
 
 ## 45. A write waits for the official runtime to leave its startup window
 
@@ -1396,3 +1409,26 @@ a missing `kimiAgentAPI` or a missing Work target returns immediately, so a buil
 without the status API pays nothing. One status read is bounded by two seconds
 and the whole wait by `daimonBootWindow` (15 seconds); the window bounds the wait,
 never the write: once it expires the import runs and its own answer decides.
+
+`ready` is not the end of the window. Electron restarts Daimon after an applied
+disconnect, and its running-turns tracker keeps `#unknown` (`running-turns=true`)
+until asynchronous status and blueprint RPCs finish roughly 130-500ms later. A
+`save` or `disconnect` sent there writes its `pending` bytes cleanly and answers
+`{status: "deferred"}` with that revision still on `accountRevision`. The page
+keeps one call per expression (the goja tests assert exact call sequences), so
+the bounded retry lives in Go: `retryDeferredApply` waits one
+`settingsReadyStep` first (the save just saw `busy`), then polls
+`applyPendingExpression(scopeToken, accountRevision)` until `deferredApplyWindow`
+(3 seconds) expires.
+
+That expression re-reads `sources.list()` and answers `account-changed` for a
+different scope, `stale` for a revision other than the one the save saw,
+`unsupported` without the API, and `apply-failed` for a refused apply. Only
+`status: "applied"` clears `requiresRestart` and `restartDeferred`;
+`apply-failed` fails the import with `native_import_apply_failed`;
+`account-changed` stops it as `account-changed`; `deferred`, `stale` and
+`unsupported` leave the restart prompt exactly as the deferred write did, so a
+real running turn is never interrupted. When the retry applies a gateway import
+that still owed a route cleanup, one single-shot
+`disconnectDirectSourceExpression` finishes it; a direct import uses
+`disconnectGatewayExpression` the same way.

@@ -463,3 +463,519 @@ func TestImportDirectHoldsTheWriteUntilDaimonLeavesTheStartupWindow(t *testing.T
 		t.Fatalf("direct imports = %d", page.directImports)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// the post-ready reconciliation window
+
+// shortDeferredApply keeps the polls these tests depend on short. It restores
+// both globals even when a subtest fails.
+func shortDeferredApply(t *testing.T, window time.Duration) {
+	t.Helper()
+	previousStep, previousWindow := settingsReadyStep, deferredApplyWindow
+	settingsReadyStep, deferredApplyWindow = 5*time.Millisecond, window
+	t.Cleanup(func() { settingsReadyStep, deferredApplyWindow = previousStep, previousWindow })
+}
+
+// TestImportRetriesTheRepairWhenThePreviewIsNotCanonical models the 11ms race:
+// Electron's post-restart promote() writes back the blocked aliases between the
+// repair and the preview, so the first preview can only offer a random id. That
+// preview is dropped, the repair runs again on the restored bytes, and the
+// second preview keeps the canonical one.
+func TestImportRetriesTheRepairWhenThePreviewIsNotCanonical(t *testing.T) {
+	shortDeferredApply(t, 100*time.Millisecond)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	baseURL := "http://127.0.0.1:9100/v1"
+	document := kthTestAccount(baseURL, nil)
+	document["sources"] = []any{}
+	document["active"] = map[string]any{"providers": []any{}, "models": []any{
+		map[string]any{"alias": "byok-uuid/model-a", "providerId": "byok-uuid"}}}
+	document["blockedAliases"] = map[string]any{"byok-kth-kimi/kimi-a": "delisted"}
+	restored, err := json.Marshal(kthTestStore(account, document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kthTestWrite(t, home, kthTestStore(account, document))
+
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{
+			{"ok": false, "code": "non-canonical-provider"},
+			{"ok": true, "models": float64(2), "requiresRestart": false},
+		}}
+	var imports int
+	page.onImport = func() {
+		imports++
+		if imports == 1 {
+			// Electron writes back the bytes it read before the cleanup.
+			if writeErr := os.WriteFile(filepath.Join(home, NativeWorkStore), restored, 0o600); writeErr != nil {
+				t.Error(writeErr)
+			}
+			return
+		}
+		raw, readErr := os.ReadFile(filepath.Join(home, NativeWorkStore))
+		if readErr != nil {
+			t.Error(readErr)
+			return
+		}
+		var store map[string]any
+		if json.Unmarshal(raw, &store) != nil {
+			t.Error("the store was unreadable at the retry")
+			return
+		}
+		blocked, _ := store["accounts"].(map[string]any)[account].(map[string]any)["blockedAliases"].(map[string]any)
+		if _, present := blocked["byok-kth-kimi/kimi-a"]; present {
+			t.Error("the retry imported while the blocking alias was restored")
+		}
+	}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.importCalls != 2 {
+		t.Fatalf("imports = %d, want one non-canonical preview and one retry", page.importCalls)
+	}
+	blocked := kthTestAccountOf(t, home)["blockedAliases"].(map[string]any)
+	if _, present := blocked["byok-kth-kimi/kimi-a"]; present {
+		t.Fatalf("the restored alias survived the retry: %v", blocked)
+	}
+}
+
+func TestImportStopsWhenEveryPreviewStaysNonCanonical(t *testing.T) {
+	shortDeferredApply(t, 100*time.Millisecond)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": false, "code": "non-canonical-provider"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateFailed || result.Reason != "native_import_non_canonical_provider" {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.importCalls != kthRepairPasses {
+		t.Fatalf("imports = %d, want %d bounded attempts", page.importCalls, kthRepairPasses)
+	}
+}
+
+func TestImportAppliesADeferredSaveAfterTheReadyWindow(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("an applied retry must clear the restart and cleanup claims: %+v", result)
+	}
+	if page.applyPendingCalls != 2 {
+		t.Fatalf("applyPending polls = %d, want the deferred answer and the applied one", page.applyPendingCalls)
+	}
+	if page.directCleanupCalls != 1 {
+		t.Fatalf("direct cleanup calls = %d", page.directCleanupCalls)
+	}
+	if page.importCalls != 1 {
+		t.Fatalf("imports = %d", page.importCalls)
+	}
+}
+
+func TestImportKeepsTheRestartPromptWhenTheDeferredApplyNeverLands(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RequiresRestart || !result.RestartDeferred || !result.RouteCleanupPending {
+		t.Fatalf("a window that never settles must keep the restart prompt: %+v", result)
+	}
+	if page.applyPendingCalls < 2 {
+		t.Fatalf("the retry did not poll: %d", page.applyPendingCalls)
+	}
+	if page.directCleanupCalls != 0 {
+		t.Fatalf("the direct source was disconnected before the apply landed: %d", page.directCleanupCalls)
+	}
+}
+
+func TestImportStopsWhenTheDeferredApplySeesAnotherAccount(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "account-changed"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token", ExpectedAccountKey: AccountScope(home)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateAccountChanged || result.Reason != NativeAccountChanged {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred {
+		t.Fatalf("another account is not a restart claim: %+v", result)
+	}
+}
+
+func TestImportKeepsTheRestartPromptWhenTheDeferredRevisionIsStale(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "stale"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token", ExpectedAccountKey: AccountScope(home)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RequiresRestart || !result.RestartDeferred {
+		t.Fatalf("a stale revision must keep the restart prompt: %+v", result)
+	}
+}
+
+func TestImportReportsAFailedDeferredApply(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "apply-failed"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token", ExpectedAccountKey: AccountScope(home)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateFailed || result.Reason != "native_import_apply_failed" {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred {
+		t.Fatalf("a failed apply keeps its own failure reason: %+v", result)
+	}
+}
+
+// A deferred reset that applies a moment later continues the same import: the
+// disconnect wrote its bytes, the apply completes them, and no Kimi restart is
+// needed.
+func TestImportContinuesAfterADeferredResetApplies(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	baseURL := "http://127.0.0.1:9100/v1"
+	kthTestWrite(t, home, kthTestStore(account, kthTestStuckAccount(baseURL, "byok-9f2c1d-kimi")))
+
+	disconnected := kthTestStore(account, kthTestAccount(baseURL, nil))
+	next := disconnected["accounts"].(map[string]any)[account].(map[string]any)
+	next["sources"] = []any{}
+	next["active"] = map[string]any{"providers": []any{}, "models": []any{}}
+	next["blockedAliases"] = map[string]any{"byok-kth-kimi/kimi-a": "disconnected"}
+	document, err := json.Marshal(disconnected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		kthDisconnectReply: map[string]any{"ok": true, "status": "deferred",
+			"applyScopeToken": "s1", "applyRevision": "a2"},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}}}
+	var writeErr error
+	page.onKthDisconnect = func() {
+		writeErr = os.WriteFile(filepath.Join(home, NativeWorkStore), document, 0o600)
+	}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if !result.OK || result.State != ImportStateAccepted || result.RequiresRestart {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.kthDisconnectCalls != 1 || page.importCalls != 1 {
+		t.Fatalf("disconnects = %d imports = %d", page.kthDisconnectCalls, page.importCalls)
+	}
+	if page.applyPendingCalls != 2 {
+		t.Fatalf("applyPending polls = %d", page.applyPendingCalls)
+	}
+	blocked := kthTestAccountOf(t, home)["blockedAliases"].(map[string]any)
+	if _, present := blocked["byok-kth-kimi/kimi-a"]; present {
+		t.Fatalf("the alias the reset blocked was not cleared: %v", blocked)
+	}
+}
+
+func TestImportStopsWhenTheDeferredResetNeverApplies(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	baseURL := "http://127.0.0.1:9100/v1"
+	before := kthTestWrite(t, home, kthTestStore(account, kthTestStuckAccount(baseURL, "byok-9f2c1d-kimi")))
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		kthDisconnectReply: map[string]any{"ok": true, "status": "deferred",
+			"applyScopeToken": "s1", "applyRevision": "a2"},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != ImportStateRequiresRestart || !result.RequiresRestart || !result.RestartDeferred ||
+		result.Reason != "model_provider_reset_pending" {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.importCalls != 0 {
+		t.Fatalf("the import ran against an unapplied reset: %d", page.importCalls)
+	}
+	after, err := os.ReadFile(filepath.Join(home, NativeWorkStore))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("the store was written while the official reset was still deferred")
+	}
+}
+
+func TestImportStopsWhenTheDeferredResetSeesAnotherAccount(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	baseURL := "http://127.0.0.1:9100/v1"
+	kthTestWrite(t, home, kthTestStore(account, kthTestStuckAccount(baseURL, "byok-9f2c1d-kimi")))
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		kthDisconnectReply: map[string]any{"ok": true, "status": "deferred",
+			"applyScopeToken": "s1", "applyRevision": "a2"},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "account-changed"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateAccountChanged || result.Reason != NativeAccountChanged {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.importCalls != 0 {
+		t.Fatalf("the import ran after the account changed: %d", page.importCalls)
+	}
+}
+
+func TestImportStopsWhenTheDeferredResetCannotApply(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	account := AccountScope(home)
+	baseURL := "http://127.0.0.1:9100/v1"
+	kthTestWrite(t, home, kthTestStore(account, kthTestStuckAccount(baseURL, "byok-9f2c1d-kimi")))
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		kthDisconnectReply: map[string]any{"ok": true, "status": "deferred",
+			"applyScopeToken": "s1", "applyRevision": "a2"},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "apply-failed"}}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateFailed || result.Reason != "native_import_provider_reset_failed" {
+		t.Fatalf("result: %+v", result)
+	}
+	if page.importCalls != 0 {
+		t.Fatalf("the import ran after a failed reset: %d", page.importCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the same window on the Direct Mode entry point
+
+func TestDirectImportAppliesADeferredSaveAfterTheReadyWindow(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}, {"ok": true, "status": "applied"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.State != ImportStateAccepted {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred || result.RouteCleanupPending {
+		t.Fatalf("an applied retry must clear the restart and cleanup claims: %+v", result)
+	}
+	if page.applyPendingCalls != 2 || page.gatewayCleanupCalls != 1 {
+		t.Fatalf("applyPending polls = %d gateway cleanups = %d", page.applyPendingCalls, page.gatewayCleanupCalls)
+	}
+	if page.directImports != 1 {
+		t.Fatalf("direct imports = %d", page.directImports)
+	}
+}
+
+func TestDirectImportKeepsTheRestartPromptWhenTheDeferredApplyNeverLands(t *testing.T) {
+	shortDeferredApply(t, 30*time.Millisecond)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "deferred"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.RequiresRestart || !result.RestartDeferred || !result.RouteCleanupPending {
+		t.Fatalf("a window that never settles must keep the restart prompt: %+v", result)
+	}
+	if page.gatewayCleanupCalls != 0 {
+		t.Fatalf("the gateway was disconnected before the apply landed: %d", page.gatewayCleanupCalls)
+	}
+}
+
+func TestDirectImportStopsWhenTheDeferredApplySeesAnotherAccount(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "account-changed"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateAccountChanged || result.Reason != NativeAccountChanged {
+		t.Fatalf("result: %+v", result)
+	}
+}
+
+func TestDirectImportReportsAFailedDeferredApply(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": false, "code": "apply-failed"}}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.State != ImportStateFailed || result.Reason != "native_import_apply_failed" {
+		t.Fatalf("result: %+v", result)
+	}
+	if result.RequiresRestart || result.RestartDeferred {
+		t.Fatalf("a failed apply keeps its own failure reason: %+v", result)
+	}
+}
+
+func TestImportKeepsTheCleanupClaimWhenTheRetriedCleanupFails(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		importReplies: []map[string]any{{"ok": true, "models": float64(2), "requiresRestart": true,
+			"restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"}},
+		directCleanupReply:  map[string]any{"ok": false, "code": "disconnect-refused"}}
+
+	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+		URL: "http://127.0.0.1:9100/v1", Token: "gateway-token",
+		ExpectedAccountKey: AccountScope(home), DisconnectDirectSourceID: "direct-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequiresRestart || result.RestartDeferred {
+		t.Fatalf("the replacement applied: %+v", result)
+	}
+	if !result.RouteCleanupPending {
+		t.Fatalf("a refused cleanup must stay pending: %+v", result)
+	}
+	if page.directCleanupCalls != 1 {
+		t.Fatalf("direct cleanup calls = %d", page.directCleanupCalls)
+	}
+}
+
+func TestDirectImportKeepsTheCleanupClaimWhenTheRetriedCleanupFails(t *testing.T) {
+	shortDeferredApply(t, time.Second)
+	home := kthTestHome(t)
+	page := &fakePage{surface: "work", actions: true, importAPI: true,
+		directImportReplies: []map[string]any{{"ok": true, "sourceId": "byok-src-1", "models": float64(1),
+			"requiresRestart": true, "restartDeferred": true, "routeCleanupPending": true,
+			"applyScopeToken": "s1", "applyRevision": "r2"}},
+		applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"}},
+		gatewayCleanupReply: map[string]any{"ok": false, "code": "foreign-source"}}
+	harness := newHarness(t, page)
+	actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+	request := validDirectImportRequest()
+	request.ExpectedAccountKey = AccountScope(home)
+	request.DisconnectGateway = true
+	request.DisconnectGatewayURL = "http://127.0.0.1:63501/v1"
+
+	result, err := actions.ImportDirect(kthImportContext(t), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequiresRestart || result.RestartDeferred {
+		t.Fatalf("the replacement applied: %+v", result)
+	}
+	if !result.RouteCleanupPending {
+		t.Fatalf("an unowned gateway must keep the cleanup claim: %+v", result)
+	}
+	if page.gatewayCleanupCalls != 1 {
+		t.Fatalf("gateway cleanup calls = %d", page.gatewayCleanupCalls)
+	}
+}

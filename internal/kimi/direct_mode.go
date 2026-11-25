@@ -435,8 +435,14 @@ if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
     routeCleanupPending=cleanup===true;
   }
 }
+let applyScopeToken="",applyRevision="";
+if(status==="deferred"&&!otherPending&&typeof sources.applyPending==="function"&&
+  typeof saved.accountRevision==="string"&&saved.accountRevision){
+  applyScopeToken=snapshot.scopeToken;applyRevision=saved.accountRevision;
+}
 return {ok:true,sourceId:saved.sourceId,gatewayDisconnected:gatewayDisconnected,routeCleanupPending:routeCleanupPending,
-  models:draftModels.length,requiresRestart:status!=="applied",restartDeferred:status==="deferred"};
+  models:draftModels.length,requiresRestart:status!=="applied",restartDeferred:status==="deferred",
+  applyScopeToken:applyScopeToken,applyRevision:applyRevision};
 })(` + quoteJS(string(encoded)) + `)`, nil
 }
 

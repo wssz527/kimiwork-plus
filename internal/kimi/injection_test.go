@@ -57,10 +57,25 @@ type fakePage struct {
 	// noShellAPI makes the Work page report no kimiAgentAPI at all.
 	noShellAPI bool
 	// importBlockFor holds the import call for that long before answering.
-	importBlockFor  time.Duration
-	importReply     map[string]any
+	importBlockFor time.Duration
+	importReply    map[string]any
+	// importReplies answers consecutive import calls; the last entry repeats.
+	// onImport runs before the answer, so a test can model the store being
+	// rewritten by another process between the repair and the preview.
+	importReplies   []map[string]any
+	onImport        func()
 	disconnectReply map[string]any
-	closeFails      bool
+	// applyPendingReplies answers consecutive applyPending probes the same way
+	// the official page does: the last entry repeats.
+	applyPendingReplies []map[string]any
+	applyPendingCalls   int
+	// directImportReplies answers consecutive direct imports; the last repeats.
+	directImportReplies []map[string]any
+	directCleanupReply  map[string]any
+	directCleanupCalls  int
+	gatewayCleanupReply map[string]any
+	gatewayCleanupCalls int
+	closeFails          bool
 	// daimonStates answers the official runtime status probe in order, so a
 	// page can model the startup window; an exhausted list reports an unreadable
 	// state. daimonStuck holds a single startup state forever.
@@ -301,8 +316,15 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 		p.mu.Lock()
 		p.importCalls++
 		reply := p.importReply
+		if next := nextFakeReply(&p.importReplies); next != nil {
+			reply = next
+		}
+		hook := p.onImport
 		hold := p.importBlockFor
 		p.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		if hold > 0 {
 			time.Sleep(hold)
 		}
@@ -310,11 +332,42 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 			reply = map[string]any{"ok": true, "models": float64(2), "requiresRestart": false}
 		}
 		return reply
+	case strings.Contains(expression, "applyPending(expectedRevision)"):
+		p.mu.Lock()
+		p.applyPendingCalls++
+		reply := nextFakeReply(&p.applyPendingReplies)
+		p.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"ok": true, "status": "applied"}
+		}
+		return reply
 	case strings.Contains(expression, "const request=JSON.parse(raw);"):
 		p.mu.Lock()
 		p.directImports++
+		reply := nextFakeReply(&p.directImportReplies)
 		p.mu.Unlock()
-		return map[string]any{"ok": true, "sourceId": "byok-src-1", "models": float64(1), "requiresRestart": false}
+		if reply == nil {
+			reply = map[string]any{"ok": true, "sourceId": "byok-src-1", "models": float64(1), "requiresRestart": false}
+		}
+		return reply
+	case strings.Contains(expression, "sourceRevision:direct.revision??null"):
+		p.mu.Lock()
+		p.directCleanupCalls++
+		reply := p.directCleanupReply
+		p.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"ok": true}
+		}
+		return reply
+	case strings.Contains(expression, "sourceRevision:gateway.revision??null"):
+		p.mu.Lock()
+		p.gatewayCleanupCalls++
+		reply := p.gatewayCleanupReply
+		p.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"ok": true}
+		}
+		return reply
 	case strings.Contains(expression, "revealByok"):
 		return map[string]any{"available": true}
 	case strings.Contains(expression, "closeSettingsPage") || strings.Contains(expression, "closeKimiWorkSettingPage"):
@@ -399,6 +452,19 @@ func (p *fakePage) actionReply(sessionID, expression string) any {
 // sessionInvalidReply is returned by the fake's page when the expression must be
 // answered with a CDP protocol error rather than a value.
 type sessionInvalidReply struct{}
+
+// nextFakeReply takes the next scripted answer from a queue and keeps the last
+// one for every later call. Callers hold the page lock.
+func nextFakeReply(replies *[]map[string]any) map[string]any {
+	if len(*replies) == 0 {
+		return nil
+	}
+	reply := (*replies)[0]
+	if len(*replies) > 1 {
+		*replies = (*replies)[1:]
+	}
+	return reply
+}
 
 // harness wires a Pipe to a fake page through two pipes.
 type harness struct {
