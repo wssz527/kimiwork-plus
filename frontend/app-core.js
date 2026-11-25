@@ -1400,6 +1400,7 @@ export {
   modelLabel,
   mountUsageRequests,
   observeMasthead,
+  postWailsMessage,
   readKey,
   reasonText,
   renderErrorList,

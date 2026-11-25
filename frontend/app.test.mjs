@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { createContext, SourceTextModule } from 'node:vm';
 
 const appFiles = ['./app-core.js', './app-overview.js', './app-models.js', './app-connections.js', './app-work.js', './app-conversations.js', './app.js'];
 const source = '\n' + appFiles.map(file => readFileSync(new URL(file, import.meta.url), 'utf8')).join('\n');
@@ -2191,6 +2192,84 @@ test('displayModelId decodes percent-encoded route IDs while falling back safely
   assert.equal(fn('magpie/kimi-group/glm-5-3-flash'), 'magpie/kimi-group/glm-5-3-flash');
   assert.equal(fn('bad%ZZescape'), 'bad%ZZescape');
   assert.equal(fn(''), '');
+});
+
+async function bootPanel(bridge = () => ({})) {
+  const nav = { setAttribute() {}, addEventListener(type, listener) { this[type] = listener; } };
+  const events = new EventTarget();
+  const document = {
+    title: '',
+    body: { dataset: {} },
+    documentElement: { dataset: {} },
+    getElementById: id => id === 'nav-maintenance' ? nav : null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  const sent = [];
+  const window = {
+    document,
+    location: { hash: '' },
+    addEventListener: events.addEventListener.bind(events),
+    ...bridge(message => {
+      sent.push({
+        message,
+        hooks: ['__kwpOpenAccounts', '__kwpOpenConversations', '__kwpOpenUpdates', '__kwpSyncTheme']
+          .map(name => typeof window[name]),
+        navigationBound: typeof nav.click === 'function',
+      });
+    }),
+  };
+  window.window = window;
+  const context = createContext(window);
+  const modules = new Map();
+  const load = url => {
+    if (!modules.has(url)) {
+      modules.set(url, new SourceTextModule(readFileSync(new URL(url), 'utf8'), { context, identifier: url }));
+    }
+    return modules.get(url);
+  };
+  const app = load(new URL('./app.js', import.meta.url).href);
+  await app.link((specifier, importer) => load(new URL(specifier, importer.identifier).href));
+  await app.evaluate();
+  return { app, core: load(new URL('./app-core.js', import.meta.url).href).namespace, document, events, sent, window };
+}
+
+test('the panel announces Wails readiness once after binding desktop navigation', async () => {
+  const bridges = [
+    postMessage => ({ webkit: { messageHandlers: { external: { postMessage } } } }),
+    postMessage => ({ chrome: { webview: { postMessage } } }),
+  ];
+  for (const bridge of bridges) {
+    const { app, core, events, sent, window } = await bootPanel(bridge);
+    await app.evaluate();
+    events.dispatchEvent(new Event('focus'));
+    events.dispatchEvent(new Event('hashchange'));
+    assert.deepEqual(sent.map(({ message }) => message), [
+      'wails:event:emit:kwp:theme:light',
+      'wails:runtime:ready',
+    ]);
+    assert.deepEqual(sent[1].hooks, ['function', 'function', 'function', 'function']);
+    assert.equal(sent[1].navigationBound, true);
+
+    window.__kwpOpenAccounts();
+    assert.equal(core.state.subtabs.maintenance, 'accounts');
+    window.__kwpOpenConversations();
+    assert.equal(core.state.view, 'conversations');
+    window.__kwpOpenUpdates();
+    assert.equal(core.state.view, 'maintenance');
+    assert.equal(core.state.subtabs.maintenance, 'connection');
+  }
+});
+
+test('the panel boots without a Wails bridge and readiness is a no-op', async () => {
+  const { core, document, sent, window } = await bootPanel(() => ({ chrome: {}, webkit: { messageHandlers: {} } }));
+  assert.equal(document.body.dataset.view, 'overview');
+  const globals = Object.keys(window);
+  const title = document.title;
+  assert.equal(core.postWailsMessage('wails:runtime:ready'), false);
+  assert.deepEqual(Object.keys(window), globals);
+  assert.equal(document.title, title);
+  assert.deepEqual(sent, []);
 });
 
 test('reportTheme emits Wails host theme events and masthead drag excludes interactive controls', () => {
