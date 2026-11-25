@@ -107,7 +107,7 @@ if(status==="pending"&&!otherPending&&typeof sources.applyPending==="function"&&
   }
 }
 if(status===""||status==="applied")return {ok:true,settled:true};
-if(status==="deferred"&&typeof sources.applyPending==="function"&&revision){
+if(status==="deferred"&&!otherPending&&typeof sources.applyPending==="function"&&revision){
   return {ok:true,settled:false,applyScopeToken:current.scopeToken,applyRevision:revision};
 }
 return {ok:true,settled:false};
@@ -144,15 +144,14 @@ return await settleDisconnect(reply,current,otherPending);
 
 // disconnectDirectSourceOnce runs one cleanup attempt. A transport failure is
 // not an import failure: the replacement is already applied, and the next sync
-// retries the cleanup from the store. `deferred` says the disconnect itself
-// wrote pending bytes, so removing the old source still waits for a restart.
-func (a *cdpActions) disconnectDirectSourceOnce(ctx context.Context, settings actionTarget, sourceID string) (settled, deferred bool) {
+// retries the cleanup from the store.
+func (a *cdpActions) disconnectDirectSourceOnce(ctx context.Context, settings actionTarget, sourceID string) string {
 	value, err := a.evaluate(ctx, settings.sessionID, disconnectDirectSourceExpression(sourceID))
 	if err != nil {
 		if errors.Is(err, ErrSessionInvalid) {
 			a.dropSession(settings.targetID)
 		}
-		return false, false
+		return ""
 	}
 	return a.settleCleanupAnswer(ctx, settings, value)
 }
@@ -160,25 +159,25 @@ func (a *cdpActions) disconnectDirectSourceOnce(ctx context.Context, settings ac
 // settleCleanupAnswer finishes one cleanup answer. An answer without `settled`
 // is the older build's plain `ok`, which already meant the cleanup landed; a
 // deferred disconnect carries the revision the bounded retry applies.
-func (a *cdpActions) settleCleanupAnswer(ctx context.Context, settings actionTarget, value any) (settled, deferred bool) {
+func (a *cdpActions) settleCleanupAnswer(ctx context.Context, settings actionTarget, value any) string {
 	answer, _ := value.(map[string]any)
 	if ok, _ := answer["ok"].(bool); !ok {
-		return false, false
+		return ""
 	}
-	settledNow, hasSettled := answer["settled"].(bool)
-	if settledNow || !hasSettled {
-		return true, false
+	settled, hasSettled := answer["settled"].(bool)
+	if settled || !hasSettled {
+		return "applied"
 	}
 	scopeToken, _ := answer["applyScopeToken"].(string)
 	revision, _ := answer["applyRevision"].(string)
 	if scopeToken == "" || revision == "" {
-		return false, false
+		return ""
 	}
 	outcome, err := a.retryDeferredApply(ctx, settings, scopeToken, revision)
 	if err != nil {
-		return false, false
+		return ""
 	}
-	return outcome == "applied", outcome == "deferred"
+	return outcome
 }
 
 // disconnectGatewayExpression disconnects this installation's loopback gateway
@@ -220,13 +219,13 @@ return await settleDisconnect(reply,current,otherPending);
 // disconnectGatewayOnce runs one gateway cleanup attempt for the same reason a
 // direct cleanup is bounded: the replacement is applied and the next sync can
 // finish this from the store.
-func (a *cdpActions) disconnectGatewayOnce(ctx context.Context, settings actionTarget, gatewayURL string) (settled, deferred bool) {
+func (a *cdpActions) disconnectGatewayOnce(ctx context.Context, settings actionTarget, gatewayURL string) string {
 	value, err := a.evaluate(ctx, settings.sessionID, disconnectGatewayExpression(gatewayURL))
 	if err != nil {
 		if errors.Is(err, ErrSessionInvalid) {
 			a.dropSession(settings.targetID)
 		}
-		return false, false
+		return ""
 	}
 	return a.settleCleanupAnswer(ctx, settings, value)
 }

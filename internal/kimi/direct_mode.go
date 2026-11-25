@@ -296,7 +296,7 @@ const ownGateway=source=>{
     isLoopback(value)&&gatewayAddress(value)===expectedGateway);
 };
 const gatewayAddress=value=>String(value??"").trim().replace(/\/models\/api\.json\/?$/i,"").replace(/\/+$/,"").toLowerCase();
-const expectedGateway=gatewayAddress(request.disconnectGatewayUrl);
+const expectedGateway=request.disconnectGateway?gatewayAddress(request.disconnectGatewayUrl):"";
 const hadManagedGateway=ownGateway(snapshot.sources.find(source=>source.id==="byok-kth"||source.kind==="kth"));
 const wantedProviders=Array.isArray(request.providers)?request.providers:[];
 const wantedModels=Array.isArray(request.models)?request.models:[];
@@ -394,7 +394,7 @@ const officialProviderIDs=source=>{
   return ids;
 };
 const cleanupGateway=async()=>{
-  if(!request.disconnectGateway||status!=="applied")return {settled:hadManagedGateway};
+  if(!request.disconnectGateway||status!=="applied")return {settled:!hadManagedGateway};
   const current=await readSnapshot();
   if(!current||current.scopeToken!==snapshot.scopeToken)return {error:"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
@@ -402,14 +402,16 @@ const cleanupGateway=async()=>{
   const ids=officialProviderIDs(direct);
   const ready=!direct?.quarantined&&ids&&draftModels.every(wanted=>directModels.some(model=>
     model.providerId===ids.get(wanted.providerId)&&model.model===wanted.model&&model.status==="available"));
-  if(!ready)return {settled:hadManagedGateway};
+  if(!ready)return {settled:!hadManagedGateway};
   const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
   // Nothing of this installation's gateway is left to remove: an inactive or
   // foreign one is not this cleanup's business.
   if(!ownGateway(gateway))return {settled:true};
+  const cleanupOtherPending=current.sources.some(source=>source.id!==gateway.id&&
+    (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
   const reply=await sources.disconnect({sourceId:gateway.id,accountRevision:current.accountRevision,sourceRevision:gateway.revision??null});
   if(reply?.ok===true)gatewayDisconnected=true;
-  return await settleDisconnect(reply,current,otherPending);
+  return await settleDisconnect(reply,current,cleanupOtherPending);
 };
 let cleanup=await cleanupGateway();
 if(cleanup?.error)return {ok:false,code:cleanup.error};

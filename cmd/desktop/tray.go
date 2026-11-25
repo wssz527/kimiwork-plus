@@ -103,14 +103,11 @@ func trayReadableModelName(alias string, models []kimi.ConversationModel) string
 			return name
 		}
 	}
-	if name := strings.TrimSpace(trayBYOKModelID(alias)); name != "" {
-		// A generated K3-compatible id is a digest, not a name: 64 hex characters
-		// in the tray say nothing about the model. A conversation can outlive the
-		// catalog entry that would have named it (Direct Mode, or a model removed
-		// from the active catalog), so it gets an honest label instead.
-		if protocol.IsKimiCompatibleModelID(name) {
-			return trayUnlistedGatewayModel
-		}
+	name := strings.TrimSpace(trayBYOKModelID(alias))
+	if protocol.IsKimiCompatibleModelID(name) || (name == "" && protocol.IsKimiCompatibleModelID(alias)) {
+		return trayUnlistedGatewayModel
+	}
+	if name != "" {
 		return name
 	}
 	return "默认模型"

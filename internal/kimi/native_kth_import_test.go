@@ -1093,6 +1093,48 @@ func TestImportKeepsTheCleanupRestartWhenTheDeferredDisconnectNeverApplies(t *te
 	}
 }
 
+func TestImportRequiresRestartWhenCleanupApplyFailsAfterDeferredSave(t *testing.T) {
+	for _, mode := range []string{IntegrationModeGateway, IntegrationModeDirect} {
+		t.Run(mode, func(t *testing.T) {
+			shortDeferredApply(t, time.Second)
+			home := kthTestHome(t)
+			save := map[string]any{"ok": true, "sourceId": directSourceID, "requiresRestart": true,
+				"restartDeferred": true, "routeCleanupPending": true, "applyScopeToken": "s1", "applyRevision": "r2"}
+			cleanup := map[string]any{"ok": true, "settled": false, "applyScopeToken": "s1", "applyRevision": "r3"}
+			page := &fakePage{surface: "work", actions: true, importAPI: true,
+				importReplies: []map[string]any{save}, directImportReplies: []map[string]any{save},
+				directCleanupReply: cleanup, gatewayCleanupReply: cleanup,
+				applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"}, {"ok": true, "status": "apply-failed"}}}
+			ctx := kthImportContext(t)
+			var result ImportResult
+			var err error
+			if mode == IntegrationModeDirect {
+				harness := newHarness(t, page)
+				actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+				request := validDirectImportRequest()
+				request.ExpectedAccountKey = AccountScope(home)
+				request.DisconnectGateway = true
+				request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+				result, err = actions.ImportDirect(ctx, request)
+			} else {
+				result, err = kthImportActions(t, home, page).ImportModels(ctx, ImportRequest{
+					URL: "http://127.0.0.1:9100/v1", Token: "fixture", ExpectedAccountKey: AccountScope(home),
+					DisconnectDirectSourceID: directSourceID})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.OK || !result.RouteCleanupPending || !result.RequiresRestart || result.RestartDeferred {
+				t.Fatalf("failed cleanup must keep its restart prompt without marking it deferred: %+v", result)
+			}
+			if page.applyPendingCalls != 2 || page.directCleanupCalls+page.gatewayCleanupCalls != 1 {
+				t.Fatalf("applyPending calls = %d, direct cleanups = %d, gateway cleanups = %d",
+					page.applyPendingCalls, page.directCleanupCalls, page.gatewayCleanupCalls)
+			}
+		})
+	}
+}
+
 // The same settlement on the Direct Mode entry point: the gateway disconnect
 // deferred by the post-ready window is applied in place.
 func TestDirectImportSettlesADeferredGatewayCleanupAfterTheReplacement(t *testing.T) {

@@ -98,6 +98,7 @@ func TestTrayReadableModelNames(t *testing.T) {
 func TestTrayReadableModelNameHidesUnlistedCompatibleDigests(t *testing.T) {
 	digest := strings.Repeat("0827c74e", 8)
 	for _, alias := range []string{
+		"kimi-k3-kwp-" + digest,
 		"byok-kth-kimi/kimi-k3-kwp-" + digest,
 		"byok-kth-resp/kimi-k3-kwp-" + digest,
 		"byok-123e4567-e89b-12d3-a456-426614174000/kimi-k3-kwp-" + digest,

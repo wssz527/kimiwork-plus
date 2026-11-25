@@ -99,7 +99,7 @@ func writeIdentity(t *testing.T, fixture *nativeFixture, userID string) {
 
 const directExpressionMock = `
 const calls=[];
-let gatewayConnected=true;
+let gatewayConnected=!globalThis.noGateway;
 const gatewayRegistry=globalThis.gatewayRegistry||"http://127.0.0.1:9100/v1/models/api.json";
 const gatewayBase=gatewayRegistry.replace(/\/models\/api\.json$/,"");
 const kth={id:"byok-kth",kind:"kth",revision:"k1",displayName:"KimiWork +",
@@ -121,10 +121,11 @@ globalThis.clawBridgeAPI={byokSources:{
   list(){calls.push("list");
     const providerId=globalThis.rejectClearedEffort&&saved?"byok-prov-fresh":"byok-prov-existing";
     custom.providers[0].id=providerId;
-    custom.models=[{providerId,model:"model-a",alias:providerId+"/model-a",status:"available"}];
+    custom.models=globalThis.directModelsUnavailable&&saved?[]:[{providerId,model:"model-a",alias:providerId+"/model-a",status:"available"}];
     if(globalThis.pendingCatalog&&saveCount===1)custom.models.push({providerId,model:"catalog-extra",alias:providerId+"/catalog-extra",status:"pending",provenance:"catalog"});
-    return ok({scopeToken:"account-1",accountRevision:disconnectedRevision||(saved?"r2":"r1"),applyState:globalThis.snapshotApplyState||"applied",
-    sources:(gatewayConnected?[kth]:[]).concat([custom])});},
+    const rows=(gatewayConnected?[kth]:[]).concat([custom]);
+    if(globalThis.otherPendingAfterSave&&saved)rows.push({id:"other",kind:"custom",models:[{status:"pending"}]});
+    return ok({scopeToken:"account-1",accountRevision:disconnectedRevision||(saved?"r2":"r1"),applyState:globalThis.snapshotApplyState||"applied",sources:rows});},
   preview(request){
     calls.push("preview");
     globalThis.seenDraft=request.draft;
@@ -136,7 +137,7 @@ globalThis.clawBridgeAPI={byokSources:{
   },
   discard(id){calls.push("discard:"+id);},
   save(request){calls.push("save");if(globalThis.failSave)return {ok:false,reasonCode:"save-refused"};saveCount++;saved=true;
-    return ok({sourceId:"byok-src-1",accountRevision:"r2",status:globalThis.pendingCatalog&&saveCount>1?"applied":"pending"});},
+    return ok({sourceId:"byok-src-1",accountRevision:"r2",status:globalThis.saveStatus||(globalThis.pendingCatalog&&saveCount>1?"applied":"pending")});},
   applyPending(revision){calls.push("apply:"+revision);return ok({status:"applied"});},
   disconnect(request){calls.push("disconnect:"+request.sourceId);if(globalThis.failDisconnect||(globalThis.pendingCatalog&&saveCount===1))return {ok:false,reasonCode:"disconnect-refused"};gatewayConnected=false;
     if(globalThis.disconnectStatus){disconnectedRevision=globalThis.disconnectRevision||"r3";
@@ -1378,6 +1379,76 @@ func TestControllerConfigureRefusesModeChangeDuringImport(t *testing.T) {
 	}
 }
 
+func TestDirectImportDefersGatewayCleanupOnlyForAManagedGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      string
+		disconnect bool
+		gatewayURL string
+		wantCalls  int
+	}{
+		{"managed gateway", "", true, "http://127.0.0.1:9100/v1", 1},
+		{"no gateway", `globalThis.noGateway=true;`, true, "http://127.0.0.1:9100/v1", 0},
+		{"cleanup not requested", "", false, "", 0},
+		{"cleanup not requested with a gateway URL", "", false, "http://127.0.0.1:9100/v1", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortDeferredApply(t, time.Second)
+			home := kthTestHome(t)
+			request := validDirectImportRequest()
+			request.ExpectedAccountKey = AccountScope(home)
+			request.DisconnectGateway = tc.disconnect
+			request.DisconnectGatewayURL = tc.gatewayURL
+			vm := runDirectExpression(t, request, `globalThis.saveStatus="deferred";`+tc.setup)
+			answer := vm.Get("directResult").Export().(map[string]any)
+			if answer["ok"] != true || answer["restartDeferred"] != true ||
+				answer["routeCleanupPending"] != (tc.wantCalls > 0) || answer["gatewayDisconnected"] != false {
+				t.Fatalf("deferred page result: %v", answer)
+			}
+			page := &fakePage{surface: "work", actions: true, importAPI: true,
+				directImportReplies: []map[string]any{answer},
+				applyPendingReplies: []map[string]any{{"ok": true, "status": "applied"}},
+				gatewayCleanupReply: map[string]any{"ok": true, "settled": true}}
+			harness := newHarness(t, page)
+			actions := NewCDPActionsForMode(harness.pipe, home, home, IntegrationModeDirect, directSourceID)
+			result, err := actions.ImportDirect(kthImportContext(t), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.OK || result.RouteCleanupPending || result.RequiresRestart || result.RestartDeferred {
+				t.Fatalf("settled import result: %+v", result)
+			}
+			if page.gatewayCleanupCalls != tc.wantCalls || page.applyPendingCalls != 1 {
+				t.Fatalf("gateway cleanups = %d, want %d; applyPending calls = %d, want 1",
+					page.gatewayCleanupCalls, tc.wantCalls, page.applyPendingCalls)
+			}
+		})
+	}
+}
+
+func TestDirectImportKeepsOnlyManagedGatewayWhileDirectModelsAreUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		setup       string
+		wantPending bool
+	}{
+		{"managed gateway", "", true},
+		{"no gateway", `globalThis.noGateway=true;`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validDirectImportRequest()
+			request.DisconnectGateway = true
+			request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
+			vm := runDirectExpression(t, request, `globalThis.saveStatus="applied";globalThis.directModelsUnavailable=true;`+tc.setup)
+			result := vm.Get("directResult").ToObject(vm)
+			if !result.Get("ok").ToBoolean() || result.Get("requiresRestart").ToBoolean() ||
+				result.Get("routeCleanupPending").ToBoolean() != tc.wantPending || result.Get("gatewayDisconnected").ToBoolean() {
+				t.Fatalf("result: %v", result.Export())
+			}
+		})
+	}
+}
+
 // The same settlement for the gateway cleanup of a Direct Mode import: a
 // `pending` answer is applied in place, a `deferred` one carries the revision
 // the Go retry owns, and a plain applied disconnect stays one call.
@@ -1385,6 +1456,7 @@ func TestDirectImportSettlesAPendingOrDeferredGatewayDisconnect(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		status       string
+		setup        string
 		wantCalls    string
 		wantPending  bool
 		wantRevision string
@@ -1404,28 +1476,41 @@ func TestDirectImportSettlesAPendingOrDeferredGatewayDisconnect(t *testing.T) {
 			name: "an applied disconnect stays one call", status: "applied",
 			wantCalls: "list,preview,save,list,apply:r2,list,disconnect:byok-kth",
 		},
+		{
+			name: "another source becomes pending after save", status: "pending",
+			setup:     `globalThis.saveStatus="applied";globalThis.otherPendingAfterSave=true;`,
+			wantCalls: "list,preview,save,list,disconnect:byok-kth,list", wantPending: true,
+		},
+		{
+			name: "a deferred disconnect with another pending source withholds its revision", status: "deferred",
+			setup:     `globalThis.saveStatus="applied";globalThis.otherPendingAfterSave=true;`,
+			wantCalls: "list,preview,save,list,disconnect:byok-kth,list", wantPending: true,
+		},
+		{
+			name: "the gateway's own pending models do not block its disconnect", status: "pending",
+			setup:     `globalThis.saveStatus="applied";globalThis.gatewayModels=[{status:"pending"}];`,
+			wantCalls: "list,preview,save,list,disconnect:byok-kth,list,apply:r3",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := validDirectImportRequest()
 			request.DisconnectGateway = true
 			request.DisconnectGatewayURL = "http://127.0.0.1:9100/v1"
-			vm := runDirectExpression(t, request, `globalThis.disconnectStatus="`+tc.status+`";`)
+			vm := runDirectExpression(t, request, `globalThis.disconnectStatus="`+tc.status+`";`+tc.setup)
 			result := vm.Get("directResult").ToObject(vm)
 			pending := result.Get("routeCleanupPending") != nil && result.Get("routeCleanupPending").ToBoolean()
 			if !result.Get("ok").ToBoolean() || pending != tc.wantPending {
 				t.Fatalf("result: %v", result.Export())
 			}
-			revision := ""
-			if value := result.Get("cleanupApplyRevision"); value != nil {
-				revision = value.String()
-			}
-			if revision != tc.wantRevision {
+			if revision := result.Get("cleanupApplyRevision").String(); revision != tc.wantRevision {
 				t.Fatalf("cleanup revision = %q, want %q", revision, tc.wantRevision)
 			}
-			if tc.wantPending {
-				if scope := result.Get("cleanupApplyScopeToken").String(); scope != "account-1" {
-					t.Fatalf("cleanup scope = %q", scope)
-				}
+			wantScope := ""
+			if tc.wantRevision != "" {
+				wantScope = "account-1"
+			}
+			if scope := result.Get("cleanupApplyScopeToken").String(); scope != wantScope {
+				t.Fatalf("cleanup scope = %q, want %q", scope, wantScope)
 			}
 			calls, err := vm.RunString(`calls.join(",")`)
 			if err != nil || calls.String() != tc.wantCalls {

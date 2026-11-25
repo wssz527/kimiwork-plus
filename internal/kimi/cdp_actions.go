@@ -552,15 +552,8 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 				result.RequiresRestart = false
 				result.RestartDeferred = false
 				if result.RouteCleanupPending && request.DisconnectDirectSourceID != "" {
-					settled, deferred := a.disconnectDirectSourceOnce(ctx, settings, request.DisconnectDirectSourceID)
-					if settled {
-						result.RouteCleanupPending = false
-					} else if deferred {
-						// The disconnect itself wrote pending bytes: the old source is
-						// gone only after the restart the user is now asked for.
-						result.RequiresRestart = true
-						result.RestartDeferred = true
-					}
+					outcome := a.disconnectDirectSourceOnce(ctx, settings, request.DisconnectDirectSourceID)
+					recordCleanupOutcome(&result, outcome)
 				}
 			case "apply-failed":
 				result.OK = false
@@ -604,6 +597,10 @@ func (a *cdpActions) settleDeferredCleanup(ctx context.Context, settings actionT
 	if err != nil {
 		return
 	}
+	recordCleanupOutcome(result, outcome)
+}
+
+func recordCleanupOutcome(result *ImportResult, outcome string) {
 	switch outcome {
 	case "applied":
 		result.RouteCleanupPending = false
@@ -723,15 +720,8 @@ func (a *cdpActions) ImportDirect(ctx context.Context, request DirectImportReque
 				result.RequiresRestart = false
 				result.RestartDeferred = false
 				if result.RouteCleanupPending && request.DisconnectGateway {
-					settled, deferred := a.disconnectGatewayOnce(ctx, settings, request.DisconnectGatewayURL)
-					if settled {
-						result.RouteCleanupPending = false
-					} else if deferred {
-						// The gateway disconnect itself wrote pending bytes: it is
-						// gone only after the restart the user is now asked for.
-						result.RequiresRestart = true
-						result.RestartDeferred = true
-					}
+					outcome := a.disconnectGatewayOnce(ctx, settings, request.DisconnectGatewayURL)
+					recordCleanupOutcome(&result, outcome)
 				}
 			case "apply-failed":
 				result.OK = false
@@ -1301,7 +1291,6 @@ if(typeof api?.revealByok==="function"){
 }
 const sources=api?.byokSources;
 const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS + `
-let hadOtherPending=false;
 const disconnectDirect=async()=>{
   if(!directSourceID)return {ok:true,settled:true};
   if(typeof sources?.list!=="function"||typeof sources.disconnect!=="function")return {ok:false,settled:false};
@@ -1312,9 +1301,11 @@ const disconnectDirect=async()=>{
   if(!direct)return {ok:true,settled:true};
   if(direct.kind!=="custom")return {ok:false,settled:false};
   if(direct.quarantined===true||direct.status==="disconnected")return {ok:true,settled:true};
+  const cleanupOtherPending=current.sources.some(source=>source.id!==direct.id&&
+    (Array.isArray(source.models)?source.models:[]).some(model=>model.status==="pending"));
   const reply=await sources.disconnect({sourceId:direct.id,accountRevision:current.accountRevision,
     sourceRevision:direct.revision??null});
-  return await settleDisconnect(reply,current,hadOtherPending);
+  return await settleDisconnect(reply,current,cleanupOtherPending);
 };
 if(typeof api?.importByokModels==="function"){
   const result=await api.importByokModels(token,baseURL);
@@ -1344,7 +1335,7 @@ const ownPreviousLoopback=existing&&existing.kind==="kth"&&
 if(existing&&(existing.kind!=="kth"||(existing.registryUrl!==catalogURL&&existing.registryUrl!==baseURL&&!ownPreviousLoopback))){
   return {ok:false,code:"foreign-url"};
 }
-hadOtherPending=snapshot.sources.some(source=>{
+const hadOtherPending=snapshot.sources.some(source=>{
   if(source.id===existing?.id)return false;
   if(Array.isArray(source.models))return source.models.some(model=>model.status==="pending");
   return snapshot.applyState!==undefined&&!["applied","idle","ready"].includes(snapshot.applyState);

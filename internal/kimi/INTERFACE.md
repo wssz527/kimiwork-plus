@@ -1438,9 +1438,10 @@ Every page-side `byokSources.disconnect` settles through one shared block. A
 reply without a `status`, or with `status: "applied"`, is done and costs no
 extra call. `status: "pending"` is applied in place through `sources.list()`
 and `applyPending` when no other source holds a pending confirmation. A
-`status: "deferred"` reply travels back as
-`cleanupApplyScopeToken`/`cleanupApplyRevision`, and `ImportModels`/`ImportDirect`
-finish it with the same `retryDeferredApply`. A cleanup that still ends
+`status: "deferred"` reply carries `cleanupApplyScopeToken`/`cleanupApplyRevision`
+only when the cleanup snapshot shows no other source with a pending
+confirmation. `ImportModels`/`ImportDirect` use that revision to finish the
+cleanup with `retryDeferredApply`. A cleanup that still ends
 `deferred` keeps `routeCleanupPending` and asks for the restart that removes the
 old source (`restartDeferred`); `apply-failed` keeps the cleanup claim and the
 restart prompt without the deferred marker; `stale` and `account-changed` leave

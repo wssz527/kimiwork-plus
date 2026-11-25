@@ -520,14 +520,17 @@ globalThis.clawBridgeAPI={byokSources:{
 // window; neither may leave the old source connected on disk.
 func TestGatewayImportSettlesAPendingOrDeferredDirectDisconnect(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		otherPending bool
-		saveStatus   string
-		disconnect   string
-		wantCalls    string
-		wantPending  bool
-		wantScope    string
-		wantRevision string
+		name             string
+		useNativeImport  bool
+		otherPending     bool
+		pendingAfterSave bool
+		directPending    bool
+		saveStatus       string
+		disconnect       string
+		wantCalls        string
+		wantPending      bool
+		wantScope        string
+		wantRevision     string
 	}{
 		{
 			name: "a pending disconnect is applied in place", saveStatus: "pending",
@@ -552,25 +555,52 @@ func TestGatewayImportSettlesAPendingOrDeferredDirectDisconnect(t *testing.T) {
 			wantCalls:   "list,preview,save,list,disconnect",
 			wantPending: true,
 		},
+		{
+			name:             "another source becomes pending after save",
+			pendingAfterSave: true, saveStatus: "applied",
+			disconnect:  `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:   "list,preview,save,list,disconnect",
+			wantPending: true,
+		},
+		{
+			name:            "native import with another pending source withholds the deferred revision",
+			useNativeImport: true, otherPending: true,
+			disconnect:  `{status:"deferred",accountRevision:"r3"}`,
+			wantCalls:   "native-import,list,disconnect",
+			wantPending: true,
+		},
+		{
+			name:          "the direct source's own pending models do not block its disconnect",
+			directPending: true, saveStatus: "applied",
+			disconnect: `{status:"pending",accountRevision:"r3"}`,
+			wantCalls:  "list,preview,save,list,disconnect,list,apply:r3",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm := goja.New()
-			sources := `[{id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},{id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"}]`
-			if tc.otherPending {
-				sources = `[{id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},{id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"},{id:"other",kind:"registry",models:[{status:"pending"}]}]`
+			if err := vm.Set("fixture", map[string]bool{
+				"useNativeImport": tc.useNativeImport, "otherPending": tc.otherPending,
+				"pendingAfterSave": tc.pendingAfterSave, "directPending": tc.directPending,
+			}); err != nil {
+				t.Fatal(err)
 			}
 			if _, err := vm.RunString(`
 const calls=[];
 let revision="r1";
-const sources=(function(){return ` + sources + `;})();
+const direct={id:"direct-source",kind:"custom",revision:"d1",models:fixture.directPending?[{status:"pending"}]:[]};
+const gateway={id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json"};
+const other={id:"other",kind:"registry",models:[{status:"pending"}]};
 const ok=value=>({ok:true,value});
 globalThis.clawBridgeAPI={byokSources:{
-  list(){calls.push("list");return ok({scopeToken:"account",accountRevision:revision,sources:sources});},
+  list(){calls.push("list");const rows=[direct,gateway];
+    if(fixture.otherPending||(fixture.pendingAfterSave&&revision!=="r1"))rows.push(other);
+    return ok({scopeToken:"account",accountRevision:revision,sources:rows});},
   preview(){calls.push("preview");return ok({scopeToken:"account",accountRevision:"r1",sourceRevision:"k1",sourceId:"byok-kth",previewId:"preview",canSave:true,candidates:[{id:"m1"}]});},
   save(){calls.push("save");revision="r2";return ok({sourceId:"byok-kth",accountRevision:"r2",status:"` + tc.saveStatus + `"});},
   applyPending(applied){calls.push("apply:"+applied);return ok({status:"applied"});},
   disconnect(request){calls.push("disconnect");revision="r3";return ok(` + tc.disconnect + `);},
 }};
+if(fixture.useNativeImport)globalThis.clawBridgeAPI.importByokModels=()=>{calls.push("native-import");return {ok:true};};
 `); err != nil {
 				t.Fatal(err)
 			}
@@ -609,6 +639,7 @@ func TestStandaloneDisconnectExpressionsSettleTheirOwnReplies(t *testing.T) {
 		name         string
 		expression   func() string
 		reply        string
+		otherPending bool
 		wantCalls    string
 		wantSettled  bool
 		wantScope    string
@@ -646,17 +677,29 @@ func TestStandaloneDisconnectExpressionsSettleTheirOwnReplies(t *testing.T) {
 			wantCalls:  "list,disconnect",
 			wantScope:  "scope", wantRevision: "r3",
 		},
+		{
+			name:         "a deferred disconnect with another pending source withholds its revision",
+			expression:   func() string { return disconnectDirectSourceExpression("direct-source") },
+			reply:        `{status:"deferred",accountRevision:"r3"}`,
+			otherPending: true,
+			wantCalls:    "list,disconnect",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm := goja.New()
+			if err := vm.Set("otherPending", tc.otherPending); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := vm.RunString(`
 const calls=[];
 let revision="r2";
 const ok=value=>({ok:true,value});
 globalThis.clawBridgeAPI={byokSources:{
-  list(){calls.push("list");return ok({scopeToken:"scope",accountRevision:revision,sources:[
+  list(){calls.push("list");const rows=[
     {id:"direct-source",kind:"custom",displayName:"KimiWork + 直连",revision:"d1"},
-    {id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json",providers:[]}]});},
+    {id:"byok-kth",kind:"kth",revision:"k1",registryUrl:"http://127.0.0.1:9100/v1/models/api.json",providers:[]}];
+    if(otherPending)rows.push({id:"other",kind:"custom",models:[{status:"pending"}]});
+    return ok({scopeToken:"scope",accountRevision:revision,sources:rows});},
   applyPending(applied){calls.push("apply:"+applied);return ok({status:"applied"});},
   disconnect(){calls.push("disconnect");revision="r3";return ok(` + tc.reply + `);},
 }};
