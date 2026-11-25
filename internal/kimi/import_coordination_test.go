@@ -43,7 +43,7 @@ func TestExplicitImportWaitsForBackgroundRepair(t *testing.T) {
 	controller.mu.Unlock()
 
 	go func() {
-		_, _ = controller.importModelsAuthorized(context.Background(), "", "repair")
+		_, _ = controller.importModelsAuthorized(context.Background(), "", "repair", "")
 	}()
 	select {
 	case <-actions.started:

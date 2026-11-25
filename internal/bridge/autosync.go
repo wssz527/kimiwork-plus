@@ -41,6 +41,8 @@ const (
 // answers immediately; only this background step waits for the edits to stop.
 const autoSyncDebounce = 800 * time.Millisecond
 
+const autoSyncProviderRepairRetries = 3
+
 const (
 	autoSyncReasonDisconnected  = "disconnected"
 	autoSyncReasonNotRunning    = "kimi_not_running"
@@ -166,6 +168,10 @@ type autoSyncCoordinator struct {
 	// write. target is the newest saved digest; empty means "ask the readback".
 	pending bool
 	target  string
+	// A repair-only catch-up must still find the owned UUID before it writes.
+	repairOnly              bool
+	attemptedProviderRepair string
+	providerRepairRetries   int
 	// disconnected is set when the user removed the managed models on purpose.
 	// Only a save that changes the surface lifts it again.
 	disconnected bool
@@ -243,6 +249,7 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 		return
 	}
 	if changed {
+		c.repairOnly = false
 		// A surface change is the user asking for the catalog again, which is
 		// also the one thing that ends a deliberate disconnect.
 		c.disconnected = false
@@ -250,7 +257,7 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 			// The newest surface is the one already in place. While a run is
 			// writing an older generation this must not short-circuit: the user
 			// reverting mid-write still owes Kimi the revert.
-			c.pending, c.target, c.blocked = false, "", false
+			c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
 			c.stopTimerLocked()
 			if c.syncedAdopted {
 				c.setStateLocked(autoSyncSynced, "")
@@ -287,7 +294,8 @@ func (c *autoSyncCoordinator) reset() {
 	if c.stopped {
 		return
 	}
-	c.pending, c.target, c.blocked, c.disconnected = false, "", false, true
+	c.pending, c.target, c.blocked, c.disconnected, c.repairOnly = false, "", false, true, false
+	c.attemptedProviderRepair = ""
 	// The profile no longer holds the catalog, so the old baseline proves
 	// nothing about the next connection.
 	c.synced, c.syncedAdopted = "", false
@@ -303,10 +311,6 @@ func (c *autoSyncCoordinator) reset() {
 // while it ran.
 func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, result any, err error) {
 	if c == nil {
-		return
-	}
-	if err == nil && action == "disconnect-models" {
-		c.reset()
 		return
 	}
 	manualPrepare := err == nil && (action == "connect-kimi" || action == "prepare-native")
@@ -327,7 +331,7 @@ func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, re
 		// user saved, and the new account still owes it.
 		c.synced, c.syncedAdopted = "", false
 		if !c.disconnected {
-			c.pending, c.blocked = true, false
+			c.pending, c.blocked, c.repairOnly = true, false, false
 			c.setStateLocked(autoSyncScheduled, "")
 			c.armLocked(0)
 		}
@@ -345,7 +349,7 @@ func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, re
 		// failure the user just resolved. A save that moved the surface while the
 		// import ran is newer and stays queued.
 		c.synced, c.syncedAdopted = startedDigest, imported.Adopted && !imported.RequiresRestart
-		c.pending, c.target, c.blocked = false, "", false
+		c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
 		c.stopTimerLocked()
 		if c.syncedAdopted {
 			c.setStateLocked(autoSyncSynced, "")
@@ -364,16 +368,14 @@ func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, re
 	if err == nil && (action == "launch-kimi" || action == "restart-kimi") && !c.disconnected {
 		// The managed profile exists now: whatever the last save owed it, and any
 		// drift the readback finds, is settled without another save.
-		c.pending = true
+		c.pending, c.repairOnly = true, false
 		c.setStateLocked(autoSyncScheduled, "")
 		c.armLocked(0)
 	}
 }
 
-// observe converges the published state with a readback the periodic loop
-// already made: once the running application adopted the catalog, a pending
-// restart is over. It never turns an unproven readback into `synced` and never
-// settles a queued generation.
+// observe queues an owned UUID repair and settles an adopted restart from the
+// periodic readback. It leaves any queued save in control of its generation.
 func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Document) {
 	if c == nil || current == nil {
 		return
@@ -381,6 +383,15 @@ func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Do
 	settled := false
 	c.mu.Lock()
 	if c.stopped || c.running || c.disconnected {
+		c.mu.Unlock()
+		return
+	}
+	if repair := providerRepairSignature(*current, d); repair != "" {
+		if !c.pending && repair != c.attemptedProviderRepair {
+			c.pending, c.repairOnly = true, true
+			c.setStateLocked(autoSyncScheduled, "")
+			c.armLocked(0)
+		}
 		c.mu.Unlock()
 		return
 	}
@@ -394,6 +405,9 @@ func (c *autoSyncCoordinator) observe(current *kimi.IntegrationResult, d core.Do
 		// here would drop a model removal, a rename or a rotated key.
 		c.mu.Unlock()
 		return
+	}
+	if kimiK3State(d, current, false) == "ready" {
+		c.attemptedProviderRepair = ""
 	}
 	digest := catalogSurfaceDigest(d)
 	switch c.state {
@@ -480,7 +494,7 @@ func (c *autoSyncCoordinator) run() {
 		c.running = false
 		retry := c.deferred
 		c.deferred = false
-		if retry {
+		if retry && (!c.repairOnly || c.timer == nil) {
 			c.armLocked(0)
 		}
 		c.mu.Unlock()
@@ -546,7 +560,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		return autoSyncIdle, "", nil, nil
 	}
 	target, disconnected, adopted := c.target, c.disconnected, c.syncedAdopted
-	baseline := c.synced
+	baseline, repairOnly := c.synced, c.repairOnly
 	c.mu.Unlock()
 	if disconnected {
 		c.hold(autoSyncIdle, autoSyncReasonDisconnected)
@@ -588,9 +602,24 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	ctx, cancel := context.WithTimeout(c.ctx, timeout)
 	defer cancel()
 	imported := kimi.ImportResult{}
+	var repair kimi.IntegrationResult
 	if target == "" {
 		observed := c.reconcile(ctx)
-		if !observed.NeedsNativeImport() {
+		if repairOnly {
+			if signature := providerRepairSignature(observed, d); signature != "" {
+				c.mu.Lock()
+				if c.attemptedProviderRepair != signature {
+					c.attemptedProviderRepair = signature
+					c.providerRepairRetries = 0
+				}
+				c.mu.Unlock()
+				repair = observed
+			} else if observed.NeedsNativeImport() {
+				c.finish(autoSyncIdle, "", false, digest, target)
+				return autoSyncIdle, "", nil, nil
+			}
+		}
+		if repair.GatewayProviderMismatch == "" && !observed.NeedsNativeImport() {
 			// A catch-up with nothing to write: the readback is the answer.
 			state, reason := autoSyncOutcome(imported, observed)
 			if state == autoSyncFailed && (observed.State == kimi.IntegrationWaitingConfig || observed.State == kimi.IntegrationPending) {
@@ -611,7 +640,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		c.finish(autoSyncFailed, autoSyncReasonPrepareNeeded, false, digest, target)
 		return autoSyncFailed, autoSyncReasonPrepareNeeded, nil, nil
 	}
-	imported, err = c.importCatalog(ctx)
+	imported, err = c.importCatalog(ctx, repair)
 	if err != nil && autoSyncUnmanagedFailure(err) && !n.autoSyncManaged() {
 		// The managed process left between the check above and the write. Nothing
 		// is written into a process this build does not own, and the generation
@@ -622,6 +651,12 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		}
 		c.hold(autoSyncDeferredOffline, autoSyncReasonNotRunning)
 		return autoSyncDeferredOffline, autoSyncReasonNotRunning, imported, nil
+	}
+	if repair.GatewayProviderMismatch != "" && imported.WaitingForImportSurface() {
+		reason := firstCode(imported.Reason, core.ErrorCode(err))
+		if c.retryProviderRepair(reason) {
+			return autoSyncScheduled, reason, imported, nil
+		}
 	}
 	if imported.State == kimi.ImportStateWaitingLogin || imported.State == kimi.ImportStateAccountChanged {
 		// The import never reached a write, so the profile signing in again is the
@@ -645,6 +680,14 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	current := c.reconcile(ctx)
 	state, reason := autoSyncOutcome(imported, current)
 	applied := current.Applied || imported.Applied
+	if repair.GatewayProviderMismatch != "" && current.GatewayProviderMismatch != "" {
+		if imported.RequiresRestart {
+			state, reason = autoSyncRequiresRestart, firstCode(imported.Reason, kimi.NativeRequiresRestart)
+		} else {
+			state, reason = autoSyncFailed, "native_import_non_canonical_provider"
+		}
+		applied = false
+	}
 	if err != nil && imported.State == kimi.ImportStateFailed && imported.Reason == autoSyncReasonPrepareNeeded {
 		// The prepare step never reached the write, so a readback of the previous
 		// catalog cannot prove this generation landed.
@@ -660,8 +703,26 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	return state, reason, imported, nil
 }
 
-func (c *autoSyncCoordinator) importCatalog(ctx context.Context) (kimi.ImportResult, error) {
+func providerRepairSignature(observed kimi.IntegrationResult, d core.Document) string {
+	readback := observed.Readback
+	if core.IntegrationMode(d) != core.IntegrationModeGateway || !core.KimiK3Compatibility(d) ||
+		(observed.State != kimi.IntegrationReady && observed.State != kimi.IntegrationRepaired) ||
+		!observed.Applied || observed.Mode == core.IntegrationModeDirect || observed.GatewayProviderMismatch == "" ||
+		readback == nil || !readback.Active || !readback.AccountVerified || readback.AccountDigest == "" {
+		return ""
+	}
+	return readback.AccountDigest + "\x00" + observed.GatewayProviderMismatch + "\x00" + catalogSurfaceDigest(d)
+}
+
+func (c *autoSyncCoordinator) importCatalog(ctx context.Context, repair kimi.IntegrationResult) (kimi.ImportResult, error) {
 	n := c.native
+	if repair.GatewayProviderMismatch != "" {
+		if n.importModels != nil {
+			return n.importModels(ctx)
+		}
+		// The repair can activate Work through the existing CDP session.
+		return n.controller.RepairGatewayProvider(ctx, repair.Readback.AccountDigest, repair.GatewayProviderMismatch)
+	}
 	if n.isDirectMode() {
 		if err := n.prepareBYOKSilent(ctx); err != nil {
 			return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(err)}, err
@@ -730,8 +791,21 @@ func (c *autoSyncCoordinator) finish(state, reason string, applied bool, digest,
 		c.armLocked(c.debounce)
 		return
 	}
-	c.pending, c.target, c.blocked = false, "", false
+	c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
 	c.setStateLocked(state, reason)
+}
+
+// retryProviderRepair keeps the operation slot free while the page mounts.
+func (c *autoSyncCoordinator) retryProviderRepair(reason string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped || c.disconnected || !c.pending || !c.repairOnly || c.providerRepairRetries >= autoSyncProviderRepairRetries {
+		return false
+	}
+	c.providerRepairRetries++
+	c.setStateLocked(autoSyncScheduled, reason)
+	c.armLocked(c.debounce)
+	return true
 }
 
 // hold publishes a state that still owes Kimi the queued write. The generation
@@ -753,16 +827,20 @@ func (c *autoSyncCoordinator) kickIfReady() {
 		return
 	}
 	c.mu.Lock()
-	queued := !c.stopped && c.pending && !c.running && !c.disconnected
+	queued := c.canKickLocked()
 	c.mu.Unlock()
 	if !queued || !c.native.autoSyncManaged() {
 		return
 	}
 	c.mu.Lock()
-	if !c.stopped && c.pending && !c.running && !c.disconnected {
+	if c.canKickLocked() {
 		c.armLocked(0)
 	}
 	c.mu.Unlock()
+}
+
+func (c *autoSyncCoordinator) canKickLocked() bool {
+	return !c.stopped && c.pending && !c.running && !c.disconnected && (!c.repairOnly || (c.timer == nil && !c.blocked))
 }
 
 // abandon ends the queued generation without a retry: the document itself
@@ -773,7 +851,7 @@ func (c *autoSyncCoordinator) abandon(state, reason string) {
 	if c.stopped {
 		return
 	}
-	c.pending, c.target, c.blocked = false, "", false
+	c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
 	c.setStateLocked(state, reason)
 }
 

@@ -1,6 +1,7 @@
 package kimi
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -548,12 +549,12 @@ func TestNativeKimiK3ReadbackKeepsLogicalModelIdentity(t *testing.T) {
 	if got := integration.Reconcile(options); got.State != IntegrationReady || got.Aliases[logical] != alias || got.Aliases[catalog[0].CatalogID] != "" {
 		t.Fatalf("K3 readback = %+v", got)
 	}
-	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models(); len(got) != 0 {
+	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models().models; len(got) != len(officialConversationModels) {
 		t.Fatalf("signed-out profile returned targets: %+v", got)
 	}
 	config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-new"}
 	fixture.writeJSON(t, configPath, config)
-	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models(); len(got) != 2 || got[0].Alias != alias || got[0].PreviousAlias != original {
+	if got := (conversationStore{home: fixture.dir, catalog: catalog}).models().models; len(got) != 5 || got[0].Alias != alias || got[0].PreviousAlias != original {
 		t.Fatalf("K3 targets = %+v", got)
 	}
 }
@@ -637,7 +638,7 @@ func TestNativeResponsesRowReconcilesUnderItsCompatibleAlias(t *testing.T) {
 	config = fixture.readJSON(t, configPath)
 	config["credentials"].(map[string]any)["kimiWeb"] = map[string]any{"userId": "account-new"}
 	fixture.writeJSON(t, configPath, config)
-	models := (conversationStore{home: fixture.dir, catalog: catalog}).models()
+	models := (conversationStore{home: fixture.dir, catalog: catalog}).models().models
 	var target *ConversationModel
 	for i := range models {
 		if models[i].Alias == alias {
@@ -649,5 +650,58 @@ func TestNativeResponsesRowReconcilesUnderItsCompatibleAlias(t *testing.T) {
 	}
 	if target.PreviousAlias != "byok-kth-resp/"+logical {
 		t.Fatalf("previous alias = %q", target.PreviousAlias)
+	}
+}
+
+func TestGatewayReadbackDetectsOnlyOwnedTemporaryProvider(t *testing.T) {
+	fixture := newNativeFixture(t)
+	const baseURL = "http://127.0.0.1:9999/v1"
+	const logical = "kimi-probe-model"
+	const credential = "cred-1"
+	const temporary = "byok-55555555-5555-4555-8555-555555555555"
+	accountKey := sha256Hex("test-account")
+	fixture.seedV3Store(t, accountKey, baseURL, credential)
+	configPath := filepath.Join(fixture.dir, NativeWorkConfig)
+	storePath := filepath.Join(fixture.dir, NativeWorkStore)
+	store := fixture.readJSON(t, storePath)
+	account := mapField(mapField(store, "accounts"), accountKey)
+	active := mapField(account, "active")
+	catalog := testCatalog()[:1]
+	catalog[0].CatalogID = protocol.KimiCompatibleModelID(logical)
+	row := modelRows(active)[0]
+	row["alias"], row["model"] = kthAliasPrefix+catalog[0].CatalogID, catalog[0].CatalogID
+	config := fixture.readJSON(t, configPath)
+	mapField(config, "credentials")["kimiWeb"] = map[string]any{"userId": "test-account"}
+	configModels := mapField(mapField(config, "model"), "models")
+	configProviders := mapField(mapField(config, "model"), "providers")
+	model := mapField(configModels, kthAliasPrefix+logical)
+	model["model"] = row["model"]
+	delete(configModels, kthAliasPrefix+logical)
+	configModels[stringField(row, "alias")] = model
+	fixture.writeJSON(t, configPath, config)
+	fixture.writeJSON(t, storePath, store)
+	controller := &Controller{settings: ControllerSettings{StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir),
+		KimiHome: fixture.dir, ProfileMode: ProfileModeIsolated, GatewayURL: baseURL, Models: catalog}}
+	ctx := context.Background()
+	if result := controller.ReconcileWithReadback(ctx); !result.Applied || result.GatewayProviderMismatch != "" {
+		t.Fatalf("canonical readback = %+v", result)
+	}
+	provider := mapField(configProviders, kthProviderID)
+	delete(configProviders, kthProviderID)
+	configProviders[temporary] = provider
+	objectRows(active, "providers")[0]["id"] = temporary
+	delete(configModels, stringField(row, "alias"))
+	row["alias"], row["providerId"], model["provider"] = temporary+"/"+catalog[0].CatalogID, temporary, temporary
+	configModels[stringField(row, "alias")] = model
+	fixture.writeJSON(t, configPath, config)
+	fixture.writeJSON(t, storePath, store)
+	if result := controller.ReconcileWithReadback(ctx); !result.Applied || result.GatewayProviderMismatch != temporary {
+		t.Fatalf("temporary provider readback = %+v", result)
+	}
+	source, _ := kthAccountSource(account)
+	source["status"] = "disconnected"
+	fixture.writeJSON(t, storePath, store)
+	if result := controller.ReconcileWithReadback(ctx); result.GatewayProviderMismatch != "" {
+		t.Fatalf("disconnected provider readback = %+v", result)
 	}
 }

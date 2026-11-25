@@ -140,3 +140,24 @@ func TestServerMapsK3ConflictAndOperationBusyErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestConversationRebindParsesOfficialAndExplicitAllMigration(t *testing.T) {
+	request, err := parseConversationRebind(core.Document{"conversationKeys": []any{"from-direct"}, "targetModelAlias": "k2d8-preview"})
+	if err != nil || request.TargetModelAlias != "k2d8-preview" || request.ThinkingLevel != "" {
+		t.Fatalf("official request = %+v, %v", request, err)
+	}
+	request, err = parseConversationRebind(core.Document{"migratePreviousAlias": true, "restartKimi": true})
+	if err != nil || !request.MigratePreviousAlias || !request.RestartKimi || request.TargetModelAlias != "" {
+		t.Fatalf("all-migration request = %+v, %v", request, err)
+	}
+	for _, in := range []core.Document{
+		{"restartKimi": true},
+		{"migratePreviousAlias": false},
+		{"migratePreviousAlias": true, "targetModelAlias": ""},
+		{"migratePreviousAlias": true, "thinkingLevel": "high"},
+	} {
+		if _, err := parseConversationRebind(in); err == nil {
+			t.Fatalf("ambiguous request was accepted: %v", in)
+		}
+	}
+}

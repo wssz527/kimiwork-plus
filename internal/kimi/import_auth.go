@@ -102,10 +102,15 @@ func (c *Controller) waitForImport(ctx context.Context) error {
 // so a second call — from a retry, a periodic reconcile or a stale UI event —
 // can never reopen the overlay on its own.
 func (c *Controller) ImportModelsAuthorized(ctx context.Context) (ImportResult, error) {
-	return c.importModelsAuthorized(ctx, "", "")
+	return c.importModelsAuthorized(ctx, "", "", "")
 }
 
-func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount, repairSignature string) (ImportResult, error) {
+// RepairGatewayProvider runs the existing import with a verified UUID precondition and no Direct cleanup.
+func (c *Controller) RepairGatewayProvider(ctx context.Context, account, provider string) (ImportResult, error) {
+	return c.importModelsAuthorized(ctx, account, "", provider)
+}
+
+func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount, repairSignature, repairProviderID string) (ImportResult, error) {
 	if repairSignature != "" {
 		c.reapChild()
 	}
@@ -133,8 +138,8 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 		c.importGranted = false
 		c.mu.Unlock()
 	}()
-	result, err := c.importModels(ctx, true, repairSignature == "", expectedAccount)
-	if repairSignature != "" && repairFailedTransiently(result) {
+	result, err := c.importModels(ctx, true, repairSignature == "", expectedAccount, repairProviderID)
+	if repairSignature != "" && result.WaitingForImportSurface() {
 		c.mu.Lock()
 		if c.repairSignature == repairSignature {
 			c.repairSignature = ""
@@ -144,15 +149,10 @@ func (c *Controller) importModelsAuthorized(ctx context.Context, expectedAccount
 	return result, err
 }
 
-// repairFailedTransiently reports only failures that happen before an import
-// expression is dispatched. Once a timeout, a disconnect or a reload can hide
-// whether the official page took the write, the repair signature stays until a
-// later reconciliation or process restart provides fresh evidence.
-func repairFailedTransiently(result ImportResult) bool {
-	if result.OK {
-		return false
-	}
-	return result.State == ImportStateWaitingWork || result.State == ImportStateWaitingSettings
+// WaitingForImportSurface reports a missing Work or Settings page before a
+// write. An import whose outcome is unknown must wait for fresh readback.
+func (r ImportResult) WaitingForImportSurface() bool {
+	return !r.OK && !r.Applied && !r.RequiresRestart && (r.State == ImportStateWaitingWork || r.State == ImportStateWaitingSettings)
 }
 
 // forgetRepairSignature drops the suppression for the next launch. A signature
@@ -200,7 +200,7 @@ func (c *Controller) RepairIntegration(ctx context.Context, observed Integration
 		return
 	}
 	signature := account + "\x00" + previous + "\x00" + target
-	_, _ = c.importModelsAuthorized(ctx, account, signature)
+	_, _ = c.importModelsAuthorized(ctx, account, signature, "")
 }
 
 // ImportDirectAuthorized runs one Direct Mode import as an explicit, one-shot
@@ -273,13 +273,13 @@ func (c *Controller) ImportDirectAuthorized(ctx context.Context, request DirectI
 // build's default: the settings page has to be open already, or the answer is
 // waiting-settings for the caller to act on.
 func (c *Controller) ImportModels(ctx context.Context) (ImportResult, error) {
-	return c.importModels(ctx, false, false, "")
+	return c.importModels(ctx, false, false, "", "")
 }
 
 // importModels is the one import path. `authorized` permits opening the overlay
 // for an explicit action or a verified own-loopback repair; `activateWork`
 // permits an explicit user action to switch a running Kimi window into Work.
-func (c *Controller) importModels(ctx context.Context, authorized, activateWork bool, expectedAccount string) (ImportResult, error) {
+func (c *Controller) importModels(ctx context.Context, authorized, activateWork bool, expectedAccount, repairProviderID string) (ImportResult, error) {
 	// A child that already exited must not be imported into, and its state must
 	// not stay `ready`.
 	c.reapChild()
@@ -325,13 +325,13 @@ func (c *Controller) importModels(ctx context.Context, authorized, activateWork 
 	// gateway import replaces. It is disconnected only after the new gateway
 	// source has been applied; only a source recorded by this tool is ever named.
 	disconnectDirect := ""
-	if settings.integrationMode() == IntegrationModeGateway {
+	if repairProviderID == "" && settings.integrationMode() == IntegrationModeGateway {
 		disconnectDirect = c.previousDirectSourceID(settings)
 	}
 	result, err := bridge.Client().ImportModels(ctx, ImportRequest{
 		URL: settings.GatewayURL, Token: settings.GatewayToken,
 		ExpectedAccountKey: account, OpenSettings: authorized, ActivateWork: activateWork,
-		DisconnectDirectSourceID: disconnectDirect,
+		DisconnectDirectSourceID: disconnectDirect, RepairProviderID: repairProviderID,
 	})
 	if err != nil {
 		// A bridge that cannot be reached is not a page state: it is a failure the

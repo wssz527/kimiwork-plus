@@ -65,12 +65,49 @@ function parsePreferences(extra) {
   }
 }
 
-function listConversations(db, limit, visibleWhere) {
+function migrationMatcher(request) {
+  const exact = new Map();
+  const gateway = new Map();
+  const foreign = new Set((request.foreignProviders || []).map(id => id.toLowerCase()));
+  for (const migration of request.migrations || []) {
+    for (const alias of migration.aliases || []) {
+      const previous = exact.get(alias);
+      if (previous === undefined) exact.set(alias, migration);
+      else if (previous?.targetModelAlias !== migration.targetModelAlias) exact.set(alias, null);
+    }
+    if (migration.gatewayModelId) gateway.set(migration.gatewayModelId, migration);
+  }
+  return {
+    find(alias) {
+      if (exact.has(alias)) return exact.get(alias);
+      const match = /^(byok-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(.+)$/i.exec(alias);
+      if (match && !foreign.has(match[1].toLowerCase())) return gateway.get(match[2]);
+    },
+    candidates(db, visibleWhere, order = '') {
+      return db.prepare(`SELECT conversation_key,
+        CASE WHEN json_valid(extra_json) THEN json_extract(extra_json, '$.runtimePreferences.modelAlias') END AS alias
+        FROM conversations WHERE ${visibleWhere} AND typeof(alias) = 'text'
+        AND (alias IN (SELECT value FROM json_each(?)) OR
+          (substr(alias, 1, 5) = 'byok-' AND substr(alias, 43) IN (SELECT value FROM json_each(?))))
+        ${order}`).iterate(JSON.stringify([...exact.keys()]), JSON.stringify([...gateway.keys()]));
+    },
+  };
+}
+
+function listConversations(db, request, visibleWhere) {
+  const migration = migrationMatcher(request);
+  const migrationCounts = Object.create(null);
+  if (request.migrations?.length) {
+    for (const row of migration.candidates(db, visibleWhere)) {
+      const target = migration.find(row.alias)?.targetModelAlias;
+      if (target) migrationCounts[target] = (migrationCounts[target] || 0) + 1;
+    }
+  }
   const rows = db.prepare(`SELECT conversation_key, title, substr(first_user_text, 1, 240) AS first_user_text,
     workspace_path, updated_at_ms, extra_json FROM conversations
     WHERE ${visibleWhere}
-    ORDER BY updated_at_ms DESC, conversation_key LIMIT ?`).all(limit);
-  return { conversations: rows.map(row => {
+    ORDER BY updated_at_ms DESC, conversation_key LIMIT ?`).all(request.limit);
+  return { migrationCounts, conversations: rows.map(row => {
     const preferences = parsePreferences(row.extra_json);
     return {
       conversationKey: row.conversation_key,
@@ -79,6 +116,7 @@ function listConversations(db, limit, visibleWhere) {
       workspacePath: row.workspace_path,
       updatedAtMs: row.updated_at_ms,
       modelAlias: preferences.modelAlias,
+      migrationTargetAlias: migration.find(preferences.modelAlias)?.targetModelAlias,
       thinkingLevel: preferences.thinkingLevel,
     };
   }) };
@@ -166,7 +204,13 @@ function applyJsonBindings(agentDirectory, entries, preloaded) {
   const applied = new Map(Object.entries(bindings.document));
   for (const entry of entries) {
     const previous = selections.get(entry.key);
-    selections.set(entry.key, { ...(isObject(previous) ? previous : {}), modelKey: entry.modelAlias, thinkingLevel: entry.thinkingLevel });
+    const next = { ...(isObject(previous) ? previous : {}), modelKey: entry.modelAlias };
+    if (entry.byok) next.thinkingLevel = entry.thinkingLevel;
+    else {
+      delete next.thinkingLevel;
+      delete next.pendingRuntime;
+    }
+    selections.set(entry.key, next);
     if (entry.byok) applied.set(entry.key, entry.modelAlias);
     else applied.delete(entry.key);
   }
@@ -233,10 +277,7 @@ function recoverPendingJournal(db, agentDirectory, visibleWhere) {
 }
 
 function rebindConversations(db, request, visibleWhere) {
-  const { agentDirectory, modelAlias, previousAlias } = request;
-  const defaultLevel = request.thinkingLevel || '';
-  const supportedEfforts = new Set(request.supportEfforts || []);
-  const byok = modelAlias.startsWith('byok-');
+  const { agentDirectory } = request;
   const journalPath = path.join(agentDirectory, JOURNAL_NAME);
   recoverPendingJournal(db, agentDirectory, visibleWhere);
 
@@ -254,22 +295,26 @@ function rebindConversations(db, request, visibleWhere) {
       ELSE json_set(${normalizedExtra}, '$.runtimePreferences.modelAlias', ?, '$.runtimePreferences.thinkingLevel', ?)
       END WHERE ${visibleWhere} AND conversation_key = ?`);
     const isObjectAt = db.prepare("SELECT json_type(?) AS root, json_type(?, '$.runtimePreferences') AS preferences");
-    let conversationKeys = request.conversationKeys;
+    const migrations = new Map();
+    let conversationKeys = request.conversationKeys || [];
     let hasMore = false;
-    if (previousAlias) {
-      const matched = db.prepare(`SELECT conversation_key FROM conversations
-        WHERE ${visibleWhere}
-        AND CASE WHEN json_valid(extra_json) THEN json_extract(extra_json, '$.runtimePreferences.modelAlias') END = ?
-        ORDER BY updated_at_ms DESC, conversation_key LIMIT ?`).all(previousAlias, request.limit + 1);
-      hasMore = matched.length > request.limit;
-      conversationKeys = matched.slice(0, request.limit).map(row => row.conversation_key);
-      if (conversationKeys.length === 0) {
-        db.exec('ROLLBACK');
-        return { conversationKeys, hadOfficial: false, hasMore };
+    if (request.migrations?.length) {
+      const matcher = migrationMatcher(request);
+      conversationKeys = [];
+      for (const row of matcher.candidates(db, visibleWhere, 'ORDER BY updated_at_ms DESC, conversation_key')) {
+        const migration = matcher.find(row.alias);
+        if (!migration) continue;
+        if (conversationKeys.length >= request.limit) {
+          hasMore = true;
+          break;
+        }
+        migrations.set(row.conversation_key, migration);
+        conversationKeys.push(row.conversation_key);
       }
     }
     let hadOfficial = false;
-    const entries = conversationKeys.map(key => {
+    const entries = [];
+    for (const key of conversationKeys) {
       const rows = read.all(key);
       if (rows.length !== 1) fail('conversation_not_found');
       const extra = rows[0].extra_json;
@@ -286,16 +331,26 @@ function rebindConversations(db, request, visibleWhere) {
       }
       const currentAlias = typeof parsed.runtimePreferences?.modelAlias === 'string' ? parsed.runtimePreferences.modelAlias : '';
       const previousLevel = typeof parsed.runtimePreferences?.thinkingLevel === 'string' ? parsed.runtimePreferences.thinkingLevel : '';
+      const migration = migrations.get(key);
+      const modelAlias = migration?.targetModelAlias || request.modelAlias;
+      const byok = modelAlias.startsWith('byok-');
+      const level = byok ? (migration?.supportEfforts?.includes(previousLevel) ? previousLevel :
+        (migration?.thinkingLevel ?? request.thinkingLevel ?? '')) : '';
+      if (currentAlias === modelAlias && previousLevel === level) continue;
       hadOfficial ||= !currentAlias || !currentAlias.startsWith('byok-');
-      const level = previousAlias && supportedEfforts.has(previousLevel) ? previousLevel : defaultLevel;
-      return { key, oldAlias: currentAlias, oldLevel: previousLevel, modelAlias, thinkingLevel: level, byok };
-    });
+      entries.push({ key, oldAlias: currentAlias, oldLevel: previousLevel, modelAlias, thinkingLevel: level, byok });
+    }
+    conversationKeys = entries.map(entry => entry.key);
+    if (!entries.length) {
+      db.exec('ROLLBACK');
+      return { conversationKeys, hadOfficial, hasMore };
+    }
     const preloaded = [
       snapshotFile(path.join(agentDirectory, 'conversation-kimi-work-models.json')),
       snapshotFile(path.join(agentDirectory, 'byok-applied-model-bindings.json')),
     ];
     for (const entry of entries) {
-      if (update.run(entry.thinkingLevel, modelAlias, modelAlias, entry.thinkingLevel, entry.key).changes !== 1) {
+      if (update.run(entry.thinkingLevel, entry.modelAlias, entry.modelAlias, entry.thinkingLevel, entry.key).changes !== 1) {
         fail('conversation_not_found');
       }
     }
@@ -342,7 +397,7 @@ function main(request) {
   const { db, visibleWhere } = openDatabase(request);
   try {
     if (request.operation === 'recover') return recoverPendingJournal(db, request.agentDirectory, visibleWhere);
-    if (request.operation === 'list') return listConversations(db, request.limit, visibleWhere);
+    if (request.operation === 'list') return listConversations(db, request, visibleWhere);
     return rebindConversations(db, request, visibleWhere);
   } finally {
     db.close();

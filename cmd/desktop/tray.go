@@ -29,12 +29,6 @@ const (
 	trayUnlistedGatewayModel = "网关模型（目录未列出）"
 )
 
-var trayOfficialModels = map[string]string{
-	"k3-agent":     "官方 · K3",
-	"k3d1-agent":   "官方 · K3.1 Pro",
-	"k2d8-preview": "官方 · K2.8 Preview",
-}
-
 var trayBYOKPrefixes = []string{"byok-kth-kimi/", "byok-kth-resp/"}
 
 var trayBYOKUUIDPrefix = regexp.MustCompile(`^byok-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/`)
@@ -91,7 +85,7 @@ func trayConversationTitle(conversation kimi.WorkConversation) string {
 
 func trayReadableModelName(alias string, models []kimi.ConversationModel) string {
 	alias = strings.TrimSpace(alias)
-	if name, ok := trayOfficialModels[alias]; ok {
+	if name := kimi.OfficialConversationModelName(alias); name != "" {
 		return name
 	}
 	for _, model := range models {
@@ -149,6 +143,9 @@ func trayMatchEffort(level string, efforts []string) (string, bool) {
 }
 
 func trayTargetThinkingLevel(model kimi.ConversationModel) string {
+	if model.SourceKind == "official" {
+		return ""
+	}
 	if level, ok := trayMatchEffort(model.DefaultEffort, model.SupportEfforts); ok {
 		return level
 	}
@@ -184,7 +181,7 @@ func trayRebindFailureMessage(err error) string {
 		case "invalid_conversation_thinking_level":
 			reason = "目标模型不支持当前会话的思考档位。"
 		case "invalid_conversation_target_model":
-			reason = "目标模型已不在已导入列表中。"
+			reason = "目标模型已不在可切换列表中。"
 		case "conversation_rebind_cancelled":
 			reason = "换模操作已取消。"
 		}
@@ -286,10 +283,14 @@ func (v *trayConversationsView) refresh(list kimi.ConversationList, err error) {
 
 func (v *trayConversationsView) addConversation(conversation kimi.WorkConversation, models []kimi.ConversationModel, kimiRunning bool) {
 	title := trayConversationTitle(conversation)
-	submenu := v.menu.AddSubmenu(title + "（" + trayReadableModelName(conversation.ModelAlias, models) + "）")
+	alias := conversation.ModelAlias
+	if conversation.MigrationTargetAlias != "" {
+		alias = conversation.MigrationTargetAlias
+	}
+	submenu := v.menu.AddSubmenu(title + "（" + trayReadableModelName(alias, models) + "）")
 	v.submenus = append(v.submenus, submenu)
 	if len(models) == 0 {
-		submenu.Add("暂无已导入的第三方模型").SetEnabled(false)
+		submenu.Add("暂无可切换的模型").SetEnabled(false)
 		return
 	}
 	for _, model := range models {
@@ -318,7 +319,7 @@ func trayRebindTargetFor(conversation kimi.WorkConversation, model kimi.Conversa
 }
 
 func (v *trayConversationsView) confirmRebind(conversation kimi.WorkConversation, model kimi.ConversationModel, modelName string, kimiRunning bool) {
-	if v.rebind.Load() {
+	if v.rebind.Load() || conversation.ModelAlias == model.Alias {
 		return
 	}
 	target := trayRebindTargetFor(conversation, model, modelName, kimiRunning)

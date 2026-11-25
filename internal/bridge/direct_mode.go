@@ -373,7 +373,10 @@ func buildDirectSpec(d core.Document, availability ...map[string]bool) *kimi.Dir
 	if core.IntegrationMode(d) != core.IntegrationModeDirect {
 		return nil
 	}
-	plan := buildDirectPlan(d, availability...)
+	return buildDirectSpecForPlan(buildDirectPlan(d, availability...))
+}
+
+func buildDirectSpecForPlan(plan directPlan) *kimi.DirectSpec {
 	spec := &kimi.DirectSpec{DisplayName: kimi.DirectDisplayName, Providers: []kimi.DirectProviderSpec{}, Models: []kimi.DirectModel{}}
 	for _, provider := range plan.providers {
 		spec.Providers = append(spec.Providers, kimi.DirectProviderSpec{

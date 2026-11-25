@@ -222,7 +222,7 @@ func TestImportDisconnectsAStuckProviderAndThenImports(t *testing.T) {
 	home := kthTestHome(t)
 	account := AccountScope(home)
 	baseURL := "http://127.0.0.1:9100/v1"
-	stuckID := "byok-9f2c1d-kimi"
+	stuckID := "byok-55555555-5555-4555-8555-555555555555"
 	kthTestWrite(t, home, kthTestStore(account, kthTestStuckAccount(baseURL, stuckID)))
 
 	// The official apply removes the source and blocks the aliases it owned, which
@@ -247,7 +247,7 @@ func TestImportDisconnectsAStuckProviderAndThenImports(t *testing.T) {
 	}
 
 	result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
-		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account})
+		URL: baseURL, Token: "gateway-token", ExpectedAccountKey: account, RepairProviderID: stuckID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1380,5 +1380,56 @@ func TestDirectImportKeepsTheCleanupRestartWhenTheDeferredDisconnectNeverApplies
 	}
 	if page.applyPendingCalls != 2 || page.gatewayCleanupCalls != 1 {
 		t.Fatalf("applyPending polls = %d cleanups = %d", page.applyPendingCalls, page.gatewayCleanupCalls)
+	}
+}
+
+func TestGatewayProviderRepairDoesNotReconnectRemovedOrReplacedSource(t *testing.T) {
+	for _, state := range []string{"disconnected", "replaced", "foreign"} {
+		t.Run(state, func(t *testing.T) {
+			const baseURL = "http://127.0.0.1:9100/v1"
+			const stuckID = "byok-55555555-5555-4555-8555-555555555555"
+			home := kthTestHome(t)
+			account := AccountScope(home)
+			fixture := kthTestStuckAccount(baseURL, stuckID)
+			source, _ := kthAccountSource(fixture)
+			switch state {
+			case "disconnected":
+				source["status"] = "disconnected"
+			case "replaced":
+				fixture = kthTestAccount(baseURL, nil)
+			case "foreign":
+				source["registryUrl"] = "https://foreign.example/v1/models/api.json"
+			}
+			kthTestWrite(t, home, kthTestStore(account, fixture))
+			page := &fakePage{surface: "work", actions: true, importAPI: true}
+			result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+				URL: baseURL, Token: "fixture-token", ExpectedAccountKey: account, RepairProviderID: stuckID,
+			})
+			if err != nil || result.Reason != "native_import_store_changed" || page.importCalls != 0 || page.kthDisconnectCalls != 0 {
+				t.Fatalf("stale repair = %+v, %v, imports=%d resets=%d", result, err, page.importCalls, page.kthDisconnectCalls)
+			}
+		})
+	}
+}
+
+func TestGatewayProviderRepairLeavesUnrelatedDirectApplyPending(t *testing.T) {
+	vm := goja.New()
+	if err := vm.Set("managedName", DirectDisplayName); err != nil {
+		t.Fatal(err)
+	}
+	_, err := vm.RunString(`
+let applies=0;
+globalThis.clawBridgeAPI={byokSources:{
+  list(){return {ok:true,value:{scopeToken:"account",accountRevision:"revision",sources:[
+    {id:"managed-direct",kind:"custom",displayName:managedName,models:[{status:"pending"}]}
+  ]}};},
+  applyPending(){applies++;return {ok:true,value:{status:"applied"}};}
+}};
+` + kthSettlePendingExpression("", "revision"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, err := vm.RunString(`applies`); err != nil || value.ToInteger() != 0 {
+		t.Fatalf("an unrelated managed Direct revision was applied: %v, %v", value, err)
 	}
 }

@@ -84,6 +84,8 @@ type ControllerSettings struct {
 	// without any key. Reconciliation and readback use it; the import itself
 	// receives keys in its own DirectImportRequest.
 	DirectSpec *DirectSpec
+	// ConversationDirectSpec maps historical managed Direct providers to saved models in gateway mode.
+	ConversationDirectSpec *DirectSpec
 }
 
 // TranslationSettings is the public renderer configuration.
@@ -1210,6 +1212,19 @@ func (c *Controller) reconcileChecked(withReadback bool, confirmedAccount string
 			result.Applied = readback.Holds(settings.GatewayURL)
 		}
 		result.Applied = result.Applied && (result.State == IntegrationReady || result.State == IntegrationRepaired)
+		if mode == IntegrationModeGateway && result.Applied && readback.Active {
+			for _, model := range settings.Models {
+				provider, id, _ := strings.Cut(result.Aliases[model.ID], "/")
+				if model.CatalogID == "" || id != model.CatalogID || !byokUUIDProvider.MatchString(provider) {
+					continue
+				}
+				scan := kthStoreState(kimiDir, account, settings.GatewayURL)
+				if scan.needsDisconnect() && scan.stuck == provider {
+					result.GatewayProviderMismatch = provider
+				}
+				break
+			}
+		}
 	}
 	committed, stale := c.commitReconcileResult(gen, result, withReadback)
 	return committed, gen, stale

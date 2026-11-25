@@ -1287,12 +1287,25 @@ The reconciliation contract that keeps the generated id from drifting:
   `models_missing` with the logical ids when the row is absent. The two sides
   therefore agree on one key per model even though the upstream speaks
   `/responses` or `/messages`.
-- `conversationStore.models()` derives `PreviousAlias` for every catalog model. A
-  model already keyed by its compatible id points back to
-  `byok-kth-kimi/<id>` for `ProtocolChat` and `byok-kth-resp/<id>` for
-  `ProtocolResponses`; a model still keyed by its own id points at
-  `byok-kth-kimi/<compatibleID>`. Only rows whose `SourceKind` is `kth` receive
-  it, so direct-mode `byok-<uuid>/...` conversations keep their own alias.
+- `GET /api/work/conversations` supplies the same switch targets to the panel
+  and tray. Official targets use `sourceKind: "official"` and the aliases
+  `k3-agent`, `k3d1-agent` and `k2d8-preview`. An official rebind uses the
+  existing transaction and journal, clears the applied BYOK binding and lets
+  the official application choose its thinking level.
+- Gateway alias migration requires a synchronized managed target. When K3
+  compatibility is off, only the exact former canonical alias can migrate to
+  the original model alias, and only after that canonical target is no longer
+  active. When compatibility is on, `PreviousAlias` identifies the former
+  original catalog name. A temporary UUID
+  aliases the same model only when its suffix is that model's generated ID and
+  the account does not identify the provider as foreign. A Direct alias needs
+  positive evidence from the account's managed custom source and an exact
+  protocol, endpoint and upstream model match to one saved model. The API
+  publishes per-model `migrationCount` across the visible database and
+  `migrationTargetAlias` on matching rows. Explicit `migratePreviousAlias`
+  with a target migrates that model only. Omitting the target migrates all
+  identified models in one batch of up to 500, with a single restart
+  confirmation when Kimi is running.
 
 The inference route follows the same key. `POST /v1/chat/completions` may address
 a `ProtocolResponses` model: when the compatibility opt-in is on, or the request
@@ -1308,6 +1321,13 @@ hook fires after `/api/workspace`, `/api/models`, `/api/connections`,
 `/api/integration-mode` and `/api/kimi-k3-compatibility` commit. Saves are merged
 behind an 800 ms debounce and run in the same single `Native.operation` slot as
 manual actions.
+When periodic readback sees the managed gateway's temporary UUID, the same slot
+runs the existing provider repair before import. It verifies the account and
+provider again before writing. A missing Work or Settings page keeps the
+repair queued for up to three retries on the debounce timer. A terminal result
+suppresses repeated attempts on unchanged drift and a deferred apply uses the
+existing restart flow. Direct-source cleanup remains part of an explicit mode
+change or catalog synchronization.
 
 `catalogSurfaceDigest` is the boundary between a gateway-only change and a
 profile write. It hashes only what Kimi renders: in gateway mode the integration

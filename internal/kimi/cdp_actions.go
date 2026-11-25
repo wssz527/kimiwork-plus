@@ -404,7 +404,8 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	if !isLoopbackGateway(request.URL) {
 		return ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request"}, nil
 	}
-	if request.Token == "" || len(request.Token) > 4096 {
+	if request.Token == "" || len(request.Token) > 4096 || (request.RepairProviderID != "" &&
+		(!byokUUIDProvider.MatchString(request.RepairProviderID) || request.ExpectedAccountKey == "" || request.DisconnectDirectSourceID != "")) {
 		return ImportResult{State: ImportStateFailed, Reason: "native_bridge_invalid_request"}, nil
 	}
 	// The account is read from this managed profile's own files before any page
@@ -460,6 +461,14 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 	expression := importExpression(request.Token, request.URL, request.DisconnectDirectSourceID)
 	var answer map[string]any
 	var result ImportResult
+	if request.RepairProviderID != "" {
+		scan := kthStoreState(a.kimiHome, current, request.URL)
+		if mode == IntegrationModeDirect || AccountScope(a.kimiHome) != current || !scan.needsDisconnect() || scan.stuck != request.RepairProviderID {
+			result := ImportResult{State: ImportStateFailed, Reason: "native_import_store_changed", Opened: opened}
+			a.closeIfOpenedInto(ctx, opened, &result)
+			return result, nil
+		}
+	}
 	for attempt := 0; attempt < attempts; attempt++ {
 		if mode != IntegrationModeDirect {
 			stop, err := a.repairKthProvider(ctx, settings, current, request.URL, request.DisconnectDirectSourceID)

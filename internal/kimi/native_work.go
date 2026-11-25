@@ -96,6 +96,8 @@ type IntegrationResult struct {
 	// RouteCleanupPending means a verified gateway replacement still shares the
 	// account with a connected managed Direct Mode source.
 	RouteCleanupPending bool `json:"routeCleanupPending,omitempty"`
+	// GatewayProviderMismatch identifies a verified managed kimi route using a temporary UUID.
+	GatewayProviderMismatch string `json:"-"`
 }
 
 // NativeIntegration reconciles one Kimi home.

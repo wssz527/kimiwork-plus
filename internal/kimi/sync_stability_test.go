@@ -342,7 +342,7 @@ func TestRepairSignatureSurvivesUncertainWrites(t *testing.T) {
 		{State: ImportStateWaitingSettings},
 	}
 	for _, result := range preWrite {
-		if !repairFailedTransiently(result) {
+		if !result.WaitingForImportSurface() {
 			t.Fatalf("%+v would suppress a repair before any write", result)
 		}
 	}
@@ -357,7 +357,7 @@ func TestRepairSignatureSurvivesUncertainWrites(t *testing.T) {
 		{State: ImportStateFailed, Reason: "native_import_import-failed"},
 	}
 	for _, result := range uncertain {
-		if repairFailedTransiently(result) {
+		if result.WaitingForImportSurface() {
 			t.Fatalf("%+v would allow replaying an uncertain write", result)
 		}
 	}
@@ -681,7 +681,7 @@ func TestImportActivateWorkFlagMatchesExplicitVsBackground(t *testing.T) {
 	if _, err := controller.ImportModels(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.importModelsAuthorized(context.Background(), sha256Hex("user-1"), "repair-sig"); err != nil {
+	if _, err := controller.importModelsAuthorized(context.Background(), sha256Hex("user-1"), "repair-sig", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := controller.ImportModelsAuthorized(context.Background()); err != nil {

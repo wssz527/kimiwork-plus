@@ -1418,3 +1418,217 @@ func TestAutoSyncAccountSwitchKeepsTheQueuedTarget(t *testing.T) {
 		t.Fatalf("the switched account kept the queue: pending=%v target=%q", pending, target)
 	}
 }
+
+func TestAutoSyncRepairsOneOwnedTemporaryGatewayProvider(t *testing.T) {
+	for _, requireRestart := range []bool{false, true} {
+		name := "applied"
+		if requireRestart {
+			name = "requires-restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+			h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+			mismatch := kimi.IntegrationResult{
+				State: kimi.IntegrationReady, Applied: true, Adopted: true,
+				GatewayProviderMismatch: "byok-55555555-5555-4555-8555-555555555555",
+				Readback:                &kimi.ImportReadback{Active: true, AccountVerified: true, AccountDigest: "verified-account"},
+			}
+			var imports atomic.Int32
+			h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult {
+				if imports.Load() == 0 || requireRestart {
+					return mismatch
+				}
+				return kimi.IntegrationResult{State: kimi.IntegrationReady, Applied: true, Adopted: true}
+			}
+			h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
+				imports.Add(1)
+				if _, claimed := h.n.beginOperation("restart-kimi"); claimed {
+					return kimi.ImportResult{}, errors.New("operation slot was not held by auto-sync")
+				}
+				return kimi.ImportResult{OK: true, Applied: !requireRestart, RequiresRestart: requireRestart}, nil
+			}
+			manualID, _ := h.n.beginOperation("rebind-conversations")
+			d := h.doc(t)
+			h.n.autoSync.observe(&mismatch, d)
+			waitAutoSync(t, "repair waiting for the operation slot", func() bool {
+				h.n.autoSync.mu.Lock()
+				defer h.n.autoSync.mu.Unlock()
+				return h.n.autoSync.blocked
+			})
+			if imports.Load() != 0 {
+				t.Fatal("repair ran concurrently with rebind")
+			}
+			h.n.finishOperation(manualID, "done", nil, nil)
+			want := autoSyncSynced
+			if requireRestart {
+				want = autoSyncRequiresRestart
+			}
+			waitAutoSyncState(t, h, want)
+			h.n.autoSync.observe(&mismatch, d)
+			h.n.autoSync.kickIfReady()
+			h.n.mu.Lock()
+			action := core.String(h.n.operation["action"])
+			h.n.mu.Unlock()
+			if action != "auto-sync" || imports.Load() != 1 || h.n.autoSync.status()["pending"] == true {
+				t.Fatalf("duplicate repair or restart: action=%q imports=%d status=%v", action, imports.Load(), h.n.autoSync.status())
+			}
+		})
+	}
+}
+
+func TestAutoSyncProviderRepairRefusesDisconnectedAndStaleReadback(t *testing.T) {
+	for _, mode := range []string{"disconnected", "vanished", "restored", "direct"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newAutoSyncHarness(t, mode == "direct", autoSyncGatewayDoc())
+			h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+			d := h.doc(t)
+			mismatch := kimi.IntegrationResult{
+				State: kimi.IntegrationReady, Applied: true, Adopted: true,
+				GatewayProviderMismatch: "byok-55555555-5555-4555-8555-555555555555",
+				Readback:                &kimi.ImportReadback{Active: true, AccountVerified: true, AccountDigest: "verified-account"},
+			}
+			h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult {
+				return kimi.IntegrationResult{State: kimi.IntegrationNeedsImport, Reason: "profile_missing"}
+			}
+			switch mode {
+			case "disconnected":
+				id, _ := h.n.beginOperation("disconnect-models")
+				h.n.autoSync.observe(&mismatch, d)
+				h.n.finishOperation(id, "done", nil, nil)
+			case "restored":
+				mismatch.Readback.Active = false
+			case "direct":
+				d["integrationMode"] = "direct"
+			}
+			h.n.autoSync.observe(&mismatch, d)
+			if mode == "vanished" {
+				waitAutoSyncState(t, h, autoSyncIdle)
+			}
+			if h.counts() != 0 || h.n.autoSync.status()["pending"] == true {
+				t.Fatalf("inactive provider triggered import: %d, status=%v", h.counts(), h.n.autoSync.status())
+			}
+		})
+	}
+}
+
+func TestAutoSyncProviderRepairRetriesWhileImportSurfaceMounts(t *testing.T) {
+	for _, tc := range []struct{ state, reason string }{
+		{kimi.ImportStateWaitingWork, kimi.NativeWaitingWork},
+		{kimi.ImportStateWaitingSettings, kimi.NativeWaitingSettings},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+			h.n.autoSync.debounce = 300 * time.Millisecond
+			h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+			mismatch := kimi.IntegrationResult{
+				State: kimi.IntegrationReady, Applied: true, Adopted: true,
+				GatewayProviderMismatch: "byok-55555555-5555-4555-8555-555555555555",
+				Readback:                &kimi.ImportReadback{Active: true, AccountVerified: true, AccountDigest: "verified-account"},
+			}
+			var imports, openWork atomic.Int32
+			h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult {
+				if imports.Load() < 2 {
+					return mismatch
+				}
+				return kimi.IntegrationResult{State: kimi.IntegrationReady, Applied: true, Adopted: true}
+			}
+			h.n.autoOpenWork = func(context.Context) error {
+				openWork.Add(1)
+				return nil
+			}
+			h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
+				if imports.Add(1) == 1 {
+					return kimi.ImportResult{State: tc.state, Reason: tc.reason}, nil
+				}
+				return kimi.ImportResult{OK: true, Applied: true, Adopted: true}, nil
+			}
+			d := h.doc(t)
+			h.n.autoSync.observe(&mismatch, d)
+			waitAutoSync(t, "scheduled repair retry", func() bool {
+				status := h.n.autoSync.status()
+				return status["state"] == autoSyncScheduled && status["reason"] == tc.reason && h.n.autoSyncOperationIdle()
+			})
+			if status := h.n.autoSync.status(); status["pending"] != true || imports.Load() != 1 {
+				t.Fatalf("transient result settled the work: status=%v imports=%d", status, imports.Load())
+			}
+			manualID, ok := h.n.beginOperation("rebind-conversations")
+			if !ok {
+				t.Fatal("transient wait still held the operation slot")
+			}
+			h.n.autoSync.mu.Lock()
+			timer := h.n.autoSync.timer
+			h.n.autoSync.mu.Unlock()
+			h.n.autoSync.observe(&mismatch, d)
+			h.n.autoSync.kickIfReady()
+			h.n.autoSync.mu.Lock()
+			sameTimer := timer != nil && h.n.autoSync.timer == timer
+			h.n.autoSync.mu.Unlock()
+			if !sameTimer {
+				t.Fatal("periodic readback replaced the retry timer")
+			}
+			waitAutoSync(t, "retry behind the rebind", func() bool {
+				h.n.autoSync.mu.Lock()
+				defer h.n.autoSync.mu.Unlock()
+				return h.n.autoSync.blocked
+			})
+			if imports.Load() != 1 {
+				t.Fatal("scheduled retry ran concurrently with rebind")
+			}
+			h.n.finishOperation(manualID, "done", nil, nil)
+			waitAutoSyncState(t, h, autoSyncSynced)
+			if imports.Load() != 2 || openWork.Load() != 0 || h.n.autoSync.status()["pending"] == true {
+				t.Fatalf("retry did not settle exactly once: imports=%d openWork=%d status=%v", imports.Load(), openWork.Load(), h.n.autoSync.status())
+			}
+		})
+	}
+}
+
+func TestAutoSyncProviderRepairRetryStopsOnLimitErrorOrDisconnect(t *testing.T) {
+	for _, mode := range []string{"limit", "error", "disconnect"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
+			if mode == "disconnect" {
+				h.n.autoSync.debounce = 300 * time.Millisecond
+			}
+			h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+			mismatch := kimi.IntegrationResult{
+				State: kimi.IntegrationReady, Applied: true, Adopted: true,
+				GatewayProviderMismatch: "byok-55555555-5555-4555-8555-555555555555",
+				Readback:                &kimi.ImportReadback{Active: true, AccountVerified: true, AccountDigest: "verified-account"},
+			}
+			var imports atomic.Int32
+			const terminalReason = "native_import_store_changed"
+			h.n.autoSyncReconcile = func(context.Context) kimi.IntegrationResult { return mismatch }
+			h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
+				if imports.Add(1) > 1 && mode == "error" {
+					return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: terminalReason}, errors.New(terminalReason)
+				}
+				return kimi.ImportResult{State: kimi.ImportStateWaitingWork, Reason: kimi.NativeWaitingWork}, nil
+			}
+			d := h.doc(t)
+			h.n.autoSync.observe(&mismatch, d)
+			wantState, wantReason := autoSyncFailed, kimi.NativeWaitingWork
+			wantImports := int32(autoSyncProviderRepairRetries + 1)
+			switch mode {
+			case "disconnect":
+				waitAutoSync(t, "waiting before retry", func() bool {
+					return h.n.autoSync.status()["reason"] == kimi.NativeWaitingWork && h.n.autoSyncOperationIdle()
+				})
+				id, ok := h.n.beginOperation("disconnect-models")
+				if !ok {
+					t.Fatal("cannot remove takeover while retry is delayed")
+				}
+				h.n.finishOperation(id, "removed", nil, nil)
+				wantState, wantReason, wantImports = autoSyncIdle, autoSyncReasonDisconnected, 1
+			case "error":
+				wantReason, wantImports = terminalReason, 2
+			}
+			waitAutoSyncState(t, h, wantState)
+			h.n.autoSync.observe(&mismatch, d)
+			h.n.autoSync.kickIfReady()
+			if status := h.n.autoSync.status(); imports.Load() != wantImports || status["pending"] == true || status["reason"] != wantReason {
+				t.Fatalf("repair did not settle: imports=%d want=%d status=%v", imports.Load(), wantImports, status)
+			}
+		})
+	}
+}

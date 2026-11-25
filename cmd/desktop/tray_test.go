@@ -290,7 +290,7 @@ func TestTrayConversationsMenu(t *testing.T) {
 
 	noModels := application.NewMenu()
 	(&trayConversationsView{menu: noModels}).refresh(kimi.ConversationList{Conversations: []kimi.WorkConversation{{ConversationKey: "k", Title: "会话"}}}, nil)
-	if placeholder := noModels.ItemAt(0).GetSubmenu().ItemAt(0); placeholder == nil || placeholder.Enabled() || placeholder.Label() != "暂无已导入的第三方模型" {
+	if placeholder := noModels.ItemAt(0).GetSubmenu().ItemAt(0); placeholder == nil || placeholder.Enabled() || placeholder.Label() != "暂无可切换的模型" {
 		t.Fatalf("missing models must show a disabled placeholder: %+v", placeholder)
 	}
 }
@@ -568,7 +568,7 @@ func TestTrayRebindFailureMessages(t *testing.T) {
 		{"conversation_kimi_stop_failed", "未能关闭 Kimi"},
 		{"conversation_rollback_failed", "回滚"},
 		{"invalid_conversation_thinking_level", "思考档位"},
-		{"invalid_conversation_target_model", "已不在已导入列表"},
+		{"invalid_conversation_target_model", "已不在可切换列表"},
 		{"account_service_unavailable", "本机后台暂不可用"},
 		{"operation_busy", "正在处理另一项操作"},
 		{"conversation_kimi_state_unknown", "无法确认 Kimi 运行状态"},
@@ -604,5 +604,37 @@ func TestTrayRebindNotice(t *testing.T) {
 	}
 	if trayCancelButtonFirst("windows") || !trayCancelButtonFirst("darwin") {
 		t.Fatal("macOS must add the cancel button first so the default sits on the right")
+	}
+}
+
+func TestTrayOfficialConversationTargets(t *testing.T) {
+	const legacy = "byok-55555555-5555-4555-8555-555555555555/group/deepseek-v4-1-flash"
+	const canonical = "byok-kth-kimi/kimi-k3-kwp-current"
+	models := []kimi.ConversationModel{
+		{Alias: canonical, DisplayName: "DeepSeek", SourceKind: "kth", DefaultEffort: "high", SupportEfforts: []string{"high"}},
+		{Alias: "k3-agent", DisplayName: "官方 · K3", SourceKind: "official"},
+		{Alias: "k3d1-agent", DisplayName: "官方 · K3.1 Pro", SourceKind: "official"},
+		{Alias: "k2d8-preview", DisplayName: "官方 · K2.8 Preview", SourceKind: "official"},
+	}
+	old := kimi.WorkConversation{ConversationKey: "old", Title: "历史会话", ModelAlias: legacy, MigrationTargetAlias: canonical, ThinkingLevel: "high"}
+	current := kimi.WorkConversation{ConversationKey: "official", Title: "官方会话", ModelAlias: "k3d1-agent"}
+	menu := application.NewMenu()
+	view := trayConversationsView{menu: menu}
+	view.refresh(kimi.ConversationList{Conversations: []kimi.WorkConversation{old, current}, Models: models, Application: kimi.NotRunning}, nil)
+	if got := menu.ItemAt(0).Label(); got != "历史会话（DeepSeek）" {
+		t.Fatalf("legacy conversation label = %q", got)
+	}
+	for i, model := range models[1:] {
+		item := menu.ItemAt(0).GetSubmenu().ItemAt(i + 1)
+		if item.Label() != model.DisplayName || !item.Enabled() || item.Checked() {
+			t.Fatalf("official target item = %+v", item)
+		}
+		target := trayRebindTargetFor(old, model, item.Label(), false)
+		if target.alias != model.Alias || target.effort != "" {
+			t.Fatalf("official rebind target = %+v", target)
+		}
+	}
+	if item := menu.ItemAt(1).GetSubmenu().ItemAt(2); item.Enabled() || !item.Checked() {
+		t.Fatalf("current official target must be checked and disabled: %+v", item)
 	}
 }

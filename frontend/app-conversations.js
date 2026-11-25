@@ -29,7 +29,7 @@ const CONVERSATION_REASONS = {
   conversation_rollback_failed: '会话绑定恢复尚未完成。请检查 Kimi 状态后刷新。',
   conversation_kimi_restart_required: '写入会话绑定需要先正常退出并重启 Kimi，请重试并允许自动重启。',
   conversation_kimi_stop_failed: '未能正常退出 Kimi，请先在官方窗口退出后重试。',
-  invalid_conversation_target_model: '目标模型不在当前已同步的模型列表中，请刷新会话后重试。',
+  invalid_conversation_target_model: '目标模型不在当前可切换的列表中，请刷新会话后重试。',
   invalid_conversation_thinking_level: '目标模型不支持所选思考档位，请换一个档位。',
   invalid_conversation_migration_target: '该模型没有可迁移的旧别名。',
   invalid_conversation_rebind: '会话改绑请求格式不被接受，请刷新后重试。',
@@ -63,24 +63,24 @@ function directoryNameOf(model) {
   return name || model.id || '';
 }
 
-/* 旧别名属于哪一侧只看别名自己的前缀：`byok-kth-*` 是本机网关写入的，
-   `byok-<uuid>/` 是官方直连写入的。按当前模式猜会把历史会话标错来源。 */
+/* 生成的兼容 ID 属于网关，临时 UUID 也可能出现在这类旧别名上。 */
 function aliasSourceKind(raw) {
   if (typeof raw !== 'string' || !raw) return '';
   if (MODEL_ALIAS_PREFIXES.some((prefix) => raw.startsWith(prefix))) return 'kth';
-  if (MODEL_ALIAS_UUID_PREFIX.test(raw)) return 'custom';
+  if (MODEL_ALIAS_UUID_PREFIX.test(raw)) return KIMI_COMPATIBLE_ID.test(stripModelAliasPrefix(raw)) ? 'kth' : 'custom';
   return '';
 }
 
-function humanizeConversationModel(alias, knownModels, stateModels) {
+function humanizeConversationModel(alias, knownModels, stateModels, migrationTargetAlias) {
   if (typeof alias !== 'string' || !alias.trim()) return 'Kimi 官方模型';
   const raw = alias.trim();
-  if (OFFICIAL_MODEL_NAMES[raw]) return OFFICIAL_MODEL_NAMES[raw];
   const known = Array.isArray(knownModels) ? knownModels : [];
   const current = known.find((model) => model && model.alias === raw);
-  if (current && displayNameOf(current)) return withSource(displayNameOf(current), current.sourceKind, false);
-  const previous = known.find((model) => model && model.previousAlias === raw);
-  if (previous && displayNameOf(previous)) return withSource(displayNameOf(previous), previous.sourceKind, true);
+  if (current && displayNameOf(current)) return current.sourceKind === 'official'
+    ? displayNameOf(current) : withSource(displayNameOf(current), current.sourceKind, false);
+  if (OFFICIAL_MODEL_NAMES[raw]) return OFFICIAL_MODEL_NAMES[raw];
+  const previous = known.find((model) => model && (migrationTargetAlias ? model.alias === migrationTargetAlias : model.previousAlias === raw));
+  if (previous && displayNameOf(previous)) return withSource(displayNameOf(previous), aliasSourceKind(raw) || previous.sourceKind, true);
   const stripped = stripModelAliasPrefix(raw);
   if (typeof stripped === 'string' && stripped && stripped !== raw) {
     const catalogue = Array.isArray(stateModels) ? stateModels : [];
@@ -123,13 +123,14 @@ function conversationListStatus(list) {
   if (list.reason) return conversationReasonText(list.reason) || '无法读取 Kimi Work 会话库，请刷新后重试。';
   if (list.application === 'unknown') return '无法确认 Kimi 的运行状态，请刷新后再切换。';
   if (!list.conversations.length) return '当前没有可切换的 Kimi Work 会话。';
-  if (!list.models.length) return '当前账号没有可用的第三方模型。请先到「模型与服务商」保存并同步模型。';
+  if (!list.models.length) return '当前没有可切换的模型。';
   if (list.kimiRunning) return 'Kimi 正在运行：切换模型会先确认，再自动退出并重开 Kimi（约 2–3 秒）写入会话绑定。';
   return 'Kimi 当前未运行：切换会直接写入绑定，打开 Kimi 后继续原对话即可。';
 }
 
 function effortChoices(model) {
   if (!model) return { values: [], labels: [], fallback: '' };
+  if (model.sourceKind === 'official') return { values: [''], labels: ['官方默认'], fallback: '' };
   const supported = Array.isArray(model.supportEfforts) ? model.supportEfforts : [];
   const ordered = [
     ...EFFORT_ORDER.filter((level) => supported.includes(level)),
@@ -152,7 +153,7 @@ function effortChoices(model) {
 }
 
 function defaultEffortFor(model, ordered) {
-  if (!model) return '';
+  if (!model || model.sourceKind === 'official') return '';
   if (model.defaultEffort) return '';
   const list = ordered || (Array.isArray(model.supportEfforts) ? model.supportEfforts : []);
   return list.find((level) => level !== 'off') || (list.length ? list[0] : '');
@@ -168,21 +169,11 @@ function canSwitchConversations(list) {
   return true;
 }
 
-/* 旧别名迁移只针对「确实有会话还在用旧别名」的模型：网关模式下几乎每个模型
-   都带 previousAlias，只看字段非空会让迁移横幅常驻误报。 */
 function migrationMatchesOf(list) {
-  const models = list && Array.isArray(list.models)
-    ? list.models.filter((model) => model && typeof model.previousAlias === 'string' && model.previousAlias) : [];
-  const conversations = list && Array.isArray(list.conversations) ? list.conversations : [];
-  const matched = [];
-  let count = 0;
-  for (const model of models) {
-    const hits = conversations.filter((row) => row && row.modelAlias === model.previousAlias);
-    if (!hits.length) continue;
-    matched.push({ model, count: hits.length });
-    count += hits.length;
-  }
-  return { models: matched.map((entry) => entry.model), matches: matched, count };
+  const models = Array.isArray(list?.models) ? list.models : [];
+  const matches = models.filter((model) => model?.migrationCount > 0)
+    .map((model) => ({ model, count: model.migrationCount }));
+  return { matches, count: matches.reduce((sum, entry) => sum + entry.count, 0) };
 }
 
 /* ---------- 页面 ---------- */
@@ -241,10 +232,11 @@ function mountConversationsPage() {
     return models.find((model) => model.alias === alias) || null;
   }
 
-  function targetOptions() {
+  function targetOptions(currentAlias) {
     const models = modelsOf(currentList());
     return models.map((model) => ({
       value: model.alias,
+      disabled: model.alias === currentAlias,
       label: humanizeConversationModel(model.alias, models, state.data?.models),
     }));
   }
@@ -260,6 +252,7 @@ function mountConversationsPage() {
     const options = entries.map((entry) => {
       const node = document.createElement('option');
       node.value = entry.value;
+      node.disabled = Boolean(entry.disabled);
       node.textContent = entry.label;
       return node;
     });
@@ -284,7 +277,7 @@ function mountConversationsPage() {
   }
 
   function migrationMatches(list = currentList()) {
-    return migrationMatchesOf(list);
+    return migrationMatchesOf(savedIntegrationMode(state.data) === 'direct' ? null : list);
   }
 
   function renderGuide() {
@@ -296,7 +289,7 @@ function mountConversationsPage() {
     const migration = migrationMatches();
     setHidden(ui.migration, migration.count === 0);
     if (migration.count) {
-      setText(ui.migrationText, '发现 ' + migration.count + ' 条旧版模型别名会话，可一键迁移至新兼容别名。');
+      setText(ui.migrationText, '发现 ' + migration.count + ' 条旧版模型别名会话，可一键迁移至当前目录别名。');
     }
     if (ui.migrateAll) {
       ui.migrateAll.disabled = migration.count === 0 || !canSwitchConversations(currentList()) || state.conversations.pending;
@@ -314,7 +307,7 @@ function mountConversationsPage() {
     const choices = effortChoices(model);
     fillSelect(select, optionEntries(choices.values, choices.labels), current === undefined ? choices.fallback : current);
     /* 与目标模型下拉、切换按钮同一条守卫：状态未知或已有请求在途时不能选。 */
-    select.disabled = !switchable || !model || state.conversations.pending;
+    select.disabled = !switchable || !model || model.sourceKind === 'official';
     return select;
   }
 
@@ -452,7 +445,7 @@ function mountConversationsPage() {
     const badge = document.createElement('span');
     badge.className = 'tag conv-badge';
     badge.dataset.convCurrent = key;
-    badge.textContent = humanizeConversationModel(conversation.modelAlias, models, state.data?.models);
+    badge.textContent = humanizeConversationModel(conversation.modelAlias, models, state.data?.models, conversation.migrationTargetAlias);
     modelLine.append(badge);
     main.append(titleRow, meta, modelLine);
 
@@ -466,9 +459,9 @@ function mountConversationsPage() {
     const target = document.createElement('select');
     target.setAttribute('aria-label', '目标模型');
     target.dataset.convTarget = key;
-    const selectedAlias = state.conversations.targets[key] || (models[0] ? models[0].alias : '');
-    fillSelect(target, targetOptions(), selectedAlias);
-    target.disabled = !canSwitchConversations(currentList()) || models.length === 0;
+    const selectedAlias = state.conversations.targets[key] || models.find((model) => model.alias !== conversation.modelAlias)?.alias || '';
+    fillSelect(target, targetOptions(conversation.modelAlias), selectedAlias);
+    target.disabled = !canSwitchConversations(currentList()) || !selectedAlias;
     targetLabel.append(targetCaption, target);
 
     const effortLabel = document.createElement('label');
@@ -487,7 +480,8 @@ function mountConversationsPage() {
       const model = models.find((entry) => entry.alias === target.value) || null;
       const choices = effortChoices(model);
       fillSelect(effort, optionEntries(choices.values, choices.labels), choices.fallback);
-      effort.disabled = !model || !canSwitchConversations(currentList());
+      effort.disabled = !model || model.sourceKind === 'official' || !canSwitchConversations(currentList());
+      button.disabled = !model || model.alias === conversation.modelAlias || !canSwitchConversations(currentList());
     });
     effort.addEventListener('change', () => {
       state.conversations.efforts[key] = effort.value;
@@ -498,7 +492,7 @@ function mountConversationsPage() {
     button.className = 'btn btn--primary btn--sm conv-switch';
     button.dataset.convSwitch = key;
     button.textContent = '切换模型';
-    button.disabled = !canSwitchConversations(currentList()) || models.length === 0;
+    button.disabled = !canSwitchConversations(currentList()) || !selectedAlias || selectedAlias === conversation.modelAlias;
     button.addEventListener('click', () => {
       const model = targetModelFor(key);
       if (!model) {
@@ -509,6 +503,7 @@ function mountConversationsPage() {
         showToast(conversationListStatus(currentList()), 'warn');
         return;
       }
+      if (model.alias === conversation.modelAlias) return;
       if (currentList()?.kimiRunning === true && !state.conversations.noConfirm) {
         showRowConfirm(row, conversation, model, effort.value);
         return;
@@ -559,30 +554,35 @@ function mountConversationsPage() {
     return entry ? entry.count : 0;
   }
 
+  function switchKeys(keys, model, list = currentList()) {
+    if (!model) return [];
+    const selected = new Set(keys);
+    return (list?.conversations || []).filter((row) => selected.has(row.conversationKey) && row.modelAlias !== model.alias)
+      .map((row) => row.conversationKey);
+  }
+
   function syncBatchState() {
     const list = currentList();
     const models = modelsOf(list);
     const selected = selectedKeys();
     const switchable = canSwitchConversations(list);
+    const batchModel = batchModelOf(list);
     if (ui.batchGo) {
-      ui.batchGo.disabled = !switchable || !selected.size || !models.length;
+      ui.batchGo.disabled = !switchable || !switchKeys(selected, batchModel, list).length;
       setText(ui.batchGo, state.conversations.pending ? '正在切换…' : '切换所选会话');
     }
-    /* 批量迁移跟着用户当前选中的模型走：旧版本这里总是迁移第一个带旧别名的
-       模型，选中的模型根本没有被用到。 */
-    const batchModel = batchModelOf(list);
-    const batchMatched = Boolean(batchModel && batchModel.previousAlias) && matchedCountForModel(batchModel, list) > 0;
+    const batchMatched = matchedCountForModel(batchModel, list) > 0;
     if (ui.batchMigrate) {
       ui.batchMigrate.disabled = !switchable || !batchMatched;
     }
     if (ui.batchNote) {
       setText(ui.batchNote, !models.length
-        ? '当前没有可用的第三方模型；请先在「模型与服务商」保存并同步。'
+        ? '当前没有可切换的模型。'
         : selected.size
           ? '已选择 ' + selected.size + ' 个会话。'
-          : batchModel && batchModel.previousAlias
-            ? '勾选上方会话后，可为它们统一选择目标模型与思考档位；「迁移旧别名」只处理所选模型名下仍是旧版兼容别名的历史会话。'
-            : '勾选上方会话后，可为它们统一选择目标模型与思考档位；所选模型没有旧版兼容别名，不需要迁移。');
+          : batchMatched
+            ? '「迁移旧别名」会更新能匹配到所选模型的历史会话。'
+            : '勾选上方会话后，可统一设置目标模型与可用的思考档位。');
     }
   }
 
@@ -608,7 +608,7 @@ function mountConversationsPage() {
       ? choices.fallback
       : storedEffort;
     fillSelect(ui.batchEffort, optionEntries(choices.values, choices.labels), effortCurrent);
-    if (ui.batchEffort) ui.batchEffort.disabled = !switchable || !model;
+    if (ui.batchEffort) ui.batchEffort.disabled = !switchable || !model || model.sourceKind === 'official';
     state.conversations.batchModel = ui.batchModel?.value || current;
     state.conversations.batchEffort = ui.batchEffort?.value ?? effortCurrent;
     syncBatchState();
@@ -651,9 +651,8 @@ function mountConversationsPage() {
       for (const conversation of next.conversations) {
         const conversationKey = conversation.conversationKey;
         const kept = previous && previous.targets[conversationKey];
-        const targetAlias = next.models.length
-          ? (kept && aliases.has(kept) ? kept : next.models[0].alias)
-          : '';
+        const targetAlias = kept && kept !== conversation.modelAlias && aliases.has(kept)
+          ? kept : next.models.find((model) => model.alias !== conversation.modelAlias)?.alias;
         if (targetAlias) c.targets[conversationKey] = targetAlias;
         const effort = previous && previous.efforts[conversationKey];
         if (effort === undefined) continue;
@@ -692,11 +691,21 @@ function mountConversationsPage() {
       showToast(conversationListStatus(list), 'warn');
       return;
     }
-    if (!model) return;
+    if (migrate) {
+      const matches = migrationMatches(list);
+      if (!matches.count || (model && !matchedCountForModel(model, list))) return;
+    } else {
+      keys = switchKeys(keys, model, list);
+      if (!keys.length) return;
+    }
     const kimiRunning = list.kimiRunning === true;
     const payload = migrate
-      ? { targetModelAlias: model.alias, thinkingLevel, restartKimi: kimiRunning, migratePreviousAlias: true }
-      : { conversationKeys: keys, targetModelAlias: model.alias, thinkingLevel, restartKimi: kimiRunning };
+      ? { restartKimi: kimiRunning, migratePreviousAlias: true }
+      : { conversationKeys: keys, restartKimi: kimiRunning };
+    if (model) {
+      payload.targetModelAlias = model.alias;
+      if (model.sourceKind !== 'official') payload.thinkingLevel = thinkingLevel;
+    }
     c.pending = true;
     c.confirm = null;
     hideConfirm();
@@ -710,7 +719,7 @@ function mountConversationsPage() {
       if (migrate) {
         parts.push(count ? '已迁移 ' + count + ' 个旧别名会话。' : '没有找到使用旧别名的会话。');
       } else {
-        parts.push('已将 ' + count + ' 个会话切换到「' + displayNameOf(model) + '」。');
+        parts.push(count ? '已将 ' + count + ' 个会话切换到「' + displayNameOf(model) + '」。' : '所选会话已在使用目标模型。');
       }
       parts.push(reply?.kimiRestarted
         ? 'Kimi 已自动重启，打开后即可继续原对话。'
@@ -742,85 +751,6 @@ function mountConversationsPage() {
     }
   }
 
-  /* 一键迁移：只遍历「确有会话还在旧别名」的模型。restartKimi 只放在最后
-     一笔请求上，避免每个模型各重启一次 Kimi；Kimi 运行中时先确认一次。
-     后端在 Kimi 仍运行时拒绝 restartKimi=false 的写入，那种模型会被记下并
-     提示再点一次（每次点击至少推进一个模型，直到没有旧别名会话）。 */
-  async function runMigration(migration = migrationMatches()) {
-    const c = state.conversations;
-    if (c.pending || !canSwitchConversations(currentList())) return;
-    if (!migration.count || !migration.models.length) {
-      showToast('没有使用旧版别名的会话需要迁移。', 'warn');
-      return;
-    }
-    const list = currentList();
-    const kimiRunning = list?.kimiRunning === true;
-    c.pending = true;
-    c.confirm = null;
-    hideConfirm();
-    setResult('');
-    setStatus(kimiRunning ? '正在迁移旧别名会话，并在最后一笔后退出重开 Kimi…' : '正在迁移旧别名会话…');
-    render();
-    let migrated = 0;
-    let restarted = false;
-    const notes = [];
-    const blocked = [];
-    try {
-      for (let index = 0; index < migration.models.length; index += 1) {
-        const model = migration.models[index];
-        const last = index === migration.models.length - 1;
-        try {
-          const reply = await request(API.rebindConversations, {
-            method: 'POST',
-            body: {
-              targetModelAlias: model.alias,
-              thinkingLevel: defaultEffortFor(model),
-              restartKimi: last ? kimiRunning : false,
-              migratePreviousAlias: true,
-            },
-          });
-          if (Array.isArray(reply?.conversationKeys)) migrated += reply.conversationKeys.length;
-          if (reply?.kimiRestarted) restarted = true;
-          if (reply?.hasMore) notes.push('「' + displayNameOf(model) + '」还有旧别名会话待迁移。');
-          if (reply?.directAnthropicHistoryWarning) {
-            notes.push('提示：直连 Anthropic 可能因历史中的官方思考块拒绝继续，如遇报错请新建对话。');
-          }
-          if (Array.isArray(reply?.warnings)) {
-            for (const warning of reply.warnings) {
-              if (typeof warning === 'string' && warning) notes.push(warning);
-            }
-          }
-          if (reply?.restartReason) notes.push('重启提示：' + (reasonText(reply.restartReason) || reply.restartReason));
-        } catch (error) {
-          const code = error?.code || '';
-          const name = '「' + displayNameOf(model) + '」';
-          if (code === 'conversation_kimi_restart_required') {
-            blocked.push(name + '需要 Kimi 退出后写入');
-          } else {
-            notes.push(name + (conversationReasonText(code) || error?.message || '迁移未完成'));
-          }
-        }
-      }
-      const parts = [];
-      parts.push(migrated ? '已迁移 ' + migrated + ' 个旧别名会话。' : '本次没有可迁移的旧别名会话。');
-      if (kimiRunning) {
-        parts.push(restarted ? 'Kimi 已自动重启，打开后即可继续原对话。' : 'Kimi 未能自动重启，请手动打开 Kimi 后继续。');
-      }
-      if (blocked.length) {
-        parts.push('另有 ' + blocked.length + ' 个模型的旧别名会话因 Kimi 仍在运行未写入（' + blocked.join('、') + '）；再点一次「迁移旧别名会话」即可继续。');
-      }
-      for (const note of notes) parts.push(note);
-      setResult(parts.join(''));
-      showToast(parts[0], blocked.length ? 'warn' : 'ok');
-    } finally {
-      c.pending = false;
-      if (!state.key) return;
-      try { await loadState({ silent: true }); } catch {}
-      await load({ preserveResult: true, preserveSelection: true });
-      setStatus(conversationListStatus(currentList()));
-    }
-  }
-
   /* 迁移入口：Kimi 运行中先确认一次，避免刚点下拉就被悄悄重启。 */
   function requestMigration(migration = migrationMatches()) {
     const list = currentList();
@@ -828,16 +758,16 @@ function mountConversationsPage() {
       showToast(conversationListStatus(list), 'warn');
       return;
     }
-    if (!migration.count || !migration.models.length) {
+    if (!migration.count) {
       showToast('没有使用旧版别名的会话需要迁移。', 'warn');
       return;
     }
     if (list.kimiRunning === true && !state.conversations.noConfirm) {
-      showPageConfirm('将把 ' + migration.count + ' 条旧别名会话迁移到新兼容别名，并在最后一笔后自动关闭重开 Kimi Work（约 2–3 秒）。请确认当前没有正在生成的回复。',
+      showPageConfirm('将把 ' + migration.count + ' 条旧别名会话迁移到当前目录别名，并自动关闭重开 Kimi Work（约 2–3 秒）。请确认当前没有正在生成的回复。',
         { migration: true });
       return;
     }
-    void runMigration(migration);
+    void submitSwitch([], null, '', { migrate: true });
   }
 
   function requestBatch(model, thinkingLevel, keys, { migrate = false } = {}) {
@@ -850,9 +780,9 @@ function mountConversationsPage() {
       showToast('请先选择目标模型后再操作。', 'warn');
       return;
     }
-    if (!migrate && !keys.length) {
-      showToast('请先勾选要切换的会话。', 'error');
-      return;
+    if (!migrate) {
+      keys = switchKeys(keys, model, list);
+      if (!keys.length) return;
     }
     if (list.kimiRunning === true && !state.conversations.noConfirm) {
       const label = migrate
@@ -909,7 +839,7 @@ function mountConversationsPage() {
     }
     /* 迁移用户当前在批量工具栏里选中的模型，而不是列表里的第一个。 */
     const model = batchModelOf(list);
-    if (!model || !model.previousAlias) {
+    if (!model) {
       showToast('所选模型没有旧版兼容别名，不需要迁移。', 'warn');
       return;
     }
@@ -927,7 +857,7 @@ function mountConversationsPage() {
     if (!pending) return;
     hideConfirm();
     if (pending.migration) {
-      void runMigration(migrationMatches());
+      void submitSwitch([], null, '', { migrate: true });
       return;
     }
     void submitSwitch(pending.keys, pending.model, pending.thinkingLevel, { migrate: pending.migrate });

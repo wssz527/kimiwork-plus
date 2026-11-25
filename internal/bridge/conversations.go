@@ -48,7 +48,8 @@ func parseConversationRebind(in core.Document) (kimi.ConversationRebindRequest, 
 	migrate, hasMigration := in["migratePreviousAlias"].(bool)
 	_, keysPresent := in["conversationKeys"]
 	_, migrationPresent := in["migratePreviousAlias"]
-	if !hasAlias || (keysPresent && !hasKeys) || (migrationPresent && !hasMigration) || migrate == hasKeys {
+	_, aliasPresent := in["targetModelAlias"]
+	if (aliasPresent && (!hasAlias || alias == "")) || (!aliasPresent && !migrate) || (keysPresent && !hasKeys) || (migrationPresent && !hasMigration) || migrate == hasKeys {
 		return kimi.ConversationRebindRequest{}, invalid
 	}
 	request := kimi.ConversationRebindRequest{TargetModelAlias: alias, MigratePreviousAlias: migrate, ConversationKeys: make([]string, 0, len(rows))}
@@ -61,7 +62,7 @@ func parseConversationRebind(in core.Document) (kimi.ConversationRebindRequest, 
 	}
 	if value, present := in["thinkingLevel"]; present {
 		level, valid := value.(string)
-		if !valid {
+		if !valid || (alias == "" && level != "") {
 			return kimi.ConversationRebindRequest{}, invalid
 		}
 		request.ThinkingLevel = level

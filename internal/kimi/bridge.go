@@ -136,6 +136,8 @@ type ImportRequest struct {
 	// DisconnectDirectSourceID names the Direct Mode custom source a gateway
 	// import disconnects only after the replacement has been applied.
 	DisconnectDirectSourceID string `json:"disconnectDirectSourceId,omitempty"`
+	// RepairProviderID requires the same connected, owned UUID provider at write time.
+	RepairProviderID string `json:"repairProviderId,omitempty"`
 }
 
 // DisconnectRequest identifies only sources this product manages. The account

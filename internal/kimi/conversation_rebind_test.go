@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 const conversationFixtureAlias = "byok-custom/claude"
@@ -119,7 +122,7 @@ func TestConversationRebindBatchUpdatesSQLiteAndElectronFiles(t *testing.T) {
 	t.Cleanup(func() { listOfficialProcesses = previous })
 	ctx := context.Background()
 	list := controller.WorkConversations(ctx)
-	if list.Reason != "" || list.Application != NotRunning || len(list.Conversations) != 2 || len(list.Models) != 3 {
+	if list.Reason != "" || list.Application != NotRunning || len(list.Conversations) != 2 || len(list.Models) != 6 {
 		t.Fatalf("list = %+v", list)
 	}
 	first := list.Conversations[0]
@@ -302,8 +305,8 @@ func TestConversationModelsSelectsCurrentLegacyProfile(t *testing.T) {
 	conversationTestWrite(t, filepath.Join(home, NativeWorkStore), `{"profiles":{"`+sha256Hex("test-account")+`":{"byok-kth":`+
 		profile("byok-kth-resp/ok", "kth", "openai_responses")+`,"custom":`+profile("byok-custom/ok", "custom", "anthropic")+`},"`+
 		sha256Hex("other")+`":{"byok-kth":`+profile("byok-kth/other", "kth", "kimi")+`}}}`)
-	models := store.models()
-	if len(models) != 2 || models[0].Alias != "byok-custom/ok" || !models[0].DirectAnthropicHistoryWarning || models[1].SourceKind != "kth" {
+	models := store.models().models
+	if len(models) != 5 || models[0].Alias != "byok-custom/ok" || !models[0].DirectAnthropicHistoryWarning || models[1].SourceKind != "kth" {
 		t.Fatalf("models = %+v", models)
 	}
 }
@@ -431,16 +434,16 @@ func TestConversationRebindRequiresEffortWithoutDefault(t *testing.T) {
 	conversationTestWrite(t, filepath.Join(store.home, NativeWorkConfig), `{"credentials":{"kimiWeb":{"userId":"test-account"}}}`)
 	conversationTestWrite(t, filepath.Join(store.home, NativeWorkStore), `{"profiles":{"`+sha256Hex("test-account")+`":{"byok-kth":{"kind":"kth","models":[{"alias":"byok-kth/model","providerId":"p","model":"model","maxContextSize":512,"protocol":"kimi","supportEfforts":["zeta","max","medium","high","off","alpha","low","xhigh","high"],"defaultEffort":"invalid"}]}}}}`)
 	want := []string{"off", "low", "medium", "high", "xhigh", "max", "alpha", "zeta"}
-	if models := store.models(); len(models) != 1 || !slices.Equal(models[0].SupportEfforts, want) || models[0].DefaultEffort != "" {
+	if models := store.models().models; len(models) != 4 || !slices.Equal(models[0].SupportEfforts, want) || models[0].DefaultEffort != "" {
 		t.Fatalf("models = %+v", models)
 	}
 	request := ConversationRebindRequest{TargetModelAlias: "byok-kth/model"}
-	if _, _, err := store.target(request); err == nil || err.Error() != "invalid_conversation_thinking_level" {
+	if _, _, err := store.rebindMutation(request); err == nil || err.Error() != "invalid_conversation_thinking_level" {
 		t.Fatalf("empty level accepted: %v", err)
 	}
 	request.ThinkingLevel = " HIGH "
-	if _, level, err := store.target(request); err != nil || level != "high" {
-		t.Fatalf("explicit level = %s, %v", level, err)
+	if _, mutation, err := store.rebindMutation(request); err != nil || mutation.ThinkingLevel != "high" {
+		t.Fatalf("explicit level = %s, %v", mutation.ThinkingLevel, err)
 	}
 }
 
@@ -504,8 +507,9 @@ func TestConversationAliasMigrationPreservesSupportedEffortAndBatches(t *testing
 		insert.run('main', 'later', '/records/l', preferences('byok-kth-kimi/group/kimi-example', 'high'), '', '', '', 2);
 		insert.run('main', 'malformed', '/records/m', 'malformed', '', '', '', 3);
 	`)
-	request := conversationSQLiteRequest{Operation: "rebind", PreviousAlias: previous, ModelAlias: target,
-		SupportEfforts: []string{"low", "high"}, ThinkingLevel: "low", Limit: 1}
+	request := conversationSQLiteRequest{Operation: "rebind", Limit: 1, Migrations: []conversationMigration{{
+		TargetModelAlias: target, Aliases: []string{previous}, SupportEfforts: []string{"low", "high"}, ThinkingLevel: "low",
+	}}}
 	for i, key := range []string{"later", "earlier"} {
 		got, err := store.run(context.Background(), request)
 		if err != nil || !slices.Equal(got.ConversationKeys, []string{key}) || got.HasMore != (i == 0) {
@@ -529,10 +533,10 @@ func TestConversationAliasMigrationPreservesSupportedEffortAndBatches(t *testing
 		got.Conversations[4].ModelAlias != target || got.Conversations[4].ThinkingLevel != "low" {
 		t.Fatalf("reloaded conversations = %+v, %v", got, err)
 	}
-	// Explicit rebind must apply the requested thinkingLevel even if supportEfforts is supplied.
+	// Explicit rebind applies the requested thinkingLevel instead of preserving the old one.
 	if _, err := store.run(context.Background(), conversationSQLiteRequest{
 		Operation: "rebind", ConversationKeys: []string{"later"}, ModelAlias: target,
-		SupportEfforts: []string{"low", "high"}, ThinkingLevel: "low",
+		ThinkingLevel: "low",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -886,4 +890,256 @@ func TestConversationIntentJournalCrashRecoveryAndCancellationErrors(t *testing.
 			t.Fatalf("cancelled list = %v", err)
 		}
 	})
+}
+
+func TestConversationMigrationMapsOnlyVerifiedGatewayAndDirectAliases(t *testing.T) {
+	store, selection, bindings := conversationFixture(t)
+	const logical = "magpie/kimi-group%2Fdeepseek-v4-1-flash"
+	const upstream = "group/deepseek-v4-1-flash"
+	const direct = "byok-22222222-2222-4222-8222-222222222222/" + upstream
+	const foreignID = "byok-33333333-3333-4333-8333-333333333333"
+	const unknownID = "byok-44444444-4444-4444-8444-444444444444"
+	compatible := protocol.KimiCompatibleModelID(logical)
+	canonical := kthAliasPrefix + compatible
+	other := protocol.KimiCompatibleModelID("kimi-probe-model")
+	account, _ := readJSONFile(filepath.Join(store.home, NativeWorkStore), maxStoreBytes)
+	signedIn := mapField(mapField(account, "accounts"), sha256Hex("test-account"))
+	active := mapField(signedIn, "active")
+	models := modelRows(active)
+	models[0]["alias"], models[0]["model"] = kthAliasPrefix+other, other
+	active["models"] = append(active["models"].([]any), map[string]any{
+		"alias": canonical, "sourceId": kthSourceID, "providerId": kthProviderID, "model": compatible,
+		"supportEfforts": []string{"low", "high"}, "defaultEffort": "low",
+	})
+	signedIn["sources"] = append(signedIn["sources"].([]any), map[string]any{
+		"kind": "custom", "id": "managed-old", "displayName": DirectDisplayName, "status": "disconnected",
+		"desired": map[string]any{
+			"providers": []any{map[string]any{"id": "persisted-provider-id", "protocol": "openai", "baseUrl": "https://magpie.example/v1/"}},
+			"models":    []any{map[string]any{"alias": direct, "model": upstream, "providerId": "persisted-provider-id"}},
+		},
+	}, map[string]any{
+		"kind": "custom", "id": "other-source", "displayName": "Other provider", "providers": []any{
+			map[string]any{"id": foreignID, "protocol": "openai", "baseUrl": "https://magpie.example/v1"},
+		},
+	})
+	encoded, err := json.Marshal(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationTestWrite(t, filepath.Join(store.home, NativeWorkStore), string(encoded))
+	cases := []struct{ key, alias, level, target, targetLevel string }{
+		{"temporary-gateway", unknownID + "/" + compatible, "high", canonical, "high"},
+		{"previous-direct", direct, "max", canonical, "low"},
+		{"previous-nested", kthAliasPrefix + logical, "low", canonical, "low"},
+		{"second-model", unknownID + "/" + other, "", kthAliasPrefix + other, ""},
+		{"foreign-direct", foreignID + "/" + upstream, "high", "", ""},
+		{"foreign-hash", foreignID + "/" + compatible, "high", "", ""},
+		{"unknown-direct", unknownID + "/" + upstream, "high", "", ""},
+		{"unknown-model", unknownID + "/" + protocol.KimiCompatibleModelID("removed"), "high", "", ""},
+		{"wrong-prefix", "byok-foreign/" + compatible, "high", "", ""},
+		{"wrong-nesting", kthAliasPrefix + "other/kimi-group%2Fdeepseek-v4-1-flash", "high", "", ""},
+		{"current", canonical, "high", "", ""},
+	}
+	var inserts strings.Builder
+	inserts.WriteString(`const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)');`)
+	for _, row := range cases {
+		fmt := `insert.run('main', ` + strconv.Quote(row.key) + `, null, JSON.stringify({runtimePreferences:{modelAlias:` + strconv.Quote(row.alias) + `,thinkingLevel:` + strconv.Quote(row.level) + `}}), '', '', '', 42);`
+		inserts.WriteString(fmt)
+	}
+	conversationTestSQL(t, store, inserts.String())
+
+	previous := listOfficialProcesses
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return nil, true, "" }
+	t.Cleanup(func() { listOfficialProcesses = previous })
+	controller := &Controller{settings: ControllerSettings{UserDataDir: store.profile, ProfileMode: ProfileModeIsolated,
+		Installation: Installation{Application: "fixture"}, ConversationNodePath: store.nodePath,
+		Models: []Model{{ID: logical, CatalogID: compatible, Protocol: "chat"}, {ID: "kimi-probe-model", CatalogID: other, Protocol: "chat"}},
+		ConversationDirectSpec: &DirectSpec{
+			Providers: []DirectProviderSpec{{ID: "saved-magpie", Protocol: "openai", BaseURL: "https://magpie.example/v1"}},
+			Models:    []DirectModel{{ID: logical, ProviderID: "saved-magpie", Model: upstream}},
+		},
+	}}
+	ctx := context.Background()
+	before := controller.WorkConversations(ctx)
+	counts := map[string]int{}
+	for _, model := range before.Models {
+		counts[model.Alias] = model.MigrationCount
+	}
+	if before.Reason != "" || counts[canonical] != 3 || counts[kthAliasPrefix+other] != 1 {
+		t.Fatalf("migration readback = %+v", before)
+	}
+	byKey := map[string]WorkConversation{}
+	for _, row := range before.Conversations {
+		byKey[row.ConversationKey] = row
+	}
+	for _, row := range cases {
+		if got := byKey[row.key]; got.ModelAlias != row.alias || got.MigrationTargetAlias != row.target {
+			t.Fatalf("read-only list for %s = %+v", row.key, got)
+		}
+	}
+	if conversationTestRead(t, selection) != conversationFixtureSelection || conversationTestRead(t, bindings) != conversationFixtureBindings {
+		t.Fatal("listing conversations mutated binding files")
+	}
+	request := ConversationRebindRequest{MigratePreviousAlias: true}
+	controller.settings.IntegrationMode = IntegrationModeDirect
+	if result, err := controller.RebindWorkConversations(ctx, request); err == nil || err.Error() != "invalid_conversation_migration_target" {
+		t.Fatalf("direct migration was accepted: %+v, %v", result, err)
+	}
+	controller.settings.IntegrationMode = IntegrationModeGateway
+	result, err := controller.RebindWorkConversations(ctx, request)
+	if err != nil || len(result.ConversationKeys) != 4 || result.HasMore {
+		t.Fatalf("migration = %+v, %v", result, err)
+	}
+	for _, row := range controller.WorkConversations(ctx).Conversations {
+		for _, test := range cases {
+			if test.key != row.ConversationKey {
+				continue
+			}
+			wantAlias, wantLevel := test.alias, test.level
+			if test.target != "" {
+				wantAlias, wantLevel = test.target, test.targetLevel
+			}
+			if row.ModelAlias != wantAlias || row.ThinkingLevel != wantLevel || row.MigrationTargetAlias != "" {
+				t.Fatalf("reloaded %s = %+v", test.key, row)
+			}
+		}
+	}
+	if got := conversationTestRead(t, bindings); strings.Count(got, canonical) != 3 || !strings.Contains(got, kthAliasPrefix+other) {
+		t.Fatalf("migrated bindings = %s", got)
+	}
+}
+
+func TestConversationOfficialTargetsClearThirdPartyBindingAndEffort(t *testing.T) {
+	store, selection, bindings := conversationFixture(t)
+	conversationTestWrite(t, selection, `{"second":{"modelKey":"old-byok","pendingRuntime":true,"keep":true}}`)
+	controller := &Controller{settings: ControllerSettings{UserDataDir: store.profile, ProfileMode: ProfileModeIsolated,
+		Installation: Installation{Application: "fixture"}, IntegrationMode: IntegrationModeDirect, ConversationNodePath: store.nodePath}}
+	previous := listOfficialProcesses
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return nil, true, "" }
+	t.Cleanup(func() { listOfficialProcesses = previous })
+	ctx := context.Background()
+	list := controller.WorkConversations(ctx)
+	for _, want := range []string{"k3-agent", "k3d1-agent", "k2d8-preview"} {
+		if !slices.ContainsFunc(list.Models, func(model ConversationModel) bool {
+			return model.Alias == want && model.SourceKind == "official" && model.DisplayName == OfficialConversationModelName(want) &&
+				len(model.SupportEfforts) == 0 && model.DefaultEffort == "" && model.Protocol == "" && model.MigrationCount == 0
+		}) {
+			t.Fatalf("missing official target %s: %+v", want, list.Models)
+		}
+	}
+	request := ConversationRebindRequest{ConversationKeys: []string{"second"}, TargetModelAlias: conversationFixtureAlias, ThinkingLevel: "high"}
+	if _, err := controller.RebindWorkConversations(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.TargetModelAlias = "k3d1-agent"
+	if _, err := controller.RebindWorkConversations(ctx, request); err == nil || err.Error() != "invalid_conversation_thinking_level" {
+		t.Fatalf("official target accepted third-party effort: %v", err)
+	}
+	request.ThinkingLevel = ""
+	result, err := controller.RebindWorkConversations(ctx, request)
+	if err != nil || result.ThinkingLevel != "" || result.DirectAnthropicHistoryWarning || !slices.Equal(result.ConversationKeys, []string{"second"}) {
+		t.Fatalf("official rebind = %+v, %v", result, err)
+	}
+	if got := conversationTestRead(t, selection); !strings.Contains(got, `"second":{"modelKey":"k3d1-agent","keep":true}`) {
+		t.Fatalf("official selection = %s", got)
+	}
+	if got := conversationTestRead(t, bindings); strings.Contains(got, `"second"`) || !strings.Contains(got, `"unrelated":"byok-other"`) {
+		t.Fatalf("official binding cleanup = %s", got)
+	}
+	if row := controller.WorkConversations(ctx).Conversations[1]; row.ModelAlias != request.TargetModelAlias || row.IsBYOK || row.ThinkingLevel != "" {
+		t.Fatalf("official row = %+v", row)
+	}
+	if result, err := controller.RebindWorkConversations(ctx, request); err != nil || len(result.ConversationKeys) != 0 {
+		t.Fatalf("duplicate official rebind = %+v, %v", result, err)
+	}
+}
+
+func TestConversationMigrationRestoresOriginalGatewayAliases(t *testing.T) {
+	store, _, _ := conversationFixture(t)
+	const chatID, responsesID = "kimi-probe-model", "gpt-probe-model"
+	chatTarget, responsesTarget := kthAliasPrefix+chatID, historicalKthResponsesPrefix+responsesID
+	chatCompatible := kthAliasPrefix + protocol.KimiCompatibleModelID(chatID)
+	responsesCompatible := kthAliasPrefix + protocol.KimiCompatibleModelID(responsesID)
+	const uuid = "byok-22222222-2222-4222-8222-222222222222/"
+	aliases := map[string]string{
+		"chat": chatCompatible, "responses": responsesCompatible,
+		"uuid-compatible": uuid + protocol.KimiCompatibleModelID(chatID),
+		"direct":          uuid + chatID,
+		"nested":          kthAliasPrefix + "magpie/kimi-group%2Fdeepseek-v4-1-flash",
+	}
+	var inserts strings.Builder
+	inserts.WriteString(`const insert = db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)');`)
+	for key, alias := range aliases {
+		inserts.WriteString(`insert.run('main', ` + strconv.Quote(key) + `, null, JSON.stringify({runtimePreferences:{modelAlias:` + strconv.Quote(alias) + `}}), '', '', '', 42);`)
+	}
+	conversationTestSQL(t, store, inserts.String())
+	previous := listOfficialProcesses
+	listOfficialProcesses = func(context.Context, string) ([]int, bool, string) { return nil, true, "" }
+	t.Cleanup(func() { listOfficialProcesses = previous })
+	controller := &Controller{settings: ControllerSettings{UserDataDir: store.profile, ProfileMode: ProfileModeIsolated,
+		Installation: Installation{Application: "fixture"}, ConversationNodePath: store.nodePath, IntegrationMode: IntegrationModeGateway,
+		Models: []Model{{ID: chatID, Protocol: "chat"}, {ID: responsesID, Protocol: "responses"}},
+	}}
+	ctx := context.Background()
+	assertTargets := func(want map[string]string) {
+		t.Helper()
+		list := controller.WorkConversations(ctx)
+		if list.Reason != "" {
+			t.Fatalf("list = %+v", list)
+		}
+		got := map[string]string{}
+		for _, model := range list.Models {
+			if model.PreviousAlias != "" || model.MigrationCount != 0 {
+				if model.MigrationCount != 1 {
+					t.Fatalf("migration count = %+v", model)
+				}
+				got[model.Alias] = model.PreviousAlias
+			}
+		}
+		if !maps.Equal(got, want) {
+			t.Fatalf("reverse aliases = %v, want %v", got, want)
+		}
+		for _, row := range list.Conversations {
+			for target, source := range want {
+				if row.ModelAlias == source && row.MigrationTargetAlias != target {
+					t.Fatalf("row does not offer its reverse target: %+v", row)
+				}
+			}
+		}
+	}
+	storePath := filepath.Join(store.home, NativeWorkStore)
+	data, _ := readJSONFile(storePath, maxStoreBytes)
+	account := mapField(mapField(data, "accounts"), sha256Hex("test-account"))
+	active := mapField(account, "active")
+	original := active["models"].([]any)
+	writeModels := func(rows []any) {
+		t.Helper()
+		active["models"] = rows
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conversationTestWrite(t, storePath, string(encoded))
+	}
+	writeModels(original[1:])
+	assertTargets(map[string]string{responsesTarget: responsesCompatible})
+	writeModels(append(slices.Clone(original), map[string]any{
+		"alias": chatCompatible, "model": protocol.KimiCompatibleModelID(chatID), "sourceId": kthSourceID, "providerId": kthProviderID,
+	}))
+	assertTargets(map[string]string{responsesTarget: responsesCompatible})
+	writeModels(original)
+	assertTargets(map[string]string{chatTarget: chatCompatible, responsesTarget: responsesCompatible})
+
+	for _, tc := range []struct{ target, key string }{{responsesTarget, "responses"}, {"", "chat"}} {
+		result, err := controller.RebindWorkConversations(ctx, ConversationRebindRequest{TargetModelAlias: tc.target, MigratePreviousAlias: true})
+		if err != nil || !slices.Equal(result.ConversationKeys, []string{tc.key}) {
+			t.Fatalf("reverse rebind to %q = %+v, %v", tc.target, result, err)
+		}
+	}
+	aliases["chat"], aliases["responses"] = chatTarget, responsesTarget
+	for _, row := range controller.WorkConversations(ctx).Conversations {
+		if want, exists := aliases[row.ConversationKey]; exists && (row.ModelAlias != want || row.MigrationTargetAlias != "") {
+			t.Fatalf("reverse rebind row = %+v, want %q", row, want)
+		}
+	}
 }

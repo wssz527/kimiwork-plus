@@ -198,10 +198,12 @@ func (n *Native) Configure(d core.Document) error {
 	settings.Models = models
 	mode := core.IntegrationMode(d)
 	settings.IntegrationMode = mode
+	settings.ConversationDirectSpec = nil
 	if mode == core.IntegrationModeDirect {
 		settings.DirectSpec = buildDirectSpec(d, n.credentialAvailability(d))
 	} else {
 		settings.DirectSpec = nil
+		settings.ConversationDirectSpec = buildDirectSpecForPlan(buildDirectPlan(d))
 	}
 	settings.Translation = kimi.TranslationSettings{Enabled: translation.Enabled, Provider: translation.Provider, TargetLanguage: translation.TargetLanguage, View: translation.View}
 	if e := n.controller.Configure(settings); e != nil {
@@ -1041,8 +1043,10 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 	// the entry is consumed here so a later operation cannot inherit it.
 	startedDigest := n.operationStart[id]
 	delete(n.operationStart, id)
-	if action == "disconnect-models" && err == nil {
+	finishedDisconnect := action == "disconnect-models" && err == nil
+	if finishedDisconnect {
 		n.receipt = nil
+		n.autoSync.reset()
 	}
 	stage := core.String(n.operation["stage"])
 	duration := finishedAt.UnixMilli() - documentInt64(n.operation["startedAt"])
@@ -1063,7 +1067,9 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 		}
 	}
 	n.logOperationFinished(id, action, stage, state, reason, duration, result)
-	n.autoSync.operationFinished(action, startedDigest, result, err)
+	if !finishedDisconnect {
+		n.autoSync.operationFinished(action, startedDigest, result, err)
+	}
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {
 	fail := func(code string) (any, error) { return core.Document{"error": code}, nil }

@@ -271,7 +271,7 @@
           </div>
           <div class="action-line action-line--start"><button class="btn btn--outline" id="conv-refresh" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>刷新会话</button></div>
         </div>
-        <p class="note note--warn conv-migration" id="conv-migration-tip" hidden><span id="conv-migration-text">发现旧版模型别名会话，可一键迁移至新兼容别名。</span><button class="btn btn--outline btn--sm" id="conv-migrate-all" type="button">一键迁移旧别名会话</button></p>
+        <p class="note note--warn conv-migration" id="conv-migration-tip" hidden><span id="conv-migration-text">发现旧版模型别名会话，可一键迁移至当前目录别名。</span><button class="btn btn--outline btn--sm" id="conv-migrate-all" type="button">一键迁移旧别名会话</button></p>
         <p class="note" id="conv-status" role="status" aria-live="polite">正在读取 Kimi Work 会话…</p>
         <p class="note" id="conv-result" role="status" aria-live="polite" hidden></p>
         <div class="inline-confirm" id="conv-confirm" role="region" aria-label="确认批量切换会话模型" hidden>
@@ -294,7 +294,7 @@
       <details class="growth-disclosure" id="conv-batch">
         <summary>批量切换 / 迁移旧版模型会话</summary>
         <div class="growth-disclosure__body">
-          <p class="hint" id="conv-batch-note">勾选上方会话后，可为它们统一选择目标模型与思考档位；旧别名迁移会把使用旧版兼容别名的历史会话更新为当前别名。</p>
+          <p class="hint" id="conv-batch-note">勾选上方会话后，可统一设置目标模型与可用的思考档位。</p>
           <div class="field-row">
             <label class="field" for="conv-batch-model"><span class="field__label">目标模型</span><select id="conv-batch-model"></select></label>
             <label class="field" for="conv-batch-effort"><span class="field__label">思考档位</span><select id="conv-batch-effort"></select></label>

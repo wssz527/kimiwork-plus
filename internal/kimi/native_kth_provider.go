@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -36,6 +37,8 @@ const (
 	// writer keeps winning the compare-and-swap.
 	kthRepairPasses = 3
 )
+
+var byokUUIDProvider = regexp.MustCompile(`^byok-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // kthStoreScan is one read of the store's signed-in account, seen from what a
 // loopback import needs.
@@ -415,8 +418,8 @@ if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="strin
   typeof current.accountRevision!=="string"||!current.accountRevision)return {ok:false,code:"contract-changed"};
 if(!expectedRevision||current.accountRevision!==expectedRevision||current.sources.some(source=>
   source?.id==="byok-kth"&&source.quarantined!==true&&source.status!=="disconnected"))return {ok:true,status:"pending"};
-const direct=current.sources.find(source=>directSourceID&&source?.id===directSourceID)||
-  current.sources.find(source=>source?.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
+const direct=directSourceID&&(current.sources.find(source=>source?.id===directSourceID)||
+  current.sources.find(source=>source?.kind==="custom"&&source.displayName==="` + DirectDisplayName + `"));
 const otherPending=current.sources.some(source=>{
   if(source?.id==="byok-kth"||(source===direct&&source?.kind==="custom"))return false;
   if(Array.isArray(source?.models))return source.models.some(model=>model?.status==="pending");

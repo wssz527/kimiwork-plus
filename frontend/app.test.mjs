@@ -5147,15 +5147,15 @@ test('the conversations page pins the most recent conversation and confirms a ru
 test('a stopped Kimi switches a single row immediately without a restart dialog', async () => {
   const env = makeConversationPageEnv({ kimiRunning: false });
   await env.page.refresh();
-  const row = env.ui.list.children[1];
-  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'older');
+  const row = env.ui.list.children[0];
+  const switchButton = findNode(row, node => node.dataset?.convSwitch === 'recent');
   await switchButton.fire('click');
   await flushConversation();
   const post = env.calls.find(call => call[1]?.method === 'POST');
   assert.ok(post);
   assert.equal(post[1].body.restartKimi, false);
-  assert.deepEqual(post[1].body.conversationKeys, ['older']);
-  assert.equal(findNode(row, node => node.dataset?.convConfirm === 'older').hidden, true);
+  assert.deepEqual(post[1].body.conversationKeys, ['recent']);
+  assert.equal(findNode(row, node => node.dataset?.convConfirm === 'recent').hidden, true);
 });
 
 test('the conversations guide follows the saved integration mode and search filters by title or workspace', async () => {
@@ -5184,7 +5184,7 @@ test('the alias migration entry only appears for real matches and migrates every
     { conversationKey: 'recent', title: '新会话', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'k2d8-preview', isByok: false },
     { conversationKey: 'older', title: '旧会话', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
   ];
-  const env = makeConversationPageEnv({ kimiRunning: false, models: [first, second], conversations: rows });
+  const env = makeConversationPageEnv({ kimiRunning: false, models: [first, { ...second, migrationCount: 1 }], conversations: rows });
   env.setReply({ conversationKeys: ['older'], kimiRestarted: false });
   await env.page.refresh();
   /* 只有 previousAlias 字段、没有匹配会话的模型不显示迁移提示。 */
@@ -5195,7 +5195,7 @@ test('the alias migration entry only appears for real matches and migrates every
   await flushConversation();
   const posts = env.calls.filter(call => call[1]?.method === 'POST');
   assert.equal(posts.length, 1, 'only the model with a real match is migrated, and only once');
-  assert.equal(posts[0][1].body.targetModelAlias, second.alias);
+  assert.equal(Object.hasOwn(posts[0][1].body, 'targetModelAlias'), false);
   assert.equal(posts[0][1].body.migratePreviousAlias, true);
   assert.equal(posts[0][1].body.restartKimi, false);
   assert.match(env.ui.result.textContent, /已迁移 1 个旧别名会话/);
@@ -5205,13 +5205,13 @@ test('the alias migration entry only appears for real matches and migrates every
   assert.equal(quiet.ui.migration.hidden, true, 'a previousAlias without matching conversations must stay quiet');
   assert.equal(quiet.ui.migrateAll.disabled, true);
 
-  /* 多个模型各自有命中时逐个迁移，只有最后一笔请求带重启标记。 */
+  /* 多个模型有命中时，确认后提交一次。 */
   const multiRows = [
     { conversationKey: 'k1', title: 'A', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/a', isByok: true },
     { conversationKey: 'k2', title: 'B', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
   ];
-  const multi = makeConversationPageEnv({ kimiRunning: true, models: [first, second], conversations: multiRows });
-  multi.setReply({ conversationKeys: ['k2'], kimiRestarted: true });
+  const multi = makeConversationPageEnv({ kimiRunning: true, models: [{ ...first, migrationCount: 1 }, { ...second, migrationCount: 1 }], conversations: multiRows });
+  multi.setReply({ conversationKeys: ['k1', 'k2'], kimiRestarted: true });
   await multi.page.refresh();
   assert.match(multi.ui.migrationText.textContent, /发现 2 条旧版模型别名会话/);
   await multi.ui.migrateAll.fire('click');
@@ -5222,11 +5222,8 @@ test('the alias migration entry only appears for real matches and migrates every
   await multi.ui.confirmSubmit.fire('click');
   await flushConversation();
   const migrationPosts = multi.calls.filter(call => call[1]?.method === 'POST');
-  assert.equal(migrationPosts.length, 2);
-  assert.equal(migrationPosts[0][1].body.targetModelAlias, first.alias);
-  assert.equal(migrationPosts[0][1].body.restartKimi, false, 'earlier models must not restart Kimi');
-  assert.equal(migrationPosts[1][1].body.targetModelAlias, second.alias);
-  assert.equal(migrationPosts[1][1].body.restartKimi, true, 'only the last request restarts Kimi once');
+  assert.equal(migrationPosts.length, 1);
+  assert.deepEqual(migrationPosts[0][1].body, { restartKimi: true, migratePreviousAlias: true });
   assert.match(multi.ui.result.textContent, /已迁移 2 个旧别名会话/);
 });
 
@@ -5896,8 +5893,8 @@ test('the workspace bar only offers a manual resync where auto-sync cannot finis
 });
 
 test('the batch migrate action follows the model selected in the toolbar, not the first one', async () => {
-  const first = makeConversationModel({ alias: 'byok-kth-kimi/kimi-a', displayName: '模型 A', previousAlias: 'byok-kth-kimi/group/a' });
-  const second = makeConversationModel({ alias: 'byok-kth-kimi/kimi-b', displayName: '模型 B', previousAlias: 'byok-kth-kimi/group/b' });
+  const first = makeConversationModel({ alias: 'byok-kth-kimi/kimi-a', displayName: '模型 A', previousAlias: 'byok-kth-kimi/group/a', migrationCount: 1 });
+  const second = makeConversationModel({ alias: 'byok-kth-kimi/kimi-b', displayName: '模型 B', previousAlias: 'byok-kth-kimi/group/b', migrationCount: 1 });
   const rows = [
     { conversationKey: 'k1', title: 'A', workspacePath: '/tmp/a', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/a', isByok: true },
     { conversationKey: 'k2', title: 'B', workspacePath: '/tmp/b', updatedAtMs: Date.now(), modelAlias: 'byok-kth-kimi/group/b', isByok: true },
@@ -6124,4 +6121,80 @@ test('an unknown transition closes a stale confirm while the user is busy', asyn
   assert.equal(confirmHost.hidden, true, 'a confirm that can no longer succeed must close');
   assert.equal(env.state.conversations.rowConfirm, null);
   assert.equal(env.calls.filter(call => call[0] === '/api/work/conversations').length, 1, 'no reload while the user is busy');
+});
+
+test('official models are switchable from old BYOK sessions without inheriting effort', async () => {
+  const models = [makeConversationModel(), ...[
+    ['k3-agent', '官方 · K3'], ['k3d1-agent', '官方 · K3.1 Pro'], ['k2d8-preview', '官方 · K2.8 Preview'],
+  ].map(([alias, displayName]) => ({ alias, displayName, sourceKind: 'official', supportEfforts: [] }))];
+  const env = makeConversationPageEnv({ models, conversations: [
+    { conversationKey: 'recent', title: '旧直连', modelAlias: 'byok-22222222-2222-4222-8222-222222222222/group/deepseek-v4-1-flash', isByok: true,
+      migrationTargetAlias: models[0].alias },
+    { conversationKey: 'current', title: '当前官方', modelAlias: 'k3d1-agent' },
+  ] });
+  await env.page.refresh();
+  const row = env.ui.list.children[0];
+  const target = findNode(row, node => node.dataset?.convTarget === 'recent');
+  const effort = findNode(row, node => node.dataset?.convEffortKey === 'recent');
+  assert.match(findNode(row, node => node.dataset?.convCurrent === 'recent').textContent, /DeepSeek.*旧别名/);
+  assert.deepEqual(target.children.slice(1).map(option => option.textContent), models.slice(1).map(model => model.displayName));
+  const currentTarget = findNode(env.ui.list.children[1], node => node.dataset?.convTarget === 'current');
+  assert.equal(currentTarget.children.find(option => option.value === 'k3d1-agent').disabled, true);
+  target.value = 'k3d1-agent';
+  await target.fire('change');
+  assert.equal(effort.disabled, true);
+  assert.equal(effort.children[0].textContent, '官方默认');
+  await findNode(row, node => node.dataset?.convSwitch === 'recent').fire('click');
+  await flushConversation();
+  assert.deepEqual(env.calls.find(call => call[1]?.method === 'POST')[1].body, {
+    conversationKeys: ['recent'], targetModelAlias: 'k3d1-agent', restartKimi: false,
+  });
+  env.calls.length = 0;
+  env.ui.batchModel.value = 'k3d1-agent';
+  await env.ui.batchModel.fire('change');
+  for (const row of env.ui.list.children) {
+    const checkbox = findNode(row, node => node.dataset?.convSelect);
+    checkbox.checked = true;
+    await checkbox.fire('change');
+  }
+  await env.ui.batchGo.fire('click');
+  await flushConversation();
+  assert.deepEqual(env.calls.find(call => call[1]?.method === 'POST')[1].body.conversationKeys, ['recent']);
+});
+
+test('the migration entry uses backend counts and ignores them in direct mode', async () => {
+  const model = makeConversationModel({ migrationCount: 12 });
+  const env = makeConversationPageEnv({ models: [model], conversations: [] });
+  await env.page.refresh();
+  assert.match(env.ui.migrationText.textContent, /12 条/);
+  assert.equal(env.ui.migration.hidden, false);
+  assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
+  env.state.data.integrationMode = 'direct';
+  env.page.show();
+  await flushConversation();
+  assert.equal(env.ui.migration.hidden, true);
+  await env.ui.migrateAll.fire('click');
+  assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
+});
+
+test('reverse alias migration uses the original catalog target after confirmation', async () => {
+  const original = 'byok-kth-resp/gpt-original';
+  const compatible = 'byok-kth-kimi/kimi-k3-kwp-' + 'b'.repeat(64);
+  const model = makeConversationModel({ alias: original, previousAlias: compatible, migrationCount: 1 });
+  const env = makeConversationPageEnv({ kimiRunning: true, models: [model], conversations: [
+    { conversationKey: 'recent', title: '兼容历史会话', modelAlias: compatible, migrationTargetAlias: original },
+  ] });
+  env.state.data.kimiK3Compatibility = false;
+  await env.page.refresh();
+  assert.match(env.ui.migrationText.textContent, /当前目录别名/);
+  assert.equal(env.ui.batchMigrate.disabled, false);
+  assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
+  await env.ui.batchMigrate.fire('click');
+  assert.equal(env.ui.confirm.hidden, false);
+  assert.equal(env.calls.some(call => call[1]?.method === 'POST'), false);
+  await env.ui.confirmSubmit.fire('click');
+  await flushConversation();
+  assert.deepEqual(env.calls.find(call => call[1]?.method === 'POST')[1].body, {
+    targetModelAlias: original, thinkingLevel: '', migratePreviousAlias: true, restartKimi: true,
+  });
 });
