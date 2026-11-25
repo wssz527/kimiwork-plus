@@ -141,10 +141,12 @@ func fail(w http.ResponseWriter, e error) {
 		status = 400
 	}
 	switch code {
-	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "operation_busy", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
+	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "connection_unavailable", "subagent_model_in_use", "operation_busy", "account_session_unavailable", "account_work_home_unavailable", "account_page_sync_pending", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
 		status = 409
 	case "conversation_kimi_restart_required", "conversation_database_busy":
 		status = 409
+	case "operation_wait_cancelled":
+		status = http.StatusRequestTimeout
 	case "conversation_not_found":
 		status = 404
 	case "direct_preview_refused":
@@ -180,7 +182,13 @@ func fail(w http.ResponseWriter, e error) {
 		status = webError.Status
 		code = webError.Code
 	}
-	reply(w, status, core.Document{"error": core.Document{"code": code, "message": message(code)}})
+	body := core.Document{"code": code, "message": message(code)}
+	var occupied *core.ModelUseError
+	if errors.As(e, &occupied) && len(occupied.Models) > 0 {
+		body["models"] = occupied.Models
+		body["message"] = message(code) + " 涉及模型：" + strings.Join(occupied.Models[:min(len(occupied.Models), 3)], "、") + "。"
+	}
+	reply(w, status, core.Document{"error": body})
 }
 func message(code string) string {
 	switch code {
@@ -188,6 +196,34 @@ func message(code string) string {
 		return "配置已在其他窗口修改，请刷新后再保存。"
 	case "native_preview_unavailable":
 		return "此项原生能力当前不可用，请检查后台服务状态后重试。"
+	case "invalid_base_url":
+		return "请输入有效的上游 API 地址。"
+	case "connection_unavailable":
+		return "所选连接已不可用，请刷新列表并重新选择。"
+	case "subagent_model_in_use":
+		return "子代理仍在使用这些模型，请先修改子代理设置。"
+	case "account_session_unavailable":
+		return "请先打开并登录 Kimi Work，再保存当前账号。"
+	case "account_work_home_unavailable":
+		return "找不到 Kimi Work 的配置。请先安装并打开 Kimi Work，登录后再切换账号。"
+	case "account_page_sync_pending":
+		return "正在等待 Kimi Work 同步账号登录状态，请稍后重试。"
+	case "operation_wait_cancelled":
+		return "等待后台同步结束超时，请稍后重试。"
+	case "invalid_probe_request", "invalid_probe_protocol":
+		return "请检查填写的探测参数与接口协议。"
+	case "probe_missing_key":
+		return "请先填写 API Key。"
+	case "probe_unauthorized":
+		return "上游拒绝了认证，请检查 API Key 和模型权限。"
+	case "probe_model_required":
+		return "上游未提供可用的模型目录，请填写一个模型 ID 后重试。"
+	case "probe_timeout":
+		return "连接测试超时，请检查网络后重试。"
+	case "probe_unreachable":
+		return "无法连接上游，请检查 API 地址和网络。"
+	case "probe_inference_failed":
+		return "上游未接受测试请求，请检查模型 ID 和接口协议。"
 	case "connection_in_use":
 		return "仍有模型使用此连接，请先修改模型。"
 	case "connection_protocol_required":
@@ -422,6 +458,8 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 	}
 	if method == "POST" {
 		switch path {
+		case "/api/connections/probe":
+			return s.probeConnection(ctx, in)
 		case "/api/open-url":
 			rawURL, ok := in["url"].(string)
 			if !ok {

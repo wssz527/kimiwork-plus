@@ -38,6 +38,7 @@ type accountIndex struct {
 	CurrentID          string          `json:"currentId,omitempty"`
 	Accounts           []accountRecord `json:"accounts"`
 	RetiredCredentials []string        `json:"retiredCredentials,omitempty"`
+	PendingAccountID   string          `json:"pendingAccountId,omitempty"`
 	RestoreID          string          `json:"restoreId,omitempty"`
 	Adding             bool            `json:"adding,omitempty"`
 }
@@ -91,7 +92,7 @@ func (v *accountVault) read() (accountIndex, error) {
 			return accountIndex{}, errors.New("account_store_invalid")
 		}
 	}
-	if index.CurrentID != "" && !seen[index.CurrentID] || index.RestoreID != "" && !seen[index.RestoreID] || index.Adding && index.RestoreID == "" {
+	if index.CurrentID != "" && !seen[index.CurrentID] || index.RestoreID != "" && !seen[index.RestoreID] || index.Adding && index.RestoreID == "" || index.PendingAccountID != "" && !seen[index.PendingAccountID] {
 		return accountIndex{}, errors.New("account_store_invalid")
 	}
 	return index, nil
@@ -154,18 +155,23 @@ func refreshAccountTokenHealth(summary AccountSummary, now time.Time) AccountSum
 }
 
 func (v *accountVault) summaries() ([]AccountSummary, string, error) {
+	rows, current, _, err := v.state()
+	return rows, current, err
+}
+
+func (v *accountVault) state() ([]AccountSummary, string, string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	index, err := v.read()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	now := v.now()
 	rows := make([]AccountSummary, 0, len(index.Accounts))
 	for _, row := range index.Accounts {
 		rows = append(rows, refreshAccountTokenHealth(row.AccountSummary, now))
 	}
-	return rows, index.CurrentID, nil
+	return rows, index.CurrentID, index.PendingAccountID, nil
 }
 
 func (v *accountVault) capture(snapshot accountCapture) (AccountSummary, error) {
@@ -337,6 +343,10 @@ func (v *accountVault) updateTokenLifetime(id string, lifetime kimi.AccountToken
 }
 
 func (v *accountVault) mark(id string, needsLogin bool) error {
+	return v.markActivation(id, needsLogin, false)
+}
+
+func (v *accountVault) markActivation(id string, needsLogin, offline bool) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	index, err := v.read()
@@ -348,6 +358,10 @@ func (v *accountVault) mark(id string, needsLogin bool) error {
 			index.Accounts[i].NeedsLogin = needsLogin
 			if !needsLogin {
 				index.CurrentID = id
+				index.PendingAccountID = ""
+				if offline {
+					index.PendingAccountID = id
+				}
 				index.Accounts[i].LastUsedAt = v.now().UnixMilli()
 			}
 			if err := core.AtomicJSON(v.path, index); err != nil {
@@ -369,7 +383,7 @@ func (v *accountVault) remove(id string) error {
 	if err := v.cleanup(&index); err != nil {
 		return err
 	}
-	if id == index.CurrentID || id == index.RestoreID {
+	if id == index.CurrentID || id == index.RestoreID || id == index.PendingAccountID {
 		return errors.New("account_current_in_use")
 	}
 	for i, row := range index.Accounts {

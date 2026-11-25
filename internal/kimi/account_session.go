@@ -83,21 +83,22 @@ const (
 // Fixed failure codes. They are the whole text of an error: no path, no token
 // and no page body ever reaches a caller through one.
 const (
-	AccountErrUnavailable       = "account_session_unavailable"
-	AccountErrUnsupported       = "account_session_unsupported"
-	AccountErrHomeUnresolved    = "account_session_home_unresolved"
-	AccountErrConfigMissing     = "account_session_config_missing"
-	AccountErrConfigInvalid     = "account_session_config_invalid"
-	AccountErrConfigConflict    = "account_session_config_conflict"
-	AccountErrWriteFailed       = "account_session_write_failed"
-	AccountErrSnapshotInvalid   = "account_session_snapshot_invalid"
-	AccountErrIdentityMissing   = "account_session_identity_missing"
-	AccountErrIdentityMismatch  = "account_session_identity_mismatch"
-	AccountErrPageTimeout       = "account_session_page_timeout"
-	AccountErrRestartFailed     = "account_session_restart_failed"
-	AccountErrRollbackFailed    = "account_session_rollback_unverified"
-	AccountErrSignOutIncomplete = "account_session_sign_out_incomplete"
-	AccountErrWorkBusy          = "account_session_work_busy"
+	AccountErrUnavailable         = "account_session_unavailable"
+	AccountErrUnsupported         = "account_session_unsupported"
+	AccountErrWorkHomeUnavailable = "account_work_home_unavailable"
+	AccountErrHomeUnresolved      = "account_session_home_unresolved"
+	AccountErrConfigMissing       = "account_session_config_missing"
+	AccountErrConfigInvalid       = "account_session_config_invalid"
+	AccountErrConfigConflict      = "account_session_config_conflict"
+	AccountErrWriteFailed         = "account_session_write_failed"
+	AccountErrSnapshotInvalid     = "account_session_snapshot_invalid"
+	AccountErrIdentityMissing     = "account_session_identity_missing"
+	AccountErrIdentityMismatch    = "account_session_identity_mismatch"
+	AccountErrPageTimeout         = "account_session_page_timeout"
+	AccountErrRestartFailed       = "account_session_restart_failed"
+	AccountErrRollbackFailed      = "account_session_rollback_unverified"
+	AccountErrSignOutIncomplete   = "account_session_sign_out_incomplete"
+	AccountErrWorkBusy            = "account_session_work_busy"
 )
 
 // accountSessionMu serialises account operations in this process. One official
@@ -430,13 +431,14 @@ type AccountActivation struct {
 	ModelsState   string `json:"modelsState,omitempty"`
 	ModelsReason  string `json:"modelsReason,omitempty"`
 	UserID        string `json:"userId,omitempty"`
+	AccountID     string `json:"accountId,omitempty"`
 	Digest        string `json:"digest,omitempty"`
 	// Hot means the page followed without a restart.
 	Hot bool `json:"hot"`
 	// Restarted means a normal exit and managed relaunch were used.
 	Restarted bool `json:"restarted"`
-	// Verified means the official page reported the target account and the
-	// kernel config was read back as the same account.
+	// Verified means the kernel config names the target account. Online
+	// activation also requires the official page to report that account.
 	Verified bool `json:"verified"`
 	// RolledBack means the previous snapshot was written back.
 	RolledBack bool `json:"rolledBack"`
@@ -509,6 +511,91 @@ func (c *Controller) AccountWorkBusy(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return accountWorkBusy(ctx, surface)
+}
+
+func (c *Controller) AccountOffline(ctx context.Context) bool {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.accountOffline(ctx)
+}
+
+func (c *Controller) accountOffline(ctx context.Context) bool {
+	if _, err := c.accountSurface(); err == nil || c.managedChildAlive() {
+		return false
+	}
+	application := c.Settings().Installation.Application
+	if application == "" {
+		return true
+	}
+	probe, cancel := context.WithTimeout(ctx, IdentityProbeTimeout)
+	defer cancel()
+	pids, known, _ := processPIDs(probe, application)
+	return known && len(pids) == 0
+}
+
+func (c *Controller) ActivateAccountOffline(ctx context.Context, session AccountSession, commit func() error) error {
+	if err := session.validate(); err != nil {
+		return errors.New(AccountErrSnapshotInvalid)
+	}
+	accountSessionMu.Lock()
+	defer accountSessionMu.Unlock()
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	if !c.accountOffline(ctx) {
+		return errors.New(AccountErrUnavailable)
+	}
+	if install, err := os.Stat(c.Settings().Installation.Application); err != nil || !install.Mode().IsRegular() {
+		return errors.New(AccountErrWorkHomeUnavailable)
+	}
+	home, err := c.WorkHome()
+	if err != nil {
+		return errors.New(AccountErrWorkHomeUnavailable)
+	}
+	c.beginConfigWrite()
+	defer c.beginConfigWrite()
+	return c.configWrite(func() error {
+		web, code, _, err := accountConfigCredentials(home)
+		if err != nil {
+			if err.Error() == AccountErrConfigMissing {
+				return errors.New(AccountErrWorkHomeUnavailable)
+			}
+			return err
+		}
+		keyPath := accountCodeKeyPath(home)
+		keyInfo, keyErr := os.Lstat(keyPath)
+		key, keyRead := readAccountCodeKey(home)
+		if !os.IsNotExist(keyErr) && (keyErr != nil || !keyRead) {
+			return errors.New(AccountErrWriteFailed)
+		}
+		if err := writeAccountCredentials(home, accountConfigForSession(session)); err != nil {
+			return err
+		}
+		err = applyAccountCodeKey(home, session.CodeKey)
+		keyWritten := err == nil
+		if err == nil {
+			if matches, readable := accountConfigState(home, session.UserID); !matches || !readable {
+				err = errors.New(AccountErrIdentityMismatch)
+			} else {
+				err = commit()
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		configRestored := writeAccountCredentials(home, map[string]any{AccountKimiWeb: web, AccountKimiCode: code}) == nil
+		var restoreKeyErr error
+		if keyWritten {
+			if keyInfo != nil {
+				restoreKeyErr = replaceFile(keyPath, key, keyInfo.Mode().Perm())
+			} else {
+				restoreKeyErr = applyAccountCodeKey(home, nil)
+			}
+		}
+		if !configRestored || restoreKeyErr != nil {
+			return errors.New(AccountErrRollbackFailed)
+		}
+		return err
+	})
 }
 
 // CaptureAccount reads the account the official application is signed into right

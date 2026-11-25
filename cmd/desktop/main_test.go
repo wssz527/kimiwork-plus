@@ -18,7 +18,15 @@ func TestWindowNavScriptsCoverAllTargets(t *testing.T) {
 	if !slices.Equal(targets, []string{"accounts", "conversations", "updates"}) {
 		t.Fatalf("unexpected nav targets: %v", targets)
 	}
-	for _, needle := range []string{"__kwpOpenConversations", "nav-conversations"} {
+	for _, needle := range []string{"__kwpOpenAccounts", "nav-accounts", "nav-maintenance", "settings-tab-accounts"} {
+		if !strings.Contains(openAccountsJS, needle) {
+			t.Fatalf("accounts script is missing %q: %s", needle, openAccountsJS)
+		}
+	}
+	if strings.Index(openAccountsJS, "nav-accounts") >= strings.Index(openAccountsJS, "nav-maintenance") {
+		t.Fatal("account navigation must try the main page first")
+	}
+	for _, needle := range []string{"__kwpOpenConversations", "nav-conversations", "nav-maintenance", "conversations-panel", "scrollIntoView"} {
 		if !strings.Contains(openConversationsJS, needle) {
 			t.Fatalf("conversations script is missing %q: %s", needle, openConversationsJS)
 		}

@@ -33,6 +33,9 @@ type Native struct {
 	compatFingerprint   kimi.OfficialFingerprint
 	compatLiveProbedPID int
 	operation           core.Document
+	opIdle              chan struct{}
+	opWaiter            bool
+	opSuspended         bool
 	receipt             *nativeImportReceipt
 	jobs                chan struct{}
 	policies            *nativePolicies
@@ -680,16 +683,21 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		n.logOperationRejected(action, "native_preview_unavailable")
 		return nil, errors.New("native_preview_unavailable")
 	}
-	id, claimed := n.beginOperation(action)
-	if !claimed {
-		n.logOperationRejected(action, "operation_busy")
-		return nil, errors.New("operation_busy")
+	id, err := n.beginOperation(ctx, action)
+	if err != nil {
+		n.logOperationRejected(action, core.ErrorCode(err))
+		return nil, err
 	}
 	initial := core.Document{"id": id, "action": action, "state": "running"}
 	n.logOperationStarted(id, action)
-	go func() {
+	offline := false
+	if n.accounts != nil && n.controller != nil && (action == "account-switch" || action == "account-capture") {
+		offline = n.controller.AccountOffline(ctx)
+	}
+	waitForResult := offline || action == "open-work"
+	run := func() error {
 		timeout := 45 * time.Second
-		if action == "prepare-native" || action == "remove-dns" {
+		if action == "prepare-native" || action == "remove-dns" || (action == "disconnect-models" && in["removeDns"] == true) {
 			timeout = 180 * time.Second
 		} else if (action == "connect-kimi" && !n.isDirectMode()) || action == "disconnect-models" {
 			// Auto-launching Kimi plus the 60 second bridge budget (and one
@@ -703,7 +711,11 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		} else if strings.HasPrefix(action, "account-") {
 			timeout = 90 * time.Second
 		}
-		deadline, cancel := context.WithTimeout(context.Background(), timeout)
+		parent := context.Background()
+		if waitForResult {
+			parent = ctx
+		}
+		deadline, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 		var err error
 		var result any
@@ -715,7 +727,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		case "set-swarm":
 			result, err = n.setSwarm(deadline, swarmKey, swarmEnabled)
 		case "account-capture", "account-begin-add", "account-complete-add", "account-cancel-add", "account-switch", "account-remove":
-			if action != "account-remove" && n.accountSwitchWriteBlocked() {
+			if !offline && action != "account-remove" && n.accountSwitchWriteBlocked() {
 				err = errors.New(kimi.CompatErrAccountSwitchBlocked)
 				break
 			}
@@ -723,7 +735,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = errors.New("account_switch_unavailable")
 				break
 			}
-			result, err = n.accounts.Action(deadline, in)
+			result, err = n.accounts.action(deadline, in, offline)
 			if err == nil {
 				if action == "account-remove" || action == "account-capture" || action == "account-complete-add" {
 					// A removal or a fresh capture resolves whatever the previous
@@ -731,11 +743,21 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 					// showing a failure or a rollback that no longer describes anything.
 					n.clearStaleAccountActivation()
 				}
-				n.refreshAccountQuota(deadline)
 				if action == "account-switch" {
-					if d, _, readErr := n.service.Store.Read(); readErr == nil {
-						_ = n.policies.Configure(d)
+					if offline {
+						activation := result.(core.Document)["activation"].(kimi.AccountActivation)
+						n.mu.Lock()
+						n.accountActivation = core.Document{"state": activation.State, "accountId": activation.AccountID, "verified": activation.Verified}
+						n.mu.Unlock()
 					}
+					if n.policies != nil && n.service != nil && n.service.Store != nil {
+						if d, _, readErr := n.service.Store.Read(); readErr == nil {
+							_ = n.policies.Configure(d)
+						}
+					}
+				}
+				if !offline {
+					n.refreshAccountQuota(deadline)
 				}
 			}
 		case "launch-kimi":
@@ -750,7 +772,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				err = n.startManagedOfficial(deadline)
 			}
 		case "open-work":
-			err = n.controller.OpenWork(deadline)
+			err = n.openWork(deadline)
 		case "restart-kimi":
 			err = n.controller.RestartOfficial(deadline)
 			if err == nil {
@@ -777,6 +799,14 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 			if removed.OK || removed.State != "" || removed.Reason != "" {
 				result = removed
+				if err == nil && in["removeDns"] == true {
+					dnsErr := n.removeBYOK(deadline)
+					result = struct {
+						kimi.DisconnectResult
+						DNSRemoved bool   `json:"dnsRemoved"`
+						DNSWarning string `json:"dnsWarning,omitempty"`
+					}{removed, dnsErr == nil, core.ErrorCode(dnsErr)}
+				}
 			}
 		case "connect-kimi":
 			if n.modelSyncWriteBlocked() {
@@ -873,9 +903,38 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				_, err = n.service.translationAction(deadline, "/api/translation/preview", core.Document{"settings": d["translation"]})
 			}
 		}
+		if waitForResult && err == nil {
+			initial["state"] = state
+			if result != nil {
+				initial["result"] = result
+			}
+		}
 		n.finishOperation(id, state, result, err)
-	}()
+		return err
+	}
+	if waitForResult {
+		if err := run(); err != nil {
+			return nil, err
+		}
+	} else {
+		go run()
+	}
 	return core.Document{"operation": initial}, nil
+}
+
+func (n *Native) openWork(ctx context.Context) error {
+	open := n.autoOpenWork
+	if open == nil {
+		open = n.controller.OpenWork
+	}
+	err := open(ctx)
+	if core.ErrorCode(err) != "native_bridge_waiting_work" || n.autoLaunch == nil {
+		return err
+	}
+	if err := n.ensureManagedKimi(ctx); err != nil {
+		return err
+	}
+	return open(ctx)
 }
 
 func (n *Native) refreshControllerInstallation() error {
@@ -975,24 +1034,55 @@ func (n *Native) importDirectWithEnsure(ctx context.Context, ensure func(context
 		}, importWaitingWork)
 }
 
-// beginOperation claims Native.operation for one action. A manual prepare
-// snapshots the saved surface before the claim: its import answers for the
-// catalog that was on disk when it started, and the completion compares that
-// generation instead of whatever a save landed while it ran.
-func (n *Native) beginOperation(action string) (string, bool) {
-	startedDigest := ""
-	if action == "connect-kimi" || action == "prepare-native" {
-		startedDigest = n.currentSurfaceDigest()
-	}
+// beginOperation reserves the next slot for an explicit action when a
+// background write is in progress. A manual prepare snapshots the catalog
+// after taking the slot so its completion can settle that save generation.
+func (n *Native) beginOperation(ctx context.Context, action string) (string, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.operation != nil && n.operation["state"] == "running" {
-		return "", false
+	if n.opWaiter || (n.operation["state"] == "running" && n.operation["action"] != "auto-sync") {
+		n.mu.Unlock()
+		return "", errors.New("operation_busy")
+	}
+	if ctx.Err() != nil {
+		n.mu.Unlock()
+		return "", errors.New("operation_wait_cancelled")
+	}
+	n.autoSync.suspend()
+	if n.operation["state"] == "running" {
+		n.opWaiter = true
+		n.opIdle = make(chan struct{})
+		idle := n.opIdle
+		n.mu.Unlock()
+		select {
+		case <-idle:
+		case <-ctx.Done():
+		}
+		n.mu.Lock()
+		n.opWaiter = false
+		if ctx.Err() != nil {
+			n.autoSync.resume()
+			n.mu.Unlock()
+			return "", errors.New("operation_wait_cancelled")
+		}
 	}
 	id := RandomKey()[:16]
 	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
-	n.recordOperationStartLocked(id, startedDigest)
-	return id, true
+	n.opSuspended = true
+	n.mu.Unlock()
+	if action == "connect-kimi" || action == "prepare-native" {
+		digest := n.currentSurfaceDigest()
+		n.mu.Lock()
+		n.recordOperationStartLocked(id, digest)
+		n.mu.Unlock()
+	}
+	return id, nil
+}
+
+func (n *Native) notifyOperationIdleLocked() {
+	if n.opIdle != nil {
+		close(n.opIdle)
+		n.opIdle = nil
+	}
 }
 
 func (n *Native) recordOperationStartLocked(id, digest string) {
@@ -1009,8 +1099,13 @@ func (n *Native) recordOperationStartLocked(id, digest string) {
 // It is the shutdown path: nothing ran, so nothing is recorded.
 func (n *Native) releaseOperation(id string) {
 	n.mu.Lock()
-	if n.operation != nil && n.operation["id"] == id {
+	if n.operation["id"] == id && n.operation["state"] == "running" {
+		if n.opSuspended {
+			n.opSuspended = false
+			n.autoSync.resume()
+		}
 		n.operation = nil
+		n.notifyOperationIdleLocked()
 	}
 	delete(n.operationStart, id)
 	n.mu.Unlock()
@@ -1019,7 +1114,7 @@ func (n *Native) releaseOperation(id string) {
 func (n *Native) finishOperation(id, state string, result any, err error) {
 	finishedAt := time.Now()
 	n.mu.Lock()
-	if n.operation == nil || n.operation["id"] != id {
+	if n.operation["id"] != id || n.operation["state"] != "running" {
 		n.mu.Unlock()
 		return
 	}
@@ -1058,6 +1153,9 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 	// recorded under the same lock that published this operation, so a newer
 	// operation cannot interleave with it.
 	n.rememberImportReceiptLocked(action, result)
+	suspended := n.opSuspended
+	n.opSuspended = false
+	n.notifyOperationIdleLocked()
 	n.mu.Unlock()
 	// The diagnostic write happens with Native.mu released: a stalled disk must
 	// not block readers of the operation state, and a failed write is ignored.
@@ -1069,6 +1167,9 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 	n.logOperationFinished(id, action, stage, state, reason, duration, result)
 	if !finishedDisconnect {
 		n.autoSync.operationFinished(action, startedDigest, result, err)
+	}
+	if suspended {
+		n.autoSync.resume()
 	}
 }
 func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (any, error) {

@@ -64,10 +64,10 @@ func ValidateBaseURL(value string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", ErrInvalidBaseURL
 	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(value, "#") {
 		return "", ErrInvalidBaseURL
 	}
-	if parsed.Host == "" {
+	if parsed.Hostname() == "" {
 		return "", ErrInvalidBaseURL
 	}
 	if parsed.Scheme == "http" {

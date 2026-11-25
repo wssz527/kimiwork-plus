@@ -1078,6 +1078,417 @@
         "模型 ID 与上限取自官方模型页当前展示的 GPT-6 系列；未在该页声明的能力不写入目录。",
         "输入超过 272K tokens 的请求按官方价格规则加收费用（2 倍输入、1.5 倍输出）。"
       ]
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "kind": "api",
+      "family": "openrouter",
+      "familyName": "OpenRouter",
+      "region": "global",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "deepseek/deepseek-v3.2",
+          "name": "DeepSeek V3.2",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 163840,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ]
+        },
+        {
+          "id": "anthropic/claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "openai/gpt-5",
+          "name": "GPT-5",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 400000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://openrouter.ai/docs/api/reference/overview"
+      },
+      "keyUrl": "https://openrouter.ai/settings/keys",
+      "keySource": {
+        "url": "https://openrouter.ai/settings/keys"
+      }
+    },
+    {
+      "id": "siliconflow",
+      "name": "硅基流动",
+      "kind": "api",
+      "family": "siliconflow",
+      "familyName": "硅基流动",
+      "region": "cn",
+      "baseURL": "https://api.siliconflow.cn/v1",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-V3.2",
+          "name": "DeepSeek V3.2",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 163840,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ]
+        },
+        {
+          "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+          "name": "Qwen3 235B Instruct",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": false,
+          "inputModalities": [
+            "text"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions"
+      },
+      "keyUrl": "https://cloud.siliconflow.cn/me/account/ak",
+      "keySource": {
+        "url": "https://cloud.siliconflow.cn/me/account/ak"
+      }
+    },
+    {
+      "id": "volcengine",
+      "name": "火山方舟",
+      "kind": "api",
+      "family": "volcengine",
+      "familyName": "火山方舟",
+      "region": "cn",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "doubao-seed-1-6-251015",
+          "name": "豆包 Seed 1.6",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "doubao-seed-1-6-flash-250828",
+          "name": "豆包 Seed 1.6 Flash",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://www.volcengine.com/docs/82379"
+      },
+      "keyUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+      "keySource": {
+        "url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey"
+      }
+    },
+    {
+      "id": "moonshot-cn",
+      "name": "Moonshot 开放平台",
+      "kind": "api",
+      "family": "moonshot-cn",
+      "familyName": "Moonshot 开放平台",
+      "region": "cn",
+      "baseURL": "https://api.moonshot.cn/v1",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "kimi-k2-thinking",
+          "name": "Kimi K2 Thinking",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 262144,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text"
+          ]
+        },
+        {
+          "id": "moonshot-v1-128k",
+          "name": "Moonshot V1 128K",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 131072,
+          "tools": true,
+          "reasoning": false,
+          "inputModalities": [
+            "text"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://platform.moonshot.cn/docs/intro"
+      },
+      "keyUrl": "https://platform.moonshot.cn/console/api-keys",
+      "keySource": {
+        "url": "https://platform.moonshot.cn/console/api-keys"
+      }
+    },
+    {
+      "id": "gemini-openai",
+      "name": "Google Gemini OpenAI 兼容",
+      "kind": "api",
+      "family": "gemini-openai",
+      "familyName": "Google Gemini OpenAI 兼容",
+      "region": "global",
+      "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1048576,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://ai.google.dev/gemini-api/docs/openai"
+      },
+      "keyUrl": "https://aistudio.google.com/app/apikey",
+      "keySource": {
+        "url": "https://aistudio.google.com/app/apikey"
+      }
+    },
+    {
+      "id": "xai",
+      "name": "xAI Grok",
+      "kind": "api",
+      "family": "xai",
+      "familyName": "xAI Grok",
+      "region": "global",
+      "baseURL": "https://api.x.ai/v1",
+      "protocols": [
+        "chat"
+      ],
+      "models": [
+        {
+          "id": "grok-4-1-fast-reasoning",
+          "name": "Grok 4.1 Fast",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 2000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "grok-4-0709",
+          "name": "Grok 4",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 256000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "grok-3",
+          "name": "Grok 3",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 131072,
+          "tools": true,
+          "reasoning": false,
+          "inputModalities": [
+            "text"
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://docs.x.ai/developers/models"
+      },
+      "keyUrl": "https://console.x.ai/",
+      "keySource": {
+        "url": "https://console.x.ai/"
+      }
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic 官方",
+      "kind": "api",
+      "family": "anthropic",
+      "familyName": "Anthropic 官方",
+      "region": "global",
+      "baseURL": "https://api.anthropic.com/v1",
+      "protocols": [
+        "chat"
+      ],
+      "upstreamProtocol": "anthropic",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "upstreamProtocol": "anthropic"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 1000000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "upstreamProtocol": "anthropic"
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5",
+          "protocols": [
+            "chat"
+          ],
+          "contextWindow": 200000,
+          "tools": true,
+          "reasoning": true,
+          "inputModalities": [
+            "text",
+            "image"
+          ],
+          "upstreamProtocol": "anthropic"
+        }
+      ],
+      "source": {
+        "url": "https://platform.claude.com/docs/en/about-claude/models/overview"
+      },
+      "keyUrl": "https://platform.claude.com/settings/keys",
+      "keySource": {
+        "url": "https://platform.claude.com/settings/keys"
+      }
     }
   ],
   "menu": {

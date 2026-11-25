@@ -12,14 +12,30 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 //go:embed providers.json
 var providersJSON []byte
 
-func Providers() Document { var d Document; _ = json.Unmarshal(providersJSON, &d); return d }
+var modelCatalogHintsJSON, _ = json.Marshal(modelCatalogHints)
+
+func providerPresets() Document {
+	var d Document
+	_ = json.Unmarshal(providersJSON, &d)
+	return d
+}
+
+func Providers() Document {
+	d := providerPresets()
+	var hints []any
+	_ = json.Unmarshal(modelCatalogHintsJSON, &hints)
+	d["modelCatalogHints"] = hints
+	return d
+}
 func Preset(id string) map[string]any {
-	for _, v := range Rows(Providers()["presets"]) {
+	for _, v := range Rows(providerPresets()["presets"]) {
 		p := Object(v)
 		if p["id"] == id {
 			return p
@@ -238,7 +254,12 @@ func Discover(ctx context.Context, base, key, preset string) (Document, error) {
 	if e != nil {
 		return nil, e
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	if preset == "anthropic" {
+		req.Header.Set("x-api-key", key)
+		req.Header.Set("anthropic-version", protocol.AnthropicVersion)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	req.Header.Set("Accept", "application/json")
 	client := http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, e := client.Do(req)

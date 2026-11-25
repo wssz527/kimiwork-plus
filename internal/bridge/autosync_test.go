@@ -549,8 +549,8 @@ func (h *autoSyncHarness) finishOperation(t *testing.T, action string) {
 
 func (h *autoSyncHarness) finishOperationResult(t *testing.T, action string, result any) {
 	t.Helper()
-	id, claimed := h.n.beginOperation(action)
-	if !claimed {
+	id, claimErr := h.n.beginOperation(context.Background(), action)
+	if claimErr != nil {
 		// A background run holds the slot. Publish this action's operation the way
 		// a claim would, including the start snapshot, so the completion path stays
 		// the one under test.
@@ -1363,8 +1363,8 @@ func TestAutoSyncManualConnectDoesNotSwallowAConcurrentSave(t *testing.T) {
 	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = catalogSurfaceDigest(base), true
 	h.n.autoSync.mu.Unlock()
 
-	id, claimed := h.n.beginOperation("connect-kimi")
-	if !claimed {
+	id, claimErr := h.n.beginOperation(context.Background(), "connect-kimi")
+	if claimErr != nil {
 		t.Fatal("the manual connect could not claim the slot")
 	}
 	// The user renames a model while the manual import is still running.
@@ -1376,7 +1376,7 @@ func TestAutoSyncManualConnectDoesNotSwallowAConcurrentSave(t *testing.T) {
 	waitAutoSync(t, "the queued write to wait for the manual slot", func() bool {
 		h.n.autoSync.mu.Lock()
 		defer h.n.autoSync.mu.Unlock()
-		return h.n.autoSync.blocked
+		return h.n.autoSync.deferred
 	})
 	if imports := h.counts(); imports != 0 {
 		t.Fatalf("the queued write ran beside the manual connect: %d", imports)
@@ -1456,18 +1456,18 @@ func TestAutoSyncRepairsOneOwnedTemporaryGatewayProvider(t *testing.T) {
 			}
 			h.n.importModels = func(context.Context) (kimi.ImportResult, error) {
 				imports.Add(1)
-				if _, claimed := h.n.beginOperation("restart-kimi"); claimed {
+				if h.n.autoSyncOperationIdle() {
 					return kimi.ImportResult{}, errors.New("operation slot was not held by auto-sync")
 				}
 				return kimi.ImportResult{OK: true, Applied: !requireRestart, RequiresRestart: requireRestart}, nil
 			}
-			manualID, _ := h.n.beginOperation("rebind-conversations")
+			manualID, _ := h.n.beginOperation(context.Background(), "rebind-conversations")
 			d := h.doc(t)
 			h.n.autoSync.observe(&mismatch, d)
 			waitAutoSync(t, "repair waiting for the operation slot", func() bool {
 				h.n.autoSync.mu.Lock()
 				defer h.n.autoSync.mu.Unlock()
-				return h.n.autoSync.blocked
+				return h.n.autoSync.deferred
 			})
 			if imports.Load() != 0 {
 				t.Fatal("repair ran concurrently with rebind")
@@ -1506,7 +1506,7 @@ func TestAutoSyncProviderRepairRefusesDisconnectedAndStaleReadback(t *testing.T)
 			}
 			switch mode {
 			case "disconnected":
-				id, _ := h.n.beginOperation("disconnect-models")
+				id, _ := h.n.beginOperation(context.Background(), "disconnect-models")
 				h.n.autoSync.observe(&mismatch, d)
 				h.n.finishOperation(id, "done", nil, nil)
 			case "restored":
@@ -1565,8 +1565,8 @@ func TestAutoSyncProviderRepairRetriesWhileImportSurfaceMounts(t *testing.T) {
 			if status := h.n.autoSync.status(); status["pending"] != true || imports.Load() != 1 {
 				t.Fatalf("transient result settled the work: status=%v imports=%d", status, imports.Load())
 			}
-			manualID, ok := h.n.beginOperation("rebind-conversations")
-			if !ok {
+			manualID, err := h.n.beginOperation(context.Background(), "rebind-conversations")
+			if err != nil {
 				t.Fatal("transient wait still held the operation slot")
 			}
 			h.n.autoSync.mu.Lock()
@@ -1583,7 +1583,7 @@ func TestAutoSyncProviderRepairRetriesWhileImportSurfaceMounts(t *testing.T) {
 			waitAutoSync(t, "retry behind the rebind", func() bool {
 				h.n.autoSync.mu.Lock()
 				defer h.n.autoSync.mu.Unlock()
-				return h.n.autoSync.blocked
+				return h.n.autoSync.deferred
 			})
 			if imports.Load() != 1 {
 				t.Fatal("scheduled retry ran concurrently with rebind")
@@ -1628,8 +1628,8 @@ func TestAutoSyncProviderRepairRetryStopsOnLimitErrorOrDisconnect(t *testing.T) 
 				waitAutoSync(t, "waiting before retry", func() bool {
 					return h.n.autoSync.status()["reason"] == kimi.NativeWaitingWork && h.n.autoSyncOperationIdle()
 				})
-				id, ok := h.n.beginOperation("disconnect-models")
-				if !ok {
+				id, err := h.n.beginOperation(context.Background(), "disconnect-models")
+				if err != nil {
 					t.Fatal("cannot remove takeover while retry is delayed")
 				}
 				h.n.finishOperation(id, "removed", nil, nil)

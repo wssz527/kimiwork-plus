@@ -18,28 +18,23 @@ func (n *Native) initAccounts(gateway *Runtime) error {
 	manager, err := newAccountManager(newAccountVault(n.service.StateDir, n.service.Keys), accountHooks{
 		Capture:           n.captureAccount,
 		RestoresOnFailure: true,
-		Activate: func(ctx context.Context, raw json.RawMessage) (accountCapture, error) {
+		SyncPending:       n.activateSavedAccount,
+		ActivateOffline: func(ctx context.Context, raw json.RawMessage, commit func() error) error {
 			var session kimi.AccountSession
 			if json.Unmarshal(raw, &session) != nil {
-				return accountCapture{}, errors.New("account_snapshot_invalid")
+				return errors.New("account_snapshot_invalid")
 			}
-			result, err := n.controller.ActivateAccount(ctx, session)
-			n.mu.Lock()
-			n.accountActivation = core.Document{"state": result.State, "reason": result.Reason, "failureReason": result.FailureReason, "modelsState": result.ModelsState, "modelsReason": result.ModelsReason, "hot": result.Hot, "restarted": result.Restarted, "verified": result.Verified, "rolledBack": result.RolledBack, "requiresLogin": result.RequiresLogin}
-			n.mu.Unlock()
-			if result.RequiresLogin {
-				return accountCapture{}, errors.New("account_credentials_rejected")
-			}
+			return n.controller.ActivateAccountOffline(ctx, session, commit)
+		},
+		Activate: func(ctx context.Context, raw json.RawMessage) (accountCapture, error) {
+			user, err := n.activateSavedAccount(ctx, raw)
 			if err != nil {
 				return accountCapture{}, err
-			}
-			if !result.Verified || result.UserID != session.UserID {
-				return accountCapture{}, errors.New("account_identity_mismatch")
 			}
 			captureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			fresh, err := n.captureAccount(captureCtx)
-			if err == nil && fresh.UserID != session.UserID {
+			if err == nil && fresh.UserID != user {
 				err = errors.New("account_identity_mismatch")
 			}
 			return fresh, err
@@ -67,6 +62,27 @@ func (n *Native) initAccounts(gateway *Runtime) error {
 	}
 	n.accounts = manager
 	return nil
+}
+
+func (n *Native) activateSavedAccount(ctx context.Context, raw json.RawMessage) (string, error) {
+	var session kimi.AccountSession
+	if json.Unmarshal(raw, &session) != nil {
+		return "", errors.New("account_snapshot_invalid")
+	}
+	result, err := n.controller.ActivateAccount(ctx, session)
+	n.mu.Lock()
+	n.accountActivation = core.Document{"state": result.State, "reason": result.Reason, "failureReason": result.FailureReason, "modelsState": result.ModelsState, "modelsReason": result.ModelsReason, "hot": result.Hot, "restarted": result.Restarted, "verified": result.Verified, "rolledBack": result.RolledBack, "requiresLogin": result.RequiresLogin, "accountId": accountID(session.UserID)}
+	n.mu.Unlock()
+	if result.RequiresLogin {
+		return "", errors.New("account_credentials_rejected")
+	}
+	if err != nil {
+		return "", err
+	}
+	if !result.Verified || result.UserID != session.UserID {
+		return "", errors.New("account_identity_mismatch")
+	}
+	return result.UserID, nil
 }
 
 func (n *Native) captureAccount(ctx context.Context) (accountCapture, error) {
@@ -147,12 +163,16 @@ func (n *Native) observeAccounts(ctx context.Context) {
 	defer n.accounts.opMu.Unlock()
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	identity, err := n.controller.AccountIdentity(deadline)
-	if err != nil || !identity.PageVerified || !identity.SignedIn || identity.Source != "page+config" {
+	rows, current, pending, err := n.accounts.vault.state()
+	if err != nil {
 		return
 	}
-	rows, current, err := n.accounts.vault.summaries()
-	if err != nil {
+	if pending != "" {
+		n.completePendingAccount(ctx, pending)
+		return
+	}
+	identity, err := n.controller.AccountIdentity(deadline)
+	if err != nil || !identity.PageVerified || !identity.SignedIn || identity.Source != "page+config" {
 		return
 	}
 	n.accounts.mu.Lock()
@@ -175,6 +195,39 @@ func (n *Native) observeAccounts(ctx context.Context) {
 		}
 	}
 	n.refreshAccountQuota(deadline)
+}
+
+func (n *Native) completePendingAccount(ctx context.Context, id string) {
+	probe, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
+	err := n.accounts.hooks.Busy(probe)
+	cancelProbe()
+	if err != nil {
+		return
+	}
+	session, err := n.accounts.vault.sessionBackground(id)
+	if err != nil {
+		return
+	}
+	n.mu.Lock()
+	if n.opWaiter || n.operation["state"] == "running" {
+		n.mu.Unlock()
+		return
+	}
+	previous := n.operation
+	n.operation = core.Document{"id": RandomKey()[:16], "action": "auto-sync", "state": "running", "startedAt": time.Now().UnixMilli()}
+	n.mu.Unlock()
+	defer func() {
+		n.mu.Lock()
+		n.operation = previous
+		n.notifyOperationIdleLocked()
+		n.mu.Unlock()
+		n.autoSync.operationFinished("account-page-sync", "", nil, err)
+	}()
+	deadline, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err = n.accounts.syncPending(deadline, id, session); err == nil {
+		n.refreshAccountQuota(deadline)
+	}
 }
 
 func (n *Native) syncCurrentAccountCredentials(ctx context.Context, id string, rows []AccountSummary) {

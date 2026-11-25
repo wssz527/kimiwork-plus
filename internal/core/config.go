@@ -2,10 +2,10 @@ package core
 
 import (
 	"errors"
-	"github.com/wssz527/kimiwork-plus/internal/protocol"
-	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/wssz527/kimiwork-plus/internal/protocol"
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -89,15 +89,11 @@ func KeyEnv(id string) string {
 	return "KIMI_WORK_" + strings.Trim(envReplace.ReplaceAllString(strings.ToUpper(id), "_"), "_") + "_KEY"
 }
 func BaseURL(raw string) (string, error) {
-	u, e := url.Parse(raw)
-	if e != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("invalid_base_url")
-	}
-	loop := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"
-	if u.Scheme != "https" && !(u.Scheme == "http" && loop) {
-		return "", errors.New("invalid_base_url")
-	}
-	return strings.TrimRight(u.String(), "/"), nil
+	return ValidateBaseURL(raw)
+}
+
+func ValidateBaseURL(raw string) (string, error) {
+	return protocol.ValidateBaseURL(raw)
 }
 
 // Connection wire protocols. One supplier address speaks exactly one of them:
@@ -344,10 +340,12 @@ func MergeModels(d Document, input []any) error {
 				}
 			}
 		}
+		tools, toolsProvided := row["tools"]
+		applyModelDefaults(merged, toolsProvided && tools == nil)
 		out = append(out, merged)
 	}
 	if _, err := NormalizeSubagents(d["subagents"], out); err != nil {
-		return errors.New("subagent_model_in_use")
+		return subagentModelUseError(d["subagents"], old, out)
 	}
 	d["models"] = out
 	return nil
@@ -439,19 +437,74 @@ func MergeConnections(d Document, input []any) (map[string]*string, error) {
 		ids[id] = true
 		out = append(out, c)
 	}
+	removed := &ModelUseError{Code: "connection_in_use"}
+	narrowed := &ModelUseError{Code: "invalid_connection_protocol_in_use"}
 	for _, v := range Rows(d["models"]) {
 		model := Object(v)
 		for _, id := range modelConnections(model) {
 			if !ids[id] {
-				return nil, errors.New("connection_in_use")
+				removed.add(model)
 			}
 			if narrowedToChat[id] && String(model["protocol"]) == ConnectionProtocolResponses {
-				return nil, errors.New("invalid_connection_protocol_in_use")
+				narrowed.add(model)
 			}
 		}
 	}
+	if len(removed.Models) > 0 {
+		return nil, removed
+	}
+	if len(narrowed.Models) > 0 {
+		return nil, narrowed
+	}
 	d["connections"] = out
 	return keys, nil
+}
+
+type ModelUseError struct {
+	Code   string
+	Models []string
+}
+
+func (e *ModelUseError) Error() string { return e.Code }
+
+func (e *ModelUseError) add(row map[string]any) {
+	for _, key := range []string{"name", "upstreamModelId", "id"} {
+		if label := strings.TrimSpace(String(row[key])); label != "" {
+			for _, prior := range e.Models {
+				if prior == label {
+					return
+				}
+			}
+			e.Models = append(e.Models, label)
+			return
+		}
+	}
+}
+
+func subagentModelUseError(value any, previous map[string]map[string]any, next []any) *ModelUseError {
+	policy := Object(value)
+	refs := []string{String(policy["model"])}
+	for _, row := range Rows(policy["models"]) {
+		refs = append(refs, String(Object(row)["id"]))
+	}
+	for _, role := range []string{"plan", "coder", "explore"} {
+		refs = append(refs, String(Object(policy["roles"])[role]))
+	}
+	available := map[string]bool{}
+	for _, value := range next {
+		row := Object(value)
+		available[String(row["id"])] = row["tools"] == true
+	}
+	err := &ModelUseError{Code: "subagent_model_in_use"}
+	for _, id := range refs {
+		if id != "" && !available[id] {
+			err.add(previous[id])
+		}
+	}
+	if len(err.Models) == 0 {
+		err.add(previous[refs[0]])
+	}
+	return err
 }
 
 var errorPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,100}$`)

@@ -7,10 +7,13 @@ import (
 	"sync"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
+	"github.com/wssz527/kimiwork-plus/internal/kimi"
 )
 
 type accountHooks struct {
 	Capture           func(context.Context) (accountCapture, error)
+	SyncPending       func(context.Context, json.RawMessage) (string, error)
+	ActivateOffline   func(context.Context, json.RawMessage, func() error) error
 	Activate          func(context.Context, json.RawMessage) (accountCapture, error)
 	BeginLogin        func(context.Context) error
 	Busy              func(context.Context) error
@@ -35,14 +38,18 @@ func newAccountManager(vault *accountVault, hooks accountHooks) (*accountManager
 }
 
 func (a *accountManager) State() core.Document {
-	rows, current, err := a.vault.summaries()
+	rows, current, pending, err := a.vault.state()
 	a.mu.Lock()
 	adding, restore := a.adding, a.restoreID
 	a.mu.Unlock()
 	if err != nil {
 		return core.Document{"state": "unavailable", "reason": core.ErrorCode(err), "accounts": []AccountSummary{}, "adding": adding, "restoreAccountId": restore}
 	}
-	return core.Document{"state": "ready", "accounts": rows, "currentId": current, "adding": adding, "restoreAccountId": restore}
+	state := core.Document{"state": "ready", "accounts": rows, "currentId": current, "adding": adding, "restoreAccountId": restore}
+	if pending != "" {
+		state["pendingAccountId"] = pending
+	}
+	return state
 }
 
 func (a *accountManager) setRestore(id string, adding bool) error {
@@ -109,6 +116,10 @@ func (a *accountManager) restore(ctx context.Context, id string) error {
 }
 
 func (a *accountManager) Action(ctx context.Context, in core.Document) (any, error) {
+	return a.action(ctx, in, false)
+}
+
+func (a *accountManager) action(ctx context.Context, in core.Document, offline bool) (any, error) {
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	action := core.String(in["action"])
@@ -121,7 +132,20 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 	if a.hooks.Capture == nil || a.hooks.Activate == nil || a.hooks.BeginLogin == nil || a.hooks.Busy == nil {
 		return nil, errors.New("account_switch_unavailable")
 	}
-	if action == "account-begin-add" || action == "account-switch" || action == "account-cancel-add" {
+	if offline && action == "account-capture" {
+		return nil, errors.New(kimi.AccountErrUnavailable)
+	}
+	_, _, pending, err := a.vault.state()
+	if err != nil {
+		return nil, err
+	}
+	if pending != "" && !offline {
+		switch action {
+		case "account-capture", "account-begin-add":
+			return nil, errors.New("account_page_sync_pending")
+		}
+	}
+	if !offline && (action == "account-begin-add" || action == "account-switch" || action == "account-cancel-add") {
 		if err := a.hooks.Busy(ctx); err != nil {
 			return nil, err
 		}
@@ -129,7 +153,7 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 	a.mu.Lock()
 	restore, adding := a.restoreID, a.adding
 	a.mu.Unlock()
-	if restore != "" && !adding && (action == "account-begin-add" || action == "account-switch") {
+	if !offline && restore != "" && !adding && (action == "account-begin-add" || action == "account-switch") {
 		// An interrupted switch can leave its recovery marker behind across a
 		// daemon restart. Only a live capture, which requires the signed-in page
 		// and config to agree, may prove that the current account is real.
@@ -203,6 +227,22 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 		if err != nil {
 			return nil, err
 		}
+		if offline {
+			if err := a.hooks.ActivateOffline(ctx, session, func() error {
+				return a.vault.markActivation(id, false, true)
+			}); err != nil {
+				return nil, err
+			}
+			state := a.State()
+			state["activation"] = kimi.AccountActivation{State: "offline", AccountID: id, Verified: true}
+			return state, nil
+		}
+		if pending != "" {
+			if err := a.syncPending(ctx, id, session); err != nil {
+				return nil, err
+			}
+			return a.State(), nil
+		}
 		_, original, err := a.capture(ctx)
 		if err != nil {
 			return nil, err
@@ -242,4 +282,15 @@ func (a *accountManager) Action(ctx context.Context, in core.Document) (any, err
 		return nil, errors.New("invalid_account_action")
 	}
 	return a.State(), nil
+}
+
+func (a *accountManager) syncPending(ctx context.Context, id string, session json.RawMessage) error {
+	user, err := a.hooks.SyncPending(ctx, session)
+	if err != nil {
+		return err
+	}
+	if accountID(user) != id {
+		return errors.New("account_identity_mismatch")
+	}
+	return a.vault.mark(id, false)
 }

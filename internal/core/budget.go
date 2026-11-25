@@ -20,25 +20,35 @@ func NormalizeBudget(value any) (map[string]any, error) {
 	return policy.Document(), nil
 }
 
-// ModelPrices reads the per-model price table out of the model rows. A row
-// without `pricing` is absent from the map, which is what keeps an unpriced
-// model distinguishable from a free one.
 func ModelPrices(rows []any) (map[string]protocol.ModelPrice, error) {
+	return modelPrices(rows, "")
+}
+
+func modelPrices(rows []any, currency string) (map[string]protocol.ModelPrice, error) {
 	out := map[string]protocol.ModelPrice{}
 	for _, value := range rows {
 		row := Object(value)
 		id := String(row["id"])
-		if id == "" || row["pricing"] == nil {
+		if id == "" {
 			continue
 		}
 		price, err := protocol.ParseModelPrice(row["pricing"])
 		if err != nil {
 			return nil, errors.New("invalid_price")
 		}
-		if price == nil {
+		if price != nil {
+			out[id] = *price
 			continue
 		}
-		out[id] = *price
+		if currency == "" {
+			continue
+		}
+		hint := modelCatalogHint(row)
+		if hint == nil || hint.ReferencePricing == nil || hint.ReferencePricing.Currency != currency {
+			continue
+		}
+		reference := hint.ReferencePricing
+		out[id] = protocol.ModelPrice{InputPerMillion: &reference.Input, OutputPerMillion: &reference.Output, CachedInputPerMillion: reference.CacheRead}
 	}
 	return out, nil
 }
@@ -54,7 +64,7 @@ func PriceTable(d Document) (*protocol.PriceTable, error) {
 	if policy.Currency == "" {
 		return nil, nil
 	}
-	prices, err := ModelPrices(Rows(d["models"]))
+	prices, err := modelPrices(Rows(d["models"]), policy.Currency)
 	if err != nil {
 		return nil, err
 	}

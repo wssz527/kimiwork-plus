@@ -182,6 +182,11 @@ func mergeCandidate(id string, preset, old, live map[string]any, url string) Doc
 			}
 		}
 	}
+	if wire := String(old["upstreamProtocol"]); wire != "" {
+		out["upstreamProtocol"] = wire
+	} else if wire := String(preset["upstreamProtocol"]); wire != "" {
+		out["upstreamProtocol"] = wire
+	}
 	aliases := append(append([]any{}, Rows(old["aliases"])...), Rows(live["aliases"])...)
 	aliases = uniqueStrings(aliases, len(aliases), len(aliases), func(s string) bool { return s != "" })
 	if len(aliases) > 0 {

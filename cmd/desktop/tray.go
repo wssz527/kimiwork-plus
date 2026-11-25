@@ -17,7 +17,8 @@ import (
 
 const (
 	trayFetchTimeout         = 3 * time.Second
-	trayAccountActionTimeout = 10 * time.Second
+	trayAccountActionTimeout = 30 * time.Second
+	trayOpenWorkTimeout      = 30 * time.Second
 	trayRebindTimeout        = 35 * time.Second
 	trayHTTPTimeout          = 40 * time.Second
 	trayResponseLimit        = 2 << 20
@@ -444,6 +445,23 @@ func (t *trayController) open() {
 	}()
 }
 
+func (c accountTrayClient) openWork(ctx context.Context) error {
+	return c.request(ctx, http.MethodPost, "/api/actions", map[string]any{"action": "open-work"}, nil)
+}
+
+func trayOpenWorkFailureMessage(err error) string {
+	switch err.Error() {
+	case "unmanaged_kimi_running", "native_bridge_waiting_work":
+		return "请从官方 Kimi 窗口进入 Work。"
+	case "not_installed", "kimi_not_installed":
+		return "请先安装官方 Kimi 客户端。"
+	case "operation_busy":
+		return "上一次操作仍在进行，请稍后重试。"
+	default:
+		return "请检查 Kimi 是否已安装、后台服务是否运行，然后重试。"
+	}
+}
+
 func installTray(app *application.App, tray *application.SystemTray, dir string, diagnostics *windowDiagnostics, openWindow func(), nav *windowNavController) {
 	client := accountTrayClient{dir: dir, client: &http.Client{Timeout: trayHTTPTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	menu := app.NewMenu()
@@ -454,11 +472,27 @@ func installTray(app *application.App, tray *application.SystemTray, dir string,
 		application.InvokeAsync(func() { nav.RequestOpenUpdates() })
 	})
 	menu.Add("打开 KimiWork +").OnClick(func(*application.Context) { openWindow() })
-	menu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
+	menu.Add("打开 Kimi Work").OnClick(func(*application.Context) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), trayOpenWorkTimeout)
+			defer cancel()
+			if err := client.openWork(ctx); err != nil {
+				application.InvokeAsync(func() {
+					app.Dialog.Error().SetTitle("无法打开 Kimi Work").SetMessage(trayOpenWorkFailureMessage(err)).Show()
+				})
+			}
+		}()
+	})
+	accountsMenu := menu.AddSubmenu("切换 Kimi 账号")
+	accountsMenu.Add("正在读取账号…").SetEnabled(false)
+	conversationsMenu := menu.AddSubmenu("切换最近会话模型")
+	conversationsMenu.Add("正在读取最近会话…").SetEnabled(false)
+	diagnosticsMenu := menu.AddSubmenu("诊断与恢复")
+	diagnosticsMenu.Add("窗口恢复与诊断").OnClick(func(*application.Context) {
 		message := windowDiagnosticMessage(runtime.GOOS, diagnostics.Status())
 		app.Dialog.Info().SetTitle("KimiWork + 窗口诊断").SetMessage(message).Show()
 	})
-	menu.Add("导出窗口诊断").OnClick(func(*application.Context) {
+	diagnosticsMenu.Add("导出窗口诊断").OnClick(func(*application.Context) {
 		path, err := diagnostics.Export(dir)
 		if err != nil {
 			app.Dialog.Error().SetTitle("无法导出窗口诊断").SetMessage("请检查应用状态目录是否可写，然后重试。").Show()
@@ -466,10 +500,6 @@ func installTray(app *application.App, tray *application.SystemTray, dir string,
 		}
 		app.Dialog.Info().SetTitle("窗口诊断已导出").SetMessage("诊断不含面板令牌、密钥或页面内容。文件位置：\n" + path).Show()
 	})
-	conversationsMenu := menu.AddSubmenu("切换最近会话模型")
-	conversationsMenu.Add("正在读取最近会话…").SetEnabled(false)
-	accountsMenu := menu.AddSubmenu("切换 Kimi 账号")
-	accountsMenu.Add("正在读取账号…").SetEnabled(false)
 	menu.AddSeparator()
 	menu.Add("退出窗口（网关继续运行）").OnClick(func(*application.Context) { app.Quit() })
 	tray.SetMenu(menu)

@@ -22,6 +22,11 @@ const openAccountsJS = `(() => {
       window.__kwpOpenAccounts();
       return;
     }
+    const accountNav = document.getElementById('nav-accounts');
+    if (accountNav) {
+      accountNav.click();
+      return;
+    }
     document.getElementById('nav-maintenance')?.click();
     document.getElementById('settings-tab-accounts')?.click();
   };
@@ -38,7 +43,13 @@ const openConversationsJS = `(() => {
       window.__kwpOpenConversations();
       return;
     }
-    document.getElementById('nav-conversations')?.click();
+    const conversationsNav = document.getElementById('nav-conversations');
+    if (conversationsNav) {
+      conversationsNav.click();
+      return;
+    }
+    document.getElementById('nav-maintenance')?.click();
+    requestAnimationFrame(() => document.getElementById('conversations-panel')?.scrollIntoView({ block: 'start' }));
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', open, { once: true });

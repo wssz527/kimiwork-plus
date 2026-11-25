@@ -19,14 +19,13 @@ func (n *Native) rebindWorkConversations(ctx context.Context, in core.Document) 
 		return nil, err
 	}
 	const action = "rebind-conversations"
-	n.mu.Lock()
-	if n.operation != nil && n.operation["state"] == "running" {
-		n.mu.Unlock()
-		return nil, errors.New("operation_busy")
+	id, err := n.beginOperation(ctx, action)
+	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.New("conversation_rebind_cancelled")
+		}
+		return nil, err
 	}
-	id := RandomKey()[:16]
-	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
-	n.mu.Unlock()
 	n.logOperationStarted(id, action)
 	defer func() { n.finishOperation(id, "done", nil, err) }()
 

@@ -182,10 +182,11 @@ type autoSyncCoordinator struct {
 	// blocked says a run is due but another operation holds the slot; only that
 	// operation finishing can wake it. deferred says a run came due while the
 	// coordinator itself was running.
-	blocked  bool
-	deferred bool
-	running  bool
-	timer    *time.Timer
+	blocked   bool
+	deferred  bool
+	suspended int
+	running   bool
+	timer     *time.Timer
 }
 
 func newAutoSyncCoordinator(ctx context.Context, n *Native) *autoSyncCoordinator {
@@ -288,6 +289,30 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 	c.mu.Unlock()
 }
 
+func (c *autoSyncCoordinator) suspend() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.suspended++
+	c.mu.Unlock()
+}
+
+func (c *autoSyncCoordinator) resume() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suspended--
+	if c.suspended == 0 && (c.deferred || c.blocked) {
+		c.deferred, c.blocked = false, false
+		if c.pending {
+			c.armLocked(0)
+		}
+	}
+}
+
 // reset ends everything queued when the user removes the managed models.
 func (c *autoSyncCoordinator) reset() {
 	if c == nil {
@@ -299,6 +324,7 @@ func (c *autoSyncCoordinator) reset() {
 		return
 	}
 	c.pending, c.target, c.blocked, c.disconnected, c.repairOnly = false, "", false, true, false
+	c.deferred = false
 	c.attemptedProviderRepair = ""
 	// The profile no longer holds the catalog, so the old baseline proves
 	// nothing about the next connection.
@@ -478,7 +504,7 @@ func (c *autoSyncCoordinator) fire() {
 		return
 	}
 	c.timer = nil
-	if c.running {
+	if c.running || c.suspended != 0 {
 		c.deferred = true
 		c.mu.Unlock()
 		return
@@ -498,7 +524,7 @@ func (c *autoSyncCoordinator) run() {
 		c.running = false
 		retry := c.deferred
 		c.deferred = false
-		if retry && (!c.repairOnly || c.timer == nil) {
+		if retry && c.pending && (!c.repairOnly || c.timer == nil) {
 			c.armLocked(0)
 		}
 		c.mu.Unlock()
@@ -907,7 +933,7 @@ func (n *Native) ScheduleAutoSync(path string, prev, next core.Document) {
 func (n *Native) autoSyncOperationIdle() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.operation == nil || n.operation["state"] != "running"
+	return !n.opWaiter && (n.operation == nil || n.operation["state"] != "running")
 }
 
 // beginAutoSyncOperation claims Native.operation for one background catalog
@@ -916,8 +942,16 @@ func (n *Native) autoSyncOperationIdle() bool {
 func (n *Native) beginAutoSyncOperation() (string, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.operation != nil && n.operation["state"] == "running" {
+	if n.opWaiter || n.operation != nil && n.operation["state"] == "running" {
 		return "", false
+	}
+	if n.autoSync != nil {
+		n.autoSync.mu.Lock()
+		defer n.autoSync.mu.Unlock()
+		if n.autoSync.suspended != 0 {
+			n.autoSync.deferred = true
+			return "", false
+		}
 	}
 	id := RandomKey()[:16]
 	n.operation = core.Document{"id": id, "action": "auto-sync", "state": "running", "startedAt": time.Now().UnixMilli()}

@@ -638,3 +638,34 @@ func TestTrayOfficialConversationTargets(t *testing.T) {
 		t.Fatalf("current official target must be checked and disabled: %+v", item)
 	}
 }
+
+func TestTrayOpenWorkPostsAuthenticatedActionAndHandlesErrors(t *testing.T) {
+	var requests atomic.Int32
+	key := strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions" || r.Header.Get("Authorization") != "Bearer "+key || r.Header.Get("Origin") != "http://"+r.Host {
+			t.Errorf("unexpected Work action request: %s %s", r.Method, r.URL.Path)
+		}
+		var input map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input) != 1 || input["action"] != "open-work" {
+			t.Errorf("unexpected Work action: %v (%v)", input, err)
+		}
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"state":"done"}}`))
+		} else {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":"operation_busy"}}`))
+		}
+	}))
+	defer server.Close()
+	client := accountTrayClient{client: server.Client(), dir: trayTestStateDir(t, server.URL, key)}
+	ctx, cancel := context.WithTimeout(context.Background(), trayOpenWorkTimeout)
+	defer cancel()
+	if err := client.openWork(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.openWork(ctx); err == nil || trayOpenWorkFailureMessage(err) != "上一次操作仍在进行，请稍后重试。" {
+		t.Fatalf("Work failure = %v", err)
+	}
+}
