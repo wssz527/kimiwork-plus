@@ -646,7 +646,7 @@ function nativeConnectionText(data) {
   const info = data.integration || {};
   const preparation = info.preparation || {};
   if (modelTakeoverRemoved(data)) {
-    return '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「重新同步模型目录」可重新接管。';
+    return '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或在设置页「手动重新同步模型目录」可重新接管。';
   }
   /* 直连模式下官方 Kimi 不经过网关，所以网关侧的 DNS/桥接文案都不成立。 */
   if (savedIntegrationMode(data) === 'direct') {
@@ -753,9 +753,9 @@ function nativeConnectionText(data) {
     kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
-    disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或模型页「重新同步模型目录」可重新接管。',
-    profile_missing: '当前账号尚未同步本产品模型目录。请在模型页点「重新同步模型目录」接入。',
-    profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在模型页点「重新同步模型目录」重新接入。',
+    disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或在设置页「手动重新同步模型目录」可重新接管。',
+    profile_missing: '当前账号尚未同步本产品模型目录。请在设置页「手动重新同步模型目录」接入。',
+    profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在设置页「手动重新同步模型目录」重新接入。',
     native_scope_unverified: '当前自定义 Kimi 目录无法确认归属，自动接管已暂停。',
     account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
     native_import_account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
@@ -771,7 +771,6 @@ function nativeConnectionText(data) {
   }
   if (reasons[reason]) return reasons[reason];
   if (reason === 'waiting-login') return '请在刚打开的当前 Kimi 窗口登录；本产品不会复制原账号 Cookie 或令牌。';
-  if (info.state === 'account-unverified') return '等待在当前 Kimi 窗口登录并确认账号，再点「重新准备接入」。';
   if (info.state === 'pending') return '原生目录已接受，等待 Kimi 内核完成切换。';
   if (info.state === 'conflict') return '接入配置存在冲突，已保留当前内容；请检查配置后重试。';
   if (info.state === 'account-unverified') return '请登录 Kimi Work 并确认当前账户，然后点「打开 / 启动 Kimi」继续。';

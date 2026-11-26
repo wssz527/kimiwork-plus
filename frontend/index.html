@@ -323,10 +323,8 @@
     </section>
 
     <section class="view" id="view-accounts" data-view="accounts" aria-labelledby="accounts-heading" hidden>
-      <section class="band" aria-labelledby="accounts-heading">
-        <div class="band__head"><div><h2 id="accounts-heading">多账号管理</h2><p>保存并切换本机官方 Kimi 登录凭据；凭据仅加密保存在当前用户应用目录内，不会写入日志或远端。</p></div></div>
-        <div id="plus-accounts-host"></div>
-      </section>
+      <h2 class="sr-only" id="accounts-heading">多账号管理</h2>
+      <div id="plus-accounts-host"></div>
     </section>
 
     <section class="view" id="view-usage" data-view="usage" aria-labelledby="usage-heading" hidden>
@@ -435,10 +433,16 @@
     <a class="btn btn--quiet" id="upd-release-link" target="_blank" rel="noopener noreferrer" hidden>查看发布页</a>
   </div>
   <div id="migration-banner" hidden><p class="note" id="migration-note" role="status"></p><div class="action-line action-line--start" id="migration-actions" hidden><button class="btn btn--outline" id="migration-resume" type="button">授权并继续迁移旧凭据</button></div></div>
-  <p class="note" id="preview-service-note">重新打开窗口会核对后台构建与地址。如果与 Kimi 窗口失去连接，请正常退出 Kimi 后再从面板重新启动。</p>
-  <div class="action-line action-line--start"><button class="btn btn--outline" id="daemon-restart" type="button">重启增强服务</button><button class="btn btn--outline" id="service-register" type="button">注册后台服务</button><button class="btn btn--outline" id="service-stop" type="button">停止增强服务</button></div>
-  <div class="action-line action-line--start"><button class="btn btn--quiet" id="service-enable" type="button">允许登录时启动</button><button class="btn btn--quiet" id="service-disable" type="button">禁止登录时启动</button><button class="btn btn--quiet" id="service-uninstall" type="button">移除服务注册</button></div>
+  <div class="action-line action-line--start"><button class="btn btn--quiet" id="service-enable" type="button">允许登录时启动</button><button class="btn btn--quiet" id="service-disable" type="button">禁止登录时启动</button></div>
   <div class="action-line action-line--start"><button class="btn btn--quiet btn--sm" id="settings-reopen-guide" type="button">重新显示总览新手引导</button></div>
+  <details class="growth-disclosure" id="service-troubleshoot">
+    <summary>后台服务维护（异常排障时使用）</summary>
+    <div class="growth-disclosure__body">
+      <p class="note" id="preview-service-note">重新打开窗口会核对后台构建与地址。如果与 Kimi 窗口失去连接，请正常退出 Kimi 后再从面板重新启动。</p>
+      <div class="action-line action-line--start"><button class="btn btn--outline" id="daemon-restart" type="button">重启增强服务</button><button class="btn btn--outline" id="service-register" type="button">注册后台服务</button><button class="btn btn--outline" id="service-stop" type="button">停止增强服务</button></div>
+      <div class="action-line action-line--start"><button class="btn btn--quiet" id="service-uninstall" type="button">移除服务注册</button></div>
+    </div>
+  </details>
   <p class="hint" id="preview-service-hint">自动更新与后台服务只管理 KimiWork + 自身；更新失败或新版本无法就绪时会自动回退，网关数据与本机加密凭据保持不变。</p>
 </section>
 

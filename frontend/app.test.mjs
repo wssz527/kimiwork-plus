@@ -488,6 +488,45 @@ test('saved form backfill no longer clears a key', () => {
   assert.equal(env.dom.onboardKey.value, 'sk-user-just-typed');
 });
 
+test('an unconfigured onboarding form opens the custom address fields', () => {
+  const dom = {
+    onboardId: { value: '' }, onboardName: { value: '' }, onboardBase: { value: '' },
+    onboardPreset: { value: '', dataset: {} }, onboardKeyHint: null,
+    onboardAdvancedFields: { open: false },
+  };
+  const state = { data: { connections: { saved: [] }, models: [] }, onboard: { touched: false } };
+  const code = [
+    ...['isInputActive', 'connectionRowsOf', 'savedOnboardTarget', 'onboardTouched', 'fillOnboardForm'].map(sourceFunction),
+    'const protocolList = value => Array.isArray(value) ? value : [];',
+    'const connectionProtocol = () => null;',
+    'const connectionDefaultUpstreamProtocol = () => "";',
+    'const fillOnboardPresets = () => {};',
+    'const setText = () => {};',
+    'const fmtCount = value => String(value);',
+    'return { fillOnboardForm, savedOnboardTarget };',
+  ].join('\n');
+  const api = new Function('dom', 'state', code)(dom, state);
+
+  /* 全新未配置：没有保存连接，预设停在自定义项，地址区必须展开。 */
+  assert.equal(api.savedOnboardTarget(), null);
+  api.fillOnboardForm();
+  assert.equal(dom.onboardAdvancedFields.open, true);
+
+  dom.onboardPreset.value = 'deepseek';
+  api.fillOnboardForm();
+  assert.equal(dom.onboardAdvancedFields.open, false, 'a known preset keeps the advanced fields folded');
+
+  dom.onboardPreset.value = 'custom';
+  api.fillOnboardForm();
+  assert.equal(dom.onboardAdvancedFields.open, true, 'the custom option expands the address fields');
+
+  state.onboard.touched = true;
+  dom.onboardAdvancedFields.open = false;
+  dom.onboardPreset.value = '';
+  api.fillOnboardForm();
+  assert.equal(dom.onboardAdvancedFields.open, false, 'a user-touched wizard is never reopened by polling');
+});
+
 test('onboard discovery inherits missing metadata from the selected preset', async () => {
   const state = {
     data: { revision: 'rev', models: [], connections: { saved: [] } },
@@ -4116,6 +4155,23 @@ test('settings and preview migration copy avoid misleading keychain wording', ()
   assert.doesNotMatch(nodes['migration-note'].textContent, /钥匙串/);
 });
 
+test('the settings page keeps daily service actions visible and folds maintenance into a disclosure', () => {
+  const panel = htmlSource.slice(htmlSource.indexOf('id="update-panel"'), htmlSource.indexOf('id="translation-panel"'));
+  const drawer = panel.indexOf('id="service-troubleshoot"');
+  assert.ok(drawer >= 0, 'missing the service maintenance disclosure');
+  for (const id of ['service-enable', 'service-disable', 'settings-reopen-guide']) {
+    const position = panel.indexOf(`id="${id}"`);
+    assert.ok(position >= 0 && position < drawer, id + ' must stay visible above the maintenance drawer');
+  }
+  const drawerEnd = panel.indexOf('</details>', drawer);
+  assert.ok(drawerEnd > drawer);
+  for (const id of ['preview-service-note', 'daemon-restart', 'service-register', 'service-stop', 'service-uninstall']) {
+    const position = panel.indexOf(`id="${id}"`);
+    assert.ok(position > drawer && position < drawerEnd, id + ' belongs to the maintenance drawer');
+  }
+  assert.match(panel.slice(drawer, drawerEnd), /后台服务维护（异常排障时使用）/);
+});
+
 test('release running service is recognized as managed backend for connection apply', () => {
   const { isManagedBackend, applyAvailability, applyState, renderApply, dom } = makeCredentialEnv();
 
@@ -5069,6 +5125,9 @@ test('growth.js replaces MCP window.confirm with inline confirm and opens https 
     const link = findBy(docNote, n => n.tag === 'a');
     assert.ok(link);
     assert.equal(link.href, 'https://platform.deepseek.com/api_keys');
+    /* 预设说明只保留摘要与官网链接；逐模型原始参数串不再重复到提示里。 */
+    assert.equal(findBy(docNote, n => typeof n.textContent === 'string' && /工具支持|图片支持|推理支持|最大输出/.test(n.textContent)), null);
+    assert.ok(findBy(docNote, n => typeof n.textContent === 'string' && n.textContent.includes('个有来源的推荐模型')));
     let prevented = false;
     await link.listeners.click[0]({ preventDefault() { prevented = true; } });
     assert.equal(prevented, true);

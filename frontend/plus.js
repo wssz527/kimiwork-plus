@@ -1098,7 +1098,7 @@
       }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));
-    line.append(node('span', 'hint', 'Work 未运行时可直接切换默认凭据，下次打开自动同步；运行中优先热切换，必要时正常重启。凭据仅保存在本机加密存储，不上传或写入日志。'));
+    line.append(node('span', 'hint', '运行中优先热切换，必要时正常重启；切换失败会自动恢复原账号。'));
     return line;
   }
 
@@ -1236,13 +1236,13 @@
 
     const grid = node('div', 'field-row');
     grid.append(
-      field('货币', selectField(CURRENCIES.map(code => [code, code]), form.currency, value => { form.currency = value; form.dirty = true; })),
+      field('货币', selectField(CURRENCIES.map(code => [code, code]), form.currency, value => { form.currency = value; form.dirty = true; }), 'field--wide'),
     );
     for (const name of ['daily', 'monthly']) {
       const row = form[name];
       grid.append(
         field(name === 'daily' ? '每日上限（留空不限制）' : '每月上限（留空不限制）', textField(row.limit, value => { row.limit = value; form.dirty = true; }, '例如 20', 'number')),
-        field('达到上限时', selectField([['remind', '在面板提醒'], ['block', '拒绝新请求']], row.action, value => { row.action = value; form.dirty = true; })),
+        field(name === 'daily' ? '每日达上限时' : '每月达上限时', selectField([['remind', '在面板提醒'], ['block', '拒绝新请求']], row.action, value => { row.action = value; form.dirty = true; })),
       );
     }
 
@@ -1287,8 +1287,8 @@
     return select;
   }
 
-  function field(label, control) {
-    const wrap = node('label', 'field');
+  function field(label, control, extraClass = '') {
+    const wrap = node('label', extraClass ? 'field ' + extraClass : 'field');
     wrap.append(node('span', 'field__label', label), control);
     return wrap;
   }
@@ -1535,8 +1535,8 @@
     section.id = 'plus-accounts-panel';
     const head = node('div', 'band__head');
     head.append(node('div'));
-    head.firstChild.append(node('h2', null, '账号'));
-    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在本机加密存储；Work 未运行时可直接切换默认凭据，下次打开自动同步；运行中优先热切换，必要时正常重启。'));
+    head.firstChild.append(node('h2', null, '多账号管理'));
+    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换；登录凭据只保存在本机加密存储。Work 未运行时可直接离线切换默认凭据，下次打开自动同步。'));
     section.append(head);
     const body = node('div');
     body.id = 'plus-accounts-body';

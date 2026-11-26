@@ -120,10 +120,6 @@ function mcpNameValid(value) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
 }
 
-function capabilityText(value) {
-  return value === 'unknown' ? '待确认' : value === true ? '支持' : value === false ? '不支持' : value ?? '待确认';
-}
-
 function providerDocument(selectId, hintId, providers, openExternalUrl) {
   const select = $(selectId);
   const hint = $(hintId);
@@ -144,11 +140,6 @@ function providerDocument(selectId, hintId, providers, openExternalUrl) {
   const region = preset.region === 'cn' ? '国内' : preset.region === 'global' ? '海外' : '';
   const plan = preset.kind === 'coding' ? 'Coding Plan' : '按量 API';
   note.append(document.createTextNode(`${preset.familyName || preset.name} · ${[region, plan].filter(Boolean).join(' · ')} · ${preset.models.length} 个有来源的推荐模型。`));
-  const models = providers?.details?.[preset.id]?.models || [];
-  if (models.length) {
-    const summary = models.slice(0, 3).map(model => `${model.label}：工具${capabilityText(model.tools)}，图片${capabilityText(model.imageInput)}，推理${capabilityText(model.reasoning)}，上下文${capabilityText(model.contextWindow)}，最大输出${capabilityText(model.maxOutputTokens)}`).join('；');
-    note.append(document.createElement('br'), document.createTextNode(summary));
-  }
   if (typeof preset.keyUrl === 'string') {
     try {
       const url = new URL(preset.keyUrl);

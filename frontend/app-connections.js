@@ -699,6 +699,12 @@ function fillOnboardForm() {
   if (!dom.onboardId) return;
   fillOnboardPresets();
   const target = savedOnboardTarget();
+  /* 自定义兼容接口（含空配置首次打开）需要地址与 Key，默认展开高级字段；
+     有明确预设时保持折叠。用户已主动改动向导后不再代为切换。 */
+  if (dom.onboardAdvancedFields && !state.onboard.touched) {
+    const activePreset = target ? target.providerPresetId : (dom.onboardPreset ? dom.onboardPreset.value : '');
+    dom.onboardAdvancedFields.open = !activePreset || activePreset === 'custom';
+  }
   if (target) {
     const upstream = connectionDefaultUpstreamProtocol(target.id);
     if (!state.onboard.protocolTouched) {
@@ -713,9 +719,6 @@ function fillOnboardForm() {
     if (dom.onboardPreset && target.providerPresetId && !isInputActive(dom.onboardPreset)) {
       dom.onboardPreset.value = target.providerPresetId;
       dom.onboardPreset.dataset.presetId = target.providerPresetId;
-    }
-    if (dom.onboardAdvancedFields && !state.onboard.touched) {
-      dom.onboardAdvancedFields.open = !target.providerPresetId;
     }
     if (dom.onboardKeyHint) {
       setText(dom.onboardKeyHint, target.apiKeySet

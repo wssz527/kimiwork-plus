@@ -357,6 +357,48 @@ test('the budget card never calls the estimate a provider hard limit', async () 
   } finally { env.restore(); }
 });
 
+test('the budget form keeps one currency row and pairs each limit with its own action', async () => {
+  const env = makePlus({
+    data: {},
+    routes: {
+      '/api/quota/code': () => ({ state: { status: 'not_read', windows: [], wallet: null, notes: [], sources: [], selectedSource: null } }),
+      '/api/quota/magpie': () => ({ state: { status: 'not_read', notes: [], snapshot: null } }),
+      '/api/budget': () => ({
+        budget: {
+          configured: { enabled: true, currency: 'CNY', timeZone: 'Asia/Shanghai', daily: { limit: 20, action: 'block' }, monthly: { limit: 200, action: 'remind' } },
+          revision: 4,
+          status: { enforcement: 'estimate_from_ledger', currency: 'CNY', enabled: true, spend: { daily: null, monthly: null } },
+        },
+      }),
+    },
+  });
+  const find = (node, pred) => {
+    if (!node) return null;
+    if (pred(node)) return node;
+    for (const child of node.children || []) {
+      const hit = find(child, pred);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  try {
+    await env.panel.refresh();
+    const body = env.byId('plus-budget-body');
+    const grid = find(body, node => node.className === 'field-row');
+    assert.ok(grid, 'the budget form needs its two-column grid');
+    assert.equal(grid.children.length, 5, 'currency · daily limit · daily action · monthly limit · monthly action');
+    const labelOf = field => (field.children || []).find(child => child.className === 'field__label')?.textContent;
+    assert.equal(grid.children[0].className, 'field field--wide', 'currency spans the first row alone');
+    assert.equal(labelOf(grid.children[0]), '货币');
+    assert.equal(labelOf(grid.children[1]), '每日上限（留空不限制）');
+    assert.equal(labelOf(grid.children[2]), '每日达上限时');
+    assert.equal(labelOf(grid.children[3]), '每月上限（留空不限制）');
+    assert.equal(labelOf(grid.children[4]), '每月达上限时');
+    assert.equal(new Set([labelOf(grid.children[2]), labelOf(grid.children[4])]).size, 2,
+      'the two action fields must not share the same label');
+  } finally { env.restore(); }
+});
+
 test('a needsLogin flag belongs to its own account row only', async () => {
   const env = makePlus({
     data: {
