@@ -1,4 +1,4 @@
-import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, catalogModelLabel, clearKey, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, catalogModelLabel, clearKey, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setSubtab, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, renderOverviewStatus, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
@@ -364,6 +364,11 @@ function openConnectionEditor(row) {
 function closeConnectionEditor() {
   state.composing = false;
   state.conns.editing = null;
+  if (state.data && typeof connectionDraftFrom === 'function') {
+    state.conns.draft = connectionDraftFrom(state.data);
+    state.conns.dirty = false;
+  }
+  if (typeof setConnErrors === 'function') setConnErrors([]);
   renderProbeNote(dom.ceProbeResult, null);
   renderConnections();
 }
@@ -1487,10 +1492,10 @@ function renderOnboard() {
   refreshOnboardSaveState({ selected });
 
   renderOnboardOverview(data);
-  const stepsDone = renderOnboardSteps(data, { selected: selected.length, rows: rows.length });
+  renderOnboardSteps(data, { selected: selected.length, rows: rows.length });
   if (dom.onboardDisclosure && dom.onboardDisclosure.dataset.initialized !== 'true') {
-    const allDone = Boolean(stepsDone && stepsDone.connection && stepsDone.catalogue && stepsDone.apply && stepsDone.sync);
-    dom.onboardDisclosure.open = !allDone && (!savedOnboardTarget() || !(data.models || []).length);
+    const named = (connectionRowsOf(data) || []).filter((row) => row && !row.legacy);
+    dom.onboardDisclosure.open = named.length === 0;
     dom.onboardDisclosure.dataset.initialized = 'true';
   }
   if (dom.onboardDiscover) {
@@ -1557,12 +1562,44 @@ function openOnboardWizard() {
     return;
   }
   setView('models');
+  if (typeof setSubtab === 'function') setSubtab('models', 'providers', { persist: false });
   closeEditor(true);
+  if (state.onboard) {
+    state.onboard.touched = true;
+    state.onboard.discovery = null;
+    state.onboard.discoveryFor = null;
+    state.onboard.query = '';
+    state.onboard.saveErrors = [];
+    state.onboard.probeResult = null;
+    state.onboard.protocol = null;
+    state.onboard.protocolMode = 'auto';
+    state.onboard.upstreamProtocol = '';
+    state.onboard.protocolTouched = false;
+  }
+  if (dom.onboardPreset) {
+    dom.onboardPreset.value = '';
+    if (dom.onboardPreset.dataset) dom.onboardPreset.dataset.presetId = '';
+  }
+  if (dom.onboardKey) dom.onboardKey.value = '';
+  if (dom.onboardBase) dom.onboardBase.value = '';
+  if (dom.onboardName) dom.onboardName.value = '';
+  if (dom.onboardId) dom.onboardId.value = '';
+  if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
+  if (dom.onboardAdvancedFields) dom.onboardAdvancedFields.open = false;
+  if (dom.onboardKeyHint && typeof setText === 'function') {
+    setText(dom.onboardKeyHint, '只写入本机系统凭据存储；填写新服务商的 API Key。');
+  }
+  if (dom.onboardDiscoverState && typeof setText === 'function') {
+    setText(dom.onboardDiscoverState, '点击测试连接即可验证 Key、自动识别接口协议并拉取可用模型列表。');
+  }
+  if (dom.onboardErrors && typeof setHidden === 'function') setHidden(dom.onboardErrors, true);
+  if (dom.onboardSaveErrors && typeof renderErrorList === 'function') renderErrorList(dom.onboardSaveErrors, []);
   if (dom.onboardDisclosure) {
     dom.onboardDisclosure.open = true;
     dom.onboardDisclosure.dataset.initialized = 'true';
     scrollMainToElement(dom.onboardDisclosure);
   }
+  if (state.data && typeof renderOnboard === 'function') renderOnboard();
   dom.onboardPreset?.focus({ preventScroll: true });
 }
 
@@ -2217,6 +2254,23 @@ function renderApply(data) {
     dom.applyButton.disabled = !credentialPrompt || Boolean(state.pendingAction);
     setText(dom.applyButton, '重新授权并应用连接');
   }
+  if (dom.restartPanel) {
+    const applyStatus = data?.connections?.apply?.state;
+    const credPending = (typeof credentialAuthPending === 'function' && credentialAuthPending(data))
+      || (data?.connections?.saved || []).some((row) => row && row.credentialError && row.credentialError !== '');
+    const needShow = credentialPrompt
+      || credPending
+      || data?.configuration?.state === 'unavailable'
+      || Boolean(state.applyUnsupported)
+      || applyStatus === 'failed'
+      || applyStatus === 'expired'
+      || applyStatus === 'unsupported'
+      || stateInfo.tone === 'bad'
+      || stateInfo === APPLY_COPY.failed
+      || stateInfo === APPLY_COPY.expired
+      || stateInfo === APPLY_COPY.unsupported;
+    setHidden(dom.restartPanel, !needShow);
+  }
 }
 
 async function applyConnections() {
@@ -2328,9 +2382,8 @@ function renderConnections() {
   const named = rows.filter((row) => !row.legacy);
   setHidden(dom.connsList, false);
   setHidden(dom.connsEmpty, named.length > 0);
-  setHidden(dom.connsSave, false);
   setHidden(dom.connsAdd, false);
-  setHidden(dom.connsReset, false);
+  setHidden(dom.connsDiff, true);
 
   const config = data.configuration || {};
   const blocked = config.state === 'unavailable';
@@ -2341,11 +2394,11 @@ function renderConnections() {
     dom.connsSave.disabled = !dirty || state.connsSaving || blocked;
     setText(dom.connsSave, state.connsSaving ? '正在保存…' : '保存');
   }
-  if (dom.connsAdd) dom.connsAdd.disabled = state.connsSaving || blocked;
+  if (dom.connsAdd) dom.connsAdd.disabled = state.connsSaving || Boolean(state.connDeletingId) || blocked;
   if (dom.connsReset) dom.connsReset.disabled = !dirty || state.connsSaving;
   if (dom.connsDraft) {
     setText(dom.connsDraft, blocked ? '配置文件不可读，无法保存连接'
-      : dirty ? '草稿尚未保存；保存后需重启面板才会生效' : '草稿与配置文件一致');
+      : dirty ? '草稿尚未保存' : '草稿与配置文件一致');
     dom.connsDraft.dataset.dirty = String(dirty);
   }
 
@@ -2356,10 +2409,18 @@ function renderConnections() {
   }
 
   if (dom.connsList) {
-    const signature = JSON.stringify([rows, state.connsSaving, config.state, state.connChecks]);
+    const cp = state.connPicker || {};
+    const pickerKey = cp.connectionId ? [cp.connectionId, cp.loading, cp.saving, cp.error, cp.sourceNote, (cp.models || []).length] : null;
+    const modelCounts = {};
+    for (const m of (data.models || [])) {
+      if (m && m.connectionId) modelCounts[m.connectionId] = (modelCounts[m.connectionId] || 0) + 1;
+    }
+    const signature = JSON.stringify([rows, state.connsSaving, config.state, state.connChecks, state.connDeleteId, state.connDeletingId, pickerKey, modelCounts]);
     if (dom.connsList.dataset.signature !== signature) {
       dom.connsList.dataset.signature = signature;
       dom.connsList.replaceChildren(...rows.map((row, index) => buildConnectionRow(row, index)));
+    } else if (cp.connectionId) {
+      syncConnectionPickerDom();
     }
   }
 
@@ -2456,23 +2517,34 @@ function buildConnectionRow(row, index) {
   const actions = document.createElement('div');
   actions.className = 'conn-row__actions';
   if (!row.legacy) {
+    const busyRow = state.connsSaving || state.connDeletingId === row.id;
+    const pickerOpen = Boolean(state.connPicker && state.connPicker.connectionId === row.id);
     const checkButton = document.createElement('button');
     checkButton.type = 'button';
     checkButton.className = 'btn btn--quiet btn--sm';
     checkButton.dataset.connectionCheck = row.id;
-    checkButton.disabled = Boolean(check && check.busy) || state.connsSaving;
+    checkButton.disabled = Boolean(check && check.busy) || busyRow;
     checkButton.textContent = check && check.busy ? '测活中…' : '测活';
+    const modelsButton = document.createElement('button');
+    modelsButton.type = 'button';
+    modelsButton.className = 'btn btn--quiet btn--sm';
+    modelsButton.dataset.connectionModels = row.id;
+    modelsButton.setAttribute('aria-expanded', String(pickerOpen));
+    modelsButton.disabled = busyRow;
+    modelsButton.textContent = '勾选模型';
     const edit = document.createElement('button');
     edit.type = 'button';
     edit.className = 'btn btn--quiet btn--sm';
     edit.dataset.connectionEdit = row.id;
+    edit.disabled = busyRow;
     edit.textContent = '编辑';
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'btn btn--quiet btn--sm';
     remove.dataset.connectionRemove = row.id;
+    remove.disabled = busyRow;
     remove.textContent = '移除';
-    actions.append(checkButton, edit, remove);
+    actions.append(checkButton, modelsButton, edit, remove);
   } else {
     const note = document.createElement('span');
     note.className = 'hint hint--inline';
@@ -2481,6 +2553,43 @@ function buildConnectionRow(row, index) {
   }
 
   li.append(main, meta, actions);
+
+  if (!row.legacy && state.connDeleteId === row.id) {
+    const count = ((state.data && state.data.models) || []).filter((model) => model && model.connectionId === row.id).length;
+    const label = row.name || row.id;
+    const confirm = document.createElement('div');
+    confirm.className = 'inline-confirm conn-row__confirm';
+    confirm.setAttribute('role', 'region');
+    confirm.setAttribute('aria-label', '确认移除服务商');
+    const confirmText = document.createElement('p');
+    confirmText.className = 'inline-confirm__text';
+    confirmText.textContent = count > 0
+      ? '移除「' + label + '」将一并移除旗下 ' + count + ' 个模型（若子代理引用了这些模型会自动切回跟随主会话）。确认移除？'
+      : '确认移除服务商「' + label + '」？';
+    const confirmActions = document.createElement('div');
+    confirmActions.className = 'inline-confirm__actions';
+    const deleting = state.connDeletingId === row.id;
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'btn btn--danger btn--sm';
+    confirmBtn.dataset.connectionRemoveConfirm = row.id;
+    confirmBtn.disabled = deleting;
+    confirmBtn.textContent = deleting ? '正在移除…' : (count > 0 ? '一并移除' : '确认移除');
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn--quiet btn--sm';
+    cancelBtn.dataset.connectionRemoveCancel = row.id;
+    cancelBtn.disabled = deleting;
+    cancelBtn.textContent = '取消';
+    confirmActions.append(confirmBtn, cancelBtn);
+    confirm.append(confirmText, confirmActions);
+    li.append(confirm);
+  }
+
+  if (!row.legacy && state.connPicker && state.connPicker.connectionId === row.id && typeof buildConnectionPickerPanel === 'function') {
+    li.append(buildConnectionPickerPanel(row));
+  }
+
   return li;
 }
 
@@ -2558,58 +2667,9 @@ function renderConnectionEditor({ force = false } = {}) {
   }
 }
 
-/* 差异用「已保存 → 草稿」的成对值展示，让「改了但没重启」无法被误读成已生效。 */
 function renderConnectionsDiff() {
   if (!dom.connsDiff) return;
-  const available = connectionsAvailable(state.data);
-  if (!available) {
-    setHidden(dom.connsDiff, true);
-    return;
-  }
-  const saved = connectionDraftFrom(state.data) || [];
-  const draft = state.conns.draft || [];
-  const savedNamed = saved.filter((row) => !row.legacy);
-  const draftNamed = draft.filter((row) => !row.legacy);
-  const lines = [];
-  const savedById = new Map(savedNamed.map((row) => [row.id, row]));
-  for (const row of draftNamed) {
-    const before = savedById.get(row.id);
-    if (!before) {
-      lines.push(['新增连接', '—', row.name + ' · ' + row.baseURL]);
-      continue;
-    }
-    if (before.name !== row.name) lines.push(['连接名称', before.name, row.name]);
-    if (before.baseURL !== row.baseURL) lines.push(['上游地址', before.baseURL, row.baseURL]);
-    if ((before.protocols || []).join(',') !== (row.protocols || []).join(',')) {
-      lines.push(['接口协议', connectionProtocolText(before), connectionProtocolText(row)]);
-    }
-    if (row.apiKey) lines.push(['API Key', '已保存（不回显）', '本次将替换']);
-  }
-  const draftIds = new Set(draftNamed.map((row) => row.id));
-  for (const row of savedNamed) {
-    if (!draftIds.has(row.id)) lines.push(['移除连接', row.name + ' · ' + row.baseURL, '—']);
-  }
-  const removedLegacy = saved.some((row) => row.legacy) && !draft.some((row) => row.legacy);
-  if (removedLegacy) lines.push(['旧版单上游', '仍保留', '已移除']);
-  if (!lines.length) {
-    setHidden(dom.connsDiff, true);
-    return;
-  }
-  setHidden(dom.connsDiff, false);
-  const title = document.createElement('p');
-  title.className = 'diff__title';
-  title.textContent = '待重启生效的差异（已保存 → 草稿）';
-  const list = document.createElement('dl');
-  list.className = 'diff__list';
-  lines.forEach(([label, before, after]) => {
-    const dt = document.createElement('dt');
-    dt.textContent = label;
-    const dd = document.createElement('dd');
-    dd.className = 'mono';
-    dd.textContent = (before || '—') + ' → ' + (after || '—');
-    list.append(dt, dd);
-  });
-  dom.connsDiff.replaceChildren(title, list);
+  setHidden(dom.connsDiff, true);
 }
 
 
@@ -2706,6 +2766,589 @@ async function saveConnections() {
 }
 
 
+/* ---------- inline connection delete ---------- */
+
+function requestConnectionDelete(id) {
+  if (!id || state.connDeletingId) return;
+  if (state.connPicker && state.connPicker.connectionId === id) closeConnectionModelPicker({ render: false });
+  state.connDeleteId = id;
+  setConnErrors([]);
+  renderConnections();
+}
+
+function cancelConnectionDelete() {
+  if (!state.connDeleteId) return;
+  state.connDeleteId = null;
+  renderConnections();
+}
+
+async function confirmConnectionDelete(id) {
+  const data = state.data;
+  if (!data || !id || state.connDeletingId) return false;
+  state.connDeletingId = id;
+  setConnErrors([]);
+  renderConnections();
+  const epoch = state.stateReadEpoch;
+  const key = state.key;
+  const current = () => epoch === state.stateReadEpoch && key === state.key;
+  try {
+    const res = await request(API.connectionsDelete, {
+      method: 'POST',
+      body: { revision: data.revision, connectionId: id, cascade: true },
+    });
+    if (!current()) return false;
+    state.connDeleteId = null;
+    state.connDeletingId = null;
+    if (state.conns.editing && state.conns.editing.originalId === id) state.conns.editing = null;
+    if (state.connPicker && state.connPicker.connectionId === id) closeConnectionModelPicker({ render: false });
+    if (res && res.state) {
+      adoptState(res.state, { external: true });
+      state.lastSync = Date.now();
+      state.conns.base = savedConnectionsSignature(state.data);
+      state.conns.baseRevision = state.data.revision ?? null;
+      state.conns.baseEntity = connectionDraftFrom(state.data);
+      state.conns.draft = connectionDraftFrom(state.data);
+      state.conns.dirty = false;
+      renderAll();
+    } else {
+      await loadState({ silent: true });
+      if (!current()) return false;
+    }
+    const removedModels = Number(res?.removed?.models ?? res?.removed?.modelCount ?? 0);
+    showToast(removedModels > 0
+      ? '已移除服务商及旗下 ' + fmtCount(removedModels) + ' 个模型，后台将自动同步到 Kimi Work。'
+      : '已移除服务商，后台将自动同步到 Kimi Work。', 'ok');
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    state.connDeletingId = null;
+    const msg = formatApiErrorWithModels(error, '移除服务商失败，请重试。');
+    setConnErrors([msg]);
+    showToast(msg, 'error');
+    await handleSaveFailure(error, 'connections');
+    if (current()) renderConnections();
+    return false;
+  } finally {
+    if (current()) {
+      state.connDeletingId = null;
+      if (state.data) renderConnections();
+    }
+  }
+}
+
+/* ---------- inline connection model picker ---------- */
+
+function resetConnPickerState(seq = (state.connPicker?.seq || 0) + 1) {
+  return {
+    connectionId: null,
+    loading: false,
+    saving: false,
+    query: '',
+    models: [],
+    selectedIds: [],
+    error: '',
+    sourceNote: '',
+    seq,
+    detectedProtocol: null,
+    detectedUpstreamProtocol: '',
+  };
+}
+
+function closeConnectionModelPicker({ render = true } = {}) {
+  const nextSeq = (state.connPicker?.seq || 0) + 1;
+  state.connPicker = resetConnPickerState(nextSeq);
+  if (render) renderConnections();
+}
+
+function connPickerRowMeta(row) {
+  const parts = [];
+  if (row.name && row.name !== row.upstreamModelId) parts.push(row.name);
+  if (Number(row.contextWindow) > 0) parts.push(fmtK(row.contextWindow));
+  const caps = [];
+  if (row.tools === true) caps.push('工具');
+  if (row.reasoning === true) caps.push('思考');
+  if (row.vision === true) caps.push('视觉');
+  if (caps.length) parts.push(caps.join(' / '));
+  return parts.join(' · ');
+}
+
+function filteredConnectionPickerModels(cp = state.connPicker) {
+  const list = cp && Array.isArray(cp.models) ? cp.models : [];
+  const q = String(cp?.query || '').trim().toLowerCase();
+  if (!q) return list;
+  return list.filter((row) => [row.upstreamModelId, row.id, row.name, row.description]
+    .some((value) => String(value || '').toLowerCase().includes(q)));
+}
+
+function buildConnectionPickerListItems(cp, savedUpstreamSet) {
+  const visible = filteredConnectionPickerModels(cp);
+  const selectedSet = new Set(cp.selectedIds || []);
+  const nodes = [];
+  for (const row of visible) {
+    const uid = row.upstreamModelId || row.id;
+    const li = document.createElement('li');
+    li.className = 'conn-picker__item';
+    const label = document.createElement('label');
+    label.className = 'check conn-picker__check';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedSet.has(uid);
+    checkbox.disabled = cp.saving === true;
+    checkbox.dataset.connPickerItem = uid;
+    const body = document.createElement('span');
+    body.className = 'conn-picker__item-body';
+    const head = document.createElement('span');
+    head.className = 'conn-picker__item-head';
+    const idSpan = document.createElement('span');
+    idSpan.className = 'mono conn-picker__item-id';
+    idSpan.textContent = uid;
+    head.append(idSpan);
+    if (savedUpstreamSet.has(uid)) {
+      const tag = document.createElement('span');
+      tag.className = 'tag tag--saved';
+      tag.textContent = '已启用';
+      head.append(tag);
+    }
+    body.append(head);
+    const metaText = connPickerRowMeta(row);
+    if (metaText) {
+      const meta = document.createElement('span');
+      meta.className = 'conn-picker__item-meta';
+      meta.textContent = metaText;
+      body.append(meta);
+    }
+    label.append(checkbox, body);
+    li.append(label);
+    nodes.push(li);
+  }
+  return { nodes, visible };
+}
+
+function syncConnectionPickerDom() {
+  const cp = state.connPicker;
+  if (!cp || !cp.connectionId || !dom.connsList || typeof dom.connsList.querySelector !== 'function') return;
+  const host = dom.connsList.querySelector(`[data-conn-picker="${cp.connectionId}"]`);
+  if (!host) return;
+  const savedSet = new Set(((state.data && state.data.models) || [])
+    .filter((m) => m && m.connectionId === cp.connectionId)
+    .map((m) => m.upstreamModelId || m.id));
+  const listEl = host.querySelector('[data-conn-picker-list]');
+  const emptyEl = host.querySelector('[data-conn-picker-empty]');
+  const countEl = host.querySelector('[data-conn-picker-count]');
+  const selectAllBtn = host.querySelector('[data-conn-picker-select-all]');
+  const saveBtn = host.querySelector('[data-conn-picker-save]');
+  const { nodes, visible } = buildConnectionPickerListItems(cp, savedSet);
+  if (listEl) listEl.replaceChildren(...nodes);
+  if (emptyEl) emptyEl.hidden = cp.loading || !cp.models.length || visible.length > 0;
+  const selectedCount = (cp.selectedIds || []).length;
+  if (countEl) {
+    countEl.textContent = cp.loading
+      ? '拉取中…'
+      : '已选 ' + fmtCount(selectedCount) + ' / 共 ' + fmtCount(cp.models.length)
+        + (cp.query ? '（匹配 ' + fmtCount(visible.length) + '）' : '');
+  }
+  if (selectAllBtn) {
+    const selectedSet = new Set(cp.selectedIds || []);
+    const allVisible = visible.length > 0 && visible.every((row) => selectedSet.has(row.upstreamModelId || row.id));
+    selectAllBtn.disabled = cp.loading || cp.saving || visible.length === 0;
+    selectAllBtn.setAttribute('aria-pressed', String(allVisible));
+    selectAllBtn.textContent = allVisible ? '取消全选筛选结果' : '全选筛选结果';
+  }
+  if (saveBtn) {
+    saveBtn.disabled = cp.loading || cp.saving;
+    saveBtn.textContent = cp.saving ? '正在保存…' : '保存所选模型';
+  }
+}
+
+function buildConnectionPickerPanel(row) {
+  const cp = state.connPicker;
+  const panel = document.createElement('div');
+  panel.className = 'conn-picker';
+  panel.dataset.connPicker = row.id;
+  panel.setAttribute('role', 'region');
+  panel.setAttribute('aria-label', '勾选 ' + (row.name || row.id) + ' 的模型');
+
+  const head = document.createElement('div');
+  head.className = 'conn-picker__head';
+  const titleWrap = document.createElement('div');
+  const title = document.createElement('strong');
+  title.textContent = '勾选要启用的模型';
+  const count = document.createElement('span');
+  count.className = 'mono conn-picker__count';
+  count.dataset.connPickerCount = row.id;
+  titleWrap.append(title, count);
+
+  const headActions = document.createElement('div');
+  headActions.className = 'conn-picker__head-actions';
+  const reloadBtn = document.createElement('button');
+  reloadBtn.type = 'button';
+  reloadBtn.className = 'btn btn--quiet btn--sm';
+  reloadBtn.dataset.connPickerReload = row.id;
+  reloadBtn.disabled = cp.loading || cp.saving;
+  reloadBtn.textContent = cp.loading ? '正在拉取…' : '重新拉取';
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'btn btn--quiet btn--sm';
+  closeBtn.dataset.connPickerClose = row.id;
+  closeBtn.disabled = cp.saving;
+  closeBtn.textContent = '收起';
+  headActions.append(reloadBtn, closeBtn);
+  head.append(titleWrap, headActions);
+  panel.append(head);
+
+  if (cp.sourceNote) {
+    const note = document.createElement('p');
+    note.className = 'hint conn-picker__note';
+    note.textContent = cp.sourceNote;
+    panel.append(note);
+  }
+  if (cp.error) {
+    const err = document.createElement('p');
+    err.className = 'errors conn-picker__error';
+    err.textContent = cp.error;
+    panel.append(err);
+  }
+
+  const tools = document.createElement('div');
+  tools.className = 'conn-picker__tools';
+  const search = document.createElement('input');
+  search.type = 'search';
+  search.className = 'conn-picker__search';
+  search.placeholder = '按关键词筛选模型 ID 或名称';
+  search.value = cp.query || '';
+  search.disabled = cp.loading || cp.saving;
+  search.dataset.connPickerQuery = row.id;
+  search.setAttribute('aria-label', '筛选远端模型');
+  const selectAll = document.createElement('button');
+  selectAll.type = 'button';
+  selectAll.className = 'btn btn--outline btn--sm';
+  selectAll.dataset.connPickerSelectAll = row.id;
+  tools.append(search, selectAll);
+  panel.append(tools);
+
+  const savedSet = new Set(((state.data && state.data.models) || [])
+    .filter((m) => m && m.connectionId === row.id)
+    .map((m) => m.upstreamModelId || m.id));
+  const list = document.createElement('ul');
+  list.className = 'conn-picker__list';
+  list.dataset.connPickerList = row.id;
+  const { nodes, visible } = buildConnectionPickerListItems(cp, savedSet);
+  list.append(...nodes);
+  panel.append(list);
+
+  const empty = document.createElement('p');
+  empty.className = 'empty conn-picker__empty';
+  empty.dataset.connPickerEmpty = row.id;
+  empty.hidden = cp.loading || !cp.models.length || visible.length > 0;
+  empty.textContent = '没有匹配的模型，换一个关键词试试。';
+  panel.append(empty);
+
+  const selectedCount = (cp.selectedIds || []).length;
+  count.textContent = cp.loading
+    ? '拉取中…'
+    : '已选 ' + fmtCount(selectedCount) + ' / 共 ' + fmtCount(cp.models.length)
+      + (cp.query ? '（匹配 ' + fmtCount(visible.length) + '）' : '');
+  const selectedSet = new Set(cp.selectedIds || []);
+  const allVisible = visible.length > 0 && visible.every((entry) => selectedSet.has(entry.upstreamModelId || entry.id));
+  selectAll.disabled = cp.loading || cp.saving || visible.length === 0;
+  selectAll.setAttribute('aria-pressed', String(allVisible));
+  selectAll.textContent = allVisible ? '取消全选筛选结果' : '全选筛选结果';
+
+  const foot = document.createElement('div');
+  foot.className = 'action-line conn-picker__foot';
+  const footHint = document.createElement('span');
+  footHint.className = 'hint';
+  footHint.textContent = '已保存模型保留原配置；新勾选模型自动填充默认上下文与能力。';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn btn--quiet btn--sm';
+  cancelBtn.dataset.connPickerClose = row.id;
+  cancelBtn.disabled = cp.saving;
+  cancelBtn.textContent = '取消';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'btn btn--primary btn--sm';
+  saveBtn.dataset.connPickerSave = row.id;
+  saveBtn.disabled = cp.loading || cp.saving;
+  saveBtn.textContent = cp.saving ? '正在保存…' : '保存所选模型';
+  foot.append(footHint, cancelBtn, saveBtn);
+  panel.append(foot);
+
+  return panel;
+}
+
+function findConnectionRow(id) {
+  const draft = (state.conns.draft || []).find((row) => row && !row.legacy && row.id === id);
+  if (draft) return draft;
+  return (connectionRowsOf(state.data) || []).find((row) => row && !row.legacy && row.id === id) || null;
+}
+
+async function fetchConnectionPickerModels(id, seq, connRow) {
+  const data = state.data;
+  if (!data || !connRow) return;
+  const epoch = state.stateReadEpoch;
+  const key = state.key;
+  const alive = () => state.connPicker && state.connPicker.connectionId === id
+    && state.connPicker.seq === seq && epoch === state.stateReadEpoch && key === state.key;
+
+  let rawModels = [];
+  let detectedProto = connectionProtocol(connRow);
+  let detectedUpstream = connectionDefaultUpstreamProtocol(id);
+  let fetchError = '';
+  let sourceNote = '';
+
+  try {
+    const probeRes = await request(API.connectionsProbe, { method: 'POST', body: { connectionId: id } });
+    if (!alive()) return;
+    if (probeRes && probeRes.ok) {
+      if (probeRes.connectionProtocol === 'chat' || probeRes.connectionProtocol === 'responses') {
+        detectedProto = probeRes.connectionProtocol;
+      }
+      if (probeRes.upstreamProtocol === 'anthropic') {
+        detectedUpstream = 'anthropic';
+      }
+      if (Array.isArray(probeRes.catalog?.models) && probeRes.catalog.models.length) {
+        rawModels = probeRes.catalog.models;
+        sourceNote = '已从上游拉取 ' + fmtCount(rawModels.length) + ' 个模型。';
+      }
+    } else if (probeRes && !probeRes.ok) {
+      fetchError = probeRes.message || upstreamReasonText(probeRes.reason) || '';
+    }
+  } catch (error) {
+    if (!alive()) return;
+    fetchError = upstreamReasonText(error.code) || error.message || '';
+  }
+
+  if (!rawModels.length) {
+    try {
+      const discRes = await request(API.discovery, {
+        method: 'POST',
+        body: { revision: state.data?.revision, connectionId: id },
+      });
+      if (!alive()) return;
+      if (discRes && Array.isArray(discRes.models) && discRes.models.length) {
+        rawModels = discRes.models;
+        fetchError = '';
+        sourceNote = '已通过目录探测拉取 ' + fmtCount(rawModels.length) + ' 个模型。';
+      }
+    } catch (error) {
+      if (!alive()) return;
+      if (!fetchError) fetchError = discoveryReasonText(error.code) || error.message || '无法拉取远端模型列表。';
+    }
+  }
+
+  if (!alive()) return;
+  const presetModels = new Map(presetOnboardModels(connRow.providerPresetId)
+    .map((entry) => [entry.upstreamModelId, entry]));
+  const isAnthropic = detectedUpstream === 'anthropic' || isAnthropicPreset(providerPreset(connRow.providerPresetId));
+  const effectiveUpstream = isAnthropic ? 'anthropic' : '';
+  const merged = [];
+  const seen = new Set();
+
+  const savedForConn = ((state.data && state.data.models) || []).filter((m) => m && m.connectionId === id);
+  const remoteEnriched = [];
+  for (const item of rawModels) {
+    const uid = item && (item.id || item.upstreamModelId);
+    if (!uid || seen.has(uid)) continue;
+    seen.add(uid);
+    remoteEnriched.push(enrichProbeCatalogRow(item, presetModels, connRow.providerPresetId, connRow, effectiveUpstream));
+  }
+  for (const saved of savedForConn) {
+    const uid = saved.upstreamModelId || saved.id;
+    if (!uid || seen.has(uid)) continue;
+    seen.add(uid);
+    merged.push({ ...savedOnboardModelRow(saved), savedOnly: true });
+  }
+  merged.push(...remoteEnriched);
+
+  state.connPicker.loading = false;
+  state.connPicker.models = merged;
+  state.connPicker.detectedProtocol = detectedProto;
+  state.connPicker.detectedUpstreamProtocol = effectiveUpstream;
+  state.connPicker.error = !rawModels.length && fetchError ? fetchError : '';
+  state.connPicker.sourceNote = sourceNote || (merged.length
+    ? '当前显示该服务商已保存的 ' + fmtCount(merged.length) + ' 个模型；可点击「重新拉取」重试远端目录。'
+    : '未获取到可用模型列表。');
+  renderConnections();
+}
+
+function openConnectionModelPicker(id) {
+  const data = state.data;
+  if (!data || !id) return;
+  const connRow = findConnectionRow(id);
+  if (!connRow) return;
+  state.connDeleteId = null;
+  const savedIds = ((data.models || []).filter((m) => m && m.connectionId === id))
+    .map((m) => m.upstreamModelId || m.id)
+    .filter(Boolean);
+  const seq = (state.connPicker?.seq || 0) + 1;
+  state.connPicker = {
+    connectionId: id,
+    loading: true,
+    saving: false,
+    query: '',
+    models: [],
+    selectedIds: Array.from(new Set(savedIds)),
+    error: '',
+    sourceNote: '正在拉取远端模型列表…',
+    seq,
+    detectedProtocol: connectionProtocol(connRow),
+    detectedUpstreamProtocol: connectionDefaultUpstreamProtocol(id),
+  };
+  renderConnections();
+  void fetchConnectionPickerModels(id, seq, connRow);
+}
+
+function toggleConnectionModelPicker(id) {
+  if (state.connPicker && state.connPicker.connectionId === id) {
+    closeConnectionModelPicker();
+    return;
+  }
+  openConnectionModelPicker(id);
+}
+
+function reloadConnectionModelPicker(id) {
+  const cp = state.connPicker;
+  if (!cp || cp.connectionId !== id || cp.loading || cp.saving) return;
+  const connRow = findConnectionRow(id);
+  if (!connRow) return;
+  const seq = (cp.seq || 0) + 1;
+  cp.seq = seq;
+  cp.loading = true;
+  cp.error = '';
+  cp.sourceNote = '正在重新拉取远端模型列表…';
+  renderConnections();
+  void fetchConnectionPickerModels(id, seq, connRow);
+}
+
+function setConnectionPickerQuery(value) {
+  if (!state.connPicker || !state.connPicker.connectionId) return;
+  state.connPicker.query = String(value || '');
+  syncConnectionPickerDom();
+}
+
+function toggleConnectionPickerItem(upstreamId, checked) {
+  const cp = state.connPicker;
+  if (!cp || !cp.connectionId || !upstreamId) return;
+  const set = new Set(cp.selectedIds || []);
+  if (checked) set.add(upstreamId);
+  else set.delete(upstreamId);
+  cp.selectedIds = Array.from(set);
+  syncConnectionPickerDom();
+}
+
+function toggleConnectionPickerSelectAll() {
+  const cp = state.connPicker;
+  if (!cp || !cp.connectionId || cp.loading || cp.saving) return;
+  const visible = filteredConnectionPickerModels(cp);
+  if (!visible.length) return;
+  const set = new Set(cp.selectedIds || []);
+  const allSelected = visible.every((row) => set.has(row.upstreamModelId || row.id));
+  for (const row of visible) {
+    const uid = row.upstreamModelId || row.id;
+    if (allSelected) set.delete(uid);
+    else set.add(uid);
+  }
+  cp.selectedIds = Array.from(set);
+  syncConnectionPickerDom();
+}
+
+async function saveConnectionModelPicker() {
+  const data = state.data;
+  const cp = state.connPicker;
+  if (!data || !cp || !cp.connectionId || cp.loading || cp.saving) return false;
+  const id = cp.connectionId;
+  const connRow = findConnectionRow(id);
+  if (!connRow) return false;
+
+  const existing = Array.isArray(data.models) ? data.models : [];
+  const otherModels = existing.filter((m) => m && m.connectionId !== id);
+  const savedForConn = existing.filter((m) => m && m.connectionId === id);
+  const selectedSet = new Set(cp.selectedIds || []);
+
+  const keptModels = [];
+  const keptUpstreams = new Set();
+  for (const saved of savedForConn) {
+    const uid = saved.upstreamModelId || saved.id;
+    if (selectedSet.has(uid)) {
+      keptModels.push(saved);
+      keptUpstreams.add(uid);
+    }
+  }
+
+  const connProto = connectionProtocol(connRow) || cp.detectedProtocol || 'chat';
+  const isAnthropic = cp.detectedUpstreamProtocol === 'anthropic'
+    || connRow.upstreamProtocol === 'anthropic'
+    || connectionDefaultUpstreamProtocol(id) === 'anthropic'
+    || isAnthropicPreset(providerPreset(connRow.providerPresetId));
+  const presetModels = new Map(presetOnboardModels(connRow.providerPresetId)
+    .map((entry) => [entry.upstreamModelId, entry]));
+  const rowByUpstream = new Map((cp.models || []).map((row) => [row.upstreamModelId || row.id, row]));
+
+  const addedModels = [];
+  for (const uid of cp.selectedIds || []) {
+    if (keptUpstreams.has(uid)) continue;
+    const baseRow = rowByUpstream.get(uid)
+      || enrichProbeCatalogRow({ id: uid }, presetModels, connRow.providerPresetId, connRow, isAnthropic ? 'anthropic' : '');
+    const built = buildOnboardRow({
+      ...baseRow,
+      connectionId: id,
+      ...(isAnthropic ? { upstreamProtocol: 'anthropic' } : {}),
+    }, { existing: false, protocol: connProto });
+    addedModels.push(built);
+  }
+
+  const nextModels = [...otherModels, ...keptModels, ...addedModels];
+  const draftRows = (state.conns.draft && state.conns.draft.length ? state.conns.draft : connectionDraftFrom(data)) || [];
+  const connections = connectionPayload(draftRows.filter((entry) => entry && !entry.legacy));
+
+  cp.saving = true;
+  cp.error = '';
+  renderConnections();
+  const epoch = state.stateReadEpoch;
+  const key = state.key;
+  const current = () => epoch === state.stateReadEpoch && key === state.key;
+
+  try {
+    const res = await request(API.workspace, {
+      method: 'POST',
+      body: {
+        revision: data.revision,
+        models: nextModels,
+        connections,
+        pruneSubagents: true,
+      },
+    });
+    if (!current()) return false;
+    closeConnectionModelPicker({ render: false });
+    if (res && res.state) {
+      adoptState(res.state, { external: true });
+      state.lastSync = Date.now();
+      state.conns.base = savedConnectionsSignature(state.data);
+      state.conns.baseRevision = state.data.revision ?? null;
+      state.conns.baseEntity = connectionDraftFrom(state.data);
+      state.conns.draft = connectionDraftFrom(state.data);
+      state.conns.dirty = false;
+      renderAll();
+    } else {
+      await loadState({ silent: true });
+      if (!current()) return false;
+    }
+    const enabledCount = keptModels.length + addedModels.length;
+    showToast('已更新「' + (connRow.name || id) + '」的模型选择（当前启用 ' + fmtCount(enabledCount) + ' 个），后台将自动同步到 Kimi Work。', 'ok');
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    if (state.connPicker && state.connPicker.connectionId === id) {
+      state.connPicker.saving = false;
+      state.connPicker.error = formatApiErrorWithModels(error, '保存所选模型失败，请重试。');
+      showToast(state.connPicker.error, 'error');
+      renderConnections();
+    }
+    return false;
+  }
+}
+
 /* ---------- exports ---------- */
 
 export {
@@ -2715,9 +3358,12 @@ export {
   applyOnboardPreset,
   applyProviderPreset,
   applyState,
+  cancelConnectionDelete,
   closeConnectionEditor,
+  closeConnectionModelPicker,
   configInfo,
   configReady,
+  confirmConnectionDelete,
   connectionDefaultUpstreamProtocol,
   connectionDraftFrom,
   connectionPayload,
@@ -2736,21 +3382,30 @@ export {
   onboardBusy,
   onboardEditingText,
   openConnectionEditor,
+  openConnectionModelPicker,
   openOnboardWizard,
   protocolLabel,
   providerPreset,
   readConnectionEditor,
+  reloadConnectionModelPicker,
   renderConnection,
   renderConnectionEditor,
   renderConnections,
   renderOnboard,
   renderOnboardOverview,
+  requestConnectionDelete,
+  resetConnPickerState,
+  saveConnectionModelPicker,
   saveConnections,
   saveOnboard,
   savedConnectionsSignature,
   savedOnboardTarget,
+  setConnectionPickerQuery,
   setOnboardProtocol,
   syncGroupedPresetOptions,
+  toggleConnectionModelPicker,
+  toggleConnectionPickerItem,
+  toggleConnectionPickerSelectAll,
   toggleFilteredOnboardModels,
   upstreamReasonText,
   useRecommendedOnboardModels,

@@ -194,6 +194,8 @@ function mountConversationsPage() {
     migration: dom.convMigrationTip,
     migrationText: dom.convMigrationText,
     migrateAll: dom.convMigrateAll,
+    batch: dom.convBatch || $('conv-batch'),
+    batchClear: dom.convBatchClear || $('conv-batch-clear'),
     batchModel: dom.convBatchModel,
     batchEffort: dom.convBatchEffort,
     batchGo: dom.convBatchGo,
@@ -315,6 +317,7 @@ function mountConversationsPage() {
     state.conversations.confirm = null;
     state.conversations.rowConfirm = null;
     setHidden(ui.confirm, true);
+    syncBatchState();
   }
 
   /* 状态已经失效（如 Kimi 运行态未知）时，页面上展开的确认条不能留着让
@@ -333,6 +336,7 @@ function mountConversationsPage() {
     state.conversations.confirm = confirmState;
     setText(ui.confirmText, text);
     setHidden(ui.confirm, false);
+    syncBatchState();
     if (ui.confirmSubmit && ui.confirmSubmit.focus) ui.confirmSubmit.focus({ preventScroll: true });
   }
 
@@ -573,6 +577,10 @@ function mountConversationsPage() {
     const selected = selectedKeys();
     const switchable = canSwitchConversations(list);
     const batchModel = batchModelOf(list);
+    setHidden(ui.batch, !(selected.size > 0 || Boolean(state.conversations.confirm)));
+    if (ui.batchClear) {
+      ui.batchClear.disabled = state.conversations.pending === true;
+    }
     if (ui.batchGo) {
       ui.batchGo.disabled = !switchable || !switchKeys(selected, batchModel, list).length;
       setText(ui.batchGo, state.conversations.pending ? '正在切换…' : '切换所选会话');
@@ -831,6 +839,15 @@ function mountConversationsPage() {
   if (ui.batchEffort) ui.batchEffort.addEventListener('change', () => {
     state.conversations.batchEffort = ui.batchEffort.value;
   });
+  if (ui.batchClear) ui.batchClear.addEventListener('click', () => {
+    state.conversations.selected = [];
+    if (ui.list && typeof ui.list.querySelectorAll === 'function') {
+      for (const box of ui.list.querySelectorAll('[data-conv-select]')) {
+        if (box) box.checked = false;
+      }
+    }
+    syncBatchState();
+  });
   if (ui.batchGo) ui.batchGo.addEventListener('click', () => {
     const list = currentList();
     const models = modelsOf(list);
@@ -884,7 +901,7 @@ function mountConversationsPage() {
     const active = typeof document !== 'undefined' ? document.activeElement : null;
     if (!active) return false;
     if (list && typeof list.contains === 'function' && list.contains(active)) return true;
-    return active === ui.query || active === ui.queryClear || active === ui.batchModel || active === ui.batchEffort;
+    return active === ui.query || active === ui.queryClear || active === ui.batchModel || active === ui.batchEffort || active === ui.batchClear;
   }
 
   function onState(next) {
@@ -915,14 +932,14 @@ function mountConversationsPage() {
       /* 冷启动时 GET /api/work/conversations 可能先于首次 /api/state 返回：
          列表已经渲染，但展示名与 Kimi 运行态还没对齐。第一份状态到达后补
          一次渲染，避免停在「目录未列出」或把 unknown 当成未运行。 */
-      if (list && state.view === 'maintenance' && !state.conversations.loading
+      if (list && state.view === 'conversations' && !state.conversations.loading
         && !state.conversations.pending && !userBusyInConversations()) {
         setStatus(conversationListStatus(list));
         render();
       }
       return;
     }
-    if (state.view !== 'maintenance') {
+    if (state.view !== 'conversations') {
       state.conversations.stale = true;
       return;
     }

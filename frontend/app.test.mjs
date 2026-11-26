@@ -107,9 +107,9 @@ test('a completed model-source disconnect offers a real re-takeover path', () =>
     operation: { action: 'disconnect-models', state: 'removed' },
   });
   assert.notEqual(synced.code, 'restored');
-  assert.equal((htmlSource.match(/data-action="disconnect-models"/g) || []).length, 2);
+  assert.equal((htmlSource.match(/data-action="disconnect-models"/g) || []).length, 1);
   assert.equal(source.includes('window.confirm'), false, 'production JS must not call window.confirm');
-  assert.match(htmlSource, /id="workspace-disconnect-confirm"/);
+  assert.equal(htmlSource.includes('id="workspace-disconnect-confirm"'), false);
   assert.match(htmlSource, /id="native-disconnect-confirm"/);
 });
 
@@ -1649,52 +1649,72 @@ test('the model form keeps identity fields up front and folds context, output an
   assert.match(htmlSource, /id="model-advanced-details"[^>]*><summary>高级参数/);
 });
 
-test('index.html lays out five top-level tabs, the merged model page, the maintenance page and the update banner', () => {
-  for (const id of ['nav-overview', 'nav-models', 'nav-accounts', 'nav-usage', 'nav-maintenance']) {
+test('index.html lays out six top-level tabs, two-tab models, four-tab settings, standalone conversations and translation contract', () => {
+  for (const id of ['nav-overview', 'nav-models', 'nav-conversations', 'nav-accounts', 'nav-usage', 'nav-maintenance']) {
     assert.ok(htmlSource.includes(`id="${id}"`), 'missing top tab ' + id);
   }
-  assert.equal(htmlSource.includes('id="nav-conversations"'), false, 'conversations moved into maintenance');
-  assert.equal(htmlSource.includes('id="nav-subagents"'), false, 'subagents moved into models');
+  const navOrder = ['nav-overview', 'nav-models', 'nav-conversations', 'nav-accounts', 'nav-usage', 'nav-maintenance']
+    .map((id) => htmlSource.indexOf(`id="${id}"`));
+  for (let i = 1; i < navOrder.length; i++) {
+    assert.ok(navOrder[i - 1] < navOrder[i], 'masthead tabs must preserve fixed six-entry order');
+  }
+  assert.equal(htmlSource.includes('id="nav-subagents"'), false, 'subagents stay in models');
   assert.match(htmlSource, /id="nav-models"[^>]*>模型 <span class="nav__count mono" id="nav-model-count"><\/span>/);
   assert.match(htmlSource, /id="nav-maintenance"[^>]*>[\s\S]{0,160}id="nav-update-dot"/);
   assert.equal(htmlSource.includes('id="nav-work"'), false);
   assert.equal(htmlSource.includes('id="nav-extensions"'), false);
-  assert.equal(htmlSource.includes('models-tab-catalog'), false, 'the model page must not keep a catalog subtab');
-  assert.equal(htmlSource.includes('models-tab-connections'), false, 'the model page must not keep a connections subtab');
-  assert.equal(htmlSource.includes('data-subtab-group="models"'), false);
   assert.equal(htmlSource.includes('id="kimi-k3-setting"'), false, 'the manual K3 switch is gone');
   assert.ok(htmlSource.includes('id="native-troubleshoot"'));
   assert.ok(htmlSource.indexOf('id="native-troubleshoot"') < htmlSource.indexOf('id="native-sync"'));
+  assert.ok(htmlSource.includes('id="view-conversations"'));
   assert.ok(htmlSource.includes('id="view-maintenance"'));
-  assert.equal(htmlSource.includes('id="view-conversations"'), false, 'conversations is a section of maintenance, not a view');
   assert.ok(htmlSource.includes('id="conv-list"'));
   assert.ok(htmlSource.includes('id="conv-migration-tip"'));
+  assert.ok(htmlSource.includes('id="conv-batch"'));
+  assert.ok(htmlSource.includes('id="conv-batch-clear"'));
   assert.ok(htmlSource.includes('id="update-banner"'));
   assert.ok(htmlSource.includes('id="update-banner-primary"'));
+  assert.ok(htmlSource.includes('id="overview-switch-mode"'));
+  assert.match(htmlSource, /id="overview-details"[^>]*>切换模式（网关 \/ 直连）<\/button>/);
   assert.equal(source.includes('function mountWorkspace('), false);
   assert.equal(source.includes('.scrollIntoView('), false, 'production JS must scroll .main, never call scrollIntoView');
   const cssSource = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
   assert.equal(cssSource.includes('overflow: clip'), false, 'styles.css must avoid overflow: clip on root');
   assert.match(cssSource, /\.shell\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/);
-  for (const id of ['subagents-tab-models', 'subagents-tab-swarm',
-    'settings-tab-accounts', 'settings-tab-connection', 'settings-tab-extensions', 'settings-tab-advanced']) {
-    assert.equal(htmlSource.includes(`id="${id}"`), false, 'the second-level subtabs are gone in v1.1.14: ' + id);
+  for (const id of ['models-tab-providers', 'models-tab-subagents', 'models-pane-providers', 'models-pane-subagents',
+    'settings-tab-connection', 'settings-tab-extensions', 'settings-tab-updates', 'settings-tab-diagnostics',
+    'settings-pane-connection', 'settings-pane-extensions', 'settings-pane-updates', 'settings-pane-diagnostics']) {
+    assert.ok(htmlSource.includes(`id="${id}"`), 'missing v1.1.15 subtab element: ' + id);
   }
   const modelsIdx = htmlSource.indexOf('id="view-models"');
+  const convIdx = htmlSource.indexOf('id="view-conversations"');
   const accountsIdx = htmlSource.indexOf('id="view-accounts"');
-  const usageIdx = htmlSource.indexOf('id="view-usage"');
   const maintenanceIdx = htmlSource.indexOf('id="view-maintenance"');
-  const modelsSlice = htmlSource.slice(modelsIdx, accountsIdx);
+  const modelsSlice = htmlSource.slice(modelsIdx, convIdx);
   assert.ok(modelsSlice.includes('id="connections-panel"'));
   assert.ok(modelsSlice.includes('id="catalog-panel"'));
   assert.ok(modelsSlice.includes('id="restart-panel"'));
+  assert.match(modelsSlice, /id="restart-panel"[^>]*hidden/);
+  assert.equal(modelsSlice.includes('id="sa-runtime-panel"'), false, 'subagent runtime card is merged into sa-target-panel');
+  assert.ok(modelsSlice.includes('id="sa-status-strip"'));
+  assert.ok(modelsSlice.includes('id="sa-diagnostics-body"'));
   assert.ok(modelsSlice.indexOf('id="connections-panel"') < modelsSlice.indexOf('id="catalog-panel"'),
     'service connections come first, the enabled catalog follows');
   assert.ok(modelsSlice.indexOf('id="catalog-panel"') < modelsSlice.indexOf('id="model-table"'));
+  const convSlice = htmlSource.slice(convIdx, accountsIdx);
+  assert.ok(convSlice.includes('id="conversations-panel"'));
+  assert.ok(convSlice.includes('id="conv-list"'));
+  assert.ok(convSlice.includes('id="conv-migration-tip"'));
+  assert.match(convSlice, /class="conv-batchbar" id="conv-batch"[^>]*hidden/);
   const maintenanceSlice = htmlSource.slice(maintenanceIdx);
   assert.ok(maintenanceSlice.includes('id="native-panel"'));
-  assert.ok(maintenanceSlice.includes('id="conv-list"'), 'conversations live inside maintenance');
-  assert.ok(maintenanceSlice.includes('id="conv-migration-tip"'));
+  assert.equal(maintenanceSlice.includes('id="conversations-panel"'), false, 'conversations moved to its own top-level view');
+  assert.ok(maintenanceSlice.includes('id="tr-body"'));
+  assert.equal(maintenanceSlice.includes('id="tr-keyenv"'), false, 'tr-keyenv must be removed');
+  assert.ok(maintenanceSlice.includes('id="tr-restart-enable"'));
+  assert.ok(maintenanceSlice.includes('id="tr-save-row"'));
+  assert.match(maintenanceSlice, /<details[^>]*id="tr-preview-box"/);
+  assert.match(maintenanceSlice, /id="tr-custom-details"><summary>自定义接口参数与密钥<\/summary>/);
 
   const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
   const advanced = form.indexOf('id="model-advanced-details"');
@@ -2457,18 +2477,18 @@ test('an unmanaged Kimi started from the Dock is not reported as a managed load'
   };
   const verdict = syncState(base);
   assert.equal(verdict.code, 'synced');
-  assert.doesNotMatch(verdict.note, /受管进程已加载/);
-  assert.match(verdict.note, /未受本产品托管/);
+  assert.doesNotMatch(verdict.note, /受管进程已加载|配置代次|未受本产品托管/);
+  assert.match(verdict.note, /直接从桌面打开/);
   assert.match(verdict.note, /正常退出并重启 Kimi/);
 
   const text = nativeConnectionText(base);
-  assert.match(text, /未受本产品托管/);
+  assert.match(text, /直接从桌面打开/);
   assert.match(text, /正常退出并重启 Kimi/);
-  assert.doesNotMatch(text, /首次使用/);
+  assert.doesNotMatch(text, /首次使用|未受本产品托管/);
 
-  /* 受管进程仍在时，原来说明必须保持不变。 */
   const managed = { ...base, integration: { ...base.integration, adopted: true, desktop: { state: 'ready', managed: true } } };
-  assert.match(syncState(managed).note, /受管进程已加载对应配置代次/);
+  assert.match(syncState(managed).note, /配置已生效/);
+  assert.doesNotMatch(syncState(managed).note, /受管进程已加载|配置代次/);
 });
 
 test('a complete direct import only requires a restart when a managed process has not adopted it', () => {
@@ -2581,10 +2601,10 @@ test('the panel announces Wails readiness once after binding desktop navigation'
     window.__kwpOpenAccounts();
     assert.equal(core.state.view, 'accounts', 'the accounts hook opens the top-level accounts view');
     window.__kwpOpenConversations();
-    assert.equal(core.state.view, 'maintenance', 'conversations is a section of maintenance');
+    assert.equal(core.state.view, 'conversations', 'conversations is a top-level view');
     window.__kwpOpenUpdates();
     assert.equal(core.state.view, 'maintenance');
-    assert.equal(core.state.subtabs.maintenance, undefined, 'v1.1.14 has no maintenance subtabs');
+    assert.equal(core.state.subtabs.maintenance, 'updates', 'openUpdates activates the updates subtab');
   }
 });
 
@@ -3687,13 +3707,13 @@ test('a saved gateway mode reports the unfinished direct cleanup and obeys a def
   renderWorkspace(unmanagedRestart);
   assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   assert.equal(workspace['workspace-restart'].hidden, true);
-  assert.match(workspace['workspace-sync-note'].textContent, /非托管运行/);
+  assert.match(workspace['workspace-sync-note'].textContent, /直接从桌面打开/);
   renderWorkspace({ ...unmanagedRestart, kimiProcess: { running: false } });
   assert.equal(workspace['workspace-sync-state'].textContent, '已同步到 Kimi Work');
   assert.match(workspace['workspace-sync-note'].textContent, /打开 Kimi 后/);
   assert.equal(workspace['workspace-restart'].hidden, true);
   assert.doesNotMatch(connectionText(unmanagedRestart), /需要重启|等待.*重启/);
-  assert.match(connectionText(unmanagedRestart), /未受本产品托管/);
+  assert.match(connectionText(unmanagedRestart), /直接从桌面打开/);
   render(unmanagedRestart);
   assert.equal(nodes['integration-mode-state'].hidden, true);
   assert.notEqual(nodes['native-sync-label'].textContent, '等待重启 Kimi');
@@ -4155,21 +4175,24 @@ test('settings and preview migration copy avoid misleading keychain wording', ()
   assert.doesNotMatch(nodes['migration-note'].textContent, /钥匙串/);
 });
 
-test('the settings page keeps daily service actions visible and folds maintenance into a disclosure', () => {
-  const panel = htmlSource.slice(htmlSource.indexOf('id="update-panel"'), htmlSource.indexOf('id="translation-panel"'));
-  const drawer = panel.indexOf('id="service-troubleshoot"');
-  assert.ok(drawer >= 0, 'missing the service maintenance disclosure');
-  for (const id of ['service-enable', 'service-disable', 'settings-reopen-guide']) {
-    const position = panel.indexOf(`id="${id}"`);
-    assert.ok(position >= 0 && position < drawer, id + ' must stay visible above the maintenance drawer');
+test('the settings page keeps daily service actions in updates and moves service troubleshooting into diagnostics', () => {
+  const updatesStart = htmlSource.indexOf('id="settings-pane-updates"');
+  const diagStart = htmlSource.indexOf('id="settings-pane-diagnostics"');
+  assert.ok(updatesStart >= 0 && diagStart > updatesStart);
+  const updatesPane = htmlSource.slice(updatesStart, diagStart);
+  for (const id of ['update-panel', 'service-enable', 'service-disable', 'settings-reopen-guide']) {
+    assert.ok(updatesPane.includes(`id="${id}"`), id + ' belongs to the updates pane');
   }
-  const drawerEnd = panel.indexOf('</details>', drawer);
-  assert.ok(drawerEnd > drawer);
-  for (const id of ['preview-service-note', 'daemon-restart', 'service-register', 'service-stop', 'service-uninstall']) {
-    const position = panel.indexOf(`id="${id}"`);
-    assert.ok(position > drawer && position < drawerEnd, id + ' belongs to the maintenance drawer');
+  assert.equal(updatesPane.includes('id="service-troubleshoot"'), false, 'service troubleshooting moved to diagnostics pane');
+  const diagPane = htmlSource.slice(diagStart);
+  const troubleshoot = diagPane.indexOf('id="service-troubleshoot"');
+  assert.ok(troubleshoot >= 0, 'missing service-troubleshoot in diagnostics pane');
+  for (const id of ['preview-service-note', 'daemon-restart', 'service-register', 'service-stop', 'service-uninstall',
+    'plus-capabilities-host', 'compat-diagnostics-panel', 'diagnostics-export', 'overview-records']) {
+    assert.ok(diagPane.includes(`id="${id}"`), id + ' belongs to the diagnostics pane');
   }
-  assert.match(panel.slice(drawer, drawerEnd), /后台服务维护（异常排障时使用）/);
+  assert.equal(diagPane.includes('<details class="overview-records" id="diagnostics-details">'), false,
+    'diagnostics-details is directly expanded inside the diagnostics tab');
 });
 
 test('release running service is recognized as managed backend for connection apply', () => {
@@ -5142,7 +5165,7 @@ test('growth.js replaces MCP window.confirm with inline confirm and opens https 
   }
 });
 
-test('renderAll and setView render the five-entry shell, map legacy aliases, and pass the view to plusPanel', () => {
+test('renderAll and setView render the six-entry shell, map legacy aliases, and pass the view to plusPanel', () => {
   const calls = [];
   const state = { data: { revision: 'r1' }, view: 'overview', key: 'k', composing: true, onboard: {} };
   const dom = { viewTitle: {}, viewLede: {} };
@@ -5159,6 +5182,7 @@ test('renderAll and setView render the five-entry shell, map legacy aliases, and
   const VIEW_COPY = {
     overview: { title: '总览', lede: '' },
     models: { title: '模型', lede: '' },
+    conversations: { title: '会话', lede: '' },
     accounts: { title: '账号', lede: '' },
     usage: { title: '用量', lede: '' },
     maintenance: { title: '设置', lede: '' },
@@ -5196,9 +5220,11 @@ test('renderAll and setView render the five-entry shell, map legacy aliases, and
     return { setView, renderAll, VIEWS, VIEW_ALIASES };
   `)(state, dom, calls, VIEW_COPY);
 
-  assert.deepEqual(api.VIEWS, ['overview', 'models', 'accounts', 'usage', 'maintenance']);
+  assert.deepEqual(api.VIEWS, ['overview', 'models', 'conversations', 'accounts', 'usage', 'maintenance']);
   assert.equal(api.VIEW_ALIASES.subagents, 'models');
-  assert.equal(api.VIEW_ALIASES.conversations, 'maintenance');
+  assert.equal(api.VIEW_ALIASES.conversations, 'conversations');
+  assert.equal(api.VIEW_ALIASES.sessions, 'conversations');
+  assert.equal(api.VIEW_ALIASES.rebind, 'conversations');
   assert.equal(api.VIEW_ALIASES.settings, 'maintenance');
 
   api.renderAll();
@@ -5207,7 +5233,6 @@ test('renderAll and setView render the five-entry shell, map legacy aliases, and
   assert.ok(calls.includes('shell'));
   assert.equal(calls.includes('convShow'), false, 'the conversation list is not rendered on overview');
 
-  /* 旧的 subagents 入口映射到 models，并在同一个页面渲染子代理区。 */
   calls.length = 0;
   state.composing = true;
   api.setView('subagents', { persist: false });
@@ -5220,27 +5245,36 @@ test('renderAll and setView render the five-entry shell, map legacy aliases, and
   assert.ok(calls.includes('growth:models'));
   assert.ok(calls.includes('plus:models'));
 
-  /* 旧的 conversations 入口映射到 maintenance，并刷新会话维护区。 */
   calls.length = 0;
   api.setView('conversations', { persist: false });
+  assert.equal(state.view, 'conversations');
+  assert.ok(calls.includes('convShow'));
+  assert.ok(calls.includes('plus:conversations'));
+  assert.equal(calls.includes('overview:maintenance'), false);
+
+  calls.length = 0;
+  api.renderAll();
+  assert.ok(calls.includes('convShow'), 'renderAll on conversations keeps the conversation list in sync');
+  assert.ok(calls.includes('plus:conversations'));
+
+  calls.length = 0;
+  api.setView('maintenance', { persist: false });
   assert.equal(state.view, 'maintenance');
   assert.ok(calls.includes('overview:maintenance'));
   assert.ok(calls.includes('integrationMode'));
   assert.ok(calls.includes('growth:maintenance'));
-  assert.ok(calls.includes('convRefresh'));
-  assert.ok(calls.includes('plus:maintenance'));
+  assert.equal(calls.includes('convShow'), false);
+  assert.equal(calls.includes('convRefresh'), false);
 
   calls.length = 0;
   api.renderAll();
-  assert.ok(calls.includes('convShow'), 'renderAll on maintenance keeps the conversation list in sync');
-  assert.ok(calls.includes('plus:maintenance'));
+  assert.equal(calls.includes('convShow'), false, 'renderAll on maintenance no longer renders conversations');
 
   calls.length = 0;
   api.setView('accounts', { persist: false });
   assert.equal(state.view, 'accounts');
   assert.ok(calls.includes('plus:accounts'));
 
-  /* 未知视图与旧 work/extensions 别名都收敛到已定义入口。 */
   api.setView('work', { persist: false });
   assert.equal(state.view, 'models');
   api.setView('nonsense', { persist: false });
@@ -5484,13 +5518,14 @@ class ConvElement {
 function makeConversationPageEnv({ kimiRunning = false, models = null, conversations = null, reasonText = makeReasonText() } = {}) {
   const ui = {};
   for (const name of ['guide', 'guideText', 'refresh', 'status', 'result', 'query', 'count', 'list', 'empty',
-    'emptyNote', 'migration', 'migrationText', 'migrateAll', 'batch', 'batchModel', 'batchEffort', 'batchGo',
+    'emptyNote', 'migration', 'migrationText', 'migrateAll', 'batch', 'batchClear', 'batchModel', 'batchEffort', 'batchGo',
     'batchMigrate', 'batchNote', 'confirm', 'confirmText', 'confirmSubmit', 'confirmCancel']) {
     ui[name] = new ConvElement('div');
   }
   ui.queryClear = new ConvElement('button');
   ui.result.hidden = true;
   ui.migration.hidden = true;
+  ui.batch.hidden = true;
   ui.confirm.hidden = true;
   const rows = conversations || [
     { conversationKey: 'recent', title: '重构网关路由', workspacePath: '/Users/dev/projects/kimiwork-plus', updatedAtMs: Date.now() - 120000, modelAlias: 'k2d8-preview', isByok: false },
@@ -5501,7 +5536,7 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
   const toasts = [];
   const state = {
     key: 'session-key',
-    view: 'maintenance',
+    view: 'conversations',
     data: { integrationMode: 'gateway', models: [{ id: 'deepseek-v4-1-flash', name: 'DeepSeek V4.1 Flash' }] },
     conversations: { list: null, loading: false, error: '', query: '', stale: false, pending: false,
       targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null },
@@ -5521,7 +5556,7 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
     convGuide: ui.guide, convGuideText: ui.guideText, convRefresh: ui.refresh, convStatus: ui.status,
     convResult: ui.result, convQ: ui.query, convCount: ui.count, convList: ui.list, convEmpty: ui.empty,
     convEmptyNote: ui.emptyNote, convMigrationTip: ui.migration, convMigrationText: ui.migrationText,
-    convMigrateAll: ui.migrateAll, convBatch: ui.batch, convBatchModel: ui.batchModel, convBatchEffort: ui.batchEffort,
+    convMigrateAll: ui.migrateAll, convBatch: ui.batch, convBatchClear: ui.batchClear, convBatchModel: ui.batchModel, convBatchEffort: ui.batchEffort,
     convBatchGo: ui.batchGo, convBatchMigrate: ui.batchMigrate, convBatchNote: ui.batchNote,
     convConfirm: ui.confirm, convConfirmText: ui.confirmText, convConfirmSubmit: ui.confirmSubmit,
     convConfirmCancel: ui.confirmCancel,
@@ -5771,13 +5806,16 @@ test('app.js exposes the tray navigation hooks and only scrolls .main', () => {
   assert.match(appText, /window\.__kwpOpenUpdates\s*=/);
   const block = appText.slice(appText.indexOf('function openUpdatesPanel()'), appText.indexOf('function bindEvents()'));
   assert.match(block, /setView\('maintenance'\)/);
+  assert.match(block, /setSubtab\('maintenance', 'updates'\)/);
   assert.match(block, /pendingUpdatesPanelReveal = true/);
   assert.match(block, /scrollMainToElement\(panel\)/);
   assert.doesNotMatch(block, /scrollIntoView/);
   assert.match(block, /focus\(\{ preventScroll: true \}\)/);
-  assert.match(appText, /revealWorkspaceSection\('conversations-panel'\)/);
-  assert.equal(appText.includes("setSubtab('maintenance', 'connection')"), false, 'v1.1.14 has no maintenance subtabs');
-  assert.equal(htmlSource.includes('id="settings-tab-connection"'), false);
+  assert.match(appText, /window\.__kwpOpenConversations\s*=\s*\(\)\s*=>\s*\{\s*setView\('conversations'\)/);
+  assert.ok(htmlSource.includes('id="settings-tab-connection"'));
+  assert.ok(htmlSource.includes('id="settings-tab-extensions"'));
+  assert.ok(htmlSource.includes('id="settings-tab-updates"'));
+  assert.ok(htmlSource.includes('id="settings-tab-diagnostics"'));
   assert.match(htmlSource, /id="conversations-panel"/);
   assert.match(htmlSource, /id="update-panel"/);
   assert.match(htmlSource, /id="upd-check"/);
@@ -6388,7 +6426,7 @@ test('the top-bar refresh also reloads the conversations page', () => {
   const start = appText.indexOf('if (dom.refresh) dom.refresh.addEventListener');
   assert.notEqual(start, -1);
   const block = appText.slice(start, appText.indexOf('if (dom.connRetry)', start));
-  assert.match(block, /state\.view === 'maintenance'/);
+  assert.match(block, /state\.view === 'conversations'/);
   assert.match(block, /conversationsPanel\.refresh\(\)/);
 });
 
@@ -7096,4 +7134,501 @@ test('a row-level connection check records the detected protocol and imported ca
   assert.equal(recorded.ms, 321);
   assert.equal(state.connUpstreamProtocols['conn-1'], 'anthropic');
   assert.equal(toasts.at(-1)[1], 'ok');
+});
+
+test('inline connection delete shows model-count confirmation and calls POST /api/connections/delete with cascade', async () => {
+  const requests = [];
+  const toasts = [];
+  const makeEl = (tag) => {
+    const el = {
+      tagName: String(tag || 'div').toUpperCase(),
+      className: '',
+      textContent: '',
+      dataset: {},
+      attributes: {},
+      children: [],
+      hidden: false,
+      disabled: false,
+      setAttribute(k, v) { this.attributes[k] = String(v); },
+      append(...nodes) { this.children.push(...nodes); },
+      replaceChildren(...nodes) { this.children = [...nodes]; },
+    };
+    return el;
+  };
+  const textOf = (node) => !node ? '' : [node.textContent || '', ...(node.children || []).map(textOf)].join(' ');
+  const state = {
+    key: 'session',
+    stateReadEpoch: 1,
+    connsSaving: false,
+    connDeleteId: null,
+    connDeletingId: null,
+    connChecks: {},
+    connPicker: { connectionId: 'conn-a', loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 1 },
+    conns: {
+      draft: [
+        { id: 'conn-a', name: 'DeepSeek 官方', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true, legacy: false, modelCount: 2 },
+        { id: 'conn-b', name: '空服务商', baseURL: 'https://api.empty.example/v1', protocols: ['chat'], apiKeySet: true, legacy: false, modelCount: 0 },
+      ],
+      editing: { originalId: 'conn-a' },
+      errors: [],
+      dirty: false,
+    },
+    data: {
+      revision: 'rev-10',
+      configuration: { state: 'ready' },
+      connections: {
+        saved: [
+          { id: 'conn-a', name: 'DeepSeek 官方', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true },
+          { id: 'conn-b', name: '空服务商', baseURL: 'https://api.empty.example/v1', protocols: ['chat'], apiKeySet: true },
+        ],
+      },
+      models: [
+        { id: 'conn-a/chat/m1', connectionId: 'conn-a', upstreamModelId: 'm1' },
+        { id: 'conn-a/chat/m2', connectionId: 'conn-a', upstreamModelId: 'm2' },
+      ],
+    },
+  };
+  const code = [
+    'const API = { connectionsDelete: "/api/connections/delete" };',
+    'const UPSTREAM_REASON = {}; const DIAG_REASON = {};',
+    'const CREDENTIAL_VAULT_BLOCKED = [];',
+    'const fmtCount = n => String(n); const fmtMs = n => n + "ms";',
+    'const setConnErrors = errs => { state.conns.errors = errs; };',
+    'const renderConnections = () => {}; const renderAll = () => {};',
+    'const loadState = async () => true;',
+    'const handleSaveFailure = async () => {};',
+    'const showToast = (msg, tone) => toasts.push([msg, tone]);',
+    'const adoptState = next => { state.data = next; };',
+    'const connectionRowsOf = d => d?.connections?.saved || [];',
+    sourceFunction('protocolList'),
+    sourceFunction('connectionProtocol'),
+    sourceFunction('connectionProtocolText'),
+    sourceFunction('connectionDraftRow'),
+    sourceFunction('connectionDraftFrom'),
+    sourceFunction('connectionsSignature'),
+    sourceFunction('savedConnectionsSignature'),
+    sourceFunction('protocolLabel'),
+    sourceFunction('upstreamReasonText'),
+    sourceFunction('connectionKeyText'),
+    sourceFunction('formatApiErrorWithModels'),
+    sourceFunction('resetConnPickerState'),
+    sourceFunction('closeConnectionModelPicker'),
+    sourceFunction('buildConnectionRow'),
+    sourceFunction('requestConnectionDelete'),
+    sourceFunction('cancelConnectionDelete'),
+    sourceFunction('confirmConnectionDelete'),
+    'return { buildConnectionRow, requestConnectionDelete, cancelConnectionDelete, confirmConnectionDelete };',
+  ].join('\n');
+  const api = new Function('document', 'state', 'request', 'toasts', code)(
+    { createElement: makeEl },
+    state,
+    async (path, options) => {
+      requests.push({ path, method: options.method, body: options.body });
+      return {
+        ok: true,
+        removed: { models: 2 },
+        state: {
+          revision: 'rev-11',
+          configuration: { state: 'ready' },
+          connections: { saved: [state.data.connections.saved[1]] },
+          models: [],
+        },
+      };
+    },
+    toasts,
+  );
+
+  api.requestConnectionDelete('conn-b');
+  const zeroRow = api.buildConnectionRow(state.conns.draft[1], 1);
+  assert.match(textOf(zeroRow), /确认移除服务商「空服务商」？/);
+  assert.match(textOf(zeroRow), /确认移除/);
+  api.cancelConnectionDelete();
+  assert.equal(state.connDeleteId, null);
+  assert.equal(requests.length, 0);
+
+  api.requestConnectionDelete('conn-a');
+  assert.equal(state.connPicker.connectionId, null, 'requesting delete closes the same provider model picker');
+  const cascadeRow = api.buildConnectionRow(state.conns.draft[0], 0);
+  assert.match(textOf(cascadeRow), /移除「DeepSeek 官方」将一并移除旗下 2 个模型（若子代理引用了这些模型会自动切回跟随主会话）。确认移除？/);
+  assert.match(textOf(cascadeRow), /一并移除/);
+
+  const ok = await api.confirmConnectionDelete('conn-a');
+  assert.equal(ok, true);
+  assert.deepEqual(requests, [{
+    path: '/api/connections/delete',
+    method: 'POST',
+    body: { revision: 'rev-10', connectionId: 'conn-a', cascade: true },
+  }]);
+  assert.equal(state.data.revision, 'rev-11');
+  assert.equal(state.conns.editing, null);
+  assert.equal(state.connDeleteId, null);
+  assert.equal(toasts.at(-1)[1], 'ok');
+});
+
+test('inline provider model picker preserves existing models, applies defaults, sends pruneSubagents, and recovers on failure', async () => {
+  const requests = [];
+  const toasts = [];
+  let failSave = true;
+  const savedModelKept = {
+    id: 'conn-a/chat/deepseek-chat',
+    connectionId: 'conn-a',
+    upstreamModelId: 'deepseek-chat',
+    name: '自定义 DeepSeek 名称',
+    protocol: 'chat',
+    contextWindow: 65536,
+    tools: true,
+    pricing: { inputPerMillion: 1, outputPerMillion: 2 },
+    failover: [{ connectionId: 'conn-b', upstreamModelId: 'backup-1' }],
+  };
+  const savedModelRemoved = {
+    id: 'conn-a/chat/old-model',
+    connectionId: 'conn-a',
+    upstreamModelId: 'old-model',
+    protocol: 'chat',
+    contextWindow: 65536,
+    tools: true,
+  };
+  const otherConnModel = {
+    id: 'conn-b/responses/gpt-5',
+    connectionId: 'conn-b',
+    upstreamModelId: 'gpt-5',
+    protocol: 'responses',
+    contextWindow: 200000,
+    tools: true,
+  };
+  const state = {
+    key: 'session',
+    stateReadEpoch: 1,
+    providers: { presets: [] },
+    connDeleteId: null,
+    connUpstreamProtocols: {},
+    connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0 },
+    conns: {
+      draft: [
+        { id: 'conn-a', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true, legacy: false },
+        { id: 'conn-b', name: 'OpenAI', baseURL: 'https://api.openai.com/v1', protocols: ['responses'], apiKeySet: true, legacy: false },
+      ],
+    },
+    data: {
+      revision: 'rev-20',
+      configuration: { state: 'ready' },
+      connections: {
+        saved: [
+          { id: 'conn-a', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true },
+          { id: 'conn-b', name: 'OpenAI', baseURL: 'https://api.openai.com/v1', protocols: ['responses'], apiKeySet: true },
+        ],
+      },
+      models: [savedModelKept, savedModelRemoved, otherConnModel],
+    },
+  };
+  const catalogHintConst = source.slice(source.indexOf('const CATALOG_MODEL_HINTS ='), source.indexOf('function matchCatalogHint'));
+  const code = [
+    'const API = { connectionsProbe: "/api/connections/probe", discovery: "/api/discovery", workspace: "/api/workspace" };',
+    'const UPSTREAM_REASON = {}; const DIAG_REASON = {}; const DISCOVERY_REASON = {};',
+    'const dom = { connsList: null };',
+    'const fmtCount = n => String(n); const fmtK = n => n + "";',
+    'const renderConnections = () => {}; const renderAll = () => {};',
+    'const loadState = async () => true;',
+    'const showToast = (msg, tone) => toasts.push([msg, tone]);',
+    'const adoptState = next => { state.data = next; };',
+    'const connectionRowsOf = d => d?.connections?.saved || [];',
+    'const routeIdFor = (cid, uid, proto) => cid + "/" + proto + "/" + uid;',
+    catalogHintConst,
+    sourceFunction('matchCatalogHint'),
+    sourceFunction('providerPreset'),
+    sourceFunction('isAnthropicPreset'),
+    sourceFunction('presetMetadataSource'),
+    sourceFunction('presetOnboardModels'),
+    sourceFunction('inferModelDefaults'),
+    sourceFunction('protocolList'),
+    sourceFunction('connectionProtocol'),
+    sourceFunction('connectionDraftRow'),
+    sourceFunction('connectionDraftFrom'),
+    sourceFunction('connectionsSignature'),
+    sourceFunction('savedConnectionsSignature'),
+    sourceFunction('connectionPayload'),
+    sourceFunction('draftConnection'),
+    sourceFunction('connectionDefaultUpstreamProtocol'),
+    sourceFunction('mergeOnboardPresetMetadata'),
+    sourceFunction('positiveInteger'),
+    sourceFunction('sourceURLOf'),
+    sourceFunction('onboardRowSource'),
+    sourceFunction('onboardRowFrom'),
+    sourceFunction('enrichProbeCatalogRow'),
+    sourceFunction('savedOnboardRow'),
+    sourceFunction('savedOnboardModelRow'),
+    sourceFunction('currentConnectionLimit'),
+    sourceFunction('buildOnboardRow'),
+    sourceFunction('upstreamReasonText'),
+    sourceFunction('discoveryReasonText'),
+    sourceFunction('formatApiErrorWithModels'),
+    sourceFunction('resetConnPickerState'),
+    sourceFunction('closeConnectionModelPicker'),
+    sourceFunction('filteredConnectionPickerModels'),
+    sourceFunction('syncConnectionPickerDom'),
+    sourceFunction('findConnectionRow'),
+    sourceFunction('fetchConnectionPickerModels'),
+    sourceFunction('openConnectionModelPicker'),
+    sourceFunction('setConnectionPickerQuery'),
+    sourceFunction('toggleConnectionPickerItem'),
+    sourceFunction('toggleConnectionPickerSelectAll'),
+    sourceFunction('saveConnectionModelPicker'),
+    'return { openConnectionModelPicker, setConnectionPickerQuery, toggleConnectionPickerItem, toggleConnectionPickerSelectAll, saveConnectionModelPicker, filteredConnectionPickerModels };',
+  ].join('\n');
+  const api = new Function('state', 'request', 'toasts', code)(
+    state,
+    async (path, options) => {
+      requests.push({ path, body: options.body });
+      if (path === '/api/connections/probe') {
+        return { ok: true, connectionProtocol: 'chat', catalog: { models: [{ id: 'deepseek-chat' }, { id: 'custom-new-llm' }] } };
+      }
+      if (path === '/api/workspace') {
+        if (failSave) {
+          const err = new Error('后端暂时拒绝保存');
+          err.status = 409;
+          throw err;
+        }
+        return {
+          state: { ...state.data, revision: 'rev-21', models: options.body.models },
+        };
+      }
+      return {};
+    },
+    toasts,
+  );
+
+  api.openConnectionModelPicker('conn-a');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(requests[0].path, '/api/connections/probe');
+  assert.deepEqual(requests[0].body, { connectionId: 'conn-a' });
+  assert.deepEqual(state.connPicker.selectedIds.slice().sort(), ['deepseek-chat', 'old-model'], 'preselects saved models for conn-a');
+  assert.ok(state.connPicker.models.some((m) => m.upstreamModelId === 'old-model' && m.savedOnly === true), 'keeps saved-only models visible');
+
+  api.setConnectionPickerQuery('custom-new');
+  assert.deepEqual(api.filteredConnectionPickerModels().map((m) => m.upstreamModelId), ['custom-new-llm']);
+  api.toggleConnectionPickerSelectAll();
+  assert.ok(state.connPicker.selectedIds.includes('custom-new-llm'));
+  api.toggleConnectionPickerItem('old-model', false);
+  assert.equal(state.connPicker.selectedIds.includes('old-model'), false);
+
+  const firstAttempt = await api.saveConnectionModelPicker();
+  assert.equal(firstAttempt, false);
+  assert.equal(state.connPicker.connectionId, 'conn-a', 'picker stays open on save failure');
+  assert.match(state.connPicker.error, /后端暂时拒绝保存/);
+
+  failSave = false;
+  const secondAttempt = await api.saveConnectionModelPicker();
+  assert.equal(secondAttempt, true);
+  assert.equal(state.connPicker.connectionId, null, 'picker closes on save success');
+  const wsReq = requests.filter((r) => r.path === '/api/workspace').at(-1);
+  assert.equal(wsReq.body.pruneSubagents, true);
+  assert.equal(wsReq.body.revision, 'rev-20');
+  const kept = wsReq.body.models.find((m) => m.id === 'conn-a/chat/deepseek-chat');
+  assert.deepEqual(kept, savedModelKept, 'existing model keeps custom name, pricing and failover untouched');
+  assert.equal(wsReq.body.models.some((m) => m.id === 'conn-a/chat/old-model'), false, 'unchecked model is removed');
+  assert.ok(wsReq.body.models.some((m) => m.id === 'conn-b/responses/gpt-5'), 'other provider models stay untouched');
+  const added = wsReq.body.models.find((m) => m.upstreamModelId === 'custom-new-llm');
+  assert.equal(added.contextWindow, 131072, 'unknown model defaults to 128K context');
+  assert.equal(added.tools, true, 'unknown model defaults to tools=true');
+});
+
+test('restart-panel hides when applied normally and surfaces when credentials or apply fail', () => {
+  const copy = source.slice(source.indexOf('const APPLY_COPY ='), source.indexOf('\nconst APPLY_REFUSAL ='));
+  const state = { pendingAction: null, applyUnsupported: false };
+  const dom = {
+    restartPanel: { hidden: false },
+    applyButton: {}, restartHead: {}, applyVerdict: {}, applyVerdictDot: {}, applyVerdictWord: {}, applyVerdictNote: {},
+  };
+  const render = new Function('state', 'dom', `
+    ${copy}
+    const connectionsChanged = d => Boolean(d?.connections?.restartRequired);
+    const isInFlight = op => op?.state === 'running';
+    const setText = (el, text) => { el.textContent = text; };
+    const setHidden = (el, h) => { el.hidden = Boolean(h); };
+    const setDot = () => {};
+    ${sourceFunction('credentialApplyReason')}
+    ${sourceFunction('isManagedBackend')}
+    ${sourceFunction('applyAvailability')}
+    ${sourceFunction('applyState')}
+    ${sourceFunction('renderApply')}
+    return renderApply;
+  `)(state, dom);
+
+  render({ configuration: { state: 'ready' }, service: { mode: 'service', state: 'running' },
+    connections: { restartRequired: false, saved: [{ id: 'ds', apiKeySet: true }], apply: { state: 'applied' } } });
+  assert.equal(dom.restartPanel.hidden, true, 'normal applied state hides restart-panel');
+
+  render({ configuration: { state: 'ready' }, connections: { restartRequired: false, apply: { state: 'failed', reason: 'credentials_unavailable' } } });
+  assert.equal(dom.restartPanel.hidden, false, 'credential auth prompt reveals restart-panel');
+
+  render({ configuration: { state: 'ready' }, connections: { restartRequired: true, apply: { state: 'failed' } } });
+  assert.equal(dom.restartPanel.hidden, false, 'apply failure reveals restart-panel');
+});
+
+test('conversations batch bar auto-reveals on row selection and auto-hides on clear', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: false });
+  await env.page.refresh();
+  assert.equal(env.ui.batch.hidden, true, 'batch bar starts hidden when no conversation is selected');
+  const firstCheckbox = findNode(env.ui.list.children[0], (node) => node.dataset?.convSelect);
+  firstCheckbox.checked = true;
+  await firstCheckbox.fire('change');
+  assert.equal(env.ui.batch.hidden, false, 'selecting a conversation reveals the sticky batch bar');
+  assert.match(env.ui.batchNote.textContent, /已选择 1 个会话/);
+
+  await env.ui.batchClear.fire('click');
+  assert.deepEqual(env.state.conversations.selected, []);
+  assert.equal(firstCheckbox.checked, false);
+  assert.equal(env.ui.batch.hidden, true, 'clearing selection hides the sticky batch bar again');
+});
+
+test('setSubtab synchronizes aria-selected, tabindex and pane visibility', () => {
+  const tabs = [
+    { dataset: { subtabGroup: 'maintenance', subtab: 'connection' }, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+    { dataset: { subtabGroup: 'maintenance', subtab: 'updates' }, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+  ];
+  const panes = [
+    { dataset: { subtabGroup: 'maintenance', subtabPane: 'connection' }, hidden: false },
+    { dataset: { subtabGroup: 'maintenance', subtabPane: 'updates' }, hidden: true },
+  ];
+  const state = { subtabs: {} };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector.includes('[data-subtab]')) return tabs;
+      if (selector.includes('[data-subtab-pane]')) return panes;
+      return [];
+    },
+  };
+  const setSubtab = new Function('state', 'document', `
+    const SUBTAB_STORE = 'subtabs';
+    const sessionStorage = { setItem() {} };
+    const $ = () => null;
+    ${sourceFunction('setSubtab')}
+    return setSubtab;
+  `)(state, document);
+
+  setSubtab('maintenance', 'updates');
+  assert.equal(tabs[0].attrs['aria-selected'], 'false');
+  assert.equal(tabs[0].attrs.tabindex, '-1');
+  assert.equal(tabs[1].attrs['aria-selected'], 'true');
+  assert.equal(tabs[1].attrs.tabindex, '0');
+  assert.equal(panes[0].hidden, true);
+  assert.equal(panes[1].hidden, false);
+});
+
+test('onboard wizard collapses by default when providers exist and resets to blank when opened via add button', () => {
+  const state = {
+    editor: null,
+    data: {
+      revision: 'rev-1',
+      configuration: { state: 'ready' },
+      connections: { saved: [{ id: 'ds', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true }] },
+      models: [],
+    },
+    onboard: { touched: false, discovery: { models: [{ id: 'old' }] }, discoveryFor: 'old', query: 'abc', saveErrors: ['err'], probeResult: { ok: true }, protocol: 'chat', protocolMode: 'chat', upstreamProtocol: 'anthropic', protocolTouched: true },
+  };
+  const dom = {
+    onboardDisclosure: { open: false, dataset: {} },
+    onboardPreset: { value: 'deepseek', dataset: { presetId: 'deepseek' }, focus() {} },
+    onboardKey: { value: 'sk-old' },
+    onboardBase: { value: 'https://api.deepseek.com/v1' },
+    onboardName: { value: 'DeepSeek' },
+    onboardId: { value: 'ds' },
+    onboardModelQuery: { value: 'abc' },
+    onboardAdvancedFields: { open: true },
+    onboardKeyHint: { textContent: '' },
+    onboardDiscoverState: { textContent: '' },
+    onboardErrors: { hidden: false },
+    onboardSaveErrors: { hidden: false },
+  };
+  const subtabs = [];
+  const open = new Function('state', 'dom', 'subtabs', `
+    const setView = () => {};
+    const setSubtab = (g, t) => subtabs.push([g, t]);
+    const closeEditor = () => {};
+    const editorDirty = () => false;
+    const showToast = () => {};
+    const setText = (el, v) => { if (el) el.textContent = v; };
+    const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
+    const renderErrorList = () => {};
+    const scrollMainToElement = () => {};
+    const renderOnboard = () => {};
+    ${sourceFunction('openOnboardWizard')}
+    return openOnboardWizard;
+  `)(state, dom, subtabs);
+
+  open();
+  assert.deepEqual(subtabs, [['models', 'providers']]);
+  assert.equal(dom.onboardDisclosure.open, true);
+  assert.equal(state.onboard.touched, true);
+  assert.equal(state.onboard.discovery, null);
+  assert.equal(state.onboard.protocolMode, 'auto');
+  assert.equal(state.onboard.upstreamProtocol, '');
+  assert.equal(dom.onboardPreset.value, '');
+  assert.equal(dom.onboardKey.value, '');
+  assert.equal(dom.onboardBase.value, '');
+  assert.equal(dom.onboardName.value, '');
+  assert.equal(dom.onboardId.value, '');
+  assert.equal(dom.onboardModelQuery.value, '');
+});
+
+test('inline provider model picker falls back to POST /api/discovery when probe returns no catalog', async () => {
+  const requests = [];
+  const state = {
+    key: 'session',
+    stateReadEpoch: 1,
+    providers: { presets: [] },
+    connDeleteId: null,
+    connUpstreamProtocols: {},
+    connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0 },
+    conns: { draft: [{ id: 'conn-a', name: 'A', baseURL: 'https://a.example/v1', protocols: ['chat'], apiKeySet: true, legacy: false }] },
+    data: {
+      revision: 'rev-30',
+      connections: { saved: [{ id: 'conn-a', name: 'A', baseURL: 'https://a.example/v1', protocols: ['chat'], apiKeySet: true }] },
+      models: [],
+    },
+  };
+  const catalogHintConst = source.slice(source.indexOf('const CATALOG_MODEL_HINTS ='), source.indexOf('function matchCatalogHint'));
+  const open = new Function('state', 'request', `
+    const API = { connectionsProbe: '/api/connections/probe', discovery: '/api/discovery' };
+    const UPSTREAM_REASON = {}; const DIAG_REASON = {}; const DISCOVERY_REASON = {};
+    const fmtCount = n => String(n);
+    const renderConnections = () => {};
+    const connectionRowsOf = d => d?.connections?.saved || [];
+    ${catalogHintConst}
+    ${sourceFunction('matchCatalogHint')}
+    ${sourceFunction('providerPreset')}
+    ${sourceFunction('isAnthropicPreset')}
+    ${sourceFunction('presetMetadataSource')}
+    ${sourceFunction('presetOnboardModels')}
+    ${sourceFunction('inferModelDefaults')}
+    ${sourceFunction('protocolList')}
+    ${sourceFunction('connectionProtocol')}
+    ${sourceFunction('draftConnection')}
+    ${sourceFunction('connectionDefaultUpstreamProtocol')}
+    ${sourceFunction('mergeOnboardPresetMetadata')}
+    ${sourceFunction('positiveInteger')}
+    ${sourceFunction('sourceURLOf')}
+    ${sourceFunction('onboardRowSource')}
+    ${sourceFunction('onboardRowFrom')}
+    ${sourceFunction('enrichProbeCatalogRow')}
+    ${sourceFunction('savedOnboardModelRow')}
+    ${sourceFunction('upstreamReasonText')}
+    ${sourceFunction('discoveryReasonText')}
+    ${sourceFunction('findConnectionRow')}
+    ${sourceFunction('fetchConnectionPickerModels')}
+    ${sourceFunction('openConnectionModelPicker')}
+    return openConnectionModelPicker;
+  `)(state, async (path, options) => {
+    requests.push({ path, body: options.body });
+    if (path === '/api/connections/probe') return { ok: true, catalog: { models: [] } };
+    if (path === '/api/discovery') return { models: [{ id: 'fallback-model' }] };
+    return {};
+  });
+
+  open('conn-a');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(requests.map((r) => r.path), ['/api/connections/probe', '/api/discovery']);
+  assert.deepEqual(requests[1].body, { revision: 'rev-30', connectionId: 'conn-a' });
+  assert.deepEqual(state.connPicker.models.map((m) => m.upstreamModelId), ['fallback-model']);
+  assert.equal(state.connPicker.loading, false);
 });

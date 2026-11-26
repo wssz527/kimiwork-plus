@@ -1,5 +1,5 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDefaultUpstreamProtocol, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, draftConnectionProtocol, fillOnboardForm, fillOnboardPresets, formatApiErrorWithModels, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, saveConnections, saveOnboard, savedConnectionsSignature, savedOnboardTarget, setOnboardProtocol, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, VIEWS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setText, showGate, showToast, state } from './app-core.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, cancelConnectionDelete, closeConnectionEditor, closeConnectionModelPicker, configReady, confirmConnectionDelete, connectionDefaultUpstreamProtocol, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, draftConnectionProtocol, fillOnboardForm, fillOnboardPresets, formatApiErrorWithModels, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, reloadConnectionModelPicker, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, requestConnectionDelete, saveConnectionModelPicker, saveConnections, saveOnboard, savedConnectionsSignature, savedOnboardTarget, setConnectionPickerQuery, setOnboardProtocol, toggleConnectionModelPicker, toggleConnectionPickerItem, toggleConnectionPickerSelectAll, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEWS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, applyInferredModelDefaults, catalogueWith, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
 import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
@@ -9,6 +9,32 @@ let renderGrowth = () => {};
 let usagePanel = { show() {}, reload: async () => {}, reset() {} };
 let plusPanel = { render() {}, refresh: async () => {} };
 let conversationsPanel = { show() {}, refresh: async () => {}, onState() {} };
+
+function initSubtabs() {
+  let stored = {};
+  try {
+    const raw = sessionStorage.getItem(SUBTAB_STORE);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === 'object') stored = parsed;
+  } catch {
+    stored = {};
+  }
+  state.subtabs = { ...(state.subtabs || {}), ...stored };
+  if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+  const groups = new Map();
+  document.querySelectorAll('[data-subtab-group][data-subtab]').forEach((btn) => {
+    const group = btn.dataset.subtabGroup;
+    const tab = btn.dataset.subtab;
+    if (!group || !tab) return;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(tab);
+  });
+  for (const [group, tabs] of groups.entries()) {
+    const preferred = state.subtabs[group];
+    const active = tabs.includes(preferred) ? preferred : tabs[0];
+    if (active) setSubtab(group, active, { persist: false });
+  }
+}
 
 function initView() {
   let stored = null;
@@ -59,6 +85,9 @@ function setView(view, { persist = true } = {}) {
       renderSubagents();
       if (state.data) renderGrowth(state.data, { view: 'models' });
     }
+    if (view === 'conversations') {
+      if (state.key) conversationsPanel.show();
+    }
     if (view === 'accounts') {
       if (state.data) plusPanel.render(state.data, { view: 'accounts' });
     }
@@ -68,7 +97,6 @@ function setView(view, { persist = true } = {}) {
         renderIntegrationMode(state.data);
         renderGrowth(state.data, { view: 'maintenance' });
       }
-      if (state.key) void conversationsPanel.refresh();
     }
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
@@ -164,13 +192,14 @@ function renderAll() {
     renderPicker();
     renderSubagents();
     renderGrowth(state.data, { view: 'models' });
+  } else if (view === 'conversations') {
+    conversationsPanel.show();
   } else if (view === 'accounts') {
     plusPanel.render(state.data, { view: 'accounts' });
   } else if (view === 'maintenance') {
     renderOverview(state.data, { view: 'maintenance' });
     renderIntegrationMode(state.data);
     renderGrowth(state.data, { view: 'maintenance' });
-    conversationsPanel.show();
   }
 }
 
@@ -218,8 +247,7 @@ function renderLoading() {
   if (dom.modelBody) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    /* 模型表共 8 列（ID、路由、协议、预算、输出、能力、档位、操作）。 */
-    td.colSpan = 8;
+    td.colSpan = 7;
     td.className = 'muted';
     td.textContent = '正在读取模型目录…';
     tr.append(td);
@@ -277,7 +305,11 @@ function editingBusy() {
   const connEditing = Boolean(state.conns && state.conns.editing && active
     && ((dom.connEditor && typeof dom.connEditor.contains === 'function' && dom.connEditor.contains(active))
       || ['ce-name', 'ce-id', 'ce-base', 'ce-key', 'ce-keyenv'].includes(active.id)));
-  return Boolean(state.composing || state.modelsSaving || state.connsSaving || state.subagentSaving
+  const connPickerActive = Boolean(state.connPicker && state.connPicker.connectionId
+    && (state.connPicker.loading || state.connPicker.saving
+      || (active && active.dataset && ('connPickerQuery' in active.dataset || 'connPickerItem' in active.dataset))));
+  return Boolean(state.composing || state.modelsSaving || state.connsSaving || state.connDeletingId || state.subagentSaving
+    || connPickerActive
     || (state.onboard && (state.onboard.saving || state.onboard.busy)) || onboardEditingText()
     || (state.conns && state.conns.editing && (state.conns.editing.discovering || connEditing)));
 }
@@ -647,6 +679,7 @@ let pendingUpdatesPanelReveal = false;
 
 function openUpdatesPanel() {
   setView('maintenance');
+  if (typeof setSubtab === 'function') setSubtab('maintenance', 'updates');
   const revealed = typeof dom.shell === 'undefined' || !dom.shell || dom.shell.hidden !== true;
   if (!revealed) {
     pendingUpdatesPanelReveal = true;
@@ -655,6 +688,9 @@ function openUpdatesPanel() {
   const panel = $('update-panel');
   if (panel) {
     for (let node = panel; node; node = node.parentElement) {
+      if (node.dataset && node.dataset.subtabGroup && node.dataset.subtabPane && typeof setSubtab === 'function') {
+        setSubtab(node.dataset.subtabGroup, node.dataset.subtabPane);
+      }
       if (node.tagName === 'DETAILS') node.open = true;
     }
     scrollMainToElement(panel);
@@ -674,10 +710,31 @@ function flushPendingUpdatesPanelReveal() {
 function bindEvents() {
   conversationsPanel = mountConversationsPage();
   state.conversationsStateChanged = conversationsPanel.onState;
-  if (state.view === 'maintenance' && state.key) conversationsPanel.show();
+  if (state.view === 'conversations' && state.key) conversationsPanel.show();
   VIEWS.forEach(view => {
     const button = $('nav-' + view);
     if (button) button.addEventListener('click', () => setView(view));
+  });
+  document.querySelectorAll('[data-subtab-group][data-subtab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      setSubtab(button.dataset.subtabGroup, button.dataset.subtab);
+    });
+    button.addEventListener('keydown', (event) => {
+      const group = button.dataset.subtabGroup;
+      const tabs = Array.from(document.querySelectorAll(`[data-subtab-group="${group}"][data-subtab]`));
+      const index = tabs.indexOf(button);
+      if (index < 0 || !tabs.length) return;
+      let nextIndex = -1;
+      if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = tabs.length - 1;
+      if (nextIndex < 0) return;
+      event.preventDefault();
+      const target = tabs[nextIndex];
+      setSubtab(group, target.dataset.subtab);
+      if (typeof target.focus === 'function') target.focus();
+    });
   });
 
   if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => {
@@ -696,6 +753,10 @@ function bindEvents() {
     tab?.focus();
   });
   $('overview-details')?.addEventListener('click', () => {
+    setView('maintenance');
+    revealWorkspaceSection('native-panel');
+  });
+  dom.overviewSwitchMode?.addEventListener('click', () => {
     setView('maintenance');
     revealWorkspaceSection('native-panel');
   });
@@ -752,8 +813,7 @@ function bindEvents() {
     try {
       const tasks = [loadState(), refreshOverviewToday({ force: true })];
       if (state.view === 'usage') tasks.push(usagePanel.reload());
-      /* 设置页内嵌的会话维护来自独立接口：顶栏刷新时一起重读。 */
-      if (state.view === 'maintenance') tasks.push(conversationsPanel.refresh());
+      if (state.view === 'conversations') tasks.push(conversationsPanel.refresh());
       if (plusPanel && typeof plusPanel.refresh === 'function') tasks.push(plusPanel.refresh({ live: state.view === 'usage' }));
       await Promise.all(tasks);
     } finally {
@@ -1144,33 +1204,64 @@ function bindEvents() {
     renderConnections();
   });
   if (dom.connsSave) dom.connsSave.addEventListener('click', saveConnections);
-  if (dom.connsList) dom.connsList.addEventListener('click', (event) => {
-    const node = event.target && event.target.closest ? event.target.closest('button') : null;
-    if (!node) return;
-    if (node.dataset.connectionCheck) {
-      void runConnectionCheck(node.dataset.connectionCheck);
-      return;
-    }
-    if (node.dataset.connectionEdit) {
-      const row = (state.conns.draft || []).find((entry) => entry.id === node.dataset.connectionEdit);
-      if (row) openConnectionEditor(row);
-      return;
-    }
-    if (node.dataset.connectionRemove) {
-      const id = node.dataset.connectionRemove;
-      const used = ((state.data && state.data.models) || []).filter((model) => model.connectionId === id);
-      if (used.length) {
-        setConnErrors(['仍有 ' + used.length + ' 个模型使用该连接（'
-          + used.slice(0, 3).map((model) => model.name || model.upstreamModelId || model.id).join('、') + (used.length > 3 ? ' 等' : '')
-          + '）。请先在模型目录改到其他连接，再移除。']);
+  if (dom.connsList) {
+    dom.connsList.addEventListener('click', (event) => {
+      const node = event.target && event.target.closest ? event.target.closest('button') : null;
+      if (!node) return;
+      if (node.dataset.connectionCheck) {
+        void runConnectionCheck(node.dataset.connectionCheck);
         return;
       }
-      state.conns.draft = (state.conns.draft || []).filter((entry) => entry.id !== id);
-      if (state.conns.editing && state.conns.editing.originalId === id) state.conns.editing = null;
-      setConnErrors([]);
-      renderConnections();
-    }
-  });
+      if (node.dataset.connectionModels) {
+        toggleConnectionModelPicker(node.dataset.connectionModels);
+        return;
+      }
+      if (node.dataset.connectionEdit) {
+        const row = (state.conns.draft || []).find((entry) => entry.id === node.dataset.connectionEdit);
+        if (row) openConnectionEditor(row);
+        return;
+      }
+      if (node.dataset.connectionRemove) {
+        requestConnectionDelete(node.dataset.connectionRemove);
+        return;
+      }
+      if (node.dataset.connectionRemoveConfirm) {
+        void confirmConnectionDelete(node.dataset.connectionRemoveConfirm);
+        return;
+      }
+      if (node.dataset.connectionRemoveCancel) {
+        cancelConnectionDelete();
+        return;
+      }
+      if (node.dataset.connPickerReload) {
+        reloadConnectionModelPicker(node.dataset.connPickerReload);
+        return;
+      }
+      if (node.dataset.connPickerClose) {
+        closeConnectionModelPicker();
+        return;
+      }
+      if (node.dataset.connPickerSelectAll) {
+        toggleConnectionPickerSelectAll();
+        return;
+      }
+      if (node.dataset.connPickerSave) {
+        void saveConnectionModelPicker();
+      }
+    });
+    dom.connsList.addEventListener('input', (event) => {
+      const target = event.target;
+      if (target && target.dataset && 'connPickerQuery' in target.dataset) {
+        setConnectionPickerQuery(target.value);
+      }
+    });
+    dom.connsList.addEventListener('change', (event) => {
+      const target = event.target;
+      if (target && target.dataset && target.dataset.connPickerItem) {
+        toggleConnectionPickerItem(target.dataset.connPickerItem, target.checked === true);
+      }
+    });
+  }
   if (dom.connEditorClose) dom.connEditorClose.addEventListener('click', closeConnectionEditor);
   if (dom.connEditorCancel) dom.connEditorCancel.addEventListener('click', closeConnectionEditor);
   if (dom.connEditorApply) dom.connEditorApply.addEventListener('click', saveConnections);
@@ -1390,6 +1481,9 @@ function adoptLocationKey() {
   /* 新会话属于另一份配置：旧草稿与已读候选必须丢弃，否则会把上一会话的
      连接、Key 或上下文设置带进这一份。 */
   state.conns = { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] };
+  state.connDeleteId = null;
+  state.connDeletingId = null;
+  state.connPicker = { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0, detectedProtocol: null, detectedUpstreamProtocol: '' };
   state.connUpstreamProtocols = {};
   state.draft = null;
   state.draftDirty = false;
@@ -1471,8 +1565,7 @@ function boot() {
   };
   window.__kwpOpenAccounts = openAccountsTab;
   window.__kwpOpenConversations = () => {
-    setView('maintenance');
-    revealWorkspaceSection('conversations-panel');
+    setView('conversations');
     void conversationsPanel.refresh();
   };
   window.__kwpOpenUpdates = () => openUpdatesPanel();
@@ -1492,6 +1585,7 @@ function boot() {
   /* 会话密钥必须先就绪：停留在「用量」等视图时，挂载就会立刻发出第一笔请求，
      先挂视图再读密钥会让那次请求带着空密钥失败，界面上闪现「缺少面板会话密钥」。 */
   state.key = readKey();
+  initSubtabs();
   initView();
   bindEvents();
   observeMasthead();
