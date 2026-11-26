@@ -1,6 +1,6 @@
-import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, draftConnectionProtocol, fillOnboardForm, fillOnboardPresets, fillServiceForm, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, readServiceForm, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, renderServices, saveConnections, saveOnboard, saveSearchServices, savedConnectionsSignature, savedOnboardTarget, searchAvailable, serviceDraftFrom, serviceRowOf, serviceSignature, setOnboardProtocol, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
-import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
-import { applyBudgetPreset, catalogueWith, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
+import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, closeConnectionEditor, configReady, connectionDefaultUpstreamProtocol, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, draftConnectionProtocol, fillOnboardForm, fillOnboardPresets, formatApiErrorWithModels, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, saveConnections, saveOnboard, savedConnectionsSignature, savedOnboardTarget, setOnboardProtocol, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
+import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, VIEWS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setText, showGate, showToast, state } from './app-core.js';
+import { applyBudgetPreset, applyInferredModelDefaults, catalogueWith, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
 import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 import { mountConversationsPage } from './app-conversations.js';
@@ -10,29 +10,6 @@ let usagePanel = { show() {}, reload: async () => {}, reset() {} };
 let plusPanel = { render() {}, refresh: async () => {} };
 let conversationsPanel = { show() {}, refresh: async () => {}, onState() {} };
 
-
-/* 模型与服务商已合并为同一页，不再有二级子标签；这里只剩子代理与设置两组。 */
-const DEFAULT_SUBTABS = { subagents: 'models', maintenance: 'accounts' };
-const VALID_SUBTABS = {
-  subagents: new Set(['models', 'swarm']),
-  maintenance: new Set(['accounts', 'connection', 'extensions', 'advanced']),
-};
-
-function initSubtabs() {
-  let stored = null;
-  try {
-    const raw = sessionStorage.getItem(SUBTAB_STORE);
-    stored = raw ? JSON.parse(raw) : null;
-  } catch {
-    stored = null;
-  }
-  for (const [group, fallback] of Object.entries(DEFAULT_SUBTABS)) {
-    const candidate = stored && typeof stored[group] === 'string' ? stored[group] : '';
-    const tab = VALID_SUBTABS[group].has(candidate) ? candidate : fallback;
-    setSubtab(group, tab, { persist: false });
-  }
-}
-
 function initView() {
   let stored = null;
   try {
@@ -40,18 +17,18 @@ function initView() {
   } catch {
     stored = null;
   }
-  initSubtabs();
-  setView(VIEW_COPY[VIEW_ALIASES[stored] || stored] ? stored : 'overview', { persist: false });
+  const resolved = VIEW_ALIASES[stored] || stored;
+  setView(VIEWS.includes(resolved) ? resolved : 'overview', { persist: false });
 }
 
 function setView(view, { persist = true } = {}) {
   view = VIEW_ALIASES[view] || view;
-  if (!VIEW_COPY[view]) view = 'overview';
+  if (!VIEWS.includes(view)) view = 'overview';
   const apply = () => {
     if (state.integrationModeConfirm && view !== 'maintenance') cancelIntegrationModeConfirm();
     state.view = view;
     if (document.body) document.body.dataset.view = view;
-    Object.keys(VIEW_COPY).forEach((name) => {
+    VIEWS.forEach((name) => {
       const section = $('view-' + name);
       if (section) { section.hidden = name !== view; if (name === view) section.scrollTop = 0; }
       const nav = $('nav-' + name);
@@ -79,15 +56,19 @@ function setView(view, { persist = true } = {}) {
       renderModels();
       renderConnection();
       renderPicker();
+      renderSubagents();
       if (state.data) renderGrowth(state.data, { view: 'models' });
     }
-    if (view === 'conversations') conversationsPanel.show();
-    if (view === 'subagents') renderSubagents();
-    if (state.data && view === 'maintenance') {
-      renderOverview(state.data, { view: 'maintenance' });
-      renderIntegrationMode(state.data);
-      renderServices(state.data);
-      renderGrowth(state.data, { view: 'maintenance' });
+    if (view === 'accounts') {
+      if (state.data) plusPanel.render(state.data, { view: 'accounts' });
+    }
+    if (view === 'maintenance') {
+      if (state.data) {
+        renderOverview(state.data, { view: 'maintenance' });
+        renderIntegrationMode(state.data);
+        renderGrowth(state.data, { view: 'maintenance' });
+      }
+      if (state.key) void conversationsPanel.refresh();
     }
     /* 门禁页没有会话密钥：此时再展示用量面板，挂载期那笔请求只会带空密钥失败。 */
     if (view === 'usage') { if (state.key) usagePanel.show(); void plusPanel.refresh(); }
@@ -141,16 +122,6 @@ function adoptState(next, { initial = false, external = false } = {}) {
   /* 接入向导同一规则：已保存的连接第一次出现时回填一次，之后保留用户已输入的地址与勾选。 */
   if (initial || !onboardTouched()) fillOnboardForm();
 
-  /* 搜索与抓取服务遵守同一规则：非脏状态才回填，密钥草稿永不回填。 */
-  if (searchAvailable(next)) {
-    if (initial || !state.services.dirty) {
-      state.services.draft = serviceDraftFrom(next);
-      state.services.baseRow = { search: serviceRowOf(next, 'search'), fetch: serviceRowOf(next, 'fetch') };
-      state.services.base = serviceSignature(state.services.draft);
-      state.services.dirty = false;
-    }
-  }
-
   if (external && !initial) state.stateReadSeq++;
   settlePending(next);
 }
@@ -191,16 +162,15 @@ function renderAll() {
     renderModels();
     renderConnection();
     renderPicker();
-    renderGrowth(state.data, { view: 'models' });
-  } else if (view === 'conversations') {
-    conversationsPanel.show();
-  } else if (view === 'subagents') {
     renderSubagents();
+    renderGrowth(state.data, { view: 'models' });
+  } else if (view === 'accounts') {
+    plusPanel.render(state.data, { view: 'accounts' });
   } else if (view === 'maintenance') {
     renderOverview(state.data, { view: 'maintenance' });
     renderIntegrationMode(state.data);
-    renderServices(state.data);
     renderGrowth(state.data, { view: 'maintenance' });
+    conversationsPanel.show();
   }
 }
 
@@ -307,7 +277,7 @@ function editingBusy() {
   const connEditing = Boolean(state.conns && state.conns.editing && active
     && ((dom.connEditor && typeof dom.connEditor.contains === 'function' && dom.connEditor.contains(active))
       || ['ce-name', 'ce-id', 'ce-base', 'ce-key', 'ce-keyenv'].includes(active.id)));
-  return Boolean(state.composing || state.modelsSaving || state.connsSaving || state.services.saving || state.subagentSaving
+  return Boolean(state.composing || state.modelsSaving || state.connsSaving || state.subagentSaving
     || (state.onboard && (state.onboard.saving || state.onboard.busy)) || onboardEditingText()
     || (state.conns && state.conns.editing && (state.conns.editing.discovering || connEditing)));
 }
@@ -333,7 +303,14 @@ async function runAction(action, profileMode) {
   renderActions(data);
 
   try {
-    const res = await request(API.actions, { method: 'POST', body: { id: actionUUID(), at: Date.now(), action, ...(profileMode ? { profileMode } : {}) } });
+    const body = {
+      id: actionUUID(),
+      at: Date.now(),
+      action,
+      ...(action === 'disconnect-models' ? { removeDns: true } : {}),
+      ...(profileMode ? { profileMode } : {}),
+    };
+    const res = await request(API.actions, { method: 'POST', body });
     const op = res && res.operation ? res.operation : null;
     const opId = op && op.id ? op.id : null;
     if (op) {
@@ -481,7 +458,7 @@ async function handleSaveFailure(error, context) {
     return;
   }
 
-  if (error.status === 400) {
+  if (error.status === 400 || (error.status === 409 && Array.isArray(error.models) && error.models.length)) {
     if (context === 'subagents') {
       /* 后端拒绝（池非法、模型缺失、档位未声明等）保留用户草稿与
          已填的用途说明，只把真实错误码的中文回读显示在本视图。 */
@@ -490,44 +467,40 @@ async function handleSaveFailure(error, context) {
       showToast(error.message, 'error');
       return;
     }
-    if (context === 'services') {
-      state.services.serverErrors = [error.message];
-      if (state.data) renderServices(state.data);
-      else if (dom.svcErrors) renderErrorList(dom.svcErrors, [error.message]);
-      return;
-    }
     if (context === 'models' && state.editor) {
-      state.editor.serverErrors = [error.message];
+      state.editor.serverErrors = [formatApiErrorWithModels(error)];
       renderEditor();
       return;
     }
     if (context === 'connections' && dom.connsErrors) {
-      /* 后端拒绝（连接标识冲突、Key 缺失等）要留在连接页，草稿与已填的 Key
-         都不能因为一次 400 被清掉。 */
-      setConnErrors([error.message]);
+      /* 后端拒绝（连接标识冲突、Key 缺失、协议变更冲突等）要留在连接页，草稿与已填的 Key
+         都不能因为一次 400/409 被清掉。 */
+      const msg = formatApiErrorWithModels(error);
+      setConnErrors([msg]);
       renderConnections();
-      showToast(error.message, 'error');
+      showToast(msg, 'error');
       return;
     }
     if (context === 'onboard') {
       /* 向导同理：错误显示在向导自己的保存错误区，连接草稿与勾选保持原样，
          用户改完还能直接重试。renderOnboard 会重画 ob-errors，所以保存类的
          错误必须放在它不会覆盖的位置，并存进会话状态活过状态轮询。 */
-      state.onboard.saveErrors = [error.message];
+      const msg = formatApiErrorWithModels(error);
+      state.onboard.saveErrors = [msg];
       renderErrorList(dom.onboardSaveErrors, state.onboard.saveErrors);
-      showToast(error.message, 'error');
+      showToast(msg, 'error');
       return;
     }
     if (context === 'connection' && dom.connErrors) {
       setHidden(dom.connErrors, false);
-      dom.connErrors.replaceChildren(...[error.message].map((message) => {
+      dom.connErrors.replaceChildren(...[formatApiErrorWithModels(error)].map((message) => {
         const p = document.createElement('p');
         p.textContent = message;
         return p;
       }));
       return;
     }
-    showToast(error.message, 'error');
+    showToast(formatApiErrorWithModels(error), 'error');
     return;
   }
 
@@ -664,7 +637,6 @@ let pendingUpdatesPanelReveal = false;
 
 function openUpdatesPanel() {
   setView('maintenance');
-  setSubtab('maintenance', 'connection');
   const revealed = typeof dom.shell === 'undefined' || !dom.shell || dom.shell.hidden !== true;
   if (!revealed) {
     pendingUpdatesPanelReveal = true;
@@ -692,16 +664,10 @@ function flushPendingUpdatesPanelReveal() {
 function bindEvents() {
   conversationsPanel = mountConversationsPage();
   state.conversationsStateChanged = conversationsPanel.onState;
-  if (state.view === 'conversations') conversationsPanel.show();
-  Object.keys(VIEW_COPY).forEach(view => {
+  if (state.view === 'maintenance' && state.key) conversationsPanel.show();
+  VIEWS.forEach(view => {
     const button = $('nav-' + view);
     if (button) button.addEventListener('click', () => setView(view));
-  });
-  document.querySelectorAll('[data-subtab-group][data-subtab]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.dataset.subtabGroup === 'maintenance' && button.dataset.subtab !== 'connection') cancelIntegrationModeConfirm();
-      setSubtab(button.dataset.subtabGroup, button.dataset.subtab);
-    });
   });
 
   if (dom.restartBannerLink) dom.restartBannerLink.addEventListener('click', () => {
@@ -721,7 +687,7 @@ function bindEvents() {
   });
   $('overview-details')?.addEventListener('click', () => {
     setView('maintenance');
-    setSubtab('maintenance', 'connection');
+    revealWorkspaceSection('native-panel');
   });
   $('diagnostics-export')?.addEventListener('click', () => { void exportDiagnostics(); });
   $('compat-details-link')?.addEventListener('click', () => {
@@ -729,7 +695,10 @@ function bindEvents() {
     revealWorkspaceSection('compat-diagnostics-panel');
   });
   dom.overviewOpenModels?.addEventListener('click', () => setView('models'));
-  dom.overviewOpenSubagents?.addEventListener('click', () => setView('subagents'));
+  dom.overviewOpenSubagents?.addEventListener('click', () => {
+    setView('models');
+    revealWorkspaceSection('sa-target-panel');
+  });
   dom.overviewOpenUsage?.addEventListener('click', () => setView('usage'));
   dom.overviewIssueAction?.addEventListener('click', runOverviewIssueAction);
   dom.quickstartToggle?.addEventListener('click', toggleQuickstartGuide);
@@ -745,17 +714,15 @@ function bindEvents() {
   });
   $('quickstart-step-2-action')?.addEventListener('click', () => {
     setView('maintenance');
-    setSubtab('maintenance', 'connection');
     revealWorkspaceSection('native-panel');
   });
   $('quickstart-step-2-mode')?.addEventListener('click', () => {
     setView('maintenance');
-    setSubtab('maintenance', 'connection');
     revealWorkspaceSection('native-panel');
   });
   $('quickstart-step-3-action')?.addEventListener('click', () => {
-    setView('subagents');
-    setSubtab('subagents', 'models');
+    setView('models');
+    revealWorkspaceSection('sa-target-panel');
   });
   $('settings-reopen-guide')?.addEventListener('click', () => {
     reopenQuickstartGuide();
@@ -775,9 +742,8 @@ function bindEvents() {
     try {
       const tasks = [loadState(), refreshOverviewToday({ force: true })];
       if (state.view === 'usage') tasks.push(usagePanel.reload());
-      /* 会话页的列表来自独立接口：顶栏刷新必须把它一起重读，否则用户点了
-         刷新仍看到旧的会话与模型。 */
-      if (state.view === 'conversations') tasks.push(conversationsPanel.refresh());
+      /* 设置页内嵌的会话维护来自独立接口：顶栏刷新时一起重读。 */
+      if (state.view === 'maintenance') tasks.push(conversationsPanel.refresh());
       if (plusPanel && typeof plusPanel.refresh === 'function') tasks.push(plusPanel.refresh({ live: state.view === 'usage' }));
       await Promise.all(tasks);
     } finally {
@@ -825,7 +791,6 @@ function bindEvents() {
   const migrationTopLink = $('migration-top-banner-link');
   if (migrationTopLink) migrationTopLink.addEventListener('click', () => {
     setView('maintenance');
-    setSubtab('maintenance', 'connection');
     revealWorkspaceSection('migration-banner');
   });
   const openUpdateSection = () => openUpdatesPanel();
@@ -986,7 +951,10 @@ function bindEvents() {
   });
   if (dom.saReset) dom.saReset.addEventListener('click', discardDraft);
   if (dom.saSave) dom.saSave.addEventListener('click', saveSubagentTarget);
-  if (dom.saCapabilityNext) dom.saCapabilityNext.addEventListener('click', () => setView('models'));
+  if (dom.saCapabilityNext) dom.saCapabilityNext.addEventListener('click', () => {
+    setView('models');
+    revealWorkspaceSection('catalog-panel');
+  });
 
   /* 模型目录 */
   if (dom.modelQ) dom.modelQ.addEventListener('input', () => {
@@ -1012,7 +980,11 @@ function bindEvents() {
     onModelFilter('all');
     if (dom.modelQ && dom.modelQ.focus) dom.modelQ.focus();
   });
-  if (dom.modelNew) dom.modelNew.addEventListener('click', openOnboardWizard);
+  if (dom.modelNew) dom.modelNew.addEventListener('click', () => {
+    const named = (state.conns?.draft || []).filter((row) => row && !row.legacy);
+    if (named.length) openEditor(null);
+    else openOnboardWizard();
+  });
 
   if (dom.modelBody) dom.modelBody.addEventListener('click', (event) => {
     const node = event.target && event.target.closest ? event.target.closest('button') : null;
@@ -1179,8 +1151,8 @@ function bindEvents() {
       const used = ((state.data && state.data.models) || []).filter((model) => model.connectionId === id);
       if (used.length) {
         setConnErrors(['仍有 ' + used.length + ' 个模型使用该连接（'
-          + used.slice(0, 3).map((model) => model.id).join('、') + (used.length > 3 ? ' 等' : '')
-          + '）。请先在模型管理改到其他连接，再移除。']);
+          + used.slice(0, 3).map((model) => model.name || model.upstreamModelId || model.id).join('、') + (used.length > 3 ? ' 等' : '')
+          + '）。请先在模型目录改到其他连接，再移除。']);
         return;
       }
       state.conns.draft = (state.conns.draft || []).filter((entry) => entry.id !== id);
@@ -1209,12 +1181,13 @@ function bindEvents() {
       }
     });
   });
-  [dom.ceChat, dom.ceResponses].forEach((field) => {
+  [dom.ceProtoAuto, dom.ceChat, dom.ceResponses, dom.ceAnthropic].forEach((field) => {
     if (!field) return;
     field.addEventListener('change', () => {
       if (!state.conns.editing) return;
       readConnectionEditor();
       renderConnections();
+      renderConnectionEditor();
     });
   });
 
@@ -1248,6 +1221,10 @@ function bindEvents() {
       /* 新模型的协议与 ID 跟随连接的当前草稿，包括尚未保存的协议修改。 */
       editor.draft.protocol = draftConnectionProtocol(editor.draft.connectionId);
       editor.draft.id = suggestedRouteId(editor.draft);
+      if (!editor.draft.touched?.has('upstreamProtocol')) {
+        editor.draft.upstreamProtocol = connectionDefaultUpstreamProtocol(editor.draft.connectionId);
+      }
+      applyInferredModelDefaults(editor);
     }
     state.picker.models = null;
     state.picker.reason = null;
@@ -1269,8 +1246,11 @@ function bindEvents() {
     /* 换了上游模型，旧模型声明的上限就不再成立。 */
     editor.draft.contextLimit = '';
     editor.budgetNote = null;
-    /* 已保存模型保持原 ID；新模型按连接协议重新生成内部 ID。 */
-    if (!editor.originalId) editor.draft.id = suggestedRouteId(editor.draft);
+    /* 已保存模型保持原 ID；新模型按连接协议重新生成内部 ID，并自动推断默认能力。 */
+    if (!editor.originalId) {
+      editor.draft.id = suggestedRouteId(editor.draft);
+      applyInferredModelDefaults(editor);
+    }
     renderEditor();
   });
   if (dom.mBudgetGroup) dom.mBudgetGroup.addEventListener('click', (event) => {
@@ -1351,43 +1331,12 @@ function bindEvents() {
       }
       if (action === 'open-connection') {
         setView('maintenance');
-        setSubtab('maintenance', 'connection');
         revealWorkspaceSection('native-panel');
         return;
       }
       void runAction(action, button.dataset.profileMode);
     });
   });
-
-  /* 原生搜索与抓取服务 */
-  [dom.svcSearchOn, dom.svcFetchOn].forEach((field) => {
-    if (!field) return;
-    field.addEventListener('change', () => {
-      readServiceForm();
-      renderErrorList(dom.svcErrors, []);
-      renderServices(state.data);
-    });
-  });
-  [dom.svcSearchUrl, dom.svcFetchUrl, dom.svcSearchKey, dom.svcFetchKey].forEach((field) => {
-    if (!field) return;
-    field.addEventListener('input', () => {
-      readServiceForm();
-      renderErrorList(dom.svcErrors, []);
-      renderServices(state.data);
-    });
-  });
-  if (dom.svcReset) dom.svcReset.addEventListener('click', () => {
-    state.services.draft = serviceDraftFrom(state.data);
-    state.services.searchKey = '';
-    state.services.fetchKey = '';
-    state.services.serverErrors = [];
-    state.services.base = serviceSignature(state.services.draft);
-    state.services.dirty = false;
-    fillServiceForm();
-    renderErrorList(dom.svcErrors, []);
-    renderServices(state.data);
-  });
-  if (dom.svcSave) dom.svcSave.addEventListener('click', saveSearchServices);
 
   document.addEventListener('compositionstart', () => { state.composing = true; });
   document.addEventListener('compositionend', () => { state.composing = false; });
@@ -1437,7 +1386,7 @@ function adoptLocationKey() {
   /* 新会话属于另一份配置：旧草稿与已读候选必须丢弃，否则会把上一会话的
      连接、Key 或上下文设置带进这一份。 */
   state.conns = { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] };
-  state.services = { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '', serverErrors: [] };
+  state.connUpstreamProtocols = {};
   state.draft = null;
   state.draftDirty = false;
   state.draftBaseRevision = null;
@@ -1448,7 +1397,7 @@ function adoptLocationKey() {
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
-  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '', saveErrors: [] };
+  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null };
   if (dom.onboardKey) dom.onboardKey.value = '';
   if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
   state.applyUnsupported = false;
@@ -1498,8 +1447,11 @@ async function loadProviders() {
       renderConnectionEditor();
       fillOnboardPresets();
       renderOnboard();
+      if (state.editor && !state.editor.originalId) {
+        applyInferredModelDefaults(state.editor);
+        renderEditor();
+      }
       if (state.data && state.view === 'models') renderGrowth(state.data, { view: 'models' });
-      refreshSavedProtocolDeclarations();
     }
   } catch {
     state.providers = { presets: [] };
@@ -1511,13 +1463,12 @@ function boot() {
   initTheme();
   initWindowChrome();
   const openAccountsTab = () => {
-    setView('maintenance');
-    setSubtab('maintenance', 'accounts');
-    revealWorkspaceSection('plus-accounts-panel');
+    setView('accounts');
   };
   window.__kwpOpenAccounts = openAccountsTab;
   window.__kwpOpenConversations = () => {
-    setView('conversations');
+    setView('maintenance');
+    revealWorkspaceSection('conversations-panel');
     void conversationsPanel.refresh();
   };
   window.__kwpOpenUpdates = () => openUpdatesPanel();

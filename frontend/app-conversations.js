@@ -915,14 +915,14 @@ function mountConversationsPage() {
       /* 冷启动时 GET /api/work/conversations 可能先于首次 /api/state 返回：
          列表已经渲染，但展示名与 Kimi 运行态还没对齐。第一份状态到达后补
          一次渲染，避免停在「目录未列出」或把 unknown 当成未运行。 */
-      if (list && state.view === 'conversations' && !state.conversations.loading
+      if (list && state.view === 'maintenance' && !state.conversations.loading
         && !state.conversations.pending && !userBusyInConversations()) {
         setStatus(conversationListStatus(list));
         render();
       }
       return;
     }
-    if (state.view !== 'conversations') {
+    if (state.view !== 'maintenance') {
       state.conversations.stale = true;
       return;
     }

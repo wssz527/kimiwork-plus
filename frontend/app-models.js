@@ -1,4 +1,4 @@
-import { applyConnectionEditor, configReady, connectionDraftFrom, connectionPayload, discoveryReasonText, draftConnection, draftConnectionProtocol, protocolLabel, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
+import { applyConnectionEditor, configReady, connectionDefaultUpstreamProtocol, connectionDraftFrom, connectionPayload, discoveryReasonText, draftConnection, draftConnectionProtocol, inferModelDefaults, protocolLabel, renderConnections, savedConnectionsSignature, upstreamReasonText } from './app-connections.js';
 import { API, BUDGET_PRESETS, CONNECTION_ID_PATTERN, EFFORT_PATTERN, MODEL_ALIAS_PREFIXES, actionUUID, displayModelId, dom, fmtK, fmtTime, fmtTokens, iconUse, request, setHidden, setText, showToast, state, stripModelAliasPrefix, syncDefaultOptions, syncSelectOptions, truncate } from './app-core.js';
 import { renderActions } from './app-overview.js';
 import { adoptState, handleSaveFailure, loadState, renderAll } from './app.js';
@@ -812,25 +812,44 @@ function pickCandidate(upstreamId) {
   if (!editor.originalId) {
     draft.protocol = draft.connectionId ? draftConnectionProtocol(draft.connectionId) : null;
     draft.id = suggestedRouteId(draft);
+    if (!draft.touched?.has('upstreamProtocol')) {
+      draft.upstreamProtocol = draft.connectionId ? connectionDefaultUpstreamProtocol(draft.connectionId) : '';
+    }
   }
+  const conn = draft.connectionId ? draftConnection(draft.connectionId) : null;
+  const inferred = inferModelDefaults(upstreamId, conn?.providerPresetId || '');
   if (model) {
     if (model.name) draft.name = model.name;
-    if (model.contextWindow) draft.context = String(model.contextWindow);
-    draft.contextLimit = model.contextWindow ? String(model.contextWindow) : '';
-    if (typeof model.tools === 'boolean') draft.tools = model.tools;
-    if (typeof model.reasoning === 'boolean') draft.reasoning = model.reasoning;
-    if (Array.isArray(model.inputModalities)) draft.vision = model.inputModalities.includes('image');
+    else if (inferred.name) draft.name = inferred.name;
+    if (model.contextWindow) {
+      draft.context = String(model.contextWindow);
+      draft.contextLimit = String(model.contextWindow);
+    } else {
+      draft.context = String(inferred.contextWindow);
+      draft.contextLimit = '';
+    }
+    draft.tools = typeof model.tools === 'boolean' ? model.tools : inferred.tools;
+    draft.reasoning = typeof model.reasoning === 'boolean' ? model.reasoning : inferred.reasoning;
+    draft.vision = Array.isArray(model.inputModalities)
+      ? model.inputModalities.includes('image')
+      : inferred.inputModalities.includes('image');
     if (model.maxOutputTokens) draft.output = String(model.maxOutputTokens);
-    /* efforts 在草稿里始终是数组：fillEditorFields 与 toggleEffortChoice 都直接
-       对它调用 join/slice，写入字符串会让整个编辑器在下次渲染时抛错。 */
+    else if (inferred.maxOutputTokens) draft.output = String(inferred.maxOutputTokens);
     if (Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length) {
       draft.efforts = parseEfforts(model.reasoningEfforts).list;
+    } else if (draft.reasoning && inferred.reasoningEfforts.length) {
+      draft.efforts = parseEfforts(inferred.reasoningEfforts).list;
     }
-    /* 来源必须是这条候选自己的，不能一律写成 discovery：model-search 会把
-       静态 preset 与最近一次成功 discovery 合并，两者的来源不同。优先用后端
-       给出的 model.metadataSource / model.source，都没有时按「这次读取有没有
-       真实目录」判断，仍无法确定就标 manual 而不是编造 discovery。 */
     draft.metadataSource = candidateMetadataSource(model);
+  } else {
+    if (inferred.name) draft.name = inferred.name;
+    draft.context = String(inferred.contextWindow);
+    draft.output = inferred.maxOutputTokens ? String(inferred.maxOutputTokens) : '';
+    draft.tools = inferred.tools;
+    draft.reasoning = inferred.reasoning;
+    draft.vision = inferred.inputModalities.includes('image');
+    draft.efforts = inferred.reasoning ? parseEfforts(inferred.reasoningEfforts).list : [];
+    draft.metadataSource = inferred.metadataSource;
   }
   editor.serverErrors = [];
   editor.budgetNote = null;
@@ -905,45 +924,48 @@ function scheduleSearch() {
   }, PICKER_DEBOUNCE_MS);
 }
 
-/* 行内连接检查：按行携带该行的 connectionId，结果也按 connectionId 认领。
-   后端绝不隐式挑选连接；这里同样只检查用户点的那一行。 */
+/* 行内测活：调用 POST /api/connections/probe { connectionId } 就地反馈可用与延迟。 */
 async function runConnectionCheck(connectionId) {
   const data = state.data;
   if (!data || !connectionId) return null;
-  if (state.pendingAction) {
-    showToast('已有操作正在进行，等待它结束后再试。', 'error');
-    return null;
-  }
   state.connChecks = { ...state.connChecks, [connectionId]: { ...(state.connChecks[connectionId] || {}), busy: true } };
   renderConnections();
-  const id = actionUUID();
   try {
-    const res = await request(API.actions, {
+    const res = await request(API.connectionsProbe, {
       method: 'POST',
-      body: { id, at: Date.now(), action: 'check-upstream', connectionId },
+      body: { connectionId, timeoutMs: 15000 },
     });
-    const op = res && res.operation ? res.operation : null;
-    if (op && typeof op.connectionId === 'string' && op.connectionId !== connectionId) {
-      showToast('检查结果与所在连接不符，已忽略。', 'error');
-      return null;
+    const ok = Boolean(res && res.ok);
+    const detectedProtocol = (res && (res.connectionProtocol || res.detectedProtocol)) || '';
+    const modelCount = res && res.catalog
+      ? (Number.isInteger(res.catalog.modelCount) ? res.catalog.modelCount
+        : (Array.isArray(res.catalog.models) ? res.catalog.models.length : undefined))
+      : undefined;
+    if (res && res.upstreamProtocol === 'anthropic') {
+      if (!state.connUpstreamProtocols) state.connUpstreamProtocols = {};
+      state.connUpstreamProtocols[connectionId] = 'anthropic';
     }
-    const diag = (state.data && state.data.diagnostics && state.data.diagnostics.upstream) || {};
-    const result = op && op.state ? op
-      : diag && diag.connectionId === connectionId ? diag : null;
-    const recorded = result ? { state: result.state,
-      ...(Number.isInteger(result.httpStatus) ? { httpStatus: result.httpStatus } : {}),
-      ...(Number.isInteger(result.modelCount) ? { modelCount: result.modelCount } : {}),
-      ...(Number.isFinite(result.ms) ? { ms: result.ms } : {}),
-      ...(result.reason ? { reason: result.reason } : {}), connectionId } : { state: 'interrupted', connectionId };
+    const recorded = {
+      ok,
+      state: ok ? 'passed' : 'failed',
+      ...(res && res.message ? { message: res.message } : {}),
+      ...(detectedProtocol ? { detectedProtocol } : {}),
+      ...(Number.isInteger(modelCount) ? { modelCount } : {}),
+      ...(Number.isFinite(res && res.latencyMs) ? { ms: res.latencyMs } : {}),
+      ...(res && res.reason ? { reason: res.reason } : {}),
+      connectionId,
+    };
     state.connChecks = { ...state.connChecks, [connectionId]: recorded };
-    if (result && result.state === 'passed') showToast('连接「' + connectionId + '」可用。', 'ok');
-    else showToast('连接「' + connectionId + '」检查未通过：'
-      + (upstreamReasonText(result && result.reason) || '请稍后再试') + '。', 'error');
-    await loadState({ silent: true });
+    if (ok) {
+      showToast(res.message || ('连接「' + connectionId + '」测活通过。'), 'ok');
+    } else {
+      showToast((res && res.message) || ('连接「' + connectionId + '」测活未通过：'
+        + (upstreamReasonText(res && res.reason) || '请检查地址与密钥') + '。'), 'error');
+    }
     return { ...state.connChecks[connectionId], busy: false };
   } catch (error) {
-    state.connChecks = { ...state.connChecks, [connectionId]: { state: 'failed', reason: error.code || null, connectionId } };
-    showToast(error.message || '连接检查未完成，请稍后再试。', 'error');
+    state.connChecks = { ...state.connChecks, [connectionId]: { ok: false, state: 'failed', reason: error.code || null, message: error.message || '', connectionId } };
+    showToast(error.message || '连接测活未完成，请稍后再试。', 'error');
     return null;
   } finally {
     const current = state.connChecks[connectionId];
@@ -1081,10 +1103,11 @@ function modelDraftFrom(model) {
     failover: failoverDraftFrom(model.failover),
   } : {
     id: '', name: '', protocol: initialConnectionId ? draftConnectionProtocol(initialConnectionId) : null,
-    context: '', output: '', tools: undefined, reasoning: false, vision: false,
-    efforts: [], defaultEffort: '', connectionId: initialConnectionId, upstreamModelId: '', upstreamProtocol: '',
+    context: '131072', output: '', tools: true, reasoning: false, vision: false,
+    efforts: [], defaultEffort: '', connectionId: initialConnectionId, upstreamModelId: '',
+    upstreamProtocol: initialConnectionId ? connectionDefaultUpstreamProtocol(initialConnectionId) : '',
     upstreamProtocolChoices: upstreamProtocolSupported(state.data) ? ['', 'anthropic'] : null,
-    contextLimit: '', metadataSource: null,
+    contextLimit: '', metadataSource: { kind: 'manual' },
     pricing: priceDraftFrom(null), failover: [],
   };
   draft.baseEntity = model ? { ...model, inputModalities: model.inputModalities?.slice(),
@@ -1092,6 +1115,31 @@ function modelDraftFrom(model) {
     failover: failoverDraftFrom(model.failover) } : null;
   draft.touched = new Set();
   return draft;
+}
+
+function applyInferredModelDefaults(editor) {
+  if (!editor || editor.originalId) return;
+  const draft = editor.draft;
+  if (!draft) return;
+  const conn = draft.connectionId ? draftConnection(draft.connectionId) : null;
+  const inferred = inferModelDefaults(draft.upstreamModelId, conn?.providerPresetId || '');
+  const touched = draft.touched || new Set();
+  if (!touched.has('contextWindow')) draft.context = String(inferred.contextWindow);
+  if (!touched.has('maxOutputTokens')) draft.output = inferred.maxOutputTokens ? String(inferred.maxOutputTokens) : '';
+  if (!touched.has('tools')) draft.tools = inferred.tools;
+  if (!touched.has('reasoning')) draft.reasoning = inferred.reasoning;
+  if (!touched.has('inputModalities')) draft.vision = inferred.inputModalities.includes('image');
+  if (!touched.has('reasoningEfforts')) draft.efforts = inferred.reasoning ? parseEfforts(inferred.reasoningEfforts).list : [];
+  if (!touched.has('upstreamProtocol')) draft.upstreamProtocol = draft.connectionId ? connectionDefaultUpstreamProtocol(draft.connectionId) : '';
+  if (!touched.has('name') && !String(draft.name || '').trim() && inferred.name) draft.name = inferred.name;
+  draft.metadataSource = inferred.metadataSource;
+  if (dom.mContext && document.activeElement !== dom.mContext) dom.mContext.value = draft.context;
+  if (dom.mOutput && document.activeElement !== dom.mOutput) dom.mOutput.value = draft.output;
+  if (dom.mTools) dom.mTools.checked = draft.tools === true;
+  if (dom.mReasoning) dom.mReasoning.checked = draft.reasoning === true;
+  if (dom.mVision) dom.mVision.checked = draft.vision === true;
+  if (dom.mEfforts) dom.mEfforts.value = draft.efforts.join(', ');
+  if (dom.mName && document.activeElement !== dom.mName && !touched.has('name')) dom.mName.value = draft.name;
 }
 
 function openEditor(model) {
@@ -1251,6 +1299,10 @@ function rebaseEditor() {
 /* 这些字段都在「高级」折叠区内：保存被拦下时必须自动展开，否则用户只看到
    保存按钮变灰，却找不到要改哪一行。 */
 const ADVANCED_ERROR_PATTERNS = [
+  /上下文/,
+  /最大输出/,
+  /思考档位/,
+  /默认档位/,
   /定价/,
   /备用连接/,
 ];
@@ -1516,6 +1568,7 @@ function chooseUpstreamProtocol(value) {
   if (!editor || state.modelsSaving) return;
   if (value !== '' && value !== 'anthropic') return;
   editor.draft.upstreamProtocol = value;
+  if (editor.draft.touched) editor.draft.touched.add('upstreamProtocol');
   renderEditor();
 }
 
@@ -1782,6 +1835,7 @@ function resetModelSignature() { modelSignature = ''; }
 
 export {
   applyBudgetPreset,
+  applyInferredModelDefaults,
   catalogueWith,
   chooseUpstreamProtocol,
   clearModelQuery,

@@ -60,8 +60,8 @@ function restartBannerState(data) {
   if (credentialAuthPending(data)) {
     return {
       action: 'models',
-      label: '前往模型与服务商处理',
-      text: '部分已保存的连接凭据暂时无法读取。请到「模型与服务商」页查看原因并重新授权。',
+      label: '前往模型页处理',
+      text: '部分已保存的连接凭据暂时无法读取。请到「模型」页查看原因并重新授权。',
     };
   }
   return null;
@@ -173,7 +173,7 @@ function syncState(data) {
   }
   if (has('account_changed', 'native_import_account_changed') && info.readback?.accountVerified === true) {
     return { code: 'pending', tone: 'warn', word: '当前账号待同步',
-      note: '当前账号已登录，模型目录还未与此账号完成核对。请在模型与服务商页点「重新同步模型目录」完成核对。' };
+      note: '当前账号已登录，模型目录还未与此账号完成核对。请在「模型」页点「重新同步模型目录」完成核对。' };
   }
   if (has('native_import_waiting_login', 'waiting-login', 'account-unverified', 'account_changed',
     'native_import_account_changed')) {
@@ -297,12 +297,12 @@ function overviewState(data) {
   if (direct) {
     if (directModeOf(data)?.supported === false) {
       return { code: 'unsupported', tone: 'bad', word: '当前官方 Kimi 不支持直连',
-        note: '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或到「设置 → 接入与更新」改用本机网关模式。',
+        note: '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或到「设置」页改用本机网关模式。',
         launch: 'open-connection', launchLabel: '查看接入模式' };
     }
     if (models.length && directHasNoEligibleModels(data)) {
       return { code: 'no-eligible', tone: 'warn', word: '没有可直连的模型',
-        note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在「模型与服务商」补齐这三项。',
+        note: '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在「模型」页补齐这三项。',
         launch: 'open-models', launchLabel: '前往补齐模型' };
     }
   }
@@ -312,7 +312,7 @@ function overviewState(data) {
   }
   if (!models.length) {
     return { code: 'empty', tone: 'neutral', word: '等待添加模型',
-      note: '先在「模型与服务商」添加至少一个服务商与模型；保存后会自动同步。',
+      note: '先在「模型」页添加至少一个服务商与模型；保存后会自动同步。',
       launch: 'open-models', launchLabel: '前往添加模型' };
   }
   if (auto.state === 'requires_restart' || nativeRestartReceipt(data)) {
@@ -340,18 +340,18 @@ function overviewState(data) {
   if (auto.state === 'failed') {
     if (auto.reason === 'direct_prepare_required') {
       return { code: 'prepare', tone: 'warn', word: '同步需要处理',
-        note: '直连模式首次写入静态 hosts 需要一次系统授权。打开「设置 → 接入与更新 → 高级排障」，点一次「重新同步模型目录」完成授权即可。', ...base };
+        note: '直连模式首次写入静态 hosts 需要一次系统授权。打开「设置」页展开「手动重新同步模型目录」，点一次完成授权即可。', ...base };
     }
     const reason = auto.reason ? reasonText(auto.reason) : '';
     return { code: 'failed', tone: 'bad', word: '同步需要处理',
-      note: (reason || '后台自动同步未能完成') + '。可在「设置 → 接入与更新」查看原因并重试。', ...base };
+      note: (reason || '后台自动同步未能完成') + '。可在「设置」页查看原因并重试。', ...base };
   }
   if (direct) {
     const ready = directImportComplete(data) && directStaticHostsReady(data) && !directRouteCleanupPending(data);
     if (!ready) {
       return { code: 'deferred', tone: 'warn', word: '已保存，打开 Kimi 时自动同步',
         note: directRouteCleanupPending(data)
-          ? '新的直连配置已写入，但旧的服务商来源还没清理；后台会重试收尾，也可到「设置 → 接入与更新 → 高级排障」重新同步一次。'
+          ? '新的直连配置已写入，但旧的服务商来源还没清理；后台会重试收尾，也可到「设置」页手动重新同步一次。'
           : '已保存为零网关直连模式。' + integrationModeSyncText(data), ...base };
     }
     return { code: 'ready', tone: 'ok', word: '已就绪',
@@ -360,7 +360,7 @@ function overviewState(data) {
   /* 从直连切回网关时旧来源可能还欠清理：这时说「已就绪」会让人直接退出后台。 */
   if (directRouteCleanupPending(data)) {
     return { code: 'pending', tone: 'warn', word: '切换收尾未完成',
-      note: '新配置已写入并读回，但旧的服务商来源仍保留着；后台会重试清理，也可到「设置 → 接入与更新 → 高级排障」重新同步一次。在清理完成前不要退出后台服务。', ...base };
+      note: '新配置已写入并读回，但旧的服务商来源仍保留着；后台会重试清理，也可到「设置」页手动重新同步一次。在清理完成前不要退出后台服务。', ...base };
   }
   const transition = integrationModeTransition(data);
   if (transition) {
@@ -720,7 +720,7 @@ function nativeConnectionText(data) {
     work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
     work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
     work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
-    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「会话」页刷新。',
+    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「设置」页的会话维护区刷新。',
     work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
     native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧版本或其他接入实例，再重新准备。',
     native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
@@ -867,7 +867,7 @@ function renderOverviewSubagents(data) {
 
   if (mode === 'inherit') {
     setText(dom.overviewSubagentsValue, POLICY_MODE_WORD.inherit || '继承主模型');
-    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可前往子代理页按角色分配模型。');
+    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可在「模型」页底部按角色分配模型。');
     return;
   }
   if (mode === 'force') {
@@ -1761,7 +1761,7 @@ function requestIntegrationModeConfirm(mode) {
   }, 10_000);
   const direct = mode === 'direct';
   setText(dom.integrationModeConfirmText, direct
-    ? '切换到零网关直连后，官方菜单跨服务商换模会新开对话。已有会话请从「会话」页或托盘切换。首次同步会写入静态 hosts，可能需要系统授权，请按提示操作或重启 Kimi。'
+    ? '切换到零网关直连后，官方菜单跨服务商换模会新开对话。已有会话请从「设置」页的会话维护区或托盘切换。首次同步会写入静态 hosts，可能需要系统授权，请按提示操作或重启 Kimi。'
     : '切回本机网关后，后台会自动同步模型目录。Kimi 不会自动重启，需要重启时面板会提示你操作。');
   setText(dom.integrationModeSubmit, direct ? '确认切换到直连' : '确认切回网关');
   setHidden(dom.integrationModeConfirm, false);
@@ -2011,8 +2011,8 @@ function updateCompletionVerdict(data, actionLabel) {
   const isWindows = typeof document !== 'undefined' && document.documentElement?.dataset?.platform === 'windows';
   return { tone: 'warn', complete: false,
     text: isWindows
-      ? '当前版本 ' + version + '。部分旧版连接凭据需要系统授权迁移，请到「模型与服务商」页点「重新授权并应用连接」。'
-      : '当前版本 ' + version + '。部分旧版连接凭据仍待迁移授权，请到「模型与服务商」页点「重新授权并应用连接」（若 macOS 弹出钥匙串提示可选择「始终允许」一次完成迁移）。' };
+      ? '当前版本 ' + version + '。部分旧版连接凭据需要系统授权迁移，请到「模型」页点「重新授权并应用连接」。'
+      : '当前版本 ' + version + '。部分旧版连接凭据仍待迁移授权，请到「模型」页点「重新授权并应用连接」（若 macOS 弹出钥匙串提示可选择「始终允许」一次完成迁移）。' };
 }
 
 async function waitForUpdateReconnect(prevBuildId, actionLabel) {
@@ -2110,7 +2110,7 @@ function renderUpdates(data) {
           setText(primary, '立即下载并更新');
         }
       } else if (updateInProgress) {
-        setText(bannerText, `新版本 ${versionText}：${summary.word}。可在「设置 → 接入与更新」查看详细进度，完成后会自动替换重启。`);
+        setText(bannerText, `新版本 ${versionText}：${summary.word}。可在「设置」页查看详细进度，完成后会自动替换重启。`);
         if (primary) {
           primary.hidden = true;
           primary.dataset.updateAction = 'download';
@@ -2205,7 +2205,7 @@ function renderUpdates(data) {
       const pending = credentialAuthPending(data);
       historyNote.classList.toggle('note--warn', pending);
       setText(historyNote, pending
-        ? `已更新到 ${applied.toVersion}（${fmtTime(applied.at)}），但已保存的连接 Key 仍需系统授权：请到「模型与服务商」页点「重新授权并应用连接」。`
+        ? `已更新到 ${applied.toVersion}（${fmtTime(applied.at)}），但已保存的连接 Key 仍需系统授权：请到「模型」页点「重新授权并应用连接」。`
         : `最近一次已于 ${fmtTime(applied.at)} 从 ${applied.fromVersion || '旧版本'} 更新到 ${applied.toVersion}。`);
     } else {
       historyNote.hidden = true;
