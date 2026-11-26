@@ -65,44 +65,81 @@ test('a reset invalidates in-flight usage and quota reads and clears rendered da
   await flush();
   assert.equal(env.nodes.get('usage-stat-input').textContent, '12');
 });
-const start = source.indexOf('  function quotaPathProblem(value, required = false) {');
-const end = source.indexOf('\n  }', start);
-assert.notEqual(start, -1, 'missing quotaPathProblem in current source');
-assert.notEqual(end, -1, 'unterminated quotaPathProblem in current source');
-const quotaPathProblem = new Function(source.slice(start, end + 4) + '\nreturn quotaPathProblem;')();
 
-test('quota paths accept documented balance fields and array indexes', () => {
-  assert.equal(quotaPathProblem('data.balance', true), '');
-  assert.equal(quotaPathProblem('balance_infos.0.total_balance', true), '');
-  assert.equal(quotaPathProblem('a.b.c.d.e.f.g.h', true), '');
-});
+test('quota source editor only exposes built-in official balance adapters without custom JSON path inputs', async () => {
+  assert.equal(source.includes('quotaPathProblem'), false);
+  assert.equal(source.includes('value="custom"'), false);
+  assert.match(source, /<option value="deepseek">DeepSeek 官方余额<\/option>/);
+  assert.match(source, /<option value="moonshot-cn">Moonshot 国内余额<\/option>/);
+  assert.match(source, /<option value="moonshot-global">Moonshot 国际余额<\/option>/);
 
-test('optional quota paths may be empty while the value path is required', () => {
-  assert.equal(quotaPathProblem(''), '');
-  assert.equal(quotaPathProblem('   '), '');
-  assert.match(quotaPathProblem('', true), /请填写/);
-  assert.match(quotaPathProblem('   ', true), /请填写/);
-});
+  const nodes = new Map();
+  const makeNode = (id = '') => {
+    const node = {
+      id, textContent: '', hidden: false, value: '', disabled: false, open: false, className: '', innerHTML: '',
+      children: [], dataset: {}, style: {}, listeners: {},
+      replaceChildren(...children) { node.children = children; },
+      append(...children) { node.children.push(...children); },
+      addEventListener(type, fn) { (node.listeners[type] ||= []).push(fn); },
+      setAttribute() {}, getAttribute() { return ''; },
+      querySelector() { return makeNode(); }, querySelectorAll() { return []; }, focus() {},
+    };
+    if (id) nodes.set(id, node);
+    return node;
+  };
+  const document = {
+    getElementById(id) {
+      if (id === 'quota-source-form' && !nodes.get('quota-source-editor')?.innerHTML.includes('id="quota-source-form"')) {
+        return null;
+      }
+      if (!nodes.has(id)) nodes.set(id, makeNode(id));
+      return nodes.get(id);
+    },
+    createElement() { return makeNode(); },
+    createElementNS() { return makeNode(); },
+    querySelectorAll() { return []; },
+  };
+  const runtime = {};
+  new Function('document', 'globalThis', source)(document, runtime);
+  const calls = [];
+  const panel = runtime.KimiWorkUsage.mount({
+    request: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/quota') return { records: [], sources: [], connections: [{ id: 'conn-ds', name: 'DeepSeek 主连接' }] };
+      if (path === '/api/quota/sources') return { records: [], sources: [], connections: [{ id: 'conn-ds', name: 'DeepSeek 主连接' }] };
+      return { summary: {}, records: [], filters: {} };
+    },
+    notify() {},
+  });
+  panel.show();
+  await flush();
 
-test('quota paths reject empty segments and invalid field syntax', () => {
-  assert.notEqual(quotaPathProblem('data..balance'), '');
-  assert.notEqual(quotaPathProblem('.data.balance'), '');
-  assert.notEqual(quotaPathProblem('data.balance.'), '');
-  assert.notEqual(quotaPathProblem('balance_infos.0000.total_balance'), '');
-});
+  document.getElementById('quota-source-adapter').value = 'deepseek';
+  document.getElementById('quota-source-connection').value = 'conn-ds';
+  nodes.get('quota-add').listeners.click[0]();
 
-test('quota paths reject prototype properties', () => {
-  for (const field of ['__proto__', 'prototype', 'constructor']) {
-    assert.match(quotaPathProblem(`data.${field}.balance`), /保留字段/);
-  }
-});
+  const editorHtml = nodes.get('quota-source-editor').innerHTML;
+  assert.doesNotMatch(editorHtml, /value="custom"/);
+  assert.doesNotMatch(editorHtml, /quota-source-path|quota-source-reset|quota-source-used|quota-source-limit|quota-source-body/);
+  assert.match(editorHtml, /deepseek/);
+  assert.match(editorHtml, /moonshot-cn/);
+  assert.match(editorHtml, /moonshot-global/);
+  assert.match(nodes.get('quota-adapter-info').textContent, /https:\/\/api\.deepseek\.com\/user\/balance/);
 
-test('quota paths enforce the backend depth and length limits', () => {
-  assert.match(quotaPathProblem('a.b.c.d.e.f.g.h.i'), /8 层/);
-  assert.match(quotaPathProblem('a'.repeat(201)), /200 个字符/);
-  const maximum = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(5)].join('.');
-  assert.equal(maximum.length, 200);
-  assert.equal(quotaPathProblem(maximum), '');
+  nodes.get('quota-source-adapter').value = 'moonshot-global';
+  nodes.get('quota-source-adapter').listeners.change[0]();
+  assert.match(nodes.get('quota-adapter-info').textContent, /https:\/\/api\.moonshot\.ai\/v1\/users\/me\/balance/);
+
+  await nodes.get('quota-source-form').listeners.submit[0]({
+    preventDefault() {},
+    target: { querySelector() { return makeNode(); } },
+  });
+  const saveCall = calls.find(call => call.path === '/api/quota/sources');
+  assert.ok(saveCall);
+  assert.equal(saveCall.options.body.action, 'upsert');
+  assert.equal(saveCall.options.body.source.adapter, 'moonshot-global');
+  assert.equal(saveCall.options.body.source.endpoint, 'https://api.moonshot.ai/v1/users/me/balance');
+  assert.equal(saveCall.options.body.source.auth.connectionId, 'conn-ds');
 });
 
 /* renderChart 需要真实 DOM 才能跑；这里只做一个够用的替身，用它验证
