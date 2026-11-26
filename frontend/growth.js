@@ -127,7 +127,7 @@ function translationDraft(fallback = null) {
 
 function canAutoSaveTranslation(draft) {
   if (draft.provider !== 'custom') return true;
-  return Boolean(draft.customEndpoint && draft.customModel);
+  return Boolean(draft.customEndpoint);
 }
 
 function mcpRows(value, pattern) {
@@ -186,6 +186,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   mountLegacy();
   const local = {
     trKey: '', trDraft: null, trCopyKey: '', trCustomVisible: false,
+    trCopiedApiKeyEnv: '', trCopiedEndpoint: '',
     trSaveSeq: 0, trSaving: false, trQueuedSave: null, trSavePromise: null,
     trRestartBtn: null, trRestartBound: false, trRestarting: false,
     mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false,
@@ -230,8 +231,38 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   $('tr-copy')?.before(copyLabel);
   copyLabel.hidden = true;
 
+  function clearCopiedTranslationKey() {
+    local.trCopiedApiKeyEnv = '';
+    local.trCopiedEndpoint = '';
+  }
+
+  function syncCopiedTranslationKey(draft) {
+    if (local.trCopiedApiKeyEnv && draft.customEndpoint !== local.trCopiedEndpoint) {
+      clearCopiedTranslationKey();
+    }
+  }
+
+  function resolveTranslationApiKeyEnv(draft, apiKey, data) {
+    syncCopiedTranslationKey(draft);
+    if (apiKey) {
+      return data?.translation?.configured?.apiKeySource === 'connection'
+        ? 'KIMI_WORK_TRANSLATION_API_KEY'
+        : '';
+    }
+    if (draft.provider === 'custom' && local.trCopiedApiKeyEnv && draft.customEndpoint === local.trCopiedEndpoint) {
+      return local.trCopiedApiKeyEnv;
+    }
+    return '';
+  }
+
   function trDirty() {
-    return Boolean((local.trDraft && !same(local.trDraft, translationDraft(local.trDraft))) || $('tr-key')?.value);
+    const draft = translationDraft(local.trDraft);
+    syncCopiedTranslationKey(draft);
+    return Boolean(
+      (local.trDraft && !same(local.trDraft, draft))
+      || $('tr-key')?.value
+      || (draft.provider === 'custom' && local.trCopiedApiKeyEnv && draft.customEndpoint === local.trCopiedEndpoint)
+    );
   }
 
   function ensureRestartEnableButton() {
@@ -310,6 +341,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   }
 
   function rollbackTranslation() {
+    clearCopiedTranslationKey();
     const data = getState();
     const configured = data?.translation?.configured;
     if (configured) {
@@ -386,8 +418,9 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
           }
           showError('tr-errors', '');
           syncTranslationUI(getState());
-          const apiKey = $('tr-key')?.value || '';
+          const apiKey = job.overrideDraft ? '' : ($('tr-key')?.value || '');
           const beforeData = getState();
+          const apiKeyEnv = job.overrideDraft ? '' : resolveTranslationApiKeyEnv(draft, apiKey, beforeData);
           const body = {
             enabled: draft.enabled,
             provider: draft.provider,
@@ -398,9 +431,11 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
             revision: beforeData?.revision,
             translationRevision: beforeData?.translation?.revision,
             ...(apiKey ? { apiKey } : {}),
+            ...(apiKeyEnv ? { apiKeyEnv } : {}),
           };
           try {
             const res = await request('/api/translation', { method: 'POST', body });
+            clearCopiedTranslationKey();
             if (res?.state?.translation) {
               local.trKey = JSON.stringify([res.state.translation.configured, res.state.translation.revision]);
               local.trDraft = normalizeTranslationDraft(res.state.translation.configured);
@@ -455,9 +490,13 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
         const saved = await saveTranslation({ auto: false, silentSuccess: true });
         if (!saved) return;
       }
-      await request('/api/actions', { method: 'POST', body: { action: 'restart-kimi' } });
-      if (typeof refresh === 'function') await refresh({ silent: true });
-      notify('已请求重启 Kimi，启动完成后将自动启用页面翻译。', 'ok');
+      if (typeof runAction === 'function') {
+        await runAction('restart-kimi');
+      } else {
+        await request('/api/actions', { method: 'POST', body: { action: 'restart-kimi' } });
+        if (typeof refresh === 'function') await refresh({ silent: true });
+        notify('已请求重启 Kimi，启动完成后将自动启用页面翻译。', 'ok');
+      }
     } catch (error) {
       showError('tr-errors', errorText(error));
     } finally {
@@ -476,7 +515,14 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     if (testBtn) testBtn.disabled = true;
     text('tr-preview-result', '正在发送固定短示例…');
     try {
-      const res = await request('/api/translation/preview', { method: 'POST', body: { settings: translationDraft(local.trDraft) } });
+      const draft = translationDraft(local.trDraft);
+      const apiKey = $('tr-key')?.value || '';
+      const apiKeyEnv = resolveTranslationApiKeyEnv(draft, apiKey, getState());
+      const settings = {
+        ...draft,
+        ...(apiKeyEnv ? { apiKeyEnv } : {}),
+      };
+      const res = await request('/api/translation/preview', { method: 'POST', body: { settings } });
       text('tr-preview-original', res.preview.original);
       text('tr-preview-result', res.preview.translated);
       notify('固定示例已返回译文。Kimi 内的显示范围仍以运行状态为准。', 'ok');
@@ -489,8 +535,21 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   async function copyConnection() {
     showError('tr-errors', '');
     try {
+      if (local.trSavePromise) await local.trSavePromise;
       const res = await request('/api/translation/from-connection', { method: 'POST', body: { modelId: copySelect.value } });
-      fieldFromDraft(res.settings);
+      const nextDraft = normalizeTranslationDraft({
+        ...res.settings,
+        enabled: Boolean($('tr-enabled')?.checked || res.settings?.enabled),
+      });
+      fieldFromDraft(nextDraft);
+      if ($('tr-key')) $('tr-key').value = '';
+      const copiedEnv = typeof res.settings?.apiKeyEnv === 'string' ? res.settings.apiKeyEnv.trim() : '';
+      if (copiedEnv && nextDraft.customEndpoint) {
+        local.trCopiedApiKeyEnv = copiedEnv;
+        local.trCopiedEndpoint = nextDraft.customEndpoint;
+      } else {
+        clearCopiedTranslationKey();
+      }
       text('tr-copy-note', `已从 ${res.source.connectionName || res.source.connectionId} 的 ${res.source.modelId} 复制一次。连接以后修改不会自动跟随；请点击保存后应用。`);
       syncTranslationUI(getState());
     } catch (error) { showError('tr-errors', errorText(error)); }
@@ -764,6 +823,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
             });
             if (res?.state && getState()) getState().webTools = res.state;
             if (job.apiKey && $('web-key') && $('web-key').value === job.apiKey) $('web-key').value = '';
+            if (typeof refresh === 'function') await refresh({ silent: true });
             ok = true;
             if (!local.webQueuedSave && job.seq === local.webSaveSeq) {
               local.webDraft = null;
@@ -824,7 +884,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       }
     });
   }
-  $('tr-check')?.addEventListener('click', () => runAction('check-translation'));
+  $('tr-check')?.addEventListener('click', () => runAction?.('check-translation'));
   $('translation-panel')?.addEventListener('input', () => { syncTranslationUI(getState()); });
   $('mcp-add')?.addEventListener('click', () => editMcp());
   $('mcp-close')?.addEventListener('click', () => { hidden('mcp-form', true); local.mcp = null; });

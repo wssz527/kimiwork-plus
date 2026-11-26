@@ -34,10 +34,10 @@
 
   function template() {
     $('usage-root').innerHTML = `
-      <div class="subtabs" role="tablist" aria-label="用量中心">
-        <button id="usage-tab-requests" type="button" role="tab" data-usage-tab="requests" aria-selected="true">请求统计</button>
-        <button id="usage-tab-quotas" type="button" role="tab" data-usage-tab="quotas" aria-selected="false">额度总览</button>
-        <button id="usage-tab-budget" type="button" role="tab" data-usage-tab="budget" aria-selected="false">预算保护</button>
+      <div class="subtabs" role="tablist" id="usage-tablist" aria-label="用量中心">
+        <button class="subtabs__btn" id="usage-tab-requests" type="button" role="tab" data-usage-tab="requests" aria-controls="usage-pane-requests" aria-selected="true" tabindex="0">请求统计</button>
+        <button class="subtabs__btn" id="usage-tab-quotas" type="button" role="tab" data-usage-tab="quotas" aria-controls="usage-pane-quotas" aria-selected="false" tabindex="-1">额度总览</button>
+        <button class="subtabs__btn" id="usage-tab-budget" type="button" role="tab" data-usage-tab="budget" aria-controls="usage-pane-budget" aria-selected="false" tabindex="-1">预算保护</button>
       </div>
       <p class="errors usage-error" id="usage-error" role="alert" hidden></p>
       <section class="usage-pane" id="usage-pane-requests" role="tabpanel" aria-labelledby="usage-tab-requests">
@@ -152,12 +152,19 @@
     await Promise.all([loadUsage(), loadQuota()]);
   }
 
-  function selectTab(tab) {
+  function selectTab(tab, { focus = false } = {}) {
     const active = tab === 'quotas' || tab === 'budget' ? tab : 'requests';
     state.tab = active;
-    document.querySelectorAll('[data-usage-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.usageTab === active)));
+    let activeButton = null;
+    document.querySelectorAll('[data-usage-tab]').forEach(button => {
+      const selected = button.dataset.usageTab === active;
+      button.setAttribute('aria-selected', String(selected));
+      button.setAttribute('tabindex', selected ? '0' : '-1');
+      if (selected) activeButton = button;
+    });
     for (const name of ['requests', 'quotas', 'budget']) hide('usage-pane-' + name, name !== active);
     if (active === 'quotas' && !state.quota && !state.quotaLoading) void loadQuota();
+    if (focus && activeButton && typeof activeButton.focus === 'function') activeButton.focus();
   }
 
   const filterViews = {
@@ -560,6 +567,23 @@
 
   function bind() {
     document.querySelectorAll('[data-usage-tab]').forEach(button => button.addEventListener('click', () => selectTab(button.dataset.usageTab)));
+    const tablist = $('usage-tablist') || $('usage-root')?.querySelector?.('[role="tablist"]');
+    tablist?.addEventListener('keydown', event => {
+      const buttons = Array.from(document.querySelectorAll('[data-usage-tab]'));
+      if (!buttons.length) return;
+      const targetTab = event.target?.closest?.('[data-usage-tab]') || event.target;
+      let from = buttons.indexOf(targetTab);
+      if (from < 0) from = buttons.findIndex(item => item.dataset.usageTab === state.tab);
+      if (from < 0) from = 0;
+      let next = -1;
+      if (event.key === 'ArrowRight') next = (from + 1) % buttons.length;
+      else if (event.key === 'ArrowLeft') next = (from - 1 + buttons.length) % buttons.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = buttons.length - 1;
+      if (next < 0) return;
+      event.preventDefault?.();
+      selectTab(buttons[next].dataset.usageTab, { focus: true });
+    });
     document.querySelectorAll('[data-usage-range]').forEach(button => button.addEventListener('click', () => {
       state.range = button.dataset.usageRange;
       document.querySelectorAll('[data-usage-range]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));

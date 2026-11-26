@@ -1350,3 +1350,32 @@ test('single-account overview copy is calm and plus.js avoids internal verificat
     assert.doesNotMatch(text, /当前账号未记录|读回一致/);
   } finally { env.restore(); }
 });
+
+test('account bar marks unmatched placeholder option disabled and selected to prevent no-op selection', () => {
+  const actions = [];
+  const env = makePlus({
+    data: {
+      accounts: {
+        state: 'ready',
+        currentId: '',
+        accounts: [{ id: 'acc-1', label: '工作号' }],
+      },
+    },
+    routes: {
+      '/api/actions': body => { actions.push(body); return { ok: true }; },
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const select = env.byId('plus-account-select');
+    assert.ok(select);
+    assert.equal(select.value, '');
+    const placeholder = select.children[0];
+    assert.equal(placeholder.value, '');
+    assert.equal(placeholder.textContent, '沿用当前官方登录');
+    assert.equal(placeholder.disabled, true);
+    assert.equal(placeholder.selected, true);
+    select.listeners.change[0]();
+    assert.equal(actions.length, 0);
+  } finally { env.restore(); }
+});

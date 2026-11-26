@@ -655,6 +655,8 @@
         const option = doc().createElement('option');
         option.value = '';
         option.textContent = '沿用当前官方登录';
+        option.disabled = true;
+        option.selected = true;
         select.append(option);
       }
       for (const row of book.accounts) {
