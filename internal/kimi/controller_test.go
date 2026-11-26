@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -472,6 +474,196 @@ func TestControllerTranslationHandlerIsInvoked(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 0 {
 		t.Fatal("the handler ran without a host")
+	}
+}
+
+// translationTestHost attaches a host that answers through the controller, which
+// is the wiring production uses: the controller owns the host and the provider.
+func translationTestHost(t *testing.T, harness *harness, options InjectionOptions) (*Controller, *Host, *SurfaceSession) {
+	t.Helper()
+	controller, err := NewController(ControllerSettings{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Payload = testPayload
+	if options.Revision == "" {
+		options.Revision = "rev-1"
+	}
+	options.OnReply = func(ctx context.Context, session *SurfaceSession, generation int, id string, value any) {
+		controller.onReply(ctx, session, generation, id, value)
+	}
+	host := NewHost(harness.pipe, options)
+	controller.mu.Lock()
+	controller.host = host
+	controller.mu.Unlock()
+	t.Cleanup(func() {
+		controller.mu.Lock()
+		controller.host = nil
+		controller.mu.Unlock()
+		host.DetachAll(context.Background())
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("sync: %v", err)
+	}
+	return controller, host, sessions[0]
+}
+
+func bindingPayload(session *SurfaceSession, id, text string) string {
+	return `{"method":"Runtime.bindingCalled","sessionId":"` + session.SessionID +
+		`","params":{"name":"__kwgTranslate","executionContextId":` + itoa(session.ContextID()) +
+		`,"payload":` + strconv.Quote(`{"type":"translate","id":"`+id+`","generation":`+
+		itoa(session.Generation())+`,"text":"`+text+`","protectedTexts":[]}`) + `}}`
+}
+
+func receivedTranslation(page *fakePage, text string) bool {
+	for _, expression := range page.snapshotEvaluations() {
+		if strings.Contains(expression, "__kwgTranslationReceive?.(") && strings.Contains(expression, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTranslationProviderOutlivesTheCallTimeout proves the CDP budget is not the
+// provider budget: a translation that takes longer than one local call still
+// answers, because the provider runs on the reply timeout.
+func TestTranslationProviderOutlivesTheCallTimeout(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	var mu sync.Mutex
+	var providerErr error
+	controller, _, session := translationTestHost(t, harness, InjectionOptions{
+		Settings:     map[string]any{"enabled": true, "provider": "bing", "targetLanguage": "zh"},
+		CallTimeout:  50 * time.Millisecond,
+		ReplyTimeout: 500 * time.Millisecond,
+	})
+	controller.SetTranslationHandler(func(ctx context.Context, _ TranslationReply) (any, error) {
+		time.Sleep(120 * time.Millisecond)
+		mu.Lock()
+		providerErr = ctx.Err()
+		mu.Unlock()
+		return map[string]any{"text": "译文"}, nil
+	})
+
+	harness.pipe.dispatch(bindingPayload(session, "req-1", "hello"))
+	eventually(t, "the answer to outlive the call timeout", func() bool {
+		return receivedTranslation(page, "译文")
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if providerErr != nil {
+		t.Fatalf("the provider context ended before the provider did: %v", providerErr)
+	}
+}
+
+// TestTranslationFailureReachesThePageAfterTheReplyDeadline proves the renderer
+// still learns why a translation failed: the reply is evaluated under a fresh
+// call budget, not the provider deadline that has already expired.
+func TestTranslationFailureReachesThePageAfterTheReplyDeadline(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	controller, _, session := translationTestHost(t, harness, InjectionOptions{
+		Settings:     map[string]any{"enabled": true, "provider": "custom", "targetLanguage": "zh"},
+		ReplyTimeout: 60 * time.Millisecond,
+	})
+	controller.SetTranslationHandler(func(context.Context, TranslationReply) (any, error) {
+		time.Sleep(150 * time.Millisecond)
+		return nil, errors.New("provider timed out")
+	})
+
+	harness.pipe.dispatch(bindingPayload(session, "req-1", "hello"))
+	eventually(t, "the failure to reach the page", func() bool {
+		return receivedTranslation(page, "translation_provider_failed")
+	})
+}
+
+// TestTranslationViewChangeReachesTheAttachedPage proves a view-only switch is
+// pushed to the page that is already translating. Re-injecting would drop the
+// translations it holds for no behavioural gain, so the page is told the new
+// display mode and the boot script is refreshed for the next load.
+func TestTranslationViewChangeReachesTheAttachedPage(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	profile := filepath.Join(t.TempDir(), "profile")
+	settings := TranslationSettings{Enabled: true, Provider: "bing", TargetLanguage: "zh", View: "translated"}
+	controller, err := NewController(ControllerSettings{StateDir: filepath.Dir(profile),
+		UserDataDir: profile, Translation: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.SetTranslationHandler(func(context.Context, TranslationReply) (any, error) {
+		return map[string]any{"text": "译文"}, nil
+	})
+	child := &Child{pipe: harness.pipe, exitWait: make(chan struct{})}
+	controller.mu.Lock()
+	controller.child = child
+	controller.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := controller.attachChild(ctx, child, settings); err != nil {
+		t.Fatalf("attachChild: %v", err)
+	}
+	t.Cleanup(func() {
+		controller.mu.Lock()
+		bridge := controller.bridge
+		host := controller.host
+		controller.bridge = nil
+		controller.child = nil
+		controller.host = nil
+		controller.mu.Unlock()
+		if host != nil {
+			host.DetachAll(context.Background())
+		}
+		if bridge != nil {
+			_ = bridge.Close()
+		}
+	})
+	controller.mu.Lock()
+	host := controller.host
+	controller.mu.Unlock()
+	if host == nil || !host.HasSessions() {
+		t.Fatal("translation did not attach a page")
+	}
+	countBoots := func() int {
+		count := 0
+		for _, expression := range page.snapshotEvaluations() {
+			if strings.Contains(expression, "globalThis.__kwgTranslationConfig=") {
+				count++
+			}
+		}
+		return count
+	}
+	revision := controller.Settings().Translation.Revision()
+	boots := countBoots()
+
+	next := controller.Settings()
+	next.Translation.View = "original"
+	if err := controller.Configure(next); err != nil {
+		t.Fatal(err)
+	}
+	if controller.Settings().Translation.Revision() != revision {
+		t.Fatal("a view change re-scoped the translation")
+	}
+	eventually(t, "the view change to reach the page", func() bool {
+		for _, expression := range page.snapshotEvaluations() {
+			if strings.Contains(expression, "__kwgTranslation?.configure(") &&
+				strings.Contains(expression, `"view":"original"`) && strings.Contains(expression, `"surface":"work"`) {
+				return true
+			}
+		}
+		return false
+	})
+	if countBoots() != boots {
+		t.Fatal("the page was injected again for a view change")
+	}
+	page.mu.Lock()
+	source := page.lastSource
+	page.mu.Unlock()
+	if !strings.Contains(source, `"view":"original"`) {
+		t.Fatal("the new-document script still boots with the previous view")
 	}
 }
 

@@ -104,6 +104,18 @@ re-evaluates the injection.
 Every reply is bound to the generation that asked for it, and the evaluation is
 pinned to the main context the request came from.
 
+The binding carries one flat request (`type`, `id`, `generation`, `text`,
+`protectedTexts`); the host also accepts the older `{id, value}` wrapper and
+drops a request whose `generation` is no longer live. `ReplyTimeout` bounds the
+provider call and defaults to `DefaultReplyTimeout` (150 s). It is deliberately
+separate from `CallTimeout`, which bounds one CDP call: a provider that runs for
+seconds must not be cut off by the transport budget, and its failure must still
+reach the page. `ServeTranslationReply` holds that contract once, so the
+controller's host and a host a caller attaches itself answer identically.
+`Host.ApplySettings` pushes a settings-only change (the view) to the attached
+pages without a new generation and without dropping the acknowledged scope, so
+the cached translations survive it.
+
 ## 5. Injection payload
 
 ```go
@@ -508,6 +520,7 @@ pretending the launch failed.
 | `isUserProfile` was macOS-only and a single string compare | `validateProfile` requires the profile to resolve inside `StateDir`, with no symlink escape, on every platform. A child of the signed-in profile is refused. |
 | `kimiHome` guessed `<profile>/daimon` | `ResolveKimiHome` follows Kimi's own rule: `daimon-storage.json` `shareDir`, else `<profile>/daimon-share/daimon`, and refuses anything resolving outside the managed profile. `ControllerSettings.KimiHome` is an override honoured only inside. |
 | `Translation.Enabled == false` still injected | With translation off the host keeps the pipe (the bridge shares it) but injects nothing, attaches no surface, and reports `inactive/translation_disabled`. The native import bridge is published on that path too: it is not part of translation. |
+| The live renderer payload was answered `translation_input_invalid` | `deliverBinding` reads the flat `{type,id,generation,text,protectedTexts}` the renderer sends, keeps the wrapped `{id,value}` shape, and drops a stale `generation`. The provider runs under `ReplyTimeout`, and the reply is evaluated under a fresh call budget. A view-only change reaches the attached page through `Host.ApplySettings`. |
 
 ## 16. Round 3 evidence
 

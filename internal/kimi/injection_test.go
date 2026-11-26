@@ -717,6 +717,76 @@ func TestSubframeNavigationDoesNotRetireTheSurface(t *testing.T) {
 	eventually(t, "a main-frame navigation to retire the acknowledgement", func() bool { return session.State() == "" })
 }
 
+// TestBindingDeliversTheLiveRendererPayload pins the contract the real renderer
+// sends: one flat object carrying text and protectedTexts at the top level,
+// stamped with the generation that asked for the translation. A request stamped
+// with another generation describes a document this host already replaced, so it
+// must be dropped instead of answered.
+func TestBindingDeliversTheLiveRendererPayload(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	type delivery struct {
+		id    string
+		value any
+	}
+	delivered := make(chan delivery, 4)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		OnReply: func(_ context.Context, _ *SurfaceSession, _ int, id string, value any) {
+			delivered <- delivery{id: id, value: value}
+		}})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("sync: %v", err)
+	}
+	session := sessions[0]
+	dispatch := func(payload string) {
+		harness.pipe.dispatch(`{"method":"Runtime.bindingCalled","sessionId":"` + session.SessionID +
+			`","params":{"name":"__kwgTranslate","payload":` + strconv.Quote(payload) +
+			`,"executionContextId":` + itoa(session.ContextID()) + `}}`)
+	}
+	dispatch(`{"type":"translate","id":"kwg-1","generation":` + itoa(session.Generation()) +
+		`,"text":"Check code","protectedTexts":["code"]}`)
+	select {
+	case got := <-delivered:
+		value, ok := got.value.(map[string]any)
+		if !ok {
+			t.Fatalf("value = %#v, want the flat request object", got.value)
+		}
+		if got.id != "kwg-1" || value["text"] != "Check code" {
+			t.Fatalf("delivery = %+v value = %#v", got, value)
+		}
+		protected, ok := value["protectedTexts"].([]any)
+		if !ok || len(protected) != 1 || protected[0] != "code" {
+			t.Fatalf("protectedTexts = %#v", value["protectedTexts"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the live payload never reached the provider")
+	}
+	// A stale generation, a request that names no id and one with an empty id
+	// cannot be answered in this document, so none of them is delivered.
+	dispatch(`{"type":"translate","id":"kwg-2","generation":` + itoa(session.Generation()+1) +
+		`,"text":"stale","protectedTexts":[]}`)
+	dispatch(`{"type":"translate","generation":` + itoa(session.Generation()) + `,"text":"nameless","protectedTexts":[]}`)
+	dispatch(`{"id":"","value":"hi"}`)
+	select {
+	case got := <-delivered:
+		t.Fatalf("a request that cannot be answered was delivered: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+	// The wrapped shape an older renderer sent keeps working.
+	dispatch(`{"id":"legacy","value":"hi"}`)
+	select {
+	case got := <-delivered:
+		if got.id != "legacy" || got.value != "hi" {
+			t.Fatalf("legacy delivery = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wrapped payload was refused")
+	}
+}
+
 func TestBindingFromAnotherContextIsIgnored(t *testing.T) {
 	page := &fakePage{surface: "work"}
 	harness := newHarness(t, page)

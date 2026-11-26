@@ -245,7 +245,8 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 	c.mu.Unlock()
 	c.reconcileMu.Lock()
 	c.mu.Lock()
-	previousEnabled := c.settings.Translation.Enabled
+	previousTranslation := c.settings.Translation
+	previousEnabled := previousTranslation.Enabled
 	c.settings = settings
 	c.settingsGen++
 	actions := c.actions
@@ -258,6 +259,16 @@ func (c *Controller) Configure(settings ControllerSettings) error {
 		// Configure takes the host's own lock and invalidates the sessions whose
 		// scope changed, so this cannot race a concurrent Sync.
 		host.Configure(translationPublic(settings.Translation), settings.Translation.Revision())
+		if settings.Translation.Enabled && previousEnabled &&
+			previousTranslation.Revision() == settings.Translation.Revision() &&
+			previousTranslation.View != settings.Translation.View && host.HasSessions() {
+			// Only the display mode moved. Re-injecting would throw away the
+			// translations the page already holds, so the attached page is told
+			// the new view instead.
+			applyCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			host.ApplySettings(applyCtx)
+			cancel()
+		}
 		if !settings.Translation.Enabled && (previousEnabled || host.HasSessions()) {
 			withdrawCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			host.WithdrawAll(withdrawCtx)
@@ -1425,6 +1436,15 @@ func (c *Controller) onReply(ctx context.Context, session *SurfaceSession, gener
 	if handler == nil || host == nil {
 		return
 	}
+	ServeTranslationReply(ctx, host, handler, session, generation, id, value)
+}
+
+// ServeTranslationReply runs the provider for one renderer request and writes
+// the answer back through host. It is the reply contract the controller's own
+// host uses, and a caller that attaches its own host to the same child uses it
+// too, so the two paths cannot drift.
+func ServeTranslationReply(ctx context.Context, host *Host, handler TranslationHandler,
+	session *SurfaceSession, generation int, id string, value any) {
 	answer, err := handler(ctx, TranslationReply{SessionID: session.SessionID, Surface: session.Surface,
 		Generation: generation, ID: id, Value: value})
 	if err != nil {
@@ -1432,7 +1452,13 @@ func (c *Controller) onReply(ctx context.Context, session *SurfaceSession, gener
 		// an empty translation that would replace the original text.
 		answer = map[string]any{"error": "translation_provider_failed"}
 	}
-	_ = host.Reply(ctx, session, generation, id, answer)
+	// The provider may have used the whole reply budget, which leaves ctx
+	// expired. The reply is one short CDP evaluation, so it gets its own call
+	// timeout: the renderer must learn why a translation failed even when the
+	// request that failed took too long.
+	replyCtx, cancel := context.WithTimeout(context.Background(), host.callTimeout())
+	defer cancel()
+	_ = host.Reply(replyCtx, session, generation, id, answer)
 }
 
 // String renders a one-line status for logs.

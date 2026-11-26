@@ -112,6 +112,12 @@ func (s *SurfaceSession) ScriptID() string {
 	return s.scriptID
 }
 
+// DefaultReplyTimeout bounds one provider call from a renderer request. It is
+// not the CDP budget: a custom model provider is allowed 60-120 seconds, and the
+// renderer waits 150 seconds for the answer, so the local transport timeout must
+// never be what ends a translation.
+const DefaultReplyTimeout = 150 * time.Second
+
 // InjectionOptions configures one host.
 type InjectionOptions struct {
 	// Payload is the versioned renderer source from assets/injection. It is
@@ -126,6 +132,10 @@ type InjectionOptions struct {
 	OnReply func(ctx context.Context, session *SurfaceSession, generation int, id string, value any)
 	// CallTimeout bounds one CDP call.
 	CallTimeout time.Duration
+	// ReplyTimeout bounds one OnReply call. It is separate from CallTimeout
+	// because a provider answers in seconds while a CDP call answers in
+	// milliseconds.
+	ReplyTimeout time.Duration
 }
 
 // Host owns the CDP sessions for one Kimi process.
@@ -154,6 +164,9 @@ type Host struct {
 func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 	if options.CallTimeout <= 0 {
 		options.CallTimeout = DefaultCallTimeout
+	}
+	if options.ReplyTimeout <= 0 {
+		options.ReplyTimeout = DefaultReplyTimeout
 	}
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
 		replySlots: make(chan struct{}, 8), stopCh: make(chan struct{}), loopDone: make(chan struct{}),
@@ -209,6 +222,12 @@ func (h *Host) callTimeout() time.Duration {
 	h.optionsMu.RLock()
 	defer h.optionsMu.RUnlock()
 	return h.options.CallTimeout
+}
+
+func (h *Host) replyTimeout() time.Duration {
+	h.optionsMu.RLock()
+	defer h.optionsMu.RUnlock()
+	return h.options.ReplyTimeout
 }
 
 func (h *Host) revision() string {
@@ -611,17 +630,24 @@ func (h *Host) source(session *SurfaceSession, generation int) string {
 	// The renderer reads `surface` out of this config to decide which page
 	// component family it is looking at, so it is part of the preamble rather
 	// than something the payload infers.
-	config := map[string]any{}
-	for key, value := range h.settings() {
-		config[key] = value
-	}
-	config["surface"] = session.Surface
-	settings, _ := json.Marshal(config)
+	settings, _ := json.Marshal(h.rendererConfig(session.Surface))
 	scope, _ := json.Marshal(h.revision())
 	return "if(globalThis.__kwgTranslationScope!==" + string(scope) + "){globalThis.__kwgTranslation?.__cache?.clear();" +
 		"globalThis.__kwgTranslationScope=" + string(scope) + ";}\n" +
 		"globalThis.__kwgTranslationGeneration=" + fmt.Sprint(generation) + ";\n" +
 		"globalThis.__kwgTranslationConfig=" + string(settings) + ";\n" + h.payload()
+}
+
+// rendererConfig is the public settings object plus the surface the session was
+// classified as. Both the boot preamble and a live configure carry it, so the
+// two can never disagree about which settings a page is running.
+func (h *Host) rendererConfig(surface string) map[string]any {
+	config := map[string]any{}
+	for key, value := range h.settings() {
+		config[key] = value
+	}
+	config["surface"] = surface
+	return config
 }
 
 func (h *Host) status(ctx context.Context, sessionID string, contextID int) (map[string]any, error) {
@@ -789,21 +815,39 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 		return
 	}
 	payload := stringField(event.Params, "payload")
-	var message struct {
-		ID    any    `json:"id"`
-		Value any    `json:"value"`
-		Kind  string `json:"kind"`
-	}
-	if json.Unmarshal([]byte(payload), &message) != nil {
+	var raw map[string]any
+	if json.Unmarshal([]byte(payload), &raw) != nil || raw == nil {
 		return
+	}
+	// The renderer sends one flat object: {type, id, generation, text,
+	// protectedTexts}. A request is only answered when it names itself, and a
+	// request stamped with a generation that is no longer live describes a
+	// document this host replaced, so it is dropped rather than answered.
+	idValue, ok := raw["id"]
+	if !ok || idValue == nil {
+		return
+	}
+	if text, isString := idValue.(string); isString && text == "" {
+		return
+	}
+	if rawGeneration, hasGeneration := raw["generation"]; hasGeneration {
+		stamped, ok := numberField(rawGeneration)
+		if !ok || float64(int(stamped)) != stamped || int(stamped) != generation {
+			return
+		}
+	}
+	value, hasValue := raw["value"]
+	if !hasValue {
+		// The legacy shape wrapped the request in `value`; the live renderer
+		// sends it at the top level.
+		value = raw
 	}
 	handler := h.onReplyHandler()
 	if handler == nil {
 		return
 	}
-	id := fmt.Sprint(message.ID)
-	value := message.Value
-	timeout := h.callTimeout()
+	id := fmt.Sprint(idValue)
+	timeout := h.replyTimeout()
 	select {
 	case h.replySlots <- struct{}{}:
 		go func() {
@@ -844,6 +888,56 @@ func (h *Host) HasSessions() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.sessions) > 0
+}
+
+// ApplySettings tells every attached page about the current settings without
+// starting a new generation and without invalidating the acknowledged scope.
+//
+// A view change is not a scope change: re-injecting would drop the translations
+// the page already paid for, so the live document is asked to switch display
+// mode and the new-document script is replaced under the same generation, so a
+// later load boots with the settings that are current now.
+func (h *Host) ApplySettings(ctx context.Context) {
+	h.mu.Lock()
+	retired := h.stopped
+	sessions := make([]*SurfaceSession, 0, len(h.sessions))
+	for _, session := range h.sessions {
+		sessions = append(sessions, session)
+	}
+	h.mu.Unlock()
+	if retired {
+		return
+	}
+	for _, session := range sessions {
+		session.mu.Lock()
+		contextID := session.mainContextID
+		generation := session.generation
+		previous := session.scriptID
+		session.mu.Unlock()
+		// A page that is not attached has nothing to configure; the next Sync
+		// injects the current settings anyway.
+		if contextID <= 0 {
+			continue
+		}
+		config, err := json.Marshal(h.rendererConfig(session.Surface))
+		if err != nil {
+			continue
+		}
+		_, _ = h.Evaluate(ctx, session.SessionID,
+			"globalThis.__kwgTranslation?.configure("+string(config)+")", contextID)
+		if previous != "" {
+			_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
+				map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
+		}
+		script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
+			map[string]any{"source": h.source(session, generation)}, session.SessionID, h.callTimeout())
+		if err != nil {
+			continue
+		}
+		session.mu.Lock()
+		session.scriptID = stringField(script.Result, "identifier")
+		session.mu.Unlock()
+	}
 }
 
 func (h *Host) withdraw(ctx context.Context, stop bool) {
