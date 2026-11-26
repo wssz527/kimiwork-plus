@@ -51,12 +51,17 @@ type SurfaceSession struct {
 	scriptID         string
 	revision         string
 	injectedURL      string
-	state            string
-	structure        string
-	blocks           int
-	seenBlocks       int
-	failed           bool
-	pendingContexts  map[string]int
+	// appliedSettings is the renderer config the page is running right now:
+	// written by a successful injection or a successful live configure. The next
+	// tick compares it with the current settings, so an update that failed is
+	// retried instead of being assumed.
+	appliedSettings string
+	state           string
+	structure       string
+	blocks          int
+	seenBlocks      int
+	failed          bool
+	pendingContexts map[string]int
 }
 
 // Generation is the current injection generation. A reply is only delivered to
@@ -148,6 +153,16 @@ type Host struct {
 	optionsMu sync.RWMutex
 	options   InjectionOptions
 
+	// syncMu serializes every operation that replaces a page's scripts or
+	// settings: Sync, ApplySettings and the withdrawal. Without it a view update
+	// and a re-injection interleave, and the page ends up with the scripts of one
+	// settings scope and the configure of another.
+	//
+	// Lock order: syncMu outermost, then h.mu or session.mu, then optionsMu. The
+	// event loop never takes syncMu, so a CDP exchange can never wait on a slow
+	// caller.
+	syncMu sync.Mutex
+
 	mu         sync.Mutex
 	sessions   map[string]*SurfaceSession // keyed by target id
 	stopped    bool
@@ -155,6 +170,11 @@ type Host struct {
 	stopCh     chan struct{}
 	stopOnce   sync.Once
 	loopDone   chan struct{}
+	// cancelBindings is closed and replaced whenever the attached pages are
+	// withdrawn. A reply in flight reads the channel before it starts, so
+	// disabling translation or retiring the host cancels an upstream request
+	// that would otherwise run to its full provider deadline.
+	cancelBindings chan struct{}
 
 	// contextWaiters are released when a session's main world is reported.
 	contextWaiters map[*SurfaceSession][]chan int
@@ -170,7 +190,7 @@ func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 	}
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
 		replySlots: make(chan struct{}, 8), stopCh: make(chan struct{}), loopDone: make(chan struct{}),
-		contextWaiters: map[*SurfaceSession][]chan int{}}
+		cancelBindings: make(chan struct{}), contextWaiters: map[*SurfaceSession][]chan int{}}
 	// One permanent reader for unsolicited events. Without it, navigation and
 	// binding messages would only be seen while a context wait happened to be
 	// running, which is exactly the window where they matter least.
@@ -214,6 +234,7 @@ func (h *Host) Configure(settings map[string]any, revision string) {
 	for _, session := range sessions {
 		session.mu.Lock()
 		session.revision = ""
+		session.appliedSettings = ""
 		session.mu.Unlock()
 	}
 }
@@ -230,22 +251,27 @@ func (h *Host) replyTimeout() time.Duration {
 	return h.options.ReplyTimeout
 }
 
-func (h *Host) revision() string {
-	h.optionsMu.RLock()
-	defer h.optionsMu.RUnlock()
-	return h.options.Revision
+// settingsSnapshot is one consistent read of the renderer scope. The settings,
+// the revision and the payload are read under a single lock, so a page can never
+// be configured from the settings of one Configure call while carrying the
+// revision of another: that pair would look applied and never heal.
+type settingsSnapshot struct {
+	settings map[string]any
+	revision string
+	payload  string
+	enabled  bool
 }
 
-func (h *Host) settings() map[string]any {
+func (h *Host) snapshot() settingsSnapshot {
 	h.optionsMu.RLock()
 	defer h.optionsMu.RUnlock()
-	return h.options.Settings
-}
-
-func (h *Host) payload() string {
-	h.optionsMu.RLock()
-	defer h.optionsMu.RUnlock()
-	return h.options.Payload
+	settings := make(map[string]any, len(h.options.Settings))
+	for key, value := range h.options.Settings {
+		settings[key] = value
+	}
+	enabled, _ := settings["enabled"].(bool)
+	return settingsSnapshot{settings: settings, revision: h.options.Revision,
+		payload: h.options.Payload, enabled: enabled}
 }
 
 func (h *Host) onReplyHandler() func(context.Context, *SurfaceSession, int, string, any) {
@@ -370,12 +396,16 @@ func (h *Host) Targets(ctx context.Context) ([]map[string]any, error) {
 // Sync attaches to every eligible target, re-injects what changed and retires
 // what left the surface. It returns the sessions it now holds.
 func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+
 	h.mu.Lock()
 	stopped := h.stopped
 	h.mu.Unlock()
 	if stopped {
 		return nil, ErrPipeClosed
 	}
+	snap := h.snapshot()
 	targets, err := h.Targets(ctx)
 	if err != nil {
 		return nil, err
@@ -430,26 +460,40 @@ func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
 			h.mu.Unlock()
 		}
 
-		// Compare the full URL so a changed query can trigger a new injection.
+		// Compare the full URL so a changed query can trigger a new injection,
+		// and treat a session without a main world as needing one: a cleared
+		// context must be rebound even when the URL and the scope are unchanged.
 		session.mu.Lock()
 		moved := targetURL != session.injectedURL
-		needsInjection := moved || session.revision != h.revision()
+		acknowledged := session.revision == snap.revision
 		contextID := session.mainContextID
+		applied := session.appliedSettings
 		session.mu.Unlock()
+		needsInjection := moved || !acknowledged || contextID <= 0
 
+		wantConfig, configErr := json.Marshal(h.rendererConfigFor(snap, session.Surface))
 		if needsInjection {
-			if err := h.inject(ctx, session, targetURL); err != nil {
+			if err := h.inject(ctx, session, snap, targetURL); err != nil {
 				session.mu.Lock()
 				session.revision = ""
+				session.appliedSettings = ""
 				session.state = "failed"
 				session.failed = true
 				session.mu.Unlock()
 				sessions = append(sessions, session)
 				continue
 			}
+		} else if configErr != nil || applied != string(wantConfig) {
+			// A live update that failed — the page was mid-navigation, the
+			// provider of the CDP call timed out — is retried here instead of
+			// leaving the page on the previous view until it navigates.
+			_ = h.applySessionSettings(ctx, session, snap)
+			sessions = append(sessions, session)
+			continue
 		} else if status, err := h.status(ctx, session.SessionID, contextID); err != nil || !validStatus(status, surface) {
 			session.mu.Lock()
 			session.revision = ""
+			session.appliedSettings = ""
 			session.state = "failed"
 			session.failed = true
 			session.mu.Unlock()
@@ -514,11 +558,16 @@ func (h *Host) detach(ctx context.Context, session *SurfaceSession) error {
 // A new injection is a new generation: anything issued by the previous document
 // is retired so it cannot paint into the page that is now attached. The world
 // identity is deliberately left alone; only real evidence drops it.
-func (h *Host) inject(ctx context.Context, session *SurfaceSession, targetURL string) error {
+func (h *Host) inject(ctx context.Context, session *SurfaceSession, snap settingsSnapshot, targetURL string) error {
 	session.mu.Lock()
 	session.generation++
 	injection := session.generation
 	session.mu.Unlock()
+
+	configJSON, source, err := h.rendererScript(snap, session.Surface, injection)
+	if err != nil {
+		return err
+	}
 
 	if _, err := h.pipe.Send(ctx, "Page.enable", map[string]any{}, session.SessionID, h.callTimeout()); err != nil {
 		return err
@@ -580,7 +629,6 @@ func (h *Host) inject(ctx context.Context, session *SurfaceSession, targetURL st
 		_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
 			map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
 	}
-	source := h.source(session, injection)
 	script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
 		map[string]any{"source": source}, session.SessionID, h.callTimeout())
 	if err != nil {
@@ -618,32 +666,38 @@ func (h *Host) inject(ctx context.Context, session *SurfaceSession, targetURL st
 	session.structure = stringField(status, "structure")
 	session.blocks = intField(status, "blocks")
 	session.seenBlocks = intField(status, "seenBlocks")
-	session.revision = h.revision()
+	session.revision = snap.revision
+	session.appliedSettings = string(configJSON)
 	session.injectedURL = targetURL
 	session.failed = false
 	return nil
 }
 
-// source renders the per-injection preamble. The payload itself is appended
-// unchanged; only the host-owned globals before it are generated here.
-func (h *Host) source(session *SurfaceSession, generation int) string {
+// rendererScript renders the per-injection preamble and returns the config it
+// stamps. The payload itself is appended unchanged; only the host-owned globals
+// before it are generated here.
+func (h *Host) rendererScript(snap settingsSnapshot, surface string, generation int) ([]byte, string, error) {
 	// The renderer reads `surface` out of this config to decide which page
 	// component family it is looking at, so it is part of the preamble rather
 	// than something the payload infers.
-	settings, _ := json.Marshal(h.rendererConfig(session.Surface))
-	scope, _ := json.Marshal(h.revision())
-	return "if(globalThis.__kwgTranslationScope!==" + string(scope) + "){globalThis.__kwgTranslation?.__cache?.clear();" +
+	configJSON, err := json.Marshal(h.rendererConfigFor(snap, surface))
+	if err != nil {
+		return nil, "", err
+	}
+	scope, _ := json.Marshal(snap.revision)
+	source := "if(globalThis.__kwgTranslationScope!==" + string(scope) + "){globalThis.__kwgTranslation?.__cache?.clear();" +
 		"globalThis.__kwgTranslationScope=" + string(scope) + ";}\n" +
 		"globalThis.__kwgTranslationGeneration=" + fmt.Sprint(generation) + ";\n" +
-		"globalThis.__kwgTranslationConfig=" + string(settings) + ";\n" + h.payload()
+		"globalThis.__kwgTranslationConfig=" + string(configJSON) + ";\n" + snap.payload
+	return configJSON, source, nil
 }
 
-// rendererConfig is the public settings object plus the surface the session was
-// classified as. Both the boot preamble and a live configure carry it, so the
-// two can never disagree about which settings a page is running.
-func (h *Host) rendererConfig(surface string) map[string]any {
-	config := map[string]any{}
-	for key, value := range h.settings() {
+// rendererConfigFor is the public settings object plus the surface the session
+// was classified as. Both the boot preamble and a live configure carry it, so
+// the two can never disagree about which settings a page is running.
+func (h *Host) rendererConfigFor(snap settingsSnapshot, surface string) map[string]any {
+	config := make(map[string]any, len(snap.settings)+1)
+	for key, value := range snap.settings {
 		config[key] = value
 	}
 	config["surface"] = surface
@@ -790,6 +844,7 @@ func (h *Host) dropWorld(session *SurfaceSession) {
 	session.mainContextID = 0
 	session.bindingContextID = 0
 	session.revision = ""
+	session.appliedSettings = ""
 	session.state = ""
 }
 
@@ -848,12 +903,40 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 	}
 	id := fmt.Sprint(idValue)
 	timeout := h.replyTimeout()
+	// The batch is read before the dispatch, so a withdrawal cancels the requests
+	// already running rather than only the ones dispatched afterwards.
+	batch := h.bindingCancel()
+	select {
+	case <-h.stopCh:
+		return
+	case <-h.pipe.Done():
+		return
+	default:
+	}
 	select {
 	case h.replySlots <- struct{}{}:
 		go func() {
 			defer func() { <-h.replySlots }()
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
+			// A provider call is allowed to outlive the page that asked for it by
+			// minutes. A withdrawal, a retired host or the end of the managed child
+			// must end it at once instead of holding a reply slot that the next
+			// translation needs.
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				select {
+				case <-ctx.Done():
+				case <-batch:
+					cancel()
+				case <-h.stopCh:
+					cancel()
+				case <-h.pipe.Done():
+					cancel()
+				case <-done:
+				}
+			}()
 			handler(ctx, session, generation, id, value)
 		}()
 	default:
@@ -898,6 +981,9 @@ func (h *Host) HasSessions() bool {
 // mode and the new-document script is replaced under the same generation, so a
 // later load boots with the settings that are current now.
 func (h *Host) ApplySettings(ctx context.Context) {
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+
 	h.mu.Lock()
 	retired := h.stopped
 	sessions := make([]*SurfaceSession, 0, len(h.sessions))
@@ -908,70 +994,155 @@ func (h *Host) ApplySettings(ctx context.Context) {
 	if retired {
 		return
 	}
+	snap := h.snapshot()
 	for _, session := range sessions {
-		session.mu.Lock()
-		contextID := session.mainContextID
-		generation := session.generation
-		previous := session.scriptID
-		session.mu.Unlock()
-		// A page that is not attached has nothing to configure; the next Sync
-		// injects the current settings anyway.
-		if contextID <= 0 {
-			continue
-		}
-		config, err := json.Marshal(h.rendererConfig(session.Surface))
-		if err != nil {
-			continue
-		}
-		_, _ = h.Evaluate(ctx, session.SessionID,
-			"globalThis.__kwgTranslation?.configure("+string(config)+")", contextID)
-		if previous != "" {
-			_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
-				map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
-		}
-		script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
-			map[string]any{"source": h.source(session, generation)}, session.SessionID, h.callTimeout())
-		if err != nil {
-			continue
-		}
-		session.mu.Lock()
-		session.scriptID = stringField(script.Result, "identifier")
-		session.mu.Unlock()
+		_ = h.applySessionSettings(ctx, session, snap)
 	}
 }
 
+// applySessionSettings moves one attached page to the current settings without
+// starting a new generation: the live document is reconfigured and its
+// new-document script is replaced, so a later load boots with the settings that
+// are current now.
+//
+// Callers hold syncMu. The replacement is registered before the previous script
+// is removed: a failure at that point leaves the acknowledged script installed
+// rather than a page with no boot script at all. Every failure clears the
+// acknowledgement and the applied settings, so the next Sync re-injects and the
+// page heals instead of silently keeping the old view.
+func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession, snap settingsSnapshot) error {
+	h.mu.Lock()
+	live := h.sessions[session.TargetID] == session && !h.stopped
+	h.mu.Unlock()
+	if !live {
+		return nil
+	}
+	session.mu.Lock()
+	contextID := session.mainContextID
+	generation := session.generation
+	revision := session.revision
+	previous := session.scriptID
+	session.mu.Unlock()
+	// A page that is not attached, or one whose scope was never acknowledged,
+	// has nothing to configure; the next Sync injects the current settings.
+	if contextID <= 0 || revision == "" || revision != snap.revision {
+		return nil
+	}
+	configJSON, source, err := h.rendererScript(snap, session.Surface, generation)
+	if err != nil {
+		session.markSettingsFailed()
+		return err
+	}
+	script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
+		map[string]any{"source": source}, session.SessionID, h.callTimeout())
+	if err != nil {
+		session.markSettingsFailed()
+		return err
+	}
+	newScriptID := stringField(script.Result, "identifier")
+	if previous != "" {
+		_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
+			map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
+	}
+	session.mu.Lock()
+	session.scriptID = newScriptID
+	session.mu.Unlock()
+
+	value, err := h.Evaluate(ctx, session.SessionID,
+		"globalThis.__kwgTranslation?.configure("+string(configJSON)+")", contextID)
+	status, ok := value.(map[string]any)
+	// A configure that fails, answers for another surface or leaves translation
+	// inactive while it is enabled did not take effect: the page still shows the
+	// previous view, so it is not acknowledged as applied.
+	if err != nil || !ok || !validStatus(status, session.Surface) ||
+		(snap.enabled && stringField(status, "state") != "active") {
+		session.markSettingsFailed()
+		if err != nil {
+			return err
+		}
+		return ErrRendererUnconfirmed
+	}
+	session.mu.Lock()
+	session.state = stringField(status, "state")
+	session.structure = stringField(status, "structure")
+	session.blocks = intField(status, "blocks")
+	session.seenBlocks = intField(status, "seenBlocks")
+	session.appliedSettings = string(configJSON)
+	session.failed = false
+	session.mu.Unlock()
+	return nil
+}
+
+// markSettingsFailed voids the acknowledgement and the applied settings, so the
+// next Sync re-injects the current scope. The script the session points at is
+// kept: it is what the retry and the detach clean up.
+func (s *SurfaceSession) markSettingsFailed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appliedSettings = ""
+	s.revision = ""
+	s.state = "failed"
+	s.failed = true
+}
+
 func (h *Host) withdraw(ctx context.Context, stop bool) {
+	if stop {
+		// Retire first so a Sync parked in waitForMainContext sees the stop
+		// channel and releases syncMu, instead of this call waiting out the
+		// context deadline behind it.
+		h.mu.Lock()
+		h.stopped = true
+		h.stopOnce.Do(func() { close(h.stopCh) })
+		h.cancelPendingBindingsLocked()
+		h.mu.Unlock()
+	}
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+
 	h.mu.Lock()
 	sessions := make([]*SurfaceSession, 0, len(h.sessions))
 	for _, session := range h.sessions {
 		sessions = append(sessions, session)
 	}
 	h.sessions = map[string]*SurfaceSession{}
-	if stop {
-		h.stopped = true
+	if !stop {
+		h.cancelPendingBindingsLocked()
 	}
 	h.mu.Unlock()
-	if stop {
-		h.stopOnce.Do(func() { close(h.stopCh) })
-	}
 
-	disabled := map[string]any{"enabled": false}
-	if settings := h.settings(); settings != nil {
-		disabled = map[string]any{}
-		for key, value := range settings {
-			disabled[key] = value
-		}
-		disabled["enabled"] = false
+	snap := h.snapshot()
+	disabled := make(map[string]any, len(snap.settings)+1)
+	for key, value := range snap.settings {
+		disabled[key] = value
 	}
+	disabled["enabled"] = false
 	encoded, _ := json.Marshal(disabled)
 	for _, session := range sessions {
 		session.mu.Lock()
 		contextID := session.mainContextID
+		session.appliedSettings = ""
+		session.revision = ""
 		session.mu.Unlock()
 		_, _ = h.Evaluate(ctx, session.SessionID,
 			"globalThis.__kwgTranslation?.configure("+string(encoded)+")", contextID)
 		_ = h.detach(ctx, session)
 	}
+}
+
+// cancelPendingBindingsLocked retires the current binding batch: every reply
+// already dispatched is cancelled. Callers hold h.mu.
+func (h *Host) cancelPendingBindingsLocked() {
+	close(h.cancelBindings)
+	h.cancelBindings = make(chan struct{})
+}
+
+// bindingCancel returns the batch a reply dispatched now belongs to. Reading it
+// before the handler starts is what makes a withdrawal cancel a request that is
+// already waiting on the provider.
+func (h *Host) bindingCancel() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cancelBindings
 }
 
 // WithdrawAll disables and removes translation scripts from every attached view
