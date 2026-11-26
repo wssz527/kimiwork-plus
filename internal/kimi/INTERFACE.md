@@ -89,10 +89,17 @@ with `exec.Command`, so a caller's `defer cancel()` does not kill a managed Kimi
 that Start just launched. The child ends through `Child.Stop`, which signals only
 the pid it started.
 
-`kimi.ClassifySurface(type, url)` returns `work`, `chat` or `other`. Only `work`
-(`app:/file:/kimi:` + `/kimi-agent.html`) and `chat` (`https://www.kimi.com` with
-`/`, `/chat/history`, `/chat/<id>`) receive anything. A query, a fragment, a
-lookalike host, a non-`page` target or an unrecognised path is `other`.
+`kimi.ClassifySurface(type, url)` returns `work`, `chat` or `other`, and only
+those two surfaces receive anything. `work` matches
+`app://localhost/kimi-agent.html`, `file:///.../kimi-agent.html` and
+`kimi://.../kimi-agent.html`; official query parameters such as `?route=...`
+are allowed, while a fragment, a userinfo, an `app://` host other than
+`localhost`, an explicit port or another application page such as
+`settings.html` is `other`. `chat` is `https://www.kimi.com` at `/`,
+`/chat/history` or `/chat/<id>`, and still refuses a query. A fragment, a
+userinfo, a lookalike host, a non-`page` target or an unrecognised path is
+`other`. Session tracking compares the whole URL, so a changed query
+re-evaluates the injection.
 
 Every reply is bound to the generation that asked for it, and the evaluation is
 pinned to the main context the request came from.
