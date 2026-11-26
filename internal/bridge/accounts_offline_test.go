@@ -247,3 +247,53 @@ func TestOfflineAccountActionsReturnConflictWhenPrerequisitesMissing(t *testing.
 		}
 	}
 }
+
+func TestCompletePendingAccountDefersWhileAutoSyncIsSuspendedAndKeepsReplacedOperation(t *testing.T) {
+	n, _ := offlineAccountNative(t, true)
+	n.autoSync = newAutoSyncCoordinator(context.Background(), n)
+	t.Cleanup(n.autoSync.stop)
+	row, _ := seedOfflineAccount(t, n, "pending-user")
+
+	n.accounts.hooks.Busy = func(context.Context) error { return nil }
+	started := 0
+	n.accounts.hooks.SyncPending = func(context.Context, json.RawMessage) (string, error) {
+		started++
+		return row.ID, nil
+	}
+
+	// A suspended coordinator records the deferred intent without claiming the slot.
+	n.autoSync.suspend()
+	n.completePendingAccount(context.Background(), row.ID)
+	if started != 0 {
+		t.Fatal("a suspended coordinator must not start the page sync")
+	}
+	n.mu.Lock()
+	claimed := n.operation
+	n.mu.Unlock()
+	if claimed != nil {
+		t.Fatalf("operation was claimed while suspended: %v", claimed)
+	}
+	n.autoSync.mu.Lock()
+	deferred := n.autoSync.deferred
+	n.autoSync.mu.Unlock()
+	if !deferred {
+		t.Fatal("a skipped run must be deferred")
+	}
+	n.autoSync.resume()
+
+	// A replacement operation takes the slot mid-sync; the deferred restore must keep it.
+	replaced := core.Document{"id": "other-operation", "action": "connect-kimi", "state": "running"}
+	n.accounts.hooks.SyncPending = func(context.Context, json.RawMessage) (string, error) {
+		n.mu.Lock()
+		n.operation = replaced
+		n.mu.Unlock()
+		return row.ID, nil
+	}
+	n.completePendingAccount(context.Background(), row.ID)
+	n.mu.Lock()
+	got := n.operation
+	n.mu.Unlock()
+	if got == nil || got["id"] != "other-operation" || got["action"] != "connect-kimi" {
+		t.Fatalf("a replaced operation was overwritten: %v", got)
+	}
+}

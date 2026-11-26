@@ -223,13 +223,32 @@ func (n *Native) completePendingAccount(ctx context.Context, id string) {
 		n.mu.Unlock()
 		return
 	}
+	// Same claim rules as beginAutoSyncOperation: while background sync is
+	// suspended, leave the operation slot alone and remember the deferred
+	// intent, keeping the Native.mu -> autoSync.mu lock order.
+	if n.autoSync != nil {
+		n.autoSync.mu.Lock()
+		suspended := n.autoSync.suspended != 0
+		if suspended {
+			n.autoSync.deferred = true
+		}
+		n.autoSync.mu.Unlock()
+		if suspended {
+			n.mu.Unlock()
+			return
+		}
+	}
 	previous := n.operation
-	n.operation = core.Document{"id": RandomKey()[:16], "action": "auto-sync", "state": "running", "startedAt": time.Now().UnixMilli()}
+	opID := RandomKey()[:16]
+	n.operation = core.Document{"id": opID, "action": "auto-sync", "state": "running", "startedAt": time.Now().UnixMilli()}
 	n.mu.Unlock()
 	defer func() {
 		n.mu.Lock()
-		n.operation = previous
-		n.notifyOperationIdleLocked()
+		// A later action may have taken the slot: reclaim only our own entry.
+		if n.operation != nil && n.operation["id"] == opID {
+			n.operation = previous
+			n.notifyOperationIdleLocked()
+		}
 		n.mu.Unlock()
 		n.autoSync.operationFinished("account-page-sync", "", nil, err)
 	}()
