@@ -352,7 +352,12 @@ test('saving a connection protocol change leaves existing model rows untouched',
     'const CONNECTION_ID_HINT = "hint";',
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
     ...['protocolList', 'normalizeBaseURL', 'connectionProtocol', 'protocolLabel', 'validateConnectionDraft',
+      'connectionDraftRow', 'connectionRowsOf', 'connectionsSignature', 'isAnthropicPreset',
+      'presetsSuggestedId', 'providerPresets', 'providerPreset', 'uniqueConnectionId', 'isInputActive',
+      'upstreamReasonText', 'fmtMs', 'renderProbeNote',
       'readConnectionEditor', 'applyConnectionEditor'].map(sourceFunction),
+    'const setHidden = () => {};',
+    'const setText = () => {};',
     'const renderConnections = () => {};',
     'const renderConnectionsDiff = () => {};',
     'return applyConnectionEditor;',
@@ -439,6 +444,7 @@ function makeOnboardEnv(savedConnections, { touched = true } = {}) {
     ...['isInputActive', 'connectionRowsOf', 'savedOnboardTarget', 'onboardTouched', 'fillOnboardForm'].map(sourceFunction),
     'const protocolList = value => Array.isArray(value) ? value.filter(entry => entry === "chat" || entry === "responses") : [];',
     'const connectionProtocol = row => { const list = protocolList(row && row.protocols); return list.length === 1 ? list[0] : null; };',
+    'const connectionDefaultUpstreamProtocol = () => "";',
     'const fillOnboardPresets = () => {};',
     'const setText = () => {};',
     'const fmtCount = (value) => String(value);',
@@ -501,18 +507,21 @@ test('onboard discovery inherits missing metadata from the selected preset', asy
   const code = [
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
     sourceHelpers,
-    ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow', 'discoveryBody',
-      'onboardEndpointKey', 'syncOnboardEndpoint', 'protocolList', 'connectionProtocol',
-      'providerPresets', 'providerPreset', 'presetOnboardModels', 'mergeOnboardPresetMetadata',
+    ...['normalizeBaseURL', 'isAnthropicPreset', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow', 'probeBody',
+      'onboardEndpointKey', 'syncOnboardEndpoint', 'protocolList', 'connectionProtocol', 'syncOnboardProtocolToDraft',
+      'providerPresets', 'providerPreset', 'presetOnboardModels', 'mergeOnboardPresetMetadata', 'presetMetadataSource',
+      'matchCatalogHint', 'inferModelDefaults', 'enrichProbeCatalogRow',
       'onboardRowSource', 'onboardRowFrom', 'preserveOnboardModelNames', 'discoverOnboardModels'].map(sourceFunction),
+    'const upstreamReasonText = code => code || "";',
     'const onboardProtocol = () => state.onboard?.protocol === "chat" || state.onboard?.protocol === "responses" ? state.onboard.protocol : null;',
     'return discoverOnboardModels;',
   ].join('\n');
   const discover = new Function('state', 'dom', 'API', 'request', 'setHidden', 'setText', 'showToast', 'fmtCount', 'discoveryReasonText', 'renderOnboard', 'clearOnboardSaveErrors', code)(
-    state, dom, { discovery: '/api/discovery' }, async () => ({ discovery: {
-      state: 'passed', modelCount: 1, checkedAt: '2026-11-23T01:00:00Z',
-      models: [{ id: 'model-a', protocols: ['chat'], source: { checkedAt: '2026-11-23' } }],
-    } }), () => {}, () => {}, () => {}, String, () => '', () => {}, () => {},
+    state, dom, { connectionsProbe: '/api/connections/probe' }, async () => ({
+      ok: true, connectionProtocol: 'chat', catalog: {
+        modelCount: 1, models: [{ id: 'model-a', protocols: ['chat'], source: { checkedAt: '2026-11-23' } }],
+      },
+    }), () => {}, () => {}, () => {}, String, () => '', () => {}, () => {},
   );
   await discover();
   const row = state.onboard.discovery.models[0];
@@ -648,9 +657,10 @@ test('recommended preset models keep names, context, output, capabilities and ef
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
     'const PROTOCOL_CHOICES = ["chat", "responses"];',
     sourceHelpers,
-    ...['normalizeBaseURL', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow',
+    ...['normalizeBaseURL', 'isAnthropicPreset', 'onboardConnectionValues', 'connectionRowsOf', 'savedOnboardRow',
       'onboardEndpointKey', 'protocolList', 'connectionProtocol',
       'providerPresets', 'providerPreset', 'presetOnboardModels', 'presetMetadataSource',
+      'mergeOnboardPresetMetadata', 'matchCatalogHint', 'inferModelDefaults', 'enrichProbeCatalogRow',
       'onboardRowSource', 'onboardRowFrom', 'useRecommendedOnboardModels'].map(sourceFunction),
     'const onboardProtocol = () => state.onboard?.protocol === "chat" || state.onboard?.protocol === "responses" ? state.onboard.protocol : null;',
     'const renderOnboard = () => {};',
@@ -827,9 +837,11 @@ test('switching presets replaces stale suggested ids but keeps a hand-edited one
     sourceFunction('providerPreset'),
     sourceFunction('connectionRowsOf'),
     sourceFunction('savedOnboardTarget'),
+    sourceFunction('isAnthropicPreset'),
     sourceFunction('onboardSuggestedId'),
     sourceFunction('onboardSuggestedName'),
     sourceFunction('staleSuggested'),
+    sourceFunction('uniqueConnectionId'),
     sourceFunction('protocolList'),
     sourceFunction('syncOnboardProtocolToDraft'),
     sourceFunction('applyOnboardPreset'),
@@ -1103,34 +1115,53 @@ test('batch context changes only selected rows and rejects unknown values', () =
 });
 
 test('new connection flows default to custom and require an explicit preset selection', () => {
-  const select = { value: '', dataset: {}, disabled: false, replaceChildren() { this.children = []; }, append(option) { this.children.push(option); } };
-  const events = [];
+  const makeSelect = () => ({ value: '', dataset: {}, disabled: false, children: [], replaceChildren(...children) { this.children = children; } });
+  const optgroups = [];
   globalThis.document = {
-    createElement: tag => ({ tagName: tag, append(...children) { this.children = children; } }),
+    createElement: tag => {
+      if (tag === 'optgroup') {
+        const group = { tagName: tag, label: '', children: [], append(node) { this.children.push(node); } };
+        optgroups.push(group);
+        return group;
+      }
+      return { tagName: tag, value: '', textContent: '' };
+    },
   };
   try {
-    const render = new Function('select', 'events', [
-      'const providers = { menu: { families: [{ family: "kimi-code", regions: [{ region: "cn", plans: [{ plan: "coding", variants: [{ presetId: "kimi-code-cn", name: "Kimi Code（国内）" }] }] }] }] }, presets: [{ id: "kimi-code-cn", family: "kimi-code", region: "cn", kind: "coding" }] };',
-      'const state = { family: "kimi-code", region: "cn", plan: "coding" };',
-      'const family = { value: state.family, addEventListener() {}, dispatchEvent() {} };',
-      'const region = { value: state.region, addEventListener() {}, dispatchEvent() {} };',
-      'const plan = { value: state.plan, addEventListener() {}, dispatchEvent() {} };',
-      growthFunction('fillProviderOptions'),
-      'const previous = select.value;',
-      'const families = providers.menu.families;',
-      'const selectedFamily = families.find(row => row.family === state.family);',
-      'const regions = selectedFamily?.regions || [];',
-      'const selectedRegion = regions.find(row => String(row.region) === state.region);',
-      'const plans = selectedRegion?.plans || [];',
-      'const variants = plans.find(row => row.plan === state.plan)?.variants || [];',
-      'fillProviderOptions(select, [{ value: "", label: "选择接口与端点" }, ...variants.map(row => ({ value: row.presetId, label: row.name }))], select.value);',
-      'select.disabled = false;',
-      'events.push({ value: select.value, options: select.children.map(option => option.value) });',
-    ].join('\n'))(select, events);
+    const code = [
+      'const PRESET_GROUP_ORDER = ["国内常用", "海外主流", "聚合与本地"];',
+      'const AGGREGATOR_OR_LOCAL_PATTERN = /openrouter|ollama|lmstudio|vllm|local|oneapi|newapi|gateway|proxy|litellm|magpie|siliconflow/i;',
+      'const DOMESTIC_PATTERN = /deepseek|dashscope|qwen|zhipu|glm|minimax|moonshot|kimi|volcengine|doubao|ark|baichuan|stepfun|hunyuan|yi/i;',
+      'const GLOBAL_PATTERN = /openai|anthropic|claude|gemini|google|xai|grok|mistral|cohere|groq|together|fireworks|perplexity/i;',
+      ...['providerPresets', 'providerPresetGroup', 'providerPresetLabel', 'providerPresetGroups', 'syncGroupedPresetOptions'].map(sourceFunction),
+      'return { providerPresetGroups, syncGroupedPresetOptions };',
+    ].join('\n');
+    const helpers = new Function('state', code)({
+      providers: { presets: [
+        { id: 'deepseek', name: 'DeepSeek', region: 'cn' },
+        { id: 'openai', name: 'OpenAI', region: 'global' },
+      ] },
+    });
+    const groups = helpers.providerPresetGroups();
+    assert.deepEqual(groups.map(group => group.label), ['国内常用', '海外主流', '自定义兼容接口']);
+    assert.deepEqual(groups.at(-1).options.map(option => option.value), ['']);
+    assert.match(groups.at(-1).options[0].label, /自定义兼容接口/);
+
+    /* 没有显式选择时停在自定义项，绝不替用户选中第一个服务商。 */
+    const select = makeSelect();
+    helpers.syncGroupedPresetOptions(select, '');
     assert.equal(select.value, '');
-    assert.deepEqual(events, [{ value: '', options: ['', 'kimi-code-cn'] }]);
+    assert.deepEqual(optgroups.map(group => group.label), ['国内常用', '海外主流', '自定义兼容接口']);
+    assert.equal(optgroups[0].children[0].value, 'deepseek');
+    /* 用户明确选择预设后才回填预设值。 */
+    helpers.syncGroupedPresetOptions(select, 'openai');
+    assert.equal(select.value, 'openai');
+    /* custom 与空值等价。 */
+    helpers.syncGroupedPresetOptions(select, 'custom');
+    assert.equal(select.value, '');
+
     assert.match(htmlSource, /id="ob-name"[^>]*placeholder="自定义名称（选填）"/);
-    assert.match(htmlSource, /id="ob-id"[^>]*placeholder="自定义连接标识（选填）"/);
+    assert.match(htmlSource, /id="ob-id"[^>]*placeholder="按服务商自动生成"/);
   } finally {
     delete globalThis.document;
   }
@@ -1138,19 +1169,35 @@ test('new connection flows default to custom and require an explicit preset sele
 
 test('late provider loading refreshes wizard options without changing typed fields', async () => {
   const state = { key: 'session-key', providers: null, onboard: { touched: true } };
-  const dom = { onboardPreset: { value: '' }, onboardPresetHint: null, onboardKey: { value: 'sk-user-just-typed' } };
+  const dom = {
+    onboardPreset: { value: '', dataset: {}, children: [], replaceChildren(...children) { this.children = children; } },
+    onboardPresetHint: null, onboardKey: { value: 'sk-user-just-typed' },
+  };
   const options = [];
   const renders = [];
+  globalThis.document = { createElement: tag => (tag === 'optgroup'
+    ? { tagName: tag, label: '', children: [], append(node) { this.children.push(node); } }
+    : { tagName: tag, value: '', textContent: '' }) };
   const code = [
-    ...['providerPresets', 'providerPresetLabel', 'providerPresetOptions', 'fillOnboardPresets', 'loadProviders'].map(sourceFunction),
+    'const PRESET_GROUP_ORDER = ["国内常用", "海外主流", "聚合与本地"];',
+    'const AGGREGATOR_OR_LOCAL_PATTERN = /openrouter|ollama|lmstudio|vllm|local|oneapi|newapi|gateway|proxy|litellm|magpie|siliconflow/i;',
+    'const DOMESTIC_PATTERN = /deepseek|dashscope|qwen|zhipu|glm|minimax|moonshot|kimi|volcengine|doubao|ark|baichuan|stepfun|hunyuan|yi/i;',
+    'const GLOBAL_PATTERN = /openai|anthropic|claude|gemini|google|xai|grok|mistral|cohere|groq|together|fireworks|perplexity/i;',
+    ...['providerPresets', 'providerPresetGroup', 'providerPresetLabel', 'providerPresetGroups', 'syncGroupedPresetOptions', 'fillOnboardPresets', 'loadProviders'].map(sourceFunction),
     'return loadProviders;',
   ].join('\n');
-  const load = new Function('state', 'dom', 'API', 'request', 'setText', 'fmtCount', 'syncSelectOptions', 'renderConnectionEditor', 'refreshSavedProtocolDeclarations', 'renderOnboard', code)(
-    state, dom, { providers: '/api/providers' }, async () => ({ presets: [{ id: 'deepseek', name: 'DeepSeek' }] }),
-    () => {}, String, (select, rows, current) => { select.value = current; options.push(...rows); }, () => {}, () => {}, () => renders.push('onboard'),
-  );
-  await load();
-  assert.deepEqual(options.map(option => option.value), ['', 'deepseek']);
+  try {
+    const load = new Function('state', 'dom', 'API', 'request', 'setText', 'fmtCount', 'renderConnectionEditor', 'refreshSavedProtocolDeclarations', 'renderOnboard', code)(
+      state, dom, { providers: '/api/providers' }, async () => ({ presets: [{ id: 'deepseek', name: 'DeepSeek' }] }),
+      () => {}, String, () => {}, () => {}, () => renders.push('onboard'),
+    );
+    await load();
+  } finally {
+    delete globalThis.document;
+  }
+  for (const group of dom.onboardPreset.children) for (const option of group.children) options.push(option);
+  assert.deepEqual(options.map(option => option.value), ['deepseek', '']);
+  assert.equal(dom.onboardPreset.value, '');
   assert.equal(dom.onboardKey.value, 'sk-user-just-typed');
   assert.equal(state.onboard.touched, true);
   assert.deepEqual(renders, ['onboard']);
@@ -1247,22 +1294,29 @@ test('a failed onboarding save keeps the form and the key', async () => {
   assert.equal(dom.onboardDisclosure.open, true);
 });
 
-test('catalogue reads require only address and key and never borrow a key for a changed endpoint', () => {
+test('catalogue probes require only address and key and never borrow a key for a changed endpoint', () => {
   const code = [
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    sourceFunction('normalizeBaseURL'), sourceFunction('discoveryBody'), 'return discoveryBody;'
+    sourceFunction('normalizeBaseURL'), sourceFunction('probeBody'), 'return probeBody;'
   ].join('\n');
   const build = new Function(code)();
   const saved = { id: 'saved', baseURL: 'https://api.example.com/v1', apiKeySet: true };
-  const anonymous = build({ id: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new', providerPresetId: '' }, null, 'rev');
+  const anonymous = build({ id: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new', providerPresetId: '' }, null);
   assert.equal(anonymous.error, undefined);
-  assert.deepEqual(anonymous.body, { revision: 'rev', baseURL: 'https://api.example.com/v1', apiKey: 'sk-new' });
-  const reused = build({ id: 'saved', baseURL: 'https://api.example.com/v1', apiKey: '' }, saved, 'rev');
-  assert.deepEqual(reused.body, { revision: 'rev', baseURL: 'https://api.example.com/v1', connectionId: 'saved' });
+  assert.deepEqual(anonymous.body, {
+    baseUrl: 'https://api.example.com/v1', protocol: 'auto', timeoutMs: 15000, apiKey: 'sk-new',
+  });
+  assert.equal(anonymous.sameEndpoint, false);
+  const reused = build({ id: 'saved', baseURL: 'https://api.example.com/v1', apiKey: '' }, saved);
+  assert.deepEqual(reused.body, {
+    baseUrl: 'https://api.example.com/v1', protocol: 'auto', timeoutMs: 15000, connectionId: 'saved',
+  });
   assert.equal(reused.body.apiKey, undefined);
-  const changed = build({ id: 'saved', baseURL: 'https://other.example.com/v1', apiKey: '' }, saved, 'rev');
-  assert.match(changed.error, /请填写该上游的 API Key/);
+  const changed = build({ id: 'saved', baseURL: 'https://other.example.com/v1', apiKey: '' }, saved);
+  assert.match(changed.error, /请先填写 API Key/);
   assert.equal(changed.body, undefined);
+  const anthropic = build({ id: '', baseURL: 'https://api.anthropic.com/v1', apiKey: 'sk-ant' }, null, { protocolMode: 'anthropic' });
+  assert.equal(anthropic.body.protocol, 'anthropic');
 });
 
 test('a new connection editor reads its current endpoint and key before an ID or saved row exists', async () => {
@@ -1272,26 +1326,29 @@ test('a new connection editor reads its current endpoint and key before an ID or
   const messages = [];
   const code = [
     'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
-    ...['normalizeBaseURL', 'discoveryBody', 'discoverConnectionEditorModels'].map(sourceFunction),
+    ...['normalizeBaseURL', 'probeBody', 'discoverConnectionEditorModels'].map(sourceFunction),
     'const readConnectionEditor = () => {};',
     'const connectionRowsOf = () => [];',
+    'const connectionProtocol = () => null;',
+    'const isAnthropicPreset = () => false;',
+    'const providerPreset = () => null;',
     'const renderConnectionEditor = () => {};',
-    'const discoveryReasonText = code => code || "";',
+    'const upstreamReasonText = code => code || "";',
     'const fmtCount = value => String(value);',
     'const showToast = message => messages.push(message);',
     'return discoverConnectionEditorModels;',
   ].join('\n');
   const discover = new Function('state', 'API', 'request', 'calls', 'messages', code)(
-    state, { discovery: '/api/discovery' }, async (path, options) => {
+    state, { connectionsProbe: '/api/connections/probe' }, async (path, options) => {
       calls.push({ path, body: options.body });
-      return { discovery: { state: 'passed', models: [{}], modelCount: 1 } };
+      return { ok: true, connectionProtocol: 'responses', catalog: { models: [{}], modelCount: 1 } };
     }, calls, messages,
   );
   const result = await discover();
-  assert.equal(result.state, 'passed');
-  assert.deepEqual(calls, [{ path: '/api/discovery', body: { revision: 'rev', baseURL: 'http://127.0.0.1:39001/v1', apiKey: 'local-acceptance-key' } }]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ path: '/api/connections/probe', body: { baseUrl: 'http://127.0.0.1:39001/v1', protocol: 'auto', timeoutMs: 15000, apiKey: 'local-acceptance-key' } }]);
   assert.equal(editing.discovering, false);
-  assert.match(messages.at(-1), /读到 1 个模型/);
+  assert.match(messages.at(-1), /拉取到 1 个模型/);
 });
 
 test('switching the private panel session clears the visible catalogue query and key', () => {
@@ -1384,7 +1441,7 @@ test('native search stays inside its single existing disclosure', () => {
   assert.equal(nodes['sa-diagnostics-body'].children[0].id, 'role-contract');
 });
 
-test('web provider selection controls the real native search disclosure', () => {
+test('web provider selection shows the Tavily key field only when Tavily is chosen', () => {
   const elements = new Proxy({ 'web-provider': { value: '' } }, {
     get(target, id) { return target[id] ||= {}; },
   });
@@ -1398,11 +1455,13 @@ test('web provider selection controls the real native search disclosure', () => 
   );
   const data = { webTools: { provider: 'official', keySet: false } };
   render(data);
-  assert.equal(elements['native-search-details'].hidden, true);
-  assert.notEqual(elements['svc-panel'].hidden, false);
-  local.webDraft = 'native';
+  assert.equal(elements['web-provider'].value, 'official');
+  assert.equal(elements['web-key-field'].hidden, true);
+  local.webDraft = 'tavily';
   render(data);
-  assert.equal(elements['native-search-details'].hidden, false);
+  assert.equal(elements['web-provider'].value, 'tavily');
+  assert.equal(elements['web-key-field'].hidden, false);
+  assert.match(elements['web-key-state'].textContent, /Tavily Key 尚未保存/);
 });
 
 /* ---------- 阶段 2：视图合并与整组保存 ---------- */
@@ -1522,21 +1581,33 @@ test('diagnostics export uses POST, reports the saved file path, and surfaces fa
   assert.equal(state.diagnosticsExporting, false);
 });
 
-test('custom model context shortcuts and thinking efforts are visible outside advanced settings', () => {
+test('the model form keeps identity fields up front and folds context, output and efforts into the advanced drawer', () => {
   const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
-  const advanced = form.indexOf('id="m-advanced"');
+  const advanced = form.indexOf('id="model-advanced-details"');
+  const advancedEnd = form.indexOf('</details>', advanced);
+  assert.ok(advanced >= 0, 'missing model-advanced-details');
+  assert.ok(advancedEnd > advanced, 'advanced drawer must close after its fields');
+  assert.equal(form.includes('id="m-advanced"'), false, 'the old m-advanced wrapper is gone');
+  for (const id of ['m-connection', 'm-upstream', 'm-name']) {
+    const position = form.indexOf(`id="${id}"`);
+    assert.ok(position >= 0, 'missing ' + id);
+    assert.ok(position < advanced, id + ' must stay in the main form');
+  }
   for (const id of ['m-budget-group', 'm-context', 'm-output', 'm-effort-field', 'm-default']) {
     const position = form.indexOf(`id="${id}"`);
     assert.ok(position >= 0, 'missing ' + id);
-    assert.ok(position < advanced, id + ' must be in the main form, not inside advanced settings');
+    assert.ok(position > advanced && position < advancedEnd, id + ' must live inside the advanced drawer');
   }
+  assert.match(htmlSource, /id="model-advanced-details"[^>]*><summary>高级参数/);
 });
 
-test('index.html lays out six top-level tabs, the merged model page, the conversations page and the update banner', () => {
-  for (const id of ['nav-overview', 'nav-models', 'nav-conversations', 'nav-subagents', 'nav-usage', 'nav-maintenance']) {
+test('index.html lays out five top-level tabs, the merged model page, the maintenance page and the update banner', () => {
+  for (const id of ['nav-overview', 'nav-models', 'nav-accounts', 'nav-usage', 'nav-maintenance']) {
     assert.ok(htmlSource.includes(`id="${id}"`), 'missing top tab ' + id);
   }
-  assert.match(htmlSource, /id="nav-models"[^>]*>模型与服务商 <span class="nav__count mono" id="nav-model-count"><\/span>/);
+  assert.equal(htmlSource.includes('id="nav-conversations"'), false, 'conversations moved into maintenance');
+  assert.equal(htmlSource.includes('id="nav-subagents"'), false, 'subagents moved into models');
+  assert.match(htmlSource, /id="nav-models"[^>]*>模型 <span class="nav__count mono" id="nav-model-count"><\/span>/);
   assert.match(htmlSource, /id="nav-maintenance"[^>]*>[\s\S]{0,160}id="nav-update-dot"/);
   assert.equal(htmlSource.includes('id="nav-work"'), false);
   assert.equal(htmlSource.includes('id="nav-extensions"'), false);
@@ -1546,7 +1617,8 @@ test('index.html lays out six top-level tabs, the merged model page, the convers
   assert.equal(htmlSource.includes('id="kimi-k3-setting"'), false, 'the manual K3 switch is gone');
   assert.ok(htmlSource.includes('id="native-troubleshoot"'));
   assert.ok(htmlSource.indexOf('id="native-troubleshoot"') < htmlSource.indexOf('id="native-sync"'));
-  assert.ok(htmlSource.includes('id="view-conversations"'));
+  assert.ok(htmlSource.includes('id="view-maintenance"'));
+  assert.equal(htmlSource.includes('id="view-conversations"'), false, 'conversations is a section of maintenance, not a view');
   assert.ok(htmlSource.includes('id="conv-list"'));
   assert.ok(htmlSource.includes('id="conv-migration-tip"'));
   assert.ok(htmlSource.includes('id="update-banner"'));
@@ -1558,30 +1630,35 @@ test('index.html lays out six top-level tabs, the merged model page, the convers
   assert.match(cssSource, /\.shell\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/);
   for (const id of ['subagents-tab-models', 'subagents-tab-swarm',
     'settings-tab-accounts', 'settings-tab-connection', 'settings-tab-extensions', 'settings-tab-advanced']) {
-    assert.ok(htmlSource.includes(`id="${id}"`), 'missing subtab ' + id);
+    assert.equal(htmlSource.includes(`id="${id}"`), false, 'the second-level subtabs are gone in v1.1.14: ' + id);
   }
   const modelsIdx = htmlSource.indexOf('id="view-models"');
-  const conversationsIdx = htmlSource.indexOf('id="view-conversations"');
+  const accountsIdx = htmlSource.indexOf('id="view-accounts"');
   const usageIdx = htmlSource.indexOf('id="view-usage"');
-  const modelsSlice = htmlSource.slice(modelsIdx, conversationsIdx);
+  const maintenanceIdx = htmlSource.indexOf('id="view-maintenance"');
+  const modelsSlice = htmlSource.slice(modelsIdx, accountsIdx);
   assert.ok(modelsSlice.includes('id="connections-panel"'));
   assert.ok(modelsSlice.includes('id="catalog-panel"'));
   assert.ok(modelsSlice.includes('id="restart-panel"'));
   assert.ok(modelsSlice.indexOf('id="connections-panel"') < modelsSlice.indexOf('id="catalog-panel"'),
     'service connections come first, the enabled catalog follows');
   assert.ok(modelsSlice.indexOf('id="catalog-panel"') < modelsSlice.indexOf('id="model-table"'));
-  assert.ok(htmlSource.slice(conversationsIdx, usageIdx).includes('id="conv-list"'));
+  const maintenanceSlice = htmlSource.slice(maintenanceIdx);
+  assert.ok(maintenanceSlice.includes('id="native-panel"'));
+  assert.ok(maintenanceSlice.includes('id="conv-list"'), 'conversations live inside maintenance');
+  assert.ok(maintenanceSlice.includes('id="conv-migration-tip"'));
 
   const form = htmlSource.slice(htmlSource.indexOf('id="model-form"'), htmlSource.indexOf('id="model-errors"'));
-  const advanced = form.indexOf('id="m-advanced"');
-  assert.match(form.slice(advanced, form.indexOf('</summary>', advanced)), /高级：上游 API 格式、定价与故障转移备用连接/);
-  for (const id of ['m-name', 'm-connection', 'm-candidates', 'm-upstream', 'm-tools', 'm-reasoning', 'm-vision',
-    'm-context', 'm-output', 'm-effort-field', 'm-default']) {
+  const advanced = form.indexOf('id="model-advanced-details"');
+  assert.ok(advanced >= 0, 'missing model-advanced-details');
+  assert.match(form.slice(advanced, form.indexOf('</summary>', advanced)), /高级参数（已自动识别，通常无需修改）/);
+  for (const id of ['m-name', 'm-connection', 'm-candidates', 'm-upstream']) {
     const position = form.indexOf(`id="${id}"`);
     assert.ok(position >= 0, 'missing ' + id);
     assert.ok(position < advanced, id + ' must stay in the default editor, not inside advanced settings');
   }
-  for (const id of ['m-price-input', 'm-failover-rows']) {
+  for (const id of ['m-tools', 'm-reasoning', 'm-vision', 'm-context', 'm-output', 'm-effort-field', 'm-default',
+    'm-price-input', 'm-failover-rows']) {
     const position = form.indexOf(`id="${id}"`);
     assert.ok(position > advanced, id + ' belongs to the advanced disclosure');
   }
@@ -2421,12 +2498,12 @@ test('the panel announces Wails readiness once after binding desktop navigation'
     assert.equal(sent[1].navigationBound, true);
 
     window.__kwpOpenAccounts();
-    assert.equal(core.state.subtabs.maintenance, 'accounts');
+    assert.equal(core.state.view, 'accounts', 'the accounts hook opens the top-level accounts view');
     window.__kwpOpenConversations();
-    assert.equal(core.state.view, 'conversations');
+    assert.equal(core.state.view, 'maintenance', 'conversations is a section of maintenance');
     window.__kwpOpenUpdates();
     assert.equal(core.state.view, 'maintenance');
-    assert.equal(core.state.subtabs.maintenance, 'connection');
+    assert.equal(core.state.subtabs.maintenance, undefined, 'v1.1.14 has no maintenance subtabs');
   }
 });
 
@@ -3729,13 +3806,13 @@ test('the shell banner promotes one direct restart action and keeps the credenti
     ${sourceFunction('renderShell')}
     return renderShell;`)(dom);
 
-  /* 配置未变更、旧凭据待授权：横幅保留，并指向模型与服务商页重授权。 */
+  /* 配置未变更、旧凭据待授权：横幅保留，并指向模型页重授权。 */
   renderShell({ gateway: { state: 'running' }, configuration: { state: 'ready' },
     connections: { saved: [{ id: 'c1', credentialError: 'credential_authorization_required' }] } });
   assert.equal(nodes['restart-banner'].hidden, false);
   assert.match(nodes['restart-banner-text'].textContent, /部分已保存的连接凭据暂时无法读取/);
-  assert.match(nodes['restart-banner-text'].textContent, /模型与服务商/);
-  assert.equal(nodes['restart-banner-link'].textContent, '前往模型与服务商处理');
+  assert.match(nodes['restart-banner-text'].textContent, /「模型」页/);
+  assert.equal(nodes['restart-banner-link'].textContent, '前往模型页处理');
   assert.equal(nodes['restart-banner-link'].dataset.bannerAction, 'models');
 
   /* 仅配置文件状态变化不再要求去模型页点「应用已保存的连接」。 */
@@ -4229,8 +4306,8 @@ test('4-step quickstart guide tracks real state, auto-collapses once ready, and 
   assert.equal(nodes['quickstart-guide'].dataset.collapsed, 'false');
 });
 
-test('app.js wires subagents view rendering and release link external browser endpoint', () => {
-  assert.match(source, /if \(view === 'subagents'\) renderSubagents\(\);/);
+test('app.js wires subagents rendering into the models view and the release link external browser endpoint', () => {
+  assert.match(source, /if \(view === 'models'\) \{[\s\S]{0,400}renderSubagents\(\);/);
   assert.match(source, /request\('\/api\/updates\/open-release',\s*\{\s*method:\s*'POST',\s*body:\s*\{\s*\}\s*\}\)/);
   assert.equal(source.includes('displayModelId(saved.model)'), false, 'saved subagent summaries use catalogue names');
   assert.match(source, /model\.tools === true/);
@@ -4391,6 +4468,7 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
 
   /* confirmActionResult 与 runAction 的 Toast 文案覆盖。 */
   const toasts = [];
+  const actionRequests = [];
   const actionState = {
     pendingAction: null,
     pendingOpId: null,
@@ -4417,9 +4495,10 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
     ${sourceFunction('runAction')}
     ${sourceFunction('confirmActionResult')}
     return { runAction, confirmActionResult };
-  `)(actionState, toasts, { actions: '/api/actions' }, async (_url, opts) => ({
-    operation: { id: 'op-' + opts.body.action, action: opts.body.action, state: 'running' },
-  }));
+  `)(actionState, toasts, { actions: '/api/actions' }, async (_url, opts) => {
+    actionRequests.push(opts.body);
+    return { operation: { id: 'op-' + opts.body.action, action: opts.body.action, state: 'running' } };
+  });
 
   actionState.data = { integration: { desktop: { managed: false } }, kimiProcess: { running: false } };
   await actionEnv.runAction('connect-kimi');
@@ -4427,6 +4506,11 @@ test('auto-start, unmanaged Kimi and waiting-work states render clear Chinese gu
   actionState.data = { integration: { desktop: { managed: false } }, kimiProcess: { running: false } };
   await actionEnv.runAction('disconnect-models');
   assert.match(toasts.at(-1).message, /自动启动 Kimi Work 并移除本产品接管的模型来源/);
+  /* 断开模型必须同时请求清理本机 DNS 接管，否则退出后仍可能解析到本机网关。 */
+  const disconnectBodies = actionRequests.filter(body => body.action === 'disconnect-models');
+  assert.equal(disconnectBodies.length, 1);
+  assert.equal(disconnectBodies[0].removeDns, true);
+  assert.equal(actionRequests.find(body => body.action === 'connect-kimi').removeDns, undefined);
   actionState.data = { integration: { desktop: { managed: true } }, kimiProcess: { running: true } };
   await actionEnv.runAction('connect-kimi');
   assert.match(toasts.at(-1).message, /正在同步模型配置到 Kimi Work/);
@@ -4618,8 +4702,7 @@ test('the onboarding steps accept a ready direct sync and the old launch overrid
   assert.equal(source.includes('function recoveryCopy('), false);
 });
 
-test('renderConnectionEditor protects active or composing inputs, respects managed providerFlow, and applyProviderPreset clears ceKey', () => {
-  const dispatched = [];
+test('renderConnectionEditor protects active or composing inputs, refreshes grouped presets, and applyProviderPreset clears ceKey', () => {
   const syncCalls = [];
   const dom = {
     connEditor: { hidden: true },
@@ -4631,7 +4714,7 @@ test('renderConnectionEditor protects active or composing inputs, respects manag
     ceKey: { value: 'sk-old-secret', placeholder: '' },
     ceChat: { checked: false },
     ceResponses: { checked: false },
-    cePreset: { value: '', dataset: { providerFlow: 'managed' }, dispatchEvent(ev) { dispatched.push(ev.type); } },
+    cePreset: { value: '', dataset: {} },
     cePresetHint: { textContent: '' },
     ceKeyHint: { textContent: '' },
     ceProtocolHint: { textContent: '' },
@@ -4653,130 +4736,106 @@ test('renderConnectionEditor protects active or composing inputs, respects manag
   const api = new Function('state', 'dom', 'document', 'syncCalls', `
     const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
     const setText = (el, t) => { if (el) el.textContent = t; };
-    const syncSelectOptions = (...args) => syncCalls.push(args);
+    const syncGroupedPresetOptions = (select, current) => { syncCalls.push([select, current]); select.value = current; };
     const renderConnections = () => {};
+    const connectionDefaultUpstreamProtocol = () => '';
     ${sourceFunction('isInputActive')}
     ${sourceFunction('providerPresets')}
     ${sourceFunction('providerPreset')}
-    ${sourceFunction('providerPresetLabel')}
-    ${sourceFunction('providerPresetOptions')}
-    ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('connectionDraftRow')}
     ${sourceFunction('protocolList')}
     ${sourceFunction('connectionProtocol')}
     ${sourceFunction('connectionProtocolText')}
     ${sourceFunction('protocolLabel')}
+    ${sourceFunction('renderProbeNote')}
+    ${sourceFunction('upstreamReasonText')}
+    ${sourceFunction('fmtMs')}
     ${sourceFunction('renderConnectionEditor')}
     ${sourceFunction('applyProviderPreset')}
-    return { renderConnectionEditor, applyProviderPreset };
+    ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('uniqueConnectionId')}
+    ${sourceFunction('isAnthropicPreset')}
+    ${sourceFunction('staleSuggested')}
+    ${sourceFunction('openConnectionEditor')}
+    return { renderConnectionEditor, applyProviderPreset, openConnectionEditor };
   `)(state, dom, documentStub, syncCalls);
 
   api.renderConnectionEditor();
   assert.equal(dom.ceName.value, '正在输入中', 'focused input must not be overwritten');
-  assert.equal(syncCalls.length, 0, 'managed providerFlow select options must not be overwritten');
-  assert.equal(dom.cePreset.dataset.desiredPreset, 'deepseek');
-  assert.deepEqual(dispatched, ['kwp:sync-provider-flow']);
+  assert.equal(syncCalls.length, 1, 'the unfocused preset select is refreshed');
+  assert.equal(syncCalls[0][1], 'deepseek', 'the grouped preset select follows the draft preset');
+
+  documentStub.activeElement = dom.cePreset;
+  api.renderConnectionEditor();
+  assert.equal(syncCalls.length, 1, 'a focused preset select must not be rewritten');
 
   documentStub.activeElement = null;
+  api.renderConnectionEditor({ force: true });
+  assert.equal(dom.ceName.value, 'DeepSeek 官方', 'without focus the draft name is shown');
+  documentStub.activeElement = dom.ceName;
   state.composing = true;
   api.renderConnectionEditor();
-  assert.equal(dom.ceName.value, '正在输入中', 'IME composing must protect inputs');
+  assert.equal(dom.ceName.value, 'DeepSeek 官方', 'IME composing must protect inputs');
 
   state.composing = false;
   api.applyProviderPreset('deepseek');
   assert.equal(state.conns.editing.keyEdited, false);
   assert.equal(state.conns.editing.draft.apiKey, '');
   assert.equal(dom.ceKey.value, '');
+
+  /* 打开编辑器默认进入自定义项：没有预设的连接必须保持空预设。 */
+  state.conns.editing = null;
+  const callsBeforeOpen = syncCalls.length;
+  api.openConnectionEditor({ id: 'custom', name: '自定义', baseURL: 'https://api.example.com/v1', protocols: ['chat'], apiKeySet: true });
+  assert.equal(state.conns.editing.draft.providerPresetId, '');
+  assert.equal(syncCalls.length > callsBeforeOpen, true, 'opening the editor always refreshes the preset select');
 });
 
-test('search service 400 error persists across renderServices until input changes, and adoptState syncs services & pendingService', async () => {
-  const renderedErrors = [];
-  const dom = {
-    svcPanel: {}, svcUnavailable: {}, svcSave: {}, svcReset: {}, svcDraft: {},
-    svcSearchOn: { checked: true }, svcFetchOn: { checked: false },
-    svcSearchUrl: { value: 'https://search.example.com' }, svcFetchUrl: { value: '' },
-    svcSearchKey: { value: 'secret-token' }, svcFetchKey: { value: '' },
-    svcSearchSaved: {}, svcSearchSavedSub: {}, svcFetchSaved: {}, svcFetchSavedSub: {},
-    svcSearchKeyHint: {}, svcVerdictDot: {}, svcVerdictWord: {}, svcVerdictNote: {}, svcVerdict: { dataset: {} },
-    svcErrors: {},
-  };
+test('adoptState merges a pending service result, protects dirty drafts, and backfills the wizard once', () => {
+  const fills = [];
+  const recomputes = [];
+  const settles = [];
   const state = {
-    composing: false,
-    data: {
-      configuration: { state: 'ready' },
-      search: { services: { search: { enabled: false, endpoint: '', hasKey: false }, fetch: { enabled: false, endpoint: '', hasKey: false } } },
-    },
-    services: {
-      base: '',
-      baseRow: { search: { enabled: false, endpoint: '', hasKey: false }, fetch: { enabled: false, endpoint: '', hasKey: false } },
-      draft: { searchOn: true, searchUrl: 'https://search.example.com', fetchOn: false, fetchUrl: '' },
-      dirty: true, saving: false, searchKey: 'secret-token', fetchKey: '', serverErrors: [],
-    },
-    draft: null, draftDirty: false, conns: { dirty: false, editing: null, draft: null },
+    data: null,
+    draft: { mode: 'draft-owned' },
+    draftDirty: true,
+    conns: { dirty: true, editing: { originalId: 'c1' }, draft: [{ id: 'c1' }] },
+    onboard: { touched: false },
     pendingService: { enabled: true, state: 'running', registered: true },
+    stateReadSeq: 0,
   };
-  const svcFns = new Function('state', 'dom', 'renderedErrors', 'request', `
-    const API = { context: '/api/context' };
-    const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
-    const SVC_STATUS = { inherit: { tone: 'neutral', word: '官方', note: '' } };
-    const SVC_REASON = {};
-    const setHidden = () => {};
-    const setText = () => {};
-    const setDot = () => {};
-    const showToast = () => {};
-    const loadState = async () => {};
-    const handleSaveFailure = async () => {};
-    const renderErrorList = (_el, list) => renderedErrors.push(list.slice());
-    const draftFromSaved = () => ({ mode: 'inherit' });
-    const recomputeDraftDirty = () => {};
-    const savedConnectionsSignature = () => '';
-    const connectionDraftFrom = () => [];
-    const connectionsDirty = () => false;
-    const onboardTouched = () => true;
-    const fillOnboardForm = () => {};
-    const settlePending = () => {};
-    ${sourceFunction('isInputActive')}
-    ${sourceFunction('normalizeBaseURL')}
-    ${sourceFunction('searchStateOf')}
-    ${sourceFunction('searchAvailable')}
-    ${sourceFunction('serviceRowOf')}
-    ${sourceFunction('serviceDraftFrom')}
-    ${sourceFunction('serviceSignature')}
-    ${sourceFunction('servicesDirty')}
-    ${sourceFunction('validateServiceDraft')}
-    ${sourceFunction('servicePayload')}
-    ${sourceFunction('evaluateServices')}
-    ${sourceFunction('serviceRowText')}
-    ${sourceFunction('servicesObservedText')}
-    ${sourceFunction('renderServices')}
-    ${sourceFunction('readServiceForm')}
-    ${sourceFunction('fillServiceForm')}
-    ${sourceFunction('saveSearchServices')}
+  const adopt = new Function('state', 'fills', 'recomputes', 'settles', `
+    const draftFromSaved = () => ({ mode: 'from-saved' });
+    const recomputeDraftDirty = () => recomputes.push('dirty');
+    const savedConnectionsSignature = () => 'sig';
+    const connectionDraftFrom = () => [{ id: 'c1' }];
+    const connectionsDirty = () => true;
+    const onboardTouched = () => state.onboard.touched === true;
+    const fillOnboardForm = () => fills.push('fill');
+    const settlePending = next => settles.push(next?.revision ?? null);
     ${sourceFunction('adoptState')}
-    return { saveSearchServices, renderServices, readServiceForm, adoptState };
-  `)(state, dom, renderedErrors, async () => {
-    const err = new Error('后端拒绝：端点不可达');
-    err.status = 400;
-    throw err;
-  });
+    return adoptState;
+  `)(state, fills, recomputes, settles);
 
-  await svcFns.saveSearchServices();
-  assert.deepEqual(state.services.serverErrors, ['后端拒绝：端点不可达']);
-  assert.deepEqual(renderedErrors.at(-1), ['后端拒绝：端点不可达']);
-  svcFns.renderServices(state.data);
-  assert.deepEqual(renderedErrors.at(-1), ['后端拒绝：端点不可达'], '400 error must survive subsequent renders');
-  svcFns.readServiceForm();
-  assert.deepEqual(state.services.serverErrors, [], 'editing input clears server error');
-
-  state.services.dirty = false;
-  const nextState = {
-    revision: 'rev-2',
-    search: { services: { search: { enabled: true, endpoint: 'https://new.example.com', hasKey: true }, fetch: { enabled: false, endpoint: '', hasKey: false } } },
-  };
-  svcFns.adoptState(nextState);
-  assert.equal(state.services.draft.searchUrl, 'https://new.example.com');
-  assert.equal(state.services.baseRow.search.hasKey, true);
+  const next = { revision: 'rev-2', service: { state: 'stale', enabled: false } };
+  adopt(next, { external: true });
+  /* 待应用的服务结果比这一轮轮询更新：合并进状态并清掉待应用标记。 */
+  assert.equal(state.data.service.state, 'running');
+  assert.equal(state.data.service.registered, true);
   assert.equal(state.data.service.loginStartup, 'enabled');
   assert.equal(state.pendingService, null);
+  assert.equal(state.stateReadSeq, 1, 'an external adopt advances the read epoch');
+  /* 脏草稿与打开的连接抽屉不被轮询覆盖。 */
+  assert.deepEqual(state.draft, { mode: 'draft-owned' });
+  assert.deepEqual(recomputes, ['dirty']);
+  assert.deepEqual(state.conns.draft, [{ id: 'c1' }]);
+  /* 未触碰向导时回填一次；用户已编辑后不再覆盖。 */
+  assert.deepEqual(fills, ['fill']);
+  state.onboard.touched = true;
+  adopt({ revision: 'rev-3' });
+  assert.deepEqual(fills, ['fill']);
+  assert.deepEqual(settles, ['rev-2', 'rev-3']);
+  assert.equal(state.stateReadSeq, 1, 'a plain poll does not advance the epoch');
 });
 
 test('setText preserves button SVG icons via .btn__label, fmtTokens(0) returns 0, and applyConnections limits Keychain copy to legacy migration', async () => {
@@ -4838,7 +4897,7 @@ test('app.js enforces single visibilitychange listener, external adoptState on m
   assert.equal(source.includes('dom.legacyPanel'), false);
 });
 
-test('growth.js replaces MCP window.confirm with inline confirm, opens https links via POST /api/open-url, and preserves ctxDraft on save error', async () => {
+test('growth.js replaces MCP window.confirm with inline confirm and opens https links via POST /api/open-url', async () => {
   const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
   assert.equal(growthSource.includes('window.confirm'), false);
   assert.equal(growthSource.includes("target = '_blank'"), false);
@@ -4869,7 +4928,6 @@ test('growth.js replaces MCP window.confirm with inline confirm, opens https lin
     return makeNode('div', id);
   };
   getEl('ob-preset').value = 'deepseek';
-  getEl('context-inherit').checked = true;
 
   const prevDoc = globalThis.document;
   const prevWin = globalThis.window;
@@ -4977,42 +5035,41 @@ test('growth.js replaces MCP window.confirm with inline confirm, opens https lin
       opts: { method: 'POST', body: { url: 'https://platform.deepseek.com/api_keys' } },
     });
 
-    // Context save failure must keep draft dirty (not overwrite local.ctxDraft).
-    elements.get('context-inherit').checked = false;
-    elements.get('context-custom').checked = true;
-    elements.get('context-ratio').value = '0.85';
-    elements.get('context-reserved').value = '16000';
-    await elements.get('context-save').listeners.click[0]();
-    render(data);
-    assert.equal(elements.get('context-draft').textContent, '有未保存的修改');
   } finally {
     globalThis.document = prevDoc;
     globalThis.window = prevWin;
   }
 });
 
-test('renderAll and setView render services on maintenance, onboard overview on overview, and pass view to plusPanel', () => {
+test('renderAll and setView render the five-entry shell, map legacy aliases, and pass the view to plusPanel', () => {
   const calls = [];
   const state = { data: { revision: 'r1' }, view: 'overview', key: 'k', composing: true, onboard: {} };
   const dom = { viewTitle: {}, viewLede: {} };
-  const VIEW_ALIASES = {};
+  const VIEWS_SOURCE = (() => {
+    const start = source.indexOf('const VIEWS = ');
+    const end = source.indexOf('\n', start);
+    return source.slice(start, end);
+  })();
+  const VIEW_ALIASES_SOURCE = (() => {
+    const start = source.indexOf('const VIEW_ALIASES = {');
+    const end = source.indexOf('\n};', start);
+    return source.slice(start, end + 3);
+  })();
   const VIEW_COPY = {
     overview: { title: '总览', lede: '' },
     models: { title: '模型', lede: '' },
-    subagents: { title: '子代理', lede: '' },
+    accounts: { title: '账号', lede: '' },
     usage: { title: '用量', lede: '' },
     maintenance: { title: '设置', lede: '' },
   };
-  const api = new Function('state', 'dom', 'calls', 'VIEW_ALIASES', 'VIEW_COPY', `
+  const api = new Function('state', 'dom', 'calls', 'VIEW_COPY', `
+    ${VIEWS_SOURCE}
+    ${VIEW_ALIASES_SOURCE}
     const VIEW_STORE = 'v';
     const document = { body: { dataset: {} } };
     const sessionStorage = { setItem() {} };
     const $ = () => null;
     const clearDisconnectConfirm = () => calls.push('clearDisconnect');
-    const renderShell = () => calls.push('shell');
-    const renderOperation = () => calls.push('op');
-    const renderActions = () => calls.push('actions');
-    const renderPreviewLifecycle = () => calls.push('lifecycle');
     const renderOverview = (_d, opts) => calls.push('overview:' + opts?.view);
     const renderWorkspaceSync = () => calls.push('workspaceSync');
     const renderOnboard = () => calls.push('onboard');
@@ -5021,9 +5078,13 @@ test('renderAll and setView render services on maintenance, onboard overview on 
     const renderPicker = () => calls.push('picker');
     const renderSubagents = () => calls.push('subagents');
     const renderIntegrationMode = () => calls.push('integrationMode');
-    const renderServices = () => calls.push('services');
     const renderGrowth = (_d, opts) => calls.push('growth:' + opts?.view);
     const renderUpdates = () => calls.push('updates');
+    const renderShell = () => calls.push('shell');
+    const renderOperation = () => calls.push('operation');
+    const renderActions = () => calls.push('actions');
+    const renderPreviewLifecycle = () => calls.push('lifecycle');
+    const conversationsPanel = { show() { calls.push('convShow'); }, refresh() { calls.push('convRefresh'); } };
     const usagePanel = { show() { calls.push('usageShow'); } };
     const plusPanel = {
       render(_d, opts) { calls.push('plus:' + opts?.view); },
@@ -5031,27 +5092,58 @@ test('renderAll and setView render services on maintenance, onboard overview on 
     };
     ${sourceFunction('setView')}
     ${sourceFunction('renderAll')}
-    return { setView, renderAll };
-  `)(state, dom, calls, VIEW_ALIASES, VIEW_COPY);
+    return { setView, renderAll, VIEWS, VIEW_ALIASES };
+  `)(state, dom, calls, VIEW_COPY);
+
+  assert.deepEqual(api.VIEWS, ['overview', 'models', 'accounts', 'usage', 'maintenance']);
+  assert.equal(api.VIEW_ALIASES.subagents, 'models');
+  assert.equal(api.VIEW_ALIASES.conversations, 'maintenance');
+  assert.equal(api.VIEW_ALIASES.settings, 'maintenance');
 
   api.renderAll();
   assert.ok(calls.includes('overview:overview'));
-  /* 旧 renderOnboardOverview 会在这里用 syncState 覆盖总览主卡；现在只剩一个入口。 */
-  assert.equal(calls.includes('overview:overview'), true);
   assert.ok(calls.includes('plus:overview'));
-  assert.equal(calls.includes('services'), false);
+  assert.ok(calls.includes('shell'));
+  assert.equal(calls.includes('convShow'), false, 'the conversation list is not rendered on overview');
 
+  /* 旧的 subagents 入口映射到 models，并在同一个页面渲染子代理区。 */
   calls.length = 0;
   state.composing = true;
-  api.setView('maintenance', { persist: false });
+  api.setView('subagents', { persist: false });
+  assert.equal(state.view, 'models');
   assert.equal(state.composing, false, 'setView must reset state.composing');
-  assert.ok(calls.includes('services'), 'setView(maintenance) must render search services');
+  assert.ok(calls.includes('models'));
+  assert.ok(calls.includes('connection'));
+  assert.ok(calls.includes('picker'));
+  assert.ok(calls.includes('subagents'));
+  assert.ok(calls.includes('growth:models'));
+  assert.ok(calls.includes('plus:models'));
+
+  /* 旧的 conversations 入口映射到 maintenance，并刷新会话维护区。 */
+  calls.length = 0;
+  api.setView('conversations', { persist: false });
+  assert.equal(state.view, 'maintenance');
+  assert.ok(calls.includes('overview:maintenance'));
+  assert.ok(calls.includes('integrationMode'));
+  assert.ok(calls.includes('growth:maintenance'));
+  assert.ok(calls.includes('convRefresh'));
   assert.ok(calls.includes('plus:maintenance'));
 
   calls.length = 0;
   api.renderAll();
-  assert.ok(calls.includes('services'), 'renderAll on maintenance must refresh search services');
+  assert.ok(calls.includes('convShow'), 'renderAll on maintenance keeps the conversation list in sync');
   assert.ok(calls.includes('plus:maintenance'));
+
+  calls.length = 0;
+  api.setView('accounts', { persist: false });
+  assert.equal(state.view, 'accounts');
+  assert.ok(calls.includes('plus:accounts'));
+
+  /* 未知视图与旧 work/extensions 别名都收敛到已定义入口。 */
+  api.setView('work', { persist: false });
+  assert.equal(state.view, 'models');
+  api.setView('nonsense', { persist: false });
+  assert.equal(state.view, 'overview');
 });
 
 test('openConnectionEditor forces field populate even when an input is focused or composing, and applyProviderPreset resets secretSet', () => {
@@ -5091,16 +5183,21 @@ test('openConnectionEditor forces field populate even when an input is focused o
     const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
     const setHidden = (el, h) => { if (el) el.hidden = Boolean(h); };
     const setText = (el, t) => { if (el) el.textContent = t; };
-    const syncSelectOptions = (sel, _opts, val) => { sel.value = val; };
+    const syncGroupedPresetOptions = (sel, val) => { sel.value = val; };
+    const connectionDefaultUpstreamProtocol = () => '';
     const renderConnections = () => renderConnectionEditor();
     ${sourceFunction('isInputActive')}
     ${sourceFunction('normalizeBaseURL')}
     ${sourceFunction('connectionDraftRow')}
     ${sourceFunction('providerPresets')}
     ${sourceFunction('providerPreset')}
-    ${sourceFunction('providerPresetLabel')}
-    ${sourceFunction('providerPresetOptions')}
+    ${sourceFunction('isAnthropicPreset')}
     ${sourceFunction('presetsSuggestedId')}
+    ${sourceFunction('uniqueConnectionId')}
+    ${sourceFunction('staleSuggested')}
+    ${sourceFunction('renderProbeNote')}
+    ${sourceFunction('upstreamReasonText')}
+    ${sourceFunction('fmtMs')}
     ${sourceFunction('protocolList')}
     ${sourceFunction('connectionProtocol')}
     ${sourceFunction('connectionProtocolText')}
@@ -5303,7 +5400,7 @@ function makeConversationPageEnv({ kimiRunning = false, models = null, conversat
   const toasts = [];
   const state = {
     key: 'session-key',
-    view: 'conversations',
+    view: 'maintenance',
     data: { integrationMode: 'gateway', models: [{ id: 'deepseek-v4-1-flash', name: 'DeepSeek V4.1 Flash' }] },
     conversations: { list: null, loading: false, error: '', query: '', stale: false, pending: false,
       targets: {}, efforts: {}, selected: [], noConfirm: false, result: '', confirm: null },
@@ -5573,11 +5670,14 @@ test('app.js exposes the tray navigation hooks and only scrolls .main', () => {
   assert.match(appText, /window\.__kwpOpenUpdates\s*=/);
   const block = appText.slice(appText.indexOf('function openUpdatesPanel()'), appText.indexOf('function bindEvents()'));
   assert.match(block, /setView\('maintenance'\)/);
-  assert.match(block, /setSubtab\('maintenance', 'connection'\)/);
+  assert.match(block, /pendingUpdatesPanelReveal = true/);
   assert.match(block, /scrollMainToElement\(panel\)/);
   assert.doesNotMatch(block, /scrollIntoView/);
   assert.match(block, /focus\(\{ preventScroll: true \}\)/);
-  assert.match(htmlSource, /id="settings-tab-connection"/);
+  assert.match(appText, /revealWorkspaceSection\('conversations-panel'\)/);
+  assert.equal(appText.includes("setSubtab('maintenance', 'connection')"), false, 'v1.1.14 has no maintenance subtabs');
+  assert.equal(htmlSource.includes('id="settings-tab-connection"'), false);
+  assert.match(htmlSource, /id="conversations-panel"/);
   assert.match(htmlSource, /id="update-panel"/);
   assert.match(htmlSource, /id="upd-check"/);
 });
@@ -6093,6 +6193,9 @@ test('a save blocked by an advanced field opens the advanced drawer', () => {
   assert.equal(dom.mAdvanced.open, true, 'pricing errors live inside the advanced drawer');
   dom.mAdvanced.open = false;
   validateEditor({ originalId: null, draft: { id: 'a', errors: ['上下文窗口必须是正整数。'] } });
+  assert.equal(dom.mAdvanced.open, true, 'context errors now live inside the advanced drawer too');
+  dom.mAdvanced.open = false;
+  validateEditor({ originalId: null, draft: { id: 'a', errors: ['请填写显示名称。'] } });
   assert.equal(dom.mAdvanced.open, false, 'main-field errors leave the drawer as it was');
 });
 
@@ -6116,17 +6219,17 @@ test('a tray update request before the shell is revealed is replayed once', () =
   const dom = { shell: { hidden: true } };
   const panel = { tagName: 'SECTION' };
   const check = { focus(options) { calls.push(['focus', options]); } };
-  const api = new Function('dom', '$', 'setView', 'setSubtab', 'scrollMainToElement', `
+  const api = new Function('dom', '$', 'setView', 'scrollMainToElement', `
     let pendingUpdatesPanelReveal = false;
     ${sourceFunction('openUpdatesPanel')}
     ${sourceFunction('flushPendingUpdatesPanelReveal')}
     return { openUpdatesPanel, flushPendingUpdatesPanelReveal, pending: () => pendingUpdatesPanelReveal };
   `)(dom, id => (id === 'update-panel' ? panel : id === 'upd-check' ? check : null),
-    view => calls.push(['view', view]), (group, tab) => calls.push(['subtab', group, tab]),
+    view => calls.push(['view', view]),
     element => calls.push(['scroll', element]));
 
   api.openUpdatesPanel();
-  assert.deepEqual(calls, [['view', 'maintenance'], ['subtab', 'maintenance', 'connection']]);
+  assert.deepEqual(calls, [['view', 'maintenance']]);
   assert.equal(api.pending(), true, 'the reveal must wait for #shell');
   dom.shell.hidden = false;
   api.flushPendingUpdatesPanelReveal();
@@ -6143,7 +6246,7 @@ test('the top-bar refresh also reloads the conversations page', () => {
   const start = appText.indexOf('if (dom.refresh) dom.refresh.addEventListener');
   assert.notEqual(start, -1);
   const block = appText.slice(start, appText.indexOf('if (dom.connRetry)', start));
-  assert.match(block, /state\.view === 'conversations'/);
+  assert.match(block, /state\.view === 'maintenance'/);
   assert.match(block, /conversationsPanel\.refresh\(\)/);
 });
 
@@ -6661,4 +6764,194 @@ test('only the exact K2.8 Preview row in gateway mode explains the two official 
     await switched.page.refresh();
     assert.ok(rowHints(switched).every(hint => hint === undefined));
   }
+});
+
+/* ---------- v1.1.14: 连接测活、协议回填与智能默认值 ---------- */
+
+test('a successful connection probe fills the connection protocol, imports candidates and keeps anthropic upstreams explicit', async () => {
+  const messages = [];
+  const makeEnv = (response) => {
+    const editing = {
+      originalId: null, discovering: false, protocolMode: 'auto',
+      draft: { id: 'conn-1', name: 'Conn', providerPresetId: '', baseURL: 'https://api.example.com/v1', apiKey: 'sk-typed', protocols: [], upstreamProtocol: '' },
+    };
+    const state = { data: { revision: 'rev-1' }, conns: { editing } };
+    const calls = [];
+    const code = [
+      'const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);',
+      ...['normalizeBaseURL', 'probeBody', 'isAnthropicPreset', 'providerPreset', 'discoverConnectionEditorModels'].map(sourceFunction),
+      'const readConnectionEditor = () => {};',
+      'const renderConnectionEditor = () => {};',
+      'const connectionRowsOf = () => [];',
+      'const connectionProtocol = draft => Array.isArray(draft?.protocols) && draft.protocols.length === 1 ? draft.protocols[0] : null;',
+      'const showToast = (message) => messages.push(message);',
+      'const upstreamReasonText = code => code || "";',
+      'const fmtCount = value => String(value);',
+      'return discoverConnectionEditorModels;',
+    ].join('\n');
+    const discover = new Function('state', 'API', 'request', 'messages', code)(
+      state, { connectionsProbe: '/api/connections/probe' },
+      async (path, options) => { calls.push({ path, body: options.body }); return response; },
+      messages,
+    );
+    return { state, editing, calls, discover };
+  };
+
+  const detected = makeEnv({ ok: true, connectionProtocol: 'responses', catalog: { models: [{ id: 'm1' }, { id: 'm2' }], modelCount: 2 } });
+  const result = await detected.discover();
+  assert.equal(detected.calls[0].path, '/api/connections/probe');
+  assert.equal(detected.calls[0].body.baseUrl, 'https://api.example.com/v1');
+  assert.deepEqual(result, { ok: true, connectionProtocol: 'responses', catalog: { models: [{ id: 'm1' }, { id: 'm2' }], modelCount: 2 } });
+  assert.deepEqual(detected.editing.draft.protocols, ['responses'], 'the probe result becomes the single connection protocol');
+  assert.equal(detected.editing.protocolMode, 'responses');
+  assert.equal(detected.editing.draft.upstreamProtocol, '');
+  assert.match(messages.at(-1), /拉取到 2 个模型/);
+
+  const anthropic = makeEnv({ ok: true, upstreamProtocol: 'anthropic', catalog: { models: [], modelCount: 0 } });
+  await anthropic.discover();
+  assert.deepEqual(anthropic.editing.draft.protocols, ['chat'], 'anthropic upstreams speak the chat connection protocol');
+  assert.equal(anthropic.editing.draft.upstreamProtocol, 'anthropic');
+  assert.equal(anthropic.editing.protocolMode, 'anthropic');
+  assert.equal(anthropic.state.connUpstreamProtocols['conn-1'], 'anthropic');
+  assert.match(messages.at(-1), /连接测试通过/);
+
+  const chat = makeEnv({ ok: true, connectionProtocol: 'chat', catalog: { models: [{ id: 'm1' }] } });
+  await chat.discover();
+  assert.deepEqual(chat.editing.draft.protocols, ['chat']);
+  assert.equal(chat.editing.draft.upstreamProtocol, '');
+});
+
+test('inferModelDefaults matches catalogue hints, preset entries and falls back to 131072 with tools on', () => {
+  const makeInfer = (state) => new Function('state', `
+    const SOURCE_STAMP_PATTERN = /^\\d{4}-\\d{2}-\\d{2}(?:T[\\d:.]+Z?)?$/;
+    ${['sourceURLOf', 'sourceStampOf', 'presetMetadataSource', 'providerPresets', 'providerPreset',
+      'presetOnboardModels', 'matchCatalogHint', 'inferModelDefaults'].map(sourceFunction).join('\n')}
+    return inferModelDefaults;
+  `)(state);
+
+  const hinted = makeInfer({ providers: { presets: [], modelCatalogHints: [
+    { name: '', patterns: ['deepseek-*'], contextWindow: 65536, tools: true, reasoning: true, reasoningEfforts: ['low', 'high'] },
+    { name: 'Exact', patterns: ['exact-model'] },
+  ] } });
+  const deepseek = hinted('deepseek-chat');
+  assert.equal(deepseek.source, 'hint');
+  assert.equal(deepseek.contextWindow, 65536);
+  assert.equal(deepseek.tools, true);
+  assert.equal(deepseek.reasoning, true);
+  assert.deepEqual(deepseek.reasoningEfforts, ['low', 'high']);
+  assert.equal(hinted('exact-model').name, 'Exact');
+  assert.equal(hinted('exact-model-2').source, 'default', 'a bare pattern is an exact match, not a prefix');
+
+  const preset = makeInfer({ providers: { presets: [{ id: 'p', models: [{ id: 'preset-model', name: 'Preset M', contextWindow: 262144, maxOutputTokens: 8192 }] }] } });
+  const fromPreset = preset('preset-model', 'p');
+  assert.equal(fromPreset.source, 'preset');
+  assert.equal(fromPreset.name, 'Preset M');
+  assert.equal(fromPreset.contextWindow, 262144);
+  assert.equal(fromPreset.maxOutputTokens, 8192);
+
+  const unknown = makeInfer({ providers: { presets: [] } })('never-heard-of-it');
+  assert.equal(unknown.source, 'default');
+  assert.equal(unknown.contextWindow, 131072);
+  assert.equal(unknown.tools, true);
+  assert.equal(unknown.reasoning, false);
+});
+
+test('applyInferredModelDefaults fills a new model draft but never overwrites touched fields or saved models', () => {
+  const makeApply = (state, dom) => new Function('state', 'dom', 'document', `
+    const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+    const SOURCE_STAMP_PATTERN = /^\\d{4}-\\d{2}-\\d{2}(?:T[\\d:.]+Z?)?$/;
+    ${sourceFunction('parseEfforts')}
+    ${['sourceURLOf', 'sourceStampOf', 'presetMetadataSource', 'providerPresets', 'providerPreset',
+      'presetOnboardModels', 'matchCatalogHint', 'inferModelDefaults', 'applyInferredModelDefaults'].map(sourceFunction).join('\n')}
+    return applyInferredModelDefaults;
+  `)(state, dom, { activeElement: null });
+  const state = { providers: { presets: [], modelCatalogHints: [
+    { name: 'Hinted', patterns: ['hinted-*'], contextWindow: 40000, tools: true, reasoning: true, reasoningEfforts: ['low'] },
+  ] } };
+  const dom = { mContext: { value: '' }, mOutput: { value: '' }, mTools: { checked: false }, mReasoning: { checked: false },
+    mVision: { checked: false }, mEfforts: { value: '' }, mName: { value: '' } };
+  const apply = makeApply(state, dom);
+
+  const draft = { connectionId: '', upstreamModelId: 'hinted-model', context: '', output: '', tools: undefined,
+    reasoning: false, vision: false, efforts: [], name: '', touched: new Set() };
+  apply({ originalId: null, draft });
+  assert.equal(draft.context, '40000');
+  assert.equal(draft.tools, true);
+  assert.equal(draft.reasoning, true);
+  assert.deepEqual(draft.efforts, ['low']);
+  assert.equal(draft.name, 'Hinted');
+  assert.equal(dom.mContext.value, '40000');
+  assert.equal(dom.mTools.checked, true);
+  assert.equal(dom.mEfforts.value, 'low');
+
+  const touchedDraft = { connectionId: '', upstreamModelId: 'hinted-model', context: '999', output: '', tools: false,
+    reasoning: false, vision: false, efforts: [], name: '我的名字', touched: new Set(['contextWindow', 'tools', 'name']) };
+  apply({ originalId: null, draft: touchedDraft });
+  assert.equal(touchedDraft.context, '999', 'a user-edited context window is never overwritten');
+  assert.equal(touchedDraft.tools, false);
+  assert.equal(touchedDraft.name, '我的名字');
+
+  const savedDraft = { connectionId: '', upstreamModelId: 'hinted-model', context: '1234', tools: false, reasoning: false,
+    vision: false, efforts: [], name: 'Saved', touched: new Set() };
+  apply({ originalId: 'conn/saved', draft: savedDraft });
+  assert.equal(savedDraft.context, '1234', 'editing an existing model keeps its saved parameters');
+  assert.equal(savedDraft.tools, false);
+  assert.equal(savedDraft.name, 'Saved');
+});
+
+test('a connection or model in use reports the Chinese occupancy names from error.models', () => {
+  const format = new Function('state', `
+    ${sourceFunction('displayModelId')}
+    ${sourceFunction('modelLabel')}
+    ${sourceFunction('catalogModelLabel')}
+    ${sourceFunction('formatApiErrorWithModels')}
+    return formatApiErrorWithModels;
+  `)({ data: { models: [
+    { id: 'conn-a/m1', name: '模型一' },
+    { id: 'conn-a/m2', upstreamModelId: 'upstream-two' },
+  ] } });
+
+  const occupied = format({ message: '该连接仍被模型使用，无法删除。', models: ['conn-a/m1', 'conn-a/m2'] });
+  assert.equal(occupied, '该连接仍被模型使用，无法删除。（占用模型：模型一、upstream-two）');
+  /* 后端已经把清单写进消息时不再重复一遍。 */
+  const inline = format({ message: '仍被使用：模型一' , models: ['conn-a/m1'] });
+  assert.equal(inline, '仍被使用：模型一');
+  /* 未知 ID 原样显示，且没有占用清单时保持原消息。 */
+  assert.equal(format({ message: '失败' }), '失败');
+  assert.match(format({ message: '失败', models: ['gone/model'] }), /gone\/model/);
+});
+
+test('a row-level connection check records the detected protocol and imported candidate count', async () => {
+  const toasts = [];
+  const state = {
+    data: { revision: 'rev-1' },
+    connChecks: {},
+    connUpstreamProtocols: {},
+  };
+  const calls = [];
+  const code = [
+    ...['runConnectionCheck'].map(sourceFunction),
+    'const renderConnections = () => {};',
+    'const showToast = (message, tone) => toasts.push([message, tone]);',
+    'const upstreamReasonText = code => code || "";',
+    'return runConnectionCheck;',
+  ].join('\n');
+  const run = new Function('state', 'API', 'request', 'toasts', code)(
+    state, { connectionsProbe: '/api/connections/probe' },
+    async (path, options) => {
+      calls.push({ path, body: options.body });
+      return { ok: true, connectionProtocol: 'responses', upstreamProtocol: 'anthropic',
+        latencyMs: 321, catalog: { models: [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }] } };
+    },
+    toasts,
+  );
+
+  const recorded = await run('conn-1');
+  assert.deepEqual(calls, [{ path: '/api/connections/probe', body: { connectionId: 'conn-1', timeoutMs: 15000 } }]);
+  assert.equal(recorded.ok, true);
+  assert.equal(recorded.detectedProtocol, 'responses');
+  assert.equal(recorded.modelCount, 3, 'the probe catalogue count is imported into the row check');
+  assert.equal(recorded.ms, 321);
+  assert.equal(state.connUpstreamProtocols['conn-1'], 'anthropic');
+  assert.equal(toasts.at(-1)[1], 'ok');
 });

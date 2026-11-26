@@ -1185,6 +1185,88 @@ test('offline account switching stays clickable when Kimi Work is not running an
   } finally { env.restore(); }
 });
 
+test('the real kimiProcess shape drives offline switching even though accounts.state stays ready', async () => {
+  const actions = [];
+  const book = {
+    state: 'ready',
+    currentId: 'acct-a',
+    accounts: [{ id: 'acct-a', name: '主账号' }, { id: 'acct-b', name: '备账号' }],
+  };
+  const stopped = { kimiProcess: { running: false, state: 'not_running' }, accounts: book };
+  const env = makePlus({
+    extraRoots: ['view-accounts'],
+    data: stopped,
+    routes: {
+      '/api/actions': body => { actions.push(body); return { operation: { id: 'op-1', action: body.action, state: 'done' } }; },
+      '/api/state': () => stopped,
+    },
+  });
+  try {
+    env.panel.render(env.getState(), { view: 'accounts' });
+    const bar = env.byId('plus-account-bar');
+    assert.match(textOf(bar), /可离线切换默认账号/);
+    assert.doesNotMatch(textOf(bar), /必要时重启 Work/);
+    assert.ok(findButton(env.byId('plus-accounts-body'), '只保存当前登录'));
+
+    findButton(env.byId('plus-accounts-body'), '只保存当前登录').listeners.click[0]();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(actions.some(item => item.action === 'account-capture'), false);
+    assert.match(textOf(env.byId('plus-accounts-body')), /请先打开并登录 Kimi Work，再保存当前账号/);
+  } finally { env.restore(); }
+});
+
+test('the top bar re-renders from running to offline while accounts.state stays ready', () => {
+  const book = {
+    state: 'ready',
+    currentId: 'acct-a',
+    accounts: [{ id: 'acct-a', name: '主账号' }, { id: 'acct-b', name: '备账号' }],
+  };
+  const env = makePlus({ data: { kimiProcess: { running: true, state: 'running' }, accounts: book } });
+  try {
+    env.panel.render(env.getState());
+    const bar = env.byId('plus-account-bar');
+    assert.match(textOf(bar), /必要时重启 Work/);
+
+    env.setState({ kimiProcess: { running: false, state: 'not_running' }, accounts: book });
+    env.panel.render(env.getState());
+    assert.match(textOf(env.byId('plus-account-bar')), /可离线切换默认账号/);
+
+    env.setState({ kimiProcess: { running: null, state: 'unknown' }, accounts: book });
+    env.panel.render(env.getState());
+    assert.match(textOf(env.byId('plus-account-bar')), /必要时重启 Work/);
+  } finally { env.restore(); }
+});
+
+test('an offline switch notice tells the user the sync happens next launch', async () => {
+  const book = {
+    state: 'ready',
+    currentId: 'acct-a',
+    accounts: [{ id: 'acct-a', name: '主账号' }, { id: 'acct-b', name: '备账号' }],
+  };
+  const env = makePlus({
+    data: { kimiProcess: { running: false, state: 'not_running' }, accounts: book },
+    routes: {
+      '/api/actions': body => ({ operation: { id: 'op-1', action: body.action, state: 'done' } }),
+      '/api/state': () => ({
+        kimiProcess: { running: false, state: 'not_running' },
+        accounts: book,
+        operation: { id: 'op-1', action: 'account-switch', state: 'done' },
+      }),
+    },
+  });
+  try {
+    env.panel.render(env.getState());
+    const select = env.byId('plus-account-select');
+    select.value = 'acct-b';
+    select.listeners.change[0]();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const notice = env.notices.find(item => /正在切换默认账号凭据/.test(item.message));
+    assert.ok(notice, 'offline switch must announce the next-launch sync');
+    assert.match(notice.message, /下次打开 Kimi Work 时将自动同步登录态/);
+    assert.doesNotMatch(notice.message, /必要时正常重启/);
+  } finally { env.restore(); }
+});
+
 test('account capture surfaces a plain login prompt when backend returns account_session_unavailable', async () => {
   const book = { state: 'ready', currentId: '', accounts: [] };
   const env = makePlus({

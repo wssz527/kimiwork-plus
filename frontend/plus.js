@@ -549,7 +549,12 @@
   }
 
   function isWorkNotRunning(data, book) {
-    return data?.kimi?.running === false || Boolean(book && book.state !== 'ready');
+    const process = data?.kimiProcess;
+    return Boolean(
+      (process && process.running === false && process.state !== 'unknown')
+      || data?.kimi?.running === false
+      || (book && book.state !== 'ready')
+    );
   }
 
   function isOfflinePending(book) {
@@ -615,8 +620,10 @@
     const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
     const offlinePending = isOfflinePending(book);
     const activeId = effectiveAccountId(book);
+    const workNotRunning = isWorkNotRunning(data, book);
     const barSig = JSON.stringify([
       book ? book.state : null,
+      workNotRunning,
       book ? book.reason : '',
       book ? book.currentId : '',
       book ? book.pendingAccountId : '',
@@ -677,7 +684,7 @@
     } else if (offlinePending) {
       parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '下次打开 Kimi Work 自动同步'));
     } else if (book.accounts.length > 1 || account.busy) {
-      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : book.state !== 'ready' ? '可离线切换默认账号' : '必要时重启 Work'));
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : workNotRunning ? '可离线切换默认账号' : '必要时重启 Work'));
     }
     parts.push(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
     slot.replaceChildren(...parts);

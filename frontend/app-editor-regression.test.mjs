@@ -39,6 +39,10 @@ const PICKER_ENV = `
   const PRICE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion'];
   ${MODEL_HELPERS.join('\n')}
   ${['candidateMetadataSource', 'connectionRowsOf', 'findConnection', 'fillEditorFields'].map(modelFunction).join('\n')}
+  const SOURCE_STAMP_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?$/;
+  ${['sourceURLOf', 'sourceStampOf', 'presetMetadataSource', 'providerPresets', 'providerPreset',
+    'isAnthropicPreset', 'connectionDefaultUpstreamProtocol', 'presetOnboardModels',
+    'matchCatalogHint', 'inferModelDefaults'].map(connectionFunction).join('\n')}
   ${['connectionProtocol', 'draftConnection', 'draftConnectionProtocol'].map(connectionFunction).join('\n')}
   const setHidden = () => {};
   const setText = () => {};
@@ -117,12 +121,13 @@ test('picking a new candidate drops values the previous candidate owned', () => 
 
   env.pickCandidate('model-b');
   assert.equal(draft.upstreamModelId, 'model-b');
-  /* 第二候选什么都没声明：上一候选的名称、预算、能力与档位都不能留下。 */
+  /* 第二候选什么都没声明：上一候选的名称、预算、能力与档位都不能留下；
+     未知模型按 v1.1.14 的默认值回填 131072 与工具调用。 */
   assert.equal(draft.name, '');
-  assert.equal(draft.context, '');
+  assert.equal(draft.context, '131072');
   assert.equal(draft.contextLimit, '');
   assert.equal(draft.output, '');
-  assert.equal(draft.tools, undefined);
+  assert.equal(draft.tools, true);
   assert.equal(draft.reasoning, false);
   assert.equal(draft.vision, false);
   assert.deepEqual(draft.efforts, []);
@@ -517,6 +522,10 @@ function makeFailureEnv() {
     const loadState = async () => true;
     const modelThreeWayDiff = () => [];
     const diffValue = value => JSON.stringify(value);
+    ${coreFunction('displayModelId')}
+    ${coreFunction('modelLabel')}
+    ${coreFunction('catalogModelLabel')}
+    ${connectionFunction('formatApiErrorWithModels')}
     ${appFunction('handleSaveFailure')}
     return handleSaveFailure;
   `;
