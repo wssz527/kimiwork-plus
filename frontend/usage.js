@@ -34,10 +34,9 @@
 
   function template() {
     $('usage-root').innerHTML = `
-      <div class="usage-tabs" role="tablist" aria-label="用量中心">
-        <button id="usage-tab-requests" type="button" role="tab" data-usage-tab="requests" aria-selected="true">请求消耗</button>
+      <div class="subtabs" role="tablist" aria-label="用量中心">
+        <button id="usage-tab-requests" type="button" role="tab" data-usage-tab="requests" aria-selected="true">请求统计</button>
         <button id="usage-tab-quotas" type="button" role="tab" data-usage-tab="quotas" aria-selected="false">额度总览</button>
-        <button id="usage-tab-sources" type="button" role="tab" data-usage-tab="sources" aria-selected="false">账户与数据来源</button>
         <button id="usage-tab-budget" type="button" role="tab" data-usage-tab="budget" aria-selected="false">预算保护</button>
       </div>
       <p class="errors usage-error" id="usage-error" role="alert" hidden></p>
@@ -90,11 +89,14 @@
         <p class="note">只有点击刷新才会查询已授权的非推理接口。失败时保留最后成功值并标记过期，不把失败显示为 0 或无限额。</p>
         <p class="note">联网搜索、调用 Kimi 资料库，以及 PPT、3D、图片生成、视频生成等能力仍走 Kimi Work 官方自身额度；KimiWork + 仅接管对话与子代理模型请求。</p>
         <div class="usage-quota-list" id="quota-list"></div><p class="empty" id="quota-empty">尚未接入可查询的额度来源。这不表示余额为 0。</p>
-      </section>
-      <section class="usage-pane" id="usage-pane-sources" role="tabpanel" aria-labelledby="usage-tab-sources" hidden>
-        <div class="band__head"><div><h2>账户与数据来源</h2><p>每个来源单独标明数据类型、凭据是否就绪、最后成功时间和失败原因。不会读取浏览器 Cookie。</p></div><button class="btn btn--outline" id="quota-add" type="button">添加余额来源</button></div>
-        <div id="quota-source-editor"></div>
-        <div class="usage-source-list" id="quota-source-list"></div>
+        <details class="growth-disclosure" id="quota-sources-disclosure">
+          <summary>管理外部额度来源</summary>
+          <div class="growth-disclosure__body">
+            <div class="band__head"><div><h3>账户与数据来源</h3><p>每个来源单独标明数据类型、凭据是否就绪、最后成功时间和失败原因。不会读取浏览器 Cookie。</p></div><button class="btn btn--outline" id="quota-add" type="button">添加余额来源</button></div>
+            <div id="quota-source-editor"></div>
+            <div class="usage-source-list" id="quota-source-list"></div>
+          </div>
+        </details>
       </section>
       <section class="usage-pane" id="usage-pane-budget" role="tabpanel" aria-labelledby="usage-tab-budget" hidden></section>`;
   }
@@ -151,10 +153,11 @@
   }
 
   function selectTab(tab) {
-    state.tab = tab;
-    document.querySelectorAll('[data-usage-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.usageTab === tab)));
-    for (const name of ['requests', 'quotas', 'sources', 'budget']) hide('usage-pane-' + name, name !== tab);
-    if (['quotas', 'sources'].includes(tab) && !state.quota && !state.quotaLoading) void loadQuota();
+    const active = tab === 'quotas' || tab === 'budget' ? tab : 'requests';
+    state.tab = active;
+    document.querySelectorAll('[data-usage-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.usageTab === active)));
+    for (const name of ['requests', 'quotas', 'budget']) hide('usage-pane-' + name, name !== active);
+    if (active === 'quotas' && !state.quota && !state.quotaLoading) void loadQuota();
   }
 
   const filterViews = {
@@ -602,6 +605,8 @@
       finally { button.disabled = false; }
     });
     $('quota-add').addEventListener('click', () => {
+      const disclosure = $('quota-sources-disclosure');
+      if (disclosure) disclosure.open = true;
       if ($('quota-source-form')) $('quota-source-editor').replaceChildren();
       else renderSourceEditor();
     });

@@ -329,3 +329,564 @@ test('usage export uses POST /api/usage/export, official quota links use POST /a
     globalThis.document = prevDoc;
   }
 });
+
+test('usage panel renders 3 subtabs and folds external quota sources inside usage-pane-quotas', async () => {
+  const nodes = new Map();
+  const makeNode = (id = '') => {
+    const node = {
+      id, textContent: '', hidden: false, value: '', disabled: false, open: false, className: '', innerHTML: '',
+      children: [], dataset: {}, style: {}, listeners: {}, attrs: {},
+      replaceChildren(...children) { node.children = children; },
+      append(...children) { node.children.push(...children); },
+      addEventListener(type, fn) { (node.listeners[type] ||= []).push(fn); },
+      setAttribute(name, value) { node.attrs[name] = String(value); },
+      getAttribute(name) { return node.attrs[name] || ''; },
+      querySelector() { return makeNode(); },
+      querySelectorAll() { return []; },
+      focus() {},
+    };
+    if (id) nodes.set(id, node);
+    return node;
+  };
+  const tabs = ['requests', 'quotas', 'budget'].map(name => {
+    const tab = makeNode('usage-tab-' + name);
+    tab.dataset.usageTab = name;
+    return tab;
+  });
+  const document = {
+    getElementById(id) {
+      if (id === 'quota-source-form' && !nodes.get('quota-source-editor')?.innerHTML.includes('id="quota-source-form"')) {
+        return null;
+      }
+      if (!nodes.has(id)) nodes.set(id, makeNode(id));
+      return nodes.get(id);
+    },
+    createElement() { return makeNode(); },
+    createElementNS() { return makeNode(); },
+    querySelectorAll(selector) {
+      if (selector === '[data-usage-tab]') return tabs;
+      return [];
+    },
+  };
+  const runtime = {};
+  new Function('document', 'globalThis', source)(document, runtime);
+
+  const calls = [];
+  let sourcesState = [
+    { sourceId: 'ds-1', sourceName: 'DeepSeek 余额', kind: 'api_balance', endpoint: 'https://api.deepseek.com/user/balance', removable: true },
+  ];
+  const panel = runtime.KimiWorkUsage.mount({
+    request: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/quota') return { records: [], sources: sourcesState, connections: [{ id: 'conn-ds', name: 'DeepSeek' }] };
+      if (path === '/api/quota/sources') {
+        if (options.body.action === 'upsert') sourcesState = [...sourcesState, { ...options.body.source, removable: true }];
+        if (options.body.action === 'remove') sourcesState = sourcesState.filter(s => s.sourceId !== options.body.sourceId);
+        return { records: [], sources: sourcesState, connections: [{ id: 'conn-ds', name: 'DeepSeek' }] };
+      }
+      return { summary: {}, records: [], filters: {} };
+    },
+    notify() {},
+  });
+
+  const html = nodes.get('usage-root').innerHTML;
+  assert.match(html, /class="subtabs"\s+role="tablist"/);
+  assert.match(html, /id="usage-tab-requests"[^>]*data-usage-tab="requests"[^>]*>请求统计</);
+  assert.match(html, /id="usage-tab-quotas"[^>]*data-usage-tab="quotas"[^>]*>额度总览</);
+  assert.match(html, /id="usage-tab-budget"[^>]*data-usage-tab="budget"[^>]*>预算保护</);
+  assert.equal(html.includes('usage-tab-sources'), false);
+  assert.equal(html.includes('usage-pane-sources'), false);
+  const quotasStart = html.indexOf('id="usage-pane-quotas"');
+  const budgetStart = html.indexOf('id="usage-pane-budget"');
+  const quotasSection = html.slice(quotasStart, budgetStart);
+  assert.match(quotasSection, /<details class="growth-disclosure" id="quota-sources-disclosure">/);
+  assert.match(quotasSection, /<summary>管理外部额度来源<\/summary>/);
+  assert.match(quotasSection, /id="quota-add"/);
+  assert.match(quotasSection, /id="quota-source-editor"/);
+  assert.match(quotasSection, /id="quota-source-list"/);
+
+  panel.show();
+  await flush();
+
+  tabs[1].listeners.click[0]();
+  assert.equal(nodes.get('usage-pane-requests').hidden, true);
+  assert.equal(nodes.get('usage-pane-quotas').hidden, false);
+  assert.equal(nodes.get('usage-pane-budget').hidden, true);
+  assert.equal(tabs[1].attrs['aria-selected'], 'true');
+
+  const disclosure = document.getElementById('quota-sources-disclosure');
+  disclosure.open = false;
+  nodes.get('quota-add').listeners.click[0]();
+  assert.equal(disclosure.open, true, 'clicking quota-add must open quota-sources-disclosure');
+
+  const removeButtons = [];
+  (function walk(node) {
+    if (!node) return;
+    if (node.textContent === '删除来源') removeButtons.push(node);
+    for (const child of node.children || []) walk(child);
+  })(nodes.get('quota-source-list'));
+  assert.equal(removeButtons.length, 1);
+  await removeButtons[0].listeners.click[0]();
+  assert.deepEqual(calls.at(-1), {
+    path: '/api/quota/sources',
+    options: { method: 'POST', body: { action: 'remove', sourceId: 'ds-1' } },
+  });
+});
+
+/* ---------- growth.js 扩展增强即点即存、收起与重启启用测试 ---------- */
+
+const growthSource = readFileSync(new URL('./growth.js', import.meta.url), 'utf8');
+
+function growthEnv({ includeRestartBtn = true, errorsInsideBody = false } = {}) {
+  const nodes = new Map();
+  const makeNode = (tag = 'div', id = '') => {
+    const node = {
+      tagName: tag.toUpperCase(), id, textContent: '', value: '', checked: false,
+      hidden: false, disabled: false, open: false, readOnly: false, title: '', className: '',
+      parentNode: null, children: [], dataset: {}, style: {}, listeners: {},
+      get options() { return node.children; },
+      replaceChildren(...items) {
+        node.children = [];
+        for (const item of items) { item.parentNode = node; node.children.push(item); }
+      },
+      append(...items) {
+        for (const item of items) { item.parentNode = node; node.children.push(item); }
+      },
+      before(item) {
+        if (!node.parentNode) return;
+        const idx = node.parentNode.children.indexOf(node);
+        item.parentNode = node.parentNode;
+        if (idx >= 0) node.parentNode.children.splice(idx, 0, item);
+        else node.parentNode.children.push(item);
+      },
+      after(item) {
+        if (!node.parentNode) return;
+        if (item.parentNode && item.parentNode !== node.parentNode) {
+          const oldIdx = item.parentNode.children.indexOf(item);
+          if (oldIdx >= 0) item.parentNode.children.splice(oldIdx, 1);
+        }
+        const idx = node.parentNode.children.indexOf(node);
+        item.parentNode = node.parentNode;
+        if (idx >= 0) node.parentNode.children.splice(idx + 1, 0, item);
+        else node.parentNode.children.push(item);
+        if (item.id) nodes.set(item.id, item);
+      },
+      addEventListener(type, fn) { (node.listeners[type] ||= []).push(fn); },
+      dispatch(type) {
+        const results = [];
+        for (const fn of node.listeners[type] || []) results.push(fn({ target: node, preventDefault() {} }));
+        return Promise.all(results);
+      },
+      closest() { return null; },
+      focus() {},
+    };
+    if (id) nodes.set(id, node);
+    return node;
+  };
+
+  const panel = makeNode('section', 'translation-panel');
+  const trEnabled = makeNode('input', 'tr-enabled');
+  const trBody = makeNode('div', 'tr-body');
+  trBody.hidden = true;
+  const trProvider = makeNode('select', 'tr-provider');
+  const trLanguage = makeNode('input', 'tr-language');
+  const trCopy = makeNode('button', 'tr-copy');
+  const trCopyNote = makeNode('span', 'tr-copy-note');
+  const trCustomDetails = makeNode('details', 'tr-custom-details');
+  const trEndpoint = makeNode('input', 'tr-endpoint');
+  const trModel = makeNode('input', 'tr-model');
+  const trKey = makeNode('input', 'tr-key');
+  const trKeyState = makeNode('span', 'tr-key-state');
+  trCustomDetails.append(trEndpoint, trModel, trKey, trKeyState);
+  const trViewTranslated = makeNode('input', 'tr-view-translated');
+  const trViewOriginal = makeNode('input', 'tr-view-original');
+  const trRuntime = makeNode('p', 'tr-runtime');
+  const trErrors = makeNode('p', 'tr-errors');
+  trErrors.hidden = true;
+  const trSaveRow = makeNode('div', 'tr-save-row');
+  const trDraft = makeNode('p', 'tr-draft');
+  const trCheck = makeNode('button', 'tr-check');
+  const trSave = makeNode('button', 'tr-save');
+  trSaveRow.append(trDraft, trCheck, trSave);
+  const trPreviewBox = makeNode('details', 'tr-preview-box');
+  const trTest = makeNode('button', 'tr-test');
+  const trPreviewOriginal = makeNode('p', 'tr-preview-original');
+  const trPreviewResult = makeNode('p', 'tr-preview-result');
+  trPreviewBox.append(trTest, trPreviewOriginal, trPreviewResult);
+  trBody.append(trProvider, trLanguage, trCopy, trCopyNote, trCustomDetails, trViewTranslated, trViewOriginal, trRuntime);
+  if (includeRestartBtn) {
+    const restartBtn = makeNode('button', 'tr-restart-enable');
+    restartBtn.hidden = true;
+    restartBtn.textContent = '重启并启用';
+    trBody.append(restartBtn);
+  }
+  if (errorsInsideBody) trBody.append(trErrors);
+  trBody.append(trSaveRow, trPreviewBox);
+  panel.append(trEnabled, trBody);
+  if (!errorsInsideBody) panel.append(trErrors);
+
+  const webPanel = makeNode('section', 'web-panel');
+  const webProvider = makeNode('select', 'web-provider');
+  const webKeyField = makeNode('label', 'web-key-field');
+  const webKey = makeNode('input', 'web-key');
+  const webKeyState = makeNode('span', 'web-key-state');
+  const webState = makeNode('p', 'web-state');
+  const webErrors = makeNode('p', 'web-errors');
+  webErrors.hidden = true;
+  const webDraft = makeNode('p', 'web-draft');
+  const webTest = makeNode('button', 'web-test');
+  const webSave = makeNode('button', 'web-save');
+  webKeyField.append(webKey, webKeyState);
+  webPanel.append(webProvider, webKeyField, webState, webErrors, webDraft, webTest, webSave);
+
+  const document = {
+    getElementById: id => nodes.get(id) || null,
+    createElement: tag => makeNode(tag),
+    createTextNode: text => ({ textContent: text }),
+  };
+  const runtime = {};
+  new Function('document', 'globalThis', growthSource)(document, runtime);
+  return { nodes, mountGrowth: runtime.KimiWorkGrowth.mountGrowth };
+}
+
+test('growth.js collapses translation when disabled, omits apiKeyEnv, auto-saves toggles, and guards incomplete custom config', async () => {
+  const env = growthEnv({ errorsInsideBody: true });
+  let state = {
+    revision: 'rev-1',
+    models: [],
+    translation: {
+      revision: 'tr-1',
+      configured: { enabled: false, provider: 'bing', targetLanguage: 'zh', view: 'translated', customEndpoint: '', customModel: '', hasApiKey: false },
+      environment: { keySet: false },
+      runtime: { state: 'inactive', reason: 'translation_disabled' },
+    },
+    webTools: { provider: 'official', keySet: false },
+  };
+  const calls = [];
+  const render = env.mountGrowth({
+    request: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/translation') {
+        const nextRev = 'rev-' + (calls.length + 1);
+        const nextTrRev = 'tr-' + (calls.length + 1);
+        state = {
+          ...state,
+          revision: nextRev,
+          translation: {
+            ...state.translation,
+            revision: nextTrRev,
+            configured: {
+              enabled: options.body.enabled,
+              provider: options.body.provider,
+              targetLanguage: options.body.targetLanguage,
+              view: options.body.view,
+              customEndpoint: options.body.customEndpoint,
+              customModel: options.body.customModel,
+              hasApiKey: Boolean(options.body.apiKey || state.translation.configured.hasApiKey),
+            },
+          },
+        };
+        return { ok: true, state };
+      }
+      if (path === '/api/translation/preview') {
+        return { preview: { original: 'Hello', translated: '你好' } };
+      }
+      return { ok: true };
+    },
+    getState: () => state,
+    refresh: async () => {},
+    notify() {},
+    runAction() {},
+  });
+
+  render(state);
+  assert.equal(env.nodes.get('tr-body').hidden, true, 'disabled translation must collapse #tr-body');
+  assert.equal(env.nodes.get('tr-errors').parentNode, env.nodes.get('translation-panel'), '#tr-errors should stay visible outside hidden #tr-body');
+  assert.equal(env.nodes.get('tr-key-state').textContent, '尚未填写 API Key');
+
+  env.nodes.get('tr-enabled').checked = true;
+  await env.nodes.get('tr-enabled').dispatch('change');
+  await flush();
+  assert.equal(env.nodes.get('tr-body').hidden, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/api/translation');
+  assert.equal('apiKeyEnv' in calls[0].options.body, false, 'POST /api/translation must omit apiKeyEnv');
+  assert.equal(calls[0].options.body.enabled, true);
+  assert.equal(calls[0].options.body.revision, 'rev-1');
+  assert.equal(calls[0].options.body.translationRevision, 'tr-1');
+  assert.equal(env.nodes.get('tr-custom-details').hidden, true);
+  assert.equal(env.nodes.get('tr-custom-details').open, false);
+  assert.equal(env.nodes.get('tr-save').hidden, true);
+
+  env.nodes.get('tr-provider').value = 'google';
+  await env.nodes.get('tr-provider').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].options.body.provider, 'google');
+  assert.equal(calls[1].options.body.revision, 'rev-2');
+  assert.equal(calls[1].options.body.translationRevision, 'tr-2');
+
+  env.nodes.get('tr-view-original').checked = true;
+  env.nodes.get('tr-view-translated').checked = false;
+  await env.nodes.get('tr-view-original').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].options.body.view, 'original');
+
+  env.nodes.get('tr-provider').value = 'custom';
+  await env.nodes.get('tr-provider').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 3, 'incomplete custom provider must not send an empty POST');
+  assert.equal(env.nodes.get('tr-custom-details').hidden, false);
+  assert.equal(env.nodes.get('tr-custom-details').open, true);
+  assert.equal(env.nodes.get('tr-save').hidden, false);
+
+  env.nodes.get('tr-endpoint').value = 'https://api.example.com/v1/chat/completions';
+  env.nodes.get('tr-model').value = 'gpt-4o-mini';
+  env.nodes.get('tr-key').value = 'sk-secret-test';
+  await env.nodes.get('tr-save').dispatch('click');
+  await flush();
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].options.body.apiKey, 'sk-secret-test');
+  assert.equal('apiKeyEnv' in calls[3].options.body, false);
+  assert.equal(env.nodes.get('tr-key').value, '', 'apiKey input must clear after save');
+  assert.equal(env.nodes.get('tr-key-state').textContent, '已保存 API Key，留空则沿用现有密钥');
+
+  env.nodes.get('tr-preview-box').open = false;
+  await env.nodes.get('tr-test').dispatch('click');
+  await flush();
+  assert.equal(env.nodes.get('tr-preview-box').open, true, 'clicking #tr-test must expand #tr-preview-box');
+});
+
+test('growth.js serializes rapid translation saves, rolls back on failure, and supports dynamic no_managed_child restart button', async () => {
+  const env = growthEnv({ includeRestartBtn: false });
+  let state = {
+    revision: 'rev-1',
+    models: [],
+    translation: {
+      revision: 'tr-1',
+      configured: { enabled: false, provider: 'bing', targetLanguage: 'zh', view: 'translated', customEndpoint: '', customModel: '' },
+      environment: { keySet: false },
+      runtime: { state: 'inactive', reason: 'no_managed_child' },
+    },
+    webTools: { provider: 'official', keySet: false },
+  };
+  const pending = [];
+  const actionCalls = [];
+  let refreshCount = 0;
+
+  const render = env.mountGrowth({
+    request: (path, options) => {
+      if (path === '/api/translation') {
+        return new Promise((resolve, reject) => {
+          pending.push({ body: options.body, resolve, reject });
+        });
+      }
+      if (path === '/api/actions') {
+        actionCalls.push(options.body);
+        return new Promise(resolve => {
+          pending.push({ path, body: options.body, resolve });
+        });
+      }
+      return Promise.resolve({ ok: true });
+    },
+    getState: () => state,
+    refresh: async () => { refreshCount++; },
+    notify() {},
+    runAction() {},
+  });
+
+  render(state);
+  assert.match(env.nodes.get('tr-runtime').textContent, /重启一次 Kimi 即可启用页面翻译。/);
+  assert.doesNotMatch(env.nodes.get('tr-runtime').textContent, /受管启动/);
+
+  // 并发连续点击：先开开关，再在第一个请求返回前切到 google，必须串行单飞且第二个拿到更新后的 revision。
+  env.nodes.get('tr-enabled').checked = true;
+  void env.nodes.get('tr-enabled').dispatch('change');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].body.revision, 'rev-1');
+
+  env.nodes.get('tr-provider').value = 'google';
+  void env.nodes.get('tr-provider').dispatch('change');
+  assert.equal(pending.length, 1, 'second change must wait in single-flight queue');
+
+  state = {
+    ...state,
+    revision: 'rev-2',
+    translation: {
+      ...state.translation,
+      revision: 'tr-2',
+      configured: { ...state.translation.configured, enabled: true },
+    },
+  };
+  pending[0].resolve({ ok: true, state });
+  await flush();
+  await flush();
+  assert.equal(pending.length, 2, 'queued save must fire after first completes');
+  assert.equal(pending[1].body.provider, 'google');
+  assert.equal(pending[1].body.revision, 'rev-2');
+  assert.equal(pending[1].body.translationRevision, 'tr-2');
+
+  state = {
+    ...state,
+    revision: 'rev-3',
+    translation: {
+      ...state.translation,
+      revision: 'tr-3',
+      configured: { ...state.translation.configured, enabled: true, provider: 'google' },
+    },
+  };
+  pending[1].resolve({ ok: true, state });
+  await flush();
+  await flush();
+
+  // 动态创建的 #tr-restart-enable 按钮应在开启且 no_managed_child 时显示
+  const restartBtn = env.nodes.get('tr-restart-enable');
+  assert.ok(restartBtn, '#tr-restart-enable must be dynamically created when absent');
+  assert.equal(restartBtn.hidden, false);
+  assert.equal(restartBtn.textContent, '重启并启用');
+
+  const clickPromise = restartBtn.dispatch('click');
+  await flush();
+  assert.equal(restartBtn.disabled, true);
+  assert.equal(restartBtn.textContent, '正在重启 Kimi…');
+  assert.deepEqual(actionCalls, [{ action: 'restart-kimi' }]);
+  const beforeRefresh = refreshCount;
+  pending[2].resolve({ ok: true });
+  await clickPromise;
+  await flush();
+  assert.equal(restartBtn.disabled, false);
+  assert.equal(restartBtn.textContent, '重启并启用');
+  assert.ok(refreshCount > beforeRefresh, 'restart must trigger host refresh callback');
+
+  // 保存失败必须回滚控件与 #tr-body 到服务端快照，并展示 #tr-errors
+  env.nodes.get('tr-enabled').checked = false;
+  void env.nodes.get('tr-enabled').dispatch('change');
+  pending[3].reject(new Error('save_boom'));
+  await flush();
+  await flush();
+  assert.equal(env.nodes.get('tr-enabled').checked, true, 'failed toggle must roll back checkbox to server state');
+  assert.equal(env.nodes.get('tr-body').hidden, false, 'failed toggle must restore #tr-body visibility');
+  assert.equal(env.nodes.get('tr-errors').hidden, false);
+  assert.match(env.nodes.get('tr-errors').textContent, /save_boom/);
+
+  // 翻译尚未保存为 enabled: true 时点击 #tr-restart-enable，必须先保存再触发 restart-kimi
+  state = {
+    ...state,
+    revision: 'rev-4',
+    translation: {
+      ...state.translation,
+      revision: 'tr-4',
+      configured: { ...state.translation.configured, enabled: false, provider: 'bing' },
+    },
+  };
+  env.nodes.get('tr-enabled').checked = true;
+  const restartWithSave = restartBtn.dispatch('click');
+  await flush();
+  assert.equal(pending.length, 5, 'must save enabled: true before restarting Kimi');
+  assert.equal(pending[4].body.enabled, true);
+  assert.equal(actionCalls.length, 1, 'must not call restart-kimi before save finishes');
+  state = {
+    ...state,
+    revision: 'rev-5',
+    translation: {
+      ...state.translation,
+      revision: 'tr-5',
+      configured: { ...state.translation.configured, enabled: true, provider: 'bing' },
+    },
+  };
+  pending[4].resolve({ ok: true, state });
+  await flush();
+  await flush();
+  assert.equal(actionCalls.length, 2);
+  assert.deepEqual(actionCalls[1], { action: 'restart-kimi' });
+  pending[5].resolve({ ok: true });
+  await restartWithSave;
+});
+
+test('growth.js web-tools auto-saves official and keyed tavily, skips keyless tavily, and rolls back on failure', async () => {
+  const env = growthEnv();
+  const state = {
+    revision: 'rev-1',
+    models: [],
+    translation: {
+      revision: 'tr-1',
+      configured: { enabled: false, provider: 'bing', targetLanguage: 'zh', view: 'translated', customEndpoint: '', customModel: '' },
+      environment: { keySet: false },
+      runtime: { state: 'inactive', reason: 'translation_disabled' },
+    },
+    webTools: { provider: 'official', keySet: false },
+  };
+  const calls = [];
+  let failNext = false;
+  const render = env.mountGrowth({
+    request: async (path, options) => {
+      calls.push({ path, options });
+      if (failNext) {
+        failNext = false;
+        throw new Error('web_save_failed');
+      }
+      if (path === '/api/web-tools' && options.body.action === 'save') {
+        return {
+          ok: true,
+          state: {
+            provider: options.body.provider,
+            keySet: Boolean(options.body.apiKey || state.webTools.keySet),
+          },
+        };
+      }
+      return { ok: true };
+    },
+    getState: () => state,
+    refresh: async () => {},
+    notify() {},
+    runAction() {},
+  });
+
+  render(state);
+  assert.equal(env.nodes.get('web-key-field').hidden, true);
+  assert.equal(env.nodes.get('web-save').hidden, true);
+  assert.equal(env.nodes.get('web-draft').hidden, true);
+
+  // 未保存 Tavily Key 时切到 tavily：展开输入框与保存按钮，但不发无 Key 请求
+  env.nodes.get('web-provider').value = 'tavily';
+  await env.nodes.get('web-provider').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 0, 'switching to tavily without saved key must not send save');
+  assert.equal(env.nodes.get('web-key-field').hidden, false);
+  assert.equal(env.nodes.get('web-save').hidden, false);
+  assert.match(env.nodes.get('web-draft').textContent, /保存服务方式/);
+
+  // 填写 Key 并保存
+  env.nodes.get('web-key').value = 'tvly-key';
+  await env.nodes.get('web-save').dispatch('click');
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options.body, { action: 'save', provider: 'tavily', apiKey: 'tvly-key' });
+  assert.equal(state.webTools.keySet, true);
+
+  // 切回 official：立即自动保存并隐藏 Key 与保存按钮
+  env.nodes.get('web-provider').value = 'official';
+  await env.nodes.get('web-provider').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].options.body, { action: 'save', provider: 'official' });
+  assert.equal(env.nodes.get('web-key-field').hidden, true);
+  assert.equal(env.nodes.get('web-save').hidden, true);
+
+  // 已有 keySet 且 #web-key 为空时切到 tavily：立即自动保存
+  env.nodes.get('web-provider').value = 'tavily';
+  await env.nodes.get('web-provider').dispatch('change');
+  await flush();
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].options.body, { action: 'save', provider: 'tavily' });
+
+  // 切回 official 失败：回退下拉选择到 tavily 并显示错误
+  failNext = true;
+  env.nodes.get('web-provider').value = 'official';
+  await env.nodes.get('web-provider').dispatch('change');
+  await flush();
+  assert.equal(env.nodes.get('web-provider').value, 'tavily', 'failed save must roll back #web-provider');
+  assert.equal(env.nodes.get('web-errors').hidden, false);
+  assert.match(env.nodes.get('web-errors').textContent, /web_save_failed/);
+});

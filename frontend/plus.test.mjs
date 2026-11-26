@@ -498,8 +498,9 @@ test('activation statuses use the backend vocabulary without raw state codes', (
   try {
     env.panel.render(env.getState());
     const text = textOf(env.byId('plus-overview-account'));
-    assert.match(text, /已应用/);
+    assert.match(text, /已切换生效/);
     assert.doesNotMatch(text, /restarted/);
+    assert.doesNotMatch(text, /读回一致/);
   } finally { env.restore(); }
 });
 
@@ -661,10 +662,13 @@ test('render() refreshes the account bar, overview and capabilities', () => {
     assert.match(textOf(env.byId('plus-capabilities-body')), /未确认/);
     assert.match(textOf(env.byId('plus-capabilities-body')), /没有提供 Tower 入口/);
 
-    // 当前账号缺失时不能空着，也不能编一个名称。
+    // 未保存多账号快照时给出温和的单账号提示，不渲染报错式文案。
     env.setState({ ...env.getState(), accounts: { state: 'ready', currentId: '', accounts: [] }, workCapabilities: null });
     env.panel.render(env.getState());
-    assert.match(textOf(env.byId('plus-overview-account')), /当前账号未记录/);
+    const singleAccountText = textOf(env.byId('plus-overview-account'));
+    assert.match(singleAccountText, /沿用当前官方登录/);
+    assert.match(singleAccountText, /单账号无需设置；需要多账号切换时可在账号页保存/);
+    assert.doesNotMatch(singleAccountText, /当前账号未记录/);
   } finally { env.restore(); }
 });
 
@@ -1326,5 +1330,23 @@ test('account capture surfaces a plain login prompt when backend returns account
     const body = env.byId('plus-accounts-body');
     assert.match(textOf(body), /请先打开并登录 Kimi Work，再保存当前账号/);
     assert.equal(findButton(body, '正常重启 Kimi 并继续添加'), null);
+  } finally { env.restore(); }
+});
+
+test('single-account overview copy is calm and plus.js avoids internal verification jargon', () => {
+  assert.equal(source.includes('读回一致'), false);
+  assert.equal(source.includes('回读校验'), false);
+  assert.equal(source.includes('受管启动'), false);
+  const env = makePlus({ data: { accounts: {
+    state: 'ready', currentId: '', accounts: [],
+    activation: { state: 'hot', hot: true, verified: true },
+  } } });
+  try {
+    env.panel.render(env.getState());
+    const text = textOf(env.byId('plus-overview-account'));
+    assert.match(text, /沿用当前官方登录/);
+    assert.match(text, /单账号无需设置；需要多账号切换时可在账号页保存。/);
+    assert.match(text, /已切换生效/);
+    assert.doesNotMatch(text, /当前账号未记录|读回一致/);
   } finally { env.restore(); }
 });

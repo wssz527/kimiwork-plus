@@ -7,22 +7,25 @@ const escapeMap = {
   translation_connection_responses_only: '这个连接只支持 Responses，不能作为 Chat 翻译端点。',
   translation_connection_anthropic_only: '这个连接使用 Anthropic Messages，不能作为 Chat 翻译端点。',
   translation_connection_chat_undeclared: '该连接尚未声明 Chat Completions 支持，不能据此生成翻译端点。',
-  translation_connection_key_missing: '该连接的 Key 尚未进入当前翻译宿主；请通过现有连接应用流程准备后再复制。',
+  translation_connection_key_missing: '该连接的 API Key 尚未就绪，请先在模型页应用该连接后再复制。',
   translation_connection_endpoint_not_base: '该连接地址已经是推理端点，不是可追加 Chat 路径的基础地址。',
   translation_connection_unavailable: '请选择一个已生效、有上游连接的模型。',
-  translation_invalid_config: '翻译配置无效，请检查语言、端点和凭据变量名。',
+  translation_invalid_config: '翻译配置无效，请检查目标语言、接口地址和 API Key。',
+  invalid_translation_config: '翻译配置无效，请检查目标语言、接口地址和 API Key。',
+  translation_endpoint_required: '请填写自定义翻译接口地址后再保存。',
+  invalid_translation_endpoint: '自定义翻译接口地址格式无效，请使用完整的 HTTPS 地址。',
   translation_preview_failed: '试译未完成，原文保持不变。请检查翻译服务与目标语言。',
   translation_timeout: '翻译服务超时，原文保持不变。',
   translation_http_error: '翻译服务返回错误，请检查地址、Key 和模型。',
   native_mcp_timeout: '原生 MCP 操作超时，未自动重试。',
 };
 
-/* 翻译宿主状态来自内核，state 与 reason 都是英文内部值；面向用户只说结论，
+/* 翻译运行状态来自内核，state 与 reason 都是英文内部值；面向用户只说结论，
    原始码留在 title 里供排查。 */
 const translationStateWords = { inactive: '未启用', active: '已生效', attaching: '正在接入页面', failed: '接入失败' };
 const translationStateReasons = {
   translation_disabled: '翻译已在设置里关闭，Kimi 页面不会被注入。',
-  no_managed_child: '还没有受管启动的 Kimi；启动后才会应用翻译。',
+  no_managed_child: '重启一次 Kimi 即可启用页面翻译。',
   translation_waiting_view: '已准备好，等待 Work 页面出现后接入。',
 };
 const mcpTransportWords = {
@@ -80,29 +83,51 @@ function mountLegacy() {
   diagnostics.append(roles);
 }
 
-function fieldFromDraft(draft) {
-  if (!$('tr-enabled')) return;
-  $('tr-enabled').checked = draft.enabled;
-  if ($('tr-provider')) $('tr-provider').value = draft.provider;
-  if ($('tr-language')) $('tr-language').value = draft.targetLanguage;
-  if ($('tr-endpoint')) $('tr-endpoint').value = draft.customEndpoint;
-  if ($('tr-model')) $('tr-model').value = draft.customModel;
-  if ($('tr-keyenv')) $('tr-keyenv').value = draft.apiKeyEnv;
-  const viewNode = $(draft.view === 'original' ? 'tr-view-original' : 'tr-view-translated');
-  if (viewNode) viewNode.checked = true;
-  if ($('tr-custom-details')) $('tr-custom-details').open = draft.provider === 'custom';
+function normalizeTranslationDraft(config) {
+  return {
+    enabled: Boolean(config?.enabled),
+    provider: config?.provider || 'bing',
+    targetLanguage: (config?.targetLanguage || '').trim(),
+    view: config?.view === 'original' ? 'original' : 'translated',
+    customEndpoint: (config?.customEndpoint || '').trim(),
+    customModel: (config?.customModel || '').trim(),
+  };
 }
 
-function translationDraft() {
+function fieldFromDraft(draft) {
+  if (!$('tr-enabled')) return;
+  const normalized = normalizeTranslationDraft(draft);
+  $('tr-enabled').checked = normalized.enabled;
+  if ($('tr-provider')) $('tr-provider').value = normalized.provider;
+  if ($('tr-language')) $('tr-language').value = normalized.targetLanguage;
+  if ($('tr-endpoint')) $('tr-endpoint').value = normalized.customEndpoint;
+  if ($('tr-model')) $('tr-model').value = normalized.customModel;
+  const viewTranslated = $('tr-view-translated');
+  const viewOriginal = $('tr-view-original');
+  if (viewTranslated) viewTranslated.checked = normalized.view !== 'original';
+  if (viewOriginal) viewOriginal.checked = normalized.view === 'original';
+  const customDetails = $('tr-custom-details');
+  if (customDetails) {
+    const showCustom = normalized.enabled && normalized.provider === 'custom';
+    customDetails.hidden = !showCustom;
+    customDetails.open = showCustom;
+  }
+}
+
+function translationDraft(fallback = null) {
   return {
     enabled: Boolean($('tr-enabled')?.checked),
-    provider: $('tr-provider')?.value || 'bing',
-    targetLanguage: ($('tr-language')?.value || '').trim(),
+    provider: $('tr-provider') ? ($('tr-provider').value || 'bing') : (fallback?.provider || 'bing'),
+    targetLanguage: $('tr-language') ? ($('tr-language').value || '').trim() : (fallback?.targetLanguage || 'zh'),
     view: $('tr-view-original')?.checked ? 'original' : 'translated',
-    customEndpoint: ($('tr-endpoint')?.value || '').trim(),
-    customModel: ($('tr-model')?.value || '').trim(),
-    apiKeyEnv: ($('tr-keyenv')?.value || '').trim(),
+    customEndpoint: $('tr-endpoint') ? ($('tr-endpoint').value || '').trim() : (fallback?.customEndpoint || ''),
+    customModel: $('tr-model') ? ($('tr-model').value || '').trim() : (fallback?.customModel || ''),
   };
+}
+
+function canAutoSaveTranslation(draft) {
+  if (draft.provider !== 'custom') return true;
+  return Boolean(draft.customEndpoint && draft.customModel);
 }
 
 function mcpRows(value, pattern) {
@@ -159,7 +184,18 @@ function providerDocument(selectId, hintId, providers, openExternalUrl) {
 
 function mountGrowth({ request, getState, getProviders = () => null, refresh, notify, runAction }) {
   mountLegacy();
-  const local = { trKey: '', trDraft: null, trCopyKey: '', mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false, webDraft: null, webResult: null };
+  const local = {
+    trKey: '', trDraft: null, trCopyKey: '', trCustomVisible: false,
+    trSaveSeq: 0, trSaving: false, trQueuedSave: null, trSavePromise: null,
+    trRestartBtn: null, trRestartBound: false, trRestarting: false,
+    mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false,
+    webDraft: null, webResult: null, webSaveSeq: 0, webSaving: false, webQueuedSave: null, webSavePromise: null,
+  };
+  const trBody = $('tr-body');
+  const trErrors = $('tr-errors');
+  if (trBody && trErrors && trErrors.parentNode === trBody && typeof trBody.after === 'function') {
+    trBody.after(trErrors);
+  }
   async function openExternalUrl(href, anchor) {
     let parsed;
     try {
@@ -194,79 +230,260 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   $('tr-copy')?.before(copyLabel);
   copyLabel.hidden = true;
 
-  function trDirty() { return Boolean(local.trDraft && !same(local.trDraft, translationDraft())); }
+  function trDirty() {
+    return Boolean((local.trDraft && !same(local.trDraft, translationDraft(local.trDraft))) || $('tr-key')?.value);
+  }
+
+  function ensureRestartEnableButton() {
+    let button = $('tr-restart-enable') || local.trRestartBtn;
+    if (!button) {
+      const runtimeNode = $('tr-runtime');
+      if (!runtimeNode) return null;
+      button = document.createElement('button');
+      button.id = 'tr-restart-enable';
+      button.type = 'button';
+      button.className = 'btn btn--primary btn--sm';
+      button.textContent = '重启并启用';
+      button.hidden = true;
+      if (typeof runtimeNode.after === 'function') runtimeNode.after(button);
+      else runtimeNode.parentNode?.append?.(button);
+    }
+    local.trRestartBtn = button;
+    if (!local.trRestartBound) {
+      local.trRestartBound = true;
+      button.addEventListener('click', restartAndEnableTranslation);
+    }
+    return button;
+  }
+
+  function syncTranslationUI(data) {
+    if (!$('tr-enabled')) return;
+    const draft = translationDraft(local.trDraft);
+    const enabled = draft.enabled;
+    const dirty = trDirty();
+    const body = $('tr-body');
+    if (body) {
+      body.hidden = !enabled;
+    } else {
+      for (const id of ['tr-provider', 'tr-language', 'tr-copy', 'tr-copy-note', 'tr-view-translated',
+        'tr-view-original', 'tr-runtime', 'tr-save-row', 'tr-check', 'tr-preview-box',
+        'tr-test', 'tr-preview-original', 'tr-preview-result']) {
+        hidden(id, !enabled);
+      }
+    }
+    copyLabel.hidden = !enabled || !copySelect.options.length;
+    const customDetails = $('tr-custom-details');
+    if (customDetails) {
+      const showCustom = enabled && draft.provider === 'custom';
+      if (!showCustom) {
+        customDetails.hidden = true;
+        customDetails.open = false;
+        local.trCustomVisible = false;
+      } else {
+        if (!local.trCustomVisible || customDetails.hidden) customDetails.open = true;
+        customDetails.hidden = false;
+        local.trCustomVisible = true;
+      }
+    }
+    hidden('tr-save', !(enabled && (draft.provider === 'custom' || dirty)));
+    if (!enabled) {
+      hidden('tr-draft', true);
+      text('tr-draft', '');
+    } else if (local.trSaving) {
+      hidden('tr-draft', false);
+      text('tr-draft', '正在保存…');
+    } else if (dirty) {
+      hidden('tr-draft', false);
+      text('tr-draft', '有未保存的修改');
+    } else {
+      hidden('tr-draft', true);
+      text('tr-draft', '');
+    }
+    const runtime = data?.translation?.runtime || {};
+    const restartBtn = ensureRestartEnableButton();
+    if (restartBtn) {
+      const showRestart = enabled && runtime.reason === 'no_managed_child';
+      restartBtn.hidden = !showRestart;
+      restartBtn.disabled = local.trRestarting;
+      restartBtn.textContent = local.trRestarting ? '正在重启 Kimi…' : '重启并启用';
+    }
+  }
+
+  function rollbackTranslation() {
+    const data = getState();
+    const configured = data?.translation?.configured;
+    if (configured) {
+      const normalized = normalizeTranslationDraft(configured);
+      local.trDraft = normalized;
+      local.trKey = JSON.stringify([configured, data.translation?.revision]);
+      fieldFromDraft(normalized);
+    } else if (local.trDraft) {
+      fieldFromDraft(local.trDraft);
+    }
+    if (data) renderTranslation(data);
+    else syncTranslationUI(null);
+  }
+
   function renderTranslation(data) {
-    const config = data.translation?.configured;
+    const config = data?.translation?.configured;
     if (!config || !$('tr-enabled')) return;
     const key = JSON.stringify([config, data.translation.revision]);
-    if (!local.trDraft || local.trKey !== key && !trDirty()) {
-      local.trDraft = { ...config };
+    if (!local.trDraft || (local.trKey !== key && !trDirty() && !local.trSaving)) {
+      local.trDraft = normalizeTranslationDraft(config);
       local.trKey = key;
-      fieldFromDraft(config);
+      fieldFromDraft(local.trDraft);
     }
-    const envReady = data.translation.environment?.keySet === true;
-    text('tr-key-state', config.provider === 'custom'
-      ? envReady ? '当前宿主已提供此凭据变量；Key 不会回显。' : '当前宿主未提供此变量；请在下方重新输入 Key 并保存。'
-      : 'Bing / Google 使用现有翻译服务；不需要模型连接 Key。');
+    const hasKey = Boolean(config.hasApiKey || data?.translation?.environment?.keySet);
+    text('tr-key-state', hasKey ? '已保存 API Key，留空则沿用现有密钥' : '尚未填写 API Key');
     const runtime = data.translation.runtime || {};
     const stateWord = translationStateWords[runtime.state] || '状态未报告';
     const stateNote = runtime.warning || translationStateReasons[runtime.reason]
-      || (runtime.reason ? '宿主报告了未识别的状态，详见诊断信息。' : '保存设置与运行采用是分开的状态。');
+      || (runtime.reason ? '翻译服务返回了未识别的状态，详见诊断信息。' : '保存设置与运行采用是分开的状态。');
     text('tr-runtime', '运行状态：' + stateWord + '。' + stateNote);
     const runtimeNode = $('tr-runtime');
     if (runtimeNode) {
       runtimeNode.title = [runtime.state, runtime.reason].filter(Boolean).join(' · ');
     }
-    text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致');
     const trCopyBtn = $('tr-copy');
     if (trCopyBtn) trCopyBtn.disabled = !copySelect.value;
-    const modelKey = JSON.stringify(data.models.map(row => [row.id, row.name, row.connectionId, row.protocol]));
+    const models = Array.isArray(data.models) ? data.models : [];
+    const modelKey = JSON.stringify(models.map(row => [row.id, row.name, row.connectionId, row.protocol]));
     if (local.trCopyKey !== modelKey) {
       local.trCopyKey = modelKey;
       copySelect.replaceChildren();
-      for (const model of data.models.filter(row => row.connectionId)) {
+      for (const model of models.filter(row => row.connectionId)) {
         const option = document.createElement('option');
         option.value = model.id;
         option.textContent = `${model.name || model.id} · ${model.id}`;
         copySelect.append(option);
       }
-      copyLabel.hidden = !copySelect.options.length;
       if (trCopyBtn) trCopyBtn.disabled = !copySelect.value;
     }
+    syncTranslationUI(data);
   }
 
-  async function saveTranslation() {
-    const draft = translationDraft();
-    showError('tr-errors', '');
-    try {
-      const data = getState();
-      const res = await request('/api/translation', { method: 'POST', body: {
-        ...draft, revision: data.revision, translationRevision: data.translation.revision,
-        ...($('tr-key').value ? { apiKey: $('tr-key').value } : {}),
-      } });
-      if (res.state) {
-        local.trKey = JSON.stringify([res.state.translation.configured, res.state.translation.revision]);
-        local.trDraft = { ...res.state.translation.configured };
+  function saveTranslation(opts = {}) {
+    const seq = ++local.trSaveSeq;
+    local.trQueuedSave = {
+      seq,
+      auto: Boolean(opts.auto),
+      silentSuccess: Boolean(opts.silentSuccess),
+      overrideDraft: opts.overrideDraft ? normalizeTranslationDraft(opts.overrideDraft) : null,
+    };
+    if (local.trSavePromise) return local.trSavePromise;
+    local.trSavePromise = (async () => {
+      local.trSaving = true;
+      let ok = false;
+      try {
+        while (local.trQueuedSave) {
+          const job = local.trQueuedSave;
+          local.trQueuedSave = null;
+          const draft = job.overrideDraft || translationDraft(local.trDraft);
+          if (job.auto && !canAutoSaveTranslation(draft)) {
+            syncTranslationUI(getState());
+            ok = false;
+            continue;
+          }
+          showError('tr-errors', '');
+          syncTranslationUI(getState());
+          const apiKey = $('tr-key')?.value || '';
+          const beforeData = getState();
+          const body = {
+            enabled: draft.enabled,
+            provider: draft.provider,
+            targetLanguage: draft.targetLanguage,
+            view: draft.view,
+            customEndpoint: draft.customEndpoint,
+            customModel: draft.customModel,
+            revision: beforeData?.revision,
+            translationRevision: beforeData?.translation?.revision,
+            ...(apiKey ? { apiKey } : {}),
+          };
+          try {
+            const res = await request('/api/translation', { method: 'POST', body });
+            if (res?.state?.translation) {
+              local.trKey = JSON.stringify([res.state.translation.configured, res.state.translation.revision]);
+              local.trDraft = normalizeTranslationDraft(res.state.translation.configured);
+              if (beforeData && getState() === beforeData) {
+                if (res.state.revision !== undefined) beforeData.revision = res.state.revision;
+                beforeData.translation = res.state.translation;
+              }
+            } else {
+              local.trDraft = { ...draft };
+            }
+            if (job.overrideDraft && !local.trQueuedSave && job.seq === local.trSaveSeq) {
+              fieldFromDraft(local.trDraft);
+            }
+            if (apiKey && $('tr-key') && $('tr-key').value === apiKey) $('tr-key').value = '';
+            if (typeof refresh === 'function') await refresh({ silent: true });
+            ok = true;
+            if (!local.trQueuedSave && job.seq === local.trSaveSeq) {
+              const latest = getState();
+              if (latest) renderTranslation(latest);
+              else syncTranslationUI(null);
+              if (!job.silentSuccess) {
+                notify(job.auto ? '翻译设置已自动保存。' : '翻译设置已保存；请按运行状态确认采用情况。', 'ok');
+              }
+            }
+          } catch (error) {
+            ok = false;
+            if (!local.trQueuedSave && job.seq === local.trSaveSeq) {
+              rollbackTranslation();
+              showError('tr-errors', errorText(error));
+            }
+          }
+        }
+        return ok;
+      } finally {
+        local.trSaving = false;
+        local.trSavePromise = null;
+        syncTranslationUI(getState());
       }
-      await refresh({ silent: true });
-      $('tr-key').value = '';
-      notify('翻译设置已保存；请按运行状态确认采用情况。', 'ok');
-    } catch (error) { showError('tr-errors', errorText(error)); }
+    })();
+    return local.trSavePromise;
+  }
+
+  async function restartAndEnableTranslation() {
+    if (local.trRestarting) return;
+    local.trRestarting = true;
+    showError('tr-errors', '');
+    syncTranslationUI(getState());
+    try {
+      if (local.trSavePromise) await local.trSavePromise;
+      const savedConfig = getState()?.translation?.configured;
+      if (!savedConfig?.enabled || trDirty()) {
+        const saved = await saveTranslation({ auto: false, silentSuccess: true });
+        if (!saved) return;
+      }
+      await request('/api/actions', { method: 'POST', body: { action: 'restart-kimi' } });
+      if (typeof refresh === 'function') await refresh({ silent: true });
+      notify('已请求重启 Kimi，启动完成后将自动启用页面翻译。', 'ok');
+    } catch (error) {
+      showError('tr-errors', errorText(error));
+    } finally {
+      local.trRestarting = false;
+      const latest = getState();
+      if (latest) renderTranslation(latest);
+      else syncTranslationUI(null);
+    }
   }
 
   async function preview() {
     showError('tr-errors', '');
-    $('tr-test').disabled = true;
+    const previewBox = $('tr-preview-box');
+    if (previewBox && 'open' in previewBox) previewBox.open = true;
+    const testBtn = $('tr-test');
+    if (testBtn) testBtn.disabled = true;
     text('tr-preview-result', '正在发送固定短示例…');
     try {
-      const res = await request('/api/translation/preview', { method: 'POST', body: { settings: translationDraft() } });
+      const res = await request('/api/translation/preview', { method: 'POST', body: { settings: translationDraft(local.trDraft) } });
       text('tr-preview-original', res.preview.original);
       text('tr-preview-result', res.preview.translated);
       notify('固定示例已返回译文。Kimi 内的显示范围仍以运行状态为准。', 'ok');
     } catch (error) {
       text('tr-preview-result', '试译未成功；没有替换原文。');
       showError('tr-errors', errorText(error));
-    } finally { $('tr-test').disabled = false; }
+    } finally { if (testBtn) testBtn.disabled = false; }
   }
 
   async function copyConnection() {
@@ -275,7 +492,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       const res = await request('/api/translation/from-connection', { method: 'POST', body: { modelId: copySelect.value } });
       fieldFromDraft(res.settings);
       text('tr-copy-note', `已从 ${res.source.connectionName || res.source.connectionId} 的 ${res.source.modelId} 复制一次。连接以后修改不会自动跟随；请点击保存后应用。`);
-      text('tr-draft', '有未保存的修改');
+      syncTranslationUI(getState());
     } catch (error) { showError('tr-errors', errorText(error)); }
   }
 
@@ -473,7 +690,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   }
 
   function renderWeb(data) {
-    const web = data.webTools;
+    const web = data?.webTools;
     if (!web) { text('web-state', '本机适配服务尚未接入，请刷新面板状态。'); return; }
     const providerSelect = $('web-provider');
     if (!providerSelect) return;
@@ -482,16 +699,28 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     const savedProvider = web.provider === 'tavily' ? 'tavily' : 'official';
     const activeProvider = local.webDraft === 'tavily' ? 'tavily' : local.webDraft === 'official' ? 'official' : savedProvider;
     providerSelect.value = activeProvider;
-    hidden('web-key-field', activeProvider !== 'tavily');
-    text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
+    const isTavily = activeProvider === 'tavily';
+    hidden('web-key-field', !isTavily);
+    hidden('web-save', !isTavily);
+    text('web-key-state', web.keySet ? '已保存 Tavily Key，留空则沿用现有密钥。' : 'Tavily Key 尚未保存，请填写后保存。');
     const providerLabel = providerWords[savedProvider];
-    text('web-state', local.webResult?.message || web.message || `当前方式：${providerLabel}。测试与当前会话采用分开报告。`);
+    text('web-state', local.webResult?.message || web.message || `当前方式：${providerLabel}。`);
     const searchWord = local.webResult?.search?.state ? (probeWords[local.webResult.search.state] || '已检查') : '—';
     const fetchWord = local.webResult?.fetch?.state ? (probeWords[local.webResult.fetch.state] || '已检查') : '—';
-    text('web-draft', local.webResult
-      ? `搜索：${searchWord}；正文读取：${fetchWord}。这不是当前会话已重新加载的证明。`
-      : local.webDraft && local.webDraft !== savedProvider ? '服务方式有未保存修改。'
-        : web.pendingRestart ? '已保存；需要重新加载 Kimi 会话后使用。' : '默认官方服务不会写入接管配置。');
+    let draftNote = '';
+    if (local.webSaving) {
+      draftNote = '正在保存…';
+    } else if (local.webResult) {
+      draftNote = `搜索：${searchWord}；正文读取：${fetchWord}。这不是当前会话已重新加载的证明。`;
+    } else if (isTavily && !web.keySet) {
+      draftNote = '请填写 Tavily API Key 后点击「保存服务方式」。';
+    } else if (local.webDraft && local.webDraft !== savedProvider) {
+      draftNote = '服务方式有未保存修改。';
+    } else if (web.pendingRestart) {
+      draftNote = '已保存；重新打开 Kimi 会话后生效。';
+    }
+    hidden('web-draft', !draftNote);
+    text('web-draft', draftNote);
   }
 
   async function webTest() {
@@ -509,32 +738,94 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     finally { if (testBtn) testBtn.disabled = false; }
   }
 
-  async function webSave() {
-    showError('web-errors', '');
-    try {
-      const provider = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
-      const apiKey = provider === 'tavily' ? ($('web-key')?.value || '') : '';
-      const res = await request('/api/web-tools', { method: 'POST', body: { action: 'save', provider,
-        ...(apiKey ? { apiKey } : {}) } });
-      if (res.state && getState()) getState().webTools = res.state;
-      local.webDraft = null;
-      local.webResult = null;
-      if ($('web-key')) $('web-key').value = '';
+  function webSave(opts = {}) {
+    const seq = ++local.webSaveSeq;
+    const provider = opts.provider || ($('web-provider')?.value === 'tavily' ? 'tavily' : 'official');
+    const apiKey = provider === 'tavily' ? ($('web-key')?.value || '') : '';
+    local.webQueuedSave = { seq, auto: Boolean(opts.auto), provider, apiKey };
+    if (local.webSavePromise) return local.webSavePromise;
+    local.webSavePromise = (async () => {
+      local.webSaving = true;
       renderWeb(getState());
-      notify('服务方式已保存；测试和当前会话采用请分别查看。', 'ok');
-    } catch (error) { showError('web-errors', errorText(error)); }
+      let ok = false;
+      try {
+        while (local.webQueuedSave) {
+          const job = local.webQueuedSave;
+          local.webQueuedSave = null;
+          showError('web-errors', '');
+          try {
+            const res = await request('/api/web-tools', {
+              method: 'POST',
+              body: {
+                action: 'save',
+                provider: job.provider,
+                ...(job.provider === 'tavily' && job.apiKey ? { apiKey: job.apiKey } : {}),
+              },
+            });
+            if (res?.state && getState()) getState().webTools = res.state;
+            if (job.apiKey && $('web-key') && $('web-key').value === job.apiKey) $('web-key').value = '';
+            ok = true;
+            if (!local.webQueuedSave && job.seq === local.webSaveSeq) {
+              local.webDraft = null;
+              local.webResult = null;
+              renderWeb(getState());
+              notify(job.auto ? '联网搜索服务已自动保存。' : '服务方式已保存；测试和当前会话采用请分别查看。', 'ok');
+            }
+          } catch (error) {
+            ok = false;
+            if (!local.webQueuedSave && job.seq === local.webSaveSeq) {
+              local.webDraft = null;
+              renderWeb(getState());
+              showError('web-errors', errorText(error));
+            }
+          }
+        }
+        return ok;
+      } finally {
+        local.webSaving = false;
+        local.webSavePromise = null;
+        renderWeb(getState());
+      }
+    })();
+    return local.webSavePromise;
   }
 
-  $('tr-save')?.addEventListener('click', saveTranslation);
+  ensureRestartEnableButton();
+  $('tr-enabled')?.addEventListener('change', () => {
+    showError('tr-errors', '');
+    const draft = translationDraft(local.trDraft);
+    syncTranslationUI(getState());
+    if (!draft.enabled && !canAutoSaveTranslation(draft) && local.trDraft && canAutoSaveTranslation(local.trDraft)) {
+      void saveTranslation({ auto: true, overrideDraft: { ...local.trDraft, enabled: false } });
+      return;
+    }
+    if (canAutoSaveTranslation(draft)) {
+      void saveTranslation({ auto: true });
+    }
+  });
+  $('tr-save')?.addEventListener('click', () => { void saveTranslation({ auto: false }); });
   $('tr-test')?.addEventListener('click', preview);
   $('tr-copy')?.addEventListener('click', copyConnection);
   $('tr-provider')?.addEventListener('change', () => {
-    const details = $('tr-custom-details');
-    if (details) details.open = $('tr-provider')?.value === 'custom';
-    renderTranslation(getState());
+    showError('tr-errors', '');
+    syncTranslationUI(getState());
+    const draft = translationDraft(local.trDraft);
+    if (canAutoSaveTranslation(draft)) {
+      void saveTranslation({ auto: true });
+    }
   });
+  for (const id of ['tr-view-translated', 'tr-view-original']) {
+    $(id)?.addEventListener('change', () => {
+      showError('tr-errors', '');
+      syncTranslationUI(getState());
+      const draft = translationDraft(local.trDraft);
+      if (canAutoSaveTranslation(draft)) {
+        void saveTranslation({ auto: true });
+      }
+    });
+  }
   $('tr-check')?.addEventListener('click', () => runAction('check-translation'));
-  $('translation-panel')?.addEventListener('input', () => { text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致'); });
+  $('translation-panel')?.addEventListener('input', () => { syncTranslationUI(getState()); });
   $('mcp-add')?.addEventListener('click', () => editMcp());
   $('mcp-close')?.addEventListener('click', () => { hidden('mcp-form', true); local.mcp = null; });
   $('mcp-cancel')?.addEventListener('click', () => { hidden('mcp-form', true); local.mcp = null; });
@@ -545,12 +836,19 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     if (button) void mcpAction(button.dataset.mcpAction, button.dataset.mcpName);
   });
   $('web-provider')?.addEventListener('change', () => {
-    local.webDraft = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
+    const nextProvider = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
+    local.webDraft = nextProvider;
     local.webResult = null;
+    showError('web-errors', '');
     renderWeb(getState());
+    const web = getState()?.webTools;
+    const keyInput = $('web-key')?.value || '';
+    if (nextProvider === 'official' || (nextProvider === 'tavily' && web?.keySet === true && !keyInput)) {
+      void webSave({ auto: true, provider: nextProvider });
+    }
   });
   $('web-test')?.addEventListener('click', webTest);
-  $('web-save')?.addEventListener('click', webSave);
+  $('web-save')?.addEventListener('click', () => { void webSave({ auto: false }); });
   const providerDocPairs = [['ob-preset', 'ob-preset-hint'], ['ce-preset', 'ce-preset-hint']];
   for (const [select, hint] of providerDocPairs) {
     $(select)?.addEventListener('change', () => providerDocument(select, hint, getProviders(), openExternalUrl));

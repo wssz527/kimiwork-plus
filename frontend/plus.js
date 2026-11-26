@@ -245,7 +245,7 @@
       input.placeholder = '粘贴官方 Kimi Code Key';
       input.value = code.form.key;
       input.addEventListener('input', () => { code.form.key = input.value; });
-      label.append(input, node('span', 'field__hint', '只写入本机加密凭据存储；保存后会立即回读校验。'));
+      label.append(input, node('span', 'field__hint', '只写入本机加密凭据存储，不会回显明文。'));
       const line = node('div', 'action-line action-line--start');
       line.append(
         button('保存并改用这个 Key', { className: 'btn btn--primary btn--sm', onClick: () => saveManual(input) }),
@@ -281,7 +281,7 @@
     const result = await codeAction('saveManual', { key: value });
     if (!result) return;
     code.form = { open: false, key: '', busy: false };
-    notify('Key 已保存并回读校验。', 'ok');
+    notify('Key 已保存。', 'ok');
     void refreshCode(true);
   }
 
@@ -654,7 +654,7 @@
       if (!current) {
         const option = doc().createElement('option');
         option.value = '';
-        option.textContent = '当前账号未记录';
+        option.textContent = '沿用当前官方登录';
         select.append(option);
       }
       for (const row of book.accounts) {
@@ -876,9 +876,12 @@
         hint.dataset.health = tokenNotice.level;
         wrap.append(hint);
       }
+    } else if (!book.accounts.length) {
+      wrap.append(node('strong', 'plus-overview__value', '沿用当前官方登录'));
+      wrap.append(node('small', null, '单账号无需设置；需要多账号切换时可在账号页保存。'));
     } else {
-      wrap.append(node('strong', 'plus-overview__value', '当前账号未记录'));
-      wrap.append(node('small', null, '打开 Work 并登录后，可在账号页保存当前账号。'));
+      wrap.append(node('strong', 'plus-overview__value', '沿用当前官方登录'));
+      wrap.append(node('small', null, '可在账号页保存当前登录，或切换到已保存的账号。'));
     }
     const activation = book.activation || {};
     if (textOf(activation.state)) wrap.append(activationLine(activation));
@@ -890,8 +893,8 @@
     const state = textOf(activation.state);
     const rolledBack = activation.rolledBack === true || state === 'restored';
     const words = {
-      hot: '已应用',
-      restarted: '已应用',
+      hot: '已切换生效',
+      restarted: '已切换生效',
       offline: '已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态',
       'needs-login': '需要重新登录',
       restored: '已恢复原账号',
@@ -899,7 +902,6 @@
     };
     const bits = [words[state] || state];
     if (activation.restarted === true) bits.push('已重启 Work');
-    if (activation.verified === true) bits.push('读回一致');
     if (activation.hot === true) bits.push('未重启，热切换');
     /* 已回滚时凭据失效的是「刚才想切过去的那个账号」，原账号已经恢复；
        这时再说「需要在该窗口登录」会把用户指向错误的窗口和错误的账号。 */
