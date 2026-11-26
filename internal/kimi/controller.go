@@ -1189,7 +1189,12 @@ func (c *Controller) reconcileChecked(withReadback bool, confirmedAccount string
 	if stale, current := c.staleReconcileResult(gen); stale {
 		return current, gen, true
 	}
-	result := integration.Reconcile(options)
+	var result IntegrationResult
+	if mode == IntegrationModeGateway && len(settings.Models) == 0 {
+		result = IntegrationResult{State: IntegrationWaitingConfig, Reason: "models_missing", Mode: mode}
+	} else {
+		result = integration.Reconcile(options)
+	}
 	if stale, current := c.staleReconcileResult(gen); stale {
 		return current, gen, true
 	}

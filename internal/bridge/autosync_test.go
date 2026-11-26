@@ -432,6 +432,123 @@ func TestAutoSyncImportsCatalogAfterConnectionCascade(t *testing.T) {
 	}
 }
 
+func TestAutoSyncClearsTheLastManagedCatalogAndCanImportAgain(t *testing.T) {
+	for _, mode := range []string{core.IntegrationModeGateway, core.IntegrationModeDirect} {
+		for _, path := range []string{"/api/connections/delete", "/api/workspace"} {
+			t.Run(mode+path, func(t *testing.T) {
+				base := autoSyncGatewayDocWithMode(mode)
+				h := newAutoSyncHarness(t, mode == core.IntegrationModeDirect, base)
+				s := h.n.service
+				s.ScheduleAutoSync = h.n.ScheduleAutoSync
+				h.set(func(h *autoSyncHarness) { h.applied, h.adopted = true, true })
+				h.n.autoSync.observe(integrationValue(h.integration()), h.doc(t))
+				if h.state() != autoSyncSynced {
+					t.Fatal("fixture did not start with an adopted catalog")
+				}
+				home, err := h.n.controller.WorkHome()
+				if err != nil {
+					t.Fatal(err)
+				}
+				intentPath := filepath.Join(s.StateDir, kimi.NativeWorkIntent)
+				intent := core.Document{"schemaVersion": kimi.NativeWorkSchema, "kimiHome": home, "mode": mode, "active": true}
+				if err := core.AtomicJSON(intentPath, intent); err != nil {
+					t.Fatal(err)
+				}
+				var launches, dnsChecks, removals atomic.Int32
+				h.n.autoLaunch = func(context.Context) error { launches.Add(1); return errors.New("unexpected_launch") }
+				h.n.staticHostsProbe = func() bool { dnsChecks.Add(1); return false }
+				h.n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+					removals.Add(1)
+					intent["active"] = false
+					if err := core.AtomicJSON(intentPath, intent); err != nil {
+						return kimi.DisconnectResult{}, err
+					}
+					h.set(func(h *autoSyncHarness) { h.applied = false })
+					return kimi.DisconnectResult{OK: true, State: "disconnected", Sources: 1}, nil
+				}
+				_, rev, err := s.Store.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				connection := cloneDocument(core.Object(core.Rows(base["connections"])[0]))
+				delete(connection, "apiKeyRef")
+				connection["protocols"] = []any{"responses"}
+				input := core.Document{"revision": rev, "connectionId": "alpha", "cascade": true}
+				if path == "/api/workspace" {
+					input = core.Document{"revision": rev, "connections": []any{connection}, "models": []any{}, "pruneSubagents": true}
+				}
+				if _, err = s.configure(path, input); err != nil {
+					t.Fatal(err)
+				}
+				waitAutoSyncState(t, h, autoSyncDeferredOffline)
+				if removals.Load() != 0 || launches.Load() != 0 {
+					t.Fatal("an offline removal touched Kimi")
+				}
+				h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+				h.n.autoSync.kickIfReady()
+				waitAutoSyncState(t, h, autoSyncSynced)
+				if removals.Load() != 1 || launches.Load() != 0 || dnsChecks.Load() != 0 || h.counts() != 0 ||
+					h.integration().Applied || h.n.controller.HasManagedModelSources() {
+					t.Fatal("the empty catalog did not settle after one managed removal without import, launch or DNS changes")
+				}
+				h.n.staticHostsProbe = func() bool { return true }
+				_, rev, err = s.Store.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if path == "/api/connections/delete" {
+					connection["apiKey"] = "test-reimport-key"
+				}
+				if _, err = s.configure("/api/workspace", core.Document{
+					"revision": rev, "connections": []any{connection}, "models": base["models"],
+				}); err != nil {
+					t.Fatal(err)
+				}
+				waitAutoSyncState(t, h, autoSyncSynced)
+				if imports := h.counts(); imports != 1 || removals.Load() != 1 || !h.integration().Applied {
+					t.Fatalf("adding back the same models ran %d imports and %d removals", imports, removals.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestAutoSyncDoesNotDisconnectConfiguredButIneligibleDirectModels(t *testing.T) {
+	base := autoSyncGatewayDocWithMode(core.IntegrationModeDirect)
+	h := newAutoSyncHarness(t, true, base)
+	h.set(func(h *autoSyncHarness) { h.managed, h.running = true, true })
+	var removals atomic.Int32
+	h.n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+		removals.Add(1)
+		return kimi.DisconnectResult{OK: true}, nil
+	}
+	name := credentialReference(core.Object(core.Rows(h.doc(t)["connections"])[0]))
+	if err := h.n.service.Keys.Delete(name); err != nil {
+		t.Fatal(err)
+	}
+	next := h.doc(t)
+	core.Object(core.Rows(next["models"])[0])["name"] = "Renamed"
+	h.save(t, "/api/models", next)
+	waitAutoSyncState(t, h, autoSyncFailed)
+	if got := h.n.autoSync.status()["reason"]; got != "direct_missing_api_key" {
+		t.Fatalf("missing credential reported %q", got)
+	}
+	next = h.doc(t)
+	core.Object(core.Rows(next["models"])[0])["tools"] = false
+	h.save(t, "/api/models", next)
+	waitAutoSyncState(t, h, autoSyncFailed)
+	if got := h.n.autoSync.status()["reason"]; got != "direct_no_eligible_models" || removals.Load() != 0 {
+		t.Fatalf("ineligible catalog reported %q with %d removals", got, removals.Load())
+	}
+	next = h.doc(t)
+	next["models"] = []any{}
+	h.save(t, "/api/models", next)
+	waitAutoSyncState(t, h, autoSyncIdle)
+	if removals.Load() != 0 {
+		t.Fatal("clearing an unimported catalog attempted removal")
+	}
+}
+
 // Continuous edits inside the debounce window collapse into one write.
 func TestAutoSyncMergesBurstsIntoOneImport(t *testing.T) {
 	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())
@@ -1343,10 +1460,10 @@ func TestAutoSyncFailedImportDoesNotInheritTheOlderCatalog(t *testing.T) {
 	h.n.autoSync.synced, h.n.autoSync.syncedAdopted = baseDigest, true
 	h.n.autoSync.mu.Unlock()
 
-	// Removing the only model fails at the bridge.
+	// Updating a model fails at the bridge.
 	h.set(func(h *autoSyncHarness) { h.failImport = "native_bridge_timeout" })
 	next := cloneDocument(base)
-	next["models"] = []any{}
+	core.Object(core.Rows(next["models"])[0])["name"] = "Renamed"
 	h.save(t, "/api/models", next)
 
 	waitAutoSyncState(t, h, autoSyncFailed)

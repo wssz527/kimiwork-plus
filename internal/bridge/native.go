@@ -1007,11 +1007,15 @@ func (n *Native) importModelsWithAutoStart(ctx context.Context) (kimi.ImportResu
 }
 
 func (n *Native) disconnectModelsWithAutoStart(ctx context.Context) (kimi.DisconnectResult, error) {
+	return n.disconnectModelsWithEnsure(ctx, n.ensureManagedKimi)
+}
+
+func (n *Native) disconnectModelsWithEnsure(ctx context.Context, ensure func(context.Context) error) (kimi.DisconnectResult, error) {
 	run := n.disconnectModels
 	if run == nil {
 		run = n.controller.DisconnectModelsAuthorized
 	}
-	return runWithManagedKimi(ctx, n.ensureManagedKimi, n.autoOpenWork, run, disconnectWaitingWork)
+	return runWithManagedKimi(ctx, ensure, n.autoOpenWork, run, disconnectWaitingWork)
 }
 
 // importDirect runs one Direct Mode import. The request holds the provider keys,
@@ -1146,8 +1150,11 @@ func (n *Native) finishOperation(id, state string, result any, err error) {
 	startedDigest := n.operationStart[id]
 	delete(n.operationStart, id)
 	finishedDisconnect := action == "disconnect-models" && err == nil
-	if finishedDisconnect {
+	autoRemoved, _ := result.(kimi.DisconnectResult)
+	if finishedDisconnect || action == "auto-sync" && err == nil && autoRemoved.OK {
 		n.receipt = nil
+	}
+	if finishedDisconnect {
 		n.autoSync.reset()
 	}
 	stage := core.String(n.operation["stage"])

@@ -3,7 +3,30 @@ package kimi
 import (
 	"context"
 	"errors"
+	"path/filepath"
 )
+
+func (c *Controller) HasManagedModelSources() bool {
+	settings := c.Settings()
+	home := c.kimiHome()
+	account := ""
+	if home != "" {
+		account = AccountScope(home)
+	}
+	intent, err := readIntentFile(settings.StateDir)
+	if err == nil && intent != nil && intent.Active &&
+		(home == "" || intent.KimiHome == "" || filepath.Clean(intent.KimiHome) == filepath.Clean(home)) &&
+		(account == "" || intent.AccountDigest == "" || intent.AccountDigest == sha256Hex(account)) {
+		return true
+	}
+	if account == "" {
+		return false
+	}
+	gateway := kthStoreState(home, account, settings.GatewayURL)
+	return gateway.owned ||
+		gateway.needsPendingSettle() && kthSourceOwned(gateway.source, gateway.account) ||
+		DirectSourceRemains(home, account, "") != ""
+}
 
 func (c *Controller) DisconnectModelsAuthorized(ctx context.Context) (DisconnectResult, error) {
 	if err := c.waitForImport(ctx); err != nil {

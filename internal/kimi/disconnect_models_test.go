@@ -12,6 +12,60 @@ import (
 	"github.com/dop251/goja"
 )
 
+func TestHasManagedModelSourcesFindsOfficialSourcesWithoutIntent(t *testing.T) {
+	const user = "test-current-account"
+	account := sha256Hex(user)
+	for _, tc := range []struct {
+		name  string
+		store func(string) map[string]any
+	}{
+		{"direct", directStoreFixture},
+		{"gateway", func(scope string) map[string]any {
+			return kthTestStore(scope, kthTestAccount("http://127.0.0.1:9100/v1", nil))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newNativeFixture(t)
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+			writeIdentity(t, fixture, user)
+			controller := &Controller{settings: ControllerSettings{
+				StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir), KimiHome: fixture.dir,
+				GatewayURL: "http://127.0.0.1:9200/v1",
+			}}
+			storePath := filepath.Join(fixture.dir, NativeWorkStore)
+			fixture.writeJSON(t, storePath, tc.store("other-account"))
+			if controller.HasManagedModelSources() {
+				t.Fatal("a different account's source was detected as current")
+			}
+			fixture.writeJSON(t, storePath, tc.store(account))
+			if !controller.HasManagedModelSources() {
+				t.Fatal("the current account's source was missed")
+			}
+			current := controller.ReconcileWithReadback(context.Background())
+			if current.State != IntegrationWaitingConfig || !controller.HasManagedModelSources() {
+				t.Fatalf("an empty gateway catalog did not preserve the source for authorized removal: %+v", current)
+			}
+		})
+	}
+}
+
+func TestHasManagedModelSourcesIgnoresForeignPendingDisconnect(t *testing.T) {
+	const user = "test-current-account"
+	fixture := newNativeFixture(t)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+	writeIdentity(t, fixture, user)
+	controller := &Controller{settings: ControllerSettings{
+		StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir), KimiHome: fixture.dir,
+	}}
+	account := kthTestAccount("https://foreign.example/v1", nil)
+	source := account["sources"].([]any)[0].(map[string]any)
+	source["status"] = "disconnected"
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), kthTestStore(sha256Hex(user), account))
+	if controller.HasManagedModelSources() {
+		t.Fatal("a pending disconnect of a foreign source was detected as managed")
+	}
+}
+
 func runDisconnectExpression(t *testing.T, setup string) (*goja.Runtime, *goja.Object) {
 	t.Helper()
 	vm := goja.New()

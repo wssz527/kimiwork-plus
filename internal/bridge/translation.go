@@ -145,7 +145,7 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 		settings.APIKeyEnvDisabled = true
 	} else if !clear && current.APIKeyEnv == settings.APIKeyEnv {
 		settings.APIKeyRef = current.APIKeyRef
-		settings.APIKeyEnvDisabled = current.APIKeyEnvDisabled
+		settings.APIKeyEnvDisabled = env == "" && supplied == "" && current.APIKeyEnvDisabled
 	}
 	staged := ""
 	if supplied != "" {

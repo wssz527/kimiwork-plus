@@ -205,6 +205,50 @@ func TestTranslationClearAPIKeyPreservesConnectionCredentials(t *testing.T) {
 	assertTranslationKeyState(t, core.Object(result["state"]), "connection")
 }
 
+func TestTranslationCopyConnectionRestoresClearedDefaultBinding(t *testing.T) {
+	const env = "KIMI_WORK_TRANSLATION_API_KEY"
+	s := newConfigPanelTestService(t, testKeys{env: "test-connection-key"})
+	_, rev, _ := s.Store.Read()
+	_, _, err := s.Store.Update(rev, func(d core.Document) error {
+		d["connections"] = []any{core.Document{"id": "a", "name": "A", "baseURL": "https://a.example/v1", "protocols": []any{"chat"}, "apiKeyEnv": env}}
+		d["models"] = []any{core.Document{"id": "kimi-a", "connectionId": "a", "protocol": "chat", "contextWindow": 32000}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyAndSave := func() core.Document {
+		t.Helper()
+		copy := callConfigPanel(t, s, http.MethodPost, "/api/translation/from-connection", core.Document{"modelId": "kimi-a"}, http.StatusOK)
+		draft := core.Object(copy["settings"])
+		_, latest := readTranslation(t, s)
+		draft["revision"] = latest
+		out := callConfigPanel(t, s, http.MethodPost, "/api/translation", draft, http.StatusOK)
+		return core.Object(out["state"])
+	}
+	assertTranslationKeyState(t, copyAndSave(), "connection")
+	_, rev = readTranslation(t, s)
+	out := callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{"revision": rev, "clearApiKey": true}, http.StatusOK)
+	assertTranslationKeyState(t, core.Object(out["state"]), "")
+	cleared, _ := readTranslation(t, s)
+	if cleared.APIKeyEnv != env || !cleared.APIKeyEnvDisabled {
+		t.Fatal("clear did not disable the default environment binding")
+	}
+	assertTranslationKeyState(t, copyAndSave(), "connection")
+	if restored, _ := readTranslation(t, s); restored.APIKeyEnvDisabled {
+		t.Fatal("copy did not reactivate the environment binding")
+	}
+
+	_, rev = readTranslation(t, s)
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{"revision": rev, "clearApiKey": true}, http.StatusOK)
+	_, rev = readTranslation(t, s)
+	out = callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{"revision": rev, "apiKey": "test-rotated-key"}, http.StatusOK)
+	assertTranslationKeyState(t, core.Object(out["state"]), "managed")
+	if rotated, _ := readTranslation(t, s); rotated.APIKeyEnvDisabled {
+		t.Fatal("new key did not reset the cleared binding marker")
+	}
+}
+
 func readTranslation(t *testing.T, s *Service) (core.TranslationConfig, string) {
 	t.Helper()
 	d, rev, err := s.Store.Read()

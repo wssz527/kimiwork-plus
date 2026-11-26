@@ -79,6 +79,7 @@ func catalogSurfaceDigest(d core.Document) string {
 	mode := core.IntegrationMode(d)
 	line("mode", mode)
 	if mode == core.IntegrationModeDirect {
+		line("configured-models", strconv.FormatBool(len(core.Rows(d["models"])) > 0))
 		for _, raw := range core.Rows(d["connections"]) {
 			connection := core.Object(raw)
 			base, _ := core.BaseURL(core.String(connection["baseURL"]))
@@ -258,7 +259,7 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 		// A surface change is the user asking for the catalog again, which is
 		// also the one thing that ends a deliberate disconnect.
 		c.disconnected = false
-		if !c.running && c.synced != "" && target == c.synced {
+		if !c.running && c.synced != "" && target == c.synced && len(core.Rows(next["models"])) > 0 {
 			// The newest surface is the one already in place. While a run is
 			// writing an older generation this must not short-circuit: the user
 			// reverting mid-write still owes Kimi the revert.
@@ -596,7 +597,17 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		c.hold(autoSyncIdle, autoSyncReasonDisconnected)
 		return autoSyncIdle, autoSyncReasonDisconnected, nil, nil
 	}
-	if target != "" && baseline != "" && target == baseline {
+	empty := len(core.Rows(d["models"])) == 0
+	if empty && target != "" && digest != target {
+		// A save raced the document read. Keep the queued generation for a fresh read.
+		c.mu.Lock()
+		if c.pending && c.target == target {
+			c.armLocked(c.debounce)
+		}
+		c.mu.Unlock()
+		return autoSyncScheduled, "", nil, nil
+	}
+	if !empty && target != "" && baseline != "" && target == baseline {
 		// The saved surface is the one already written.
 		if adopted {
 			c.finish(autoSyncSynced, "", false, digest, target)
@@ -605,10 +616,8 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		c.finish(autoSyncRequiresRestart, kimi.NativeRequiresRestart, false, digest, target)
 		return autoSyncRequiresRestart, kimi.NativeRequiresRestart, nil, nil
 	}
-	if target == "" && !autoSyncHasModels(n, d) {
-		// A launch with nothing configured owes Kimi no write. Running the
-		// import anyway would report the missing configuration as a failure.
-		c.finish(autoSyncIdle, "", false, digest, target)
+	if empty && !n.controller.HasManagedModelSources() {
+		c.finish(autoSyncIdle, "", true, digest, target)
 		return autoSyncIdle, "", nil, nil
 	}
 	if n.modelSyncWriteBlocked() {
@@ -616,14 +625,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		return autoSyncFailed, autoSyncReasonWriteBlocked, nil, nil
 	}
 	if !n.autoSyncManaged() {
-		// Nothing is written into a process this build does not own, and a
-		// background timer never launches one. The generation stays queued.
-		if n.autoSyncKimiRunning() {
-			c.hold(autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged)
-			return autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged, nil, nil
-		}
-		c.hold(autoSyncDeferredOffline, autoSyncReasonNotRunning)
-		return autoSyncDeferredOffline, autoSyncReasonNotRunning, nil, nil
+		return c.waitForManagedKimi(nil)
 	}
 	timeout := autoSyncGatewayTimeout
 	if n.isDirectMode() {
@@ -631,6 +633,9 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, timeout)
 	defer cancel()
+	if empty {
+		return c.disconnectCatalog(ctx, digest, target)
+	}
 	imported := kimi.ImportResult{}
 	var repair kimi.IntegrationResult
 	if target == "" {
@@ -649,7 +654,8 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 				return autoSyncIdle, "", nil, nil
 			}
 		}
-		if repair.GatewayProviderMismatch == "" && !observed.NeedsNativeImport() {
+		if repair.GatewayProviderMismatch == "" && !observed.NeedsNativeImport() &&
+			!(n.isDirectMode() && observed.State == kimi.IntegrationDisabled && observed.Reason == "direct_spec_missing") {
 			// A catch-up with nothing to write: the readback is the answer.
 			state, reason := autoSyncOutcome(imported, observed)
 			if state == autoSyncFailed && (observed.State == kimi.IntegrationWaitingConfig || observed.State == kimi.IntegrationPending) {
@@ -675,12 +681,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		// The managed process left between the check above and the write. Nothing
 		// is written into a process this build does not own, and the generation
 		// stays queued for the next managed launch.
-		if n.autoSyncKimiRunning() {
-			c.hold(autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged)
-			return autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged, imported, nil
-		}
-		c.hold(autoSyncDeferredOffline, autoSyncReasonNotRunning)
-		return autoSyncDeferredOffline, autoSyncReasonNotRunning, imported, nil
+		return c.waitForManagedKimi(imported)
 	}
 	if repair.GatewayProviderMismatch != "" && imported.WaitingForImportSurface() {
 		reason := firstCode(imported.Reason, core.ErrorCode(err))
@@ -769,14 +770,46 @@ func (c *autoSyncCoordinator) importCatalog(ctx context.Context, repair kimi.Int
 	return runWithManagedKimi(ctx, func(context.Context) error { return nil }, n.autoOpenWork, run, importWaitingWork)
 }
 
-// autoSyncHasModels reports whether the document carries anything a catalog
-// write could publish.
-func autoSyncHasModels(n *Native, d core.Document) bool {
-	if n.isDirectMode() {
-		spec := buildDirectSpec(d)
-		return spec != nil && len(spec.Models) > 0
+func (c *autoSyncCoordinator) disconnectCatalog(ctx context.Context, digest, target string) (string, string, any, error) {
+	c.mu.Lock()
+	if !c.pending || c.target != target {
+		c.mu.Unlock()
+		return autoSyncScheduled, "", nil, nil
 	}
-	return len(core.Rows(d["models"])) > 0
+	// A partial disconnect also invalidates the previous catalog baseline.
+	c.synced, c.syncedAdopted = "", false
+	c.setStateLocked(autoSyncSyncing, "")
+	c.mu.Unlock()
+	removed, err := c.native.disconnectModelsWithEnsure(ctx, func(context.Context) error { return nil })
+	if err == nil && removed.OK {
+		c.finish(autoSyncSynced, "", true, digest, target)
+		return autoSyncSynced, "", removed, nil
+	}
+	if autoSyncUnmanagedFailure(err) && !c.native.autoSyncManaged() {
+		return c.waitForManagedKimi(removed)
+	}
+	state := autoSyncFailed
+	reason := firstCode(removed.Reason, core.ErrorCode(err), "model_disconnect_failed")
+	switch removed.State {
+	case kimi.ImportStateWaitingLogin, kimi.ImportStateAccountChanged:
+		state = autoSyncWaitingLogin
+	case kimi.ImportStateRequiresRestart:
+		state = autoSyncRequiresRestart
+	}
+	c.finish(state, reason, false, digest, target)
+	if state == autoSyncFailed && err == nil {
+		err = errors.New(reason)
+	}
+	return state, reason, removed, err
+}
+
+func (c *autoSyncCoordinator) waitForManagedKimi(result any) (string, string, any, error) {
+	if c.native.autoSyncKimiRunning() {
+		c.hold(autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged)
+		return autoSyncWaitingUnmanaged, autoSyncReasonUnmanaged, result, nil
+	}
+	c.hold(autoSyncDeferredOffline, autoSyncReasonNotRunning)
+	return autoSyncDeferredOffline, autoSyncReasonNotRunning, result, nil
 }
 
 // autoSyncUnmanagedFailure reports whether an import failed because the managed
