@@ -60,6 +60,99 @@ func TestMergeModelsUsesKnownAndUnknownDefaults(t *testing.T) {
 	}
 }
 
+func TestModelCatalogHintsExposeMaxOutputTokens(t *testing.T) {
+	for _, want := range []struct {
+		id    string
+		value int
+	}{
+		{"deepseek-chat", 8192},
+		{"deepseek-reasoner", 65536},
+		{"deepseek-v4-pro", 384000},
+		{"deepseek-v4-flash", 384000},
+		{"glm-4.6", 131072},
+		{"glm-4.7", 131072},
+		{"glm-5", 131072},
+		{"glm-5.3-flash", 131072},
+		{"glm-5.3", 131072},
+		{"qwen3.8-max", 131072},
+		{"qwen3.7-plus", 131072},
+		{"gpt-4o-mini", 16384},
+		{"gpt-4o", 16384},
+		{"gpt-4.1-nano", 32768},
+		{"gpt-4.1-mini", 32768},
+		{"gpt-4.1", 32768},
+		{"gpt-5-mini", 128000},
+		{"gpt-5", 128000},
+		{"claude-3-7-sonnet", 64000},
+		{"claude-sonnet-4-5", 64000},
+		{"claude-sonnet-4-6", 64000},
+		{"claude-sonnet-4", 64000},
+		{"claude-opus-4-6", 64000},
+		{"claude-opus-4-5", 64000},
+		{"claude-opus-4", 32000},
+		{"gemini-2.5-pro", 65536},
+		{"gemini-2.5-flash-lite", 65536},
+		{"gemini-2.5-flash", 65536},
+		{"gemini-3-pro-preview", 65536},
+		{"gemini-3-flash-preview", 65536},
+		{"gemini-3.1-pro-preview", 65536},
+	} {
+		hint := modelCatalogHint(Document{"id": want.id})
+		if hint == nil || hint.MaxOutputTokens != want.value {
+			t.Fatalf("%s maxOutputTokens = %v; want %d", want.id, hint, want.value)
+		}
+	}
+	for _, id := range []string{"k3", "k3-256k", "glm-4.5", "glm-4.5-air", "gpt-5-nano", "o3", "o4-mini", "qwen-max", "grok-4", "kimi-k2.5", "model-a"} {
+		if hint := modelCatalogHint(Document{"id": id}); hint != nil && hint.MaxOutputTokens != 0 {
+			t.Fatalf("%s invented maxOutputTokens %d", id, hint.MaxOutputTokens)
+		}
+	}
+	for _, value := range Rows(Providers()["modelCatalogHints"]) {
+		row := Object(value)
+		switch String(row["id"]) {
+		case "gpt-4o":
+			if row["maxOutputTokens"] != float64(16384) {
+				t.Fatalf("providers gpt-4o maxOutputTokens = %v", row["maxOutputTokens"])
+			}
+		case "k3":
+			if _, ok := row["maxOutputTokens"]; ok {
+				t.Fatalf("providers k3 published maxOutputTokens %v", row["maxOutputTokens"])
+			}
+		}
+	}
+}
+
+func TestMergeModelsFillsKnownMaxOutputTokens(t *testing.T) {
+	d := Document{"connections": []any{}, "models": []any{}}
+	if err := MergeModels(d, []any{
+		Document{"id": "gpt-4o", "protocol": "responses"},
+		Document{"id": "gpt-5", "protocol": "responses", "maxOutputTokens": 4096},
+		Document{"id": "model-a", "protocol": "responses"},
+		Document{"id": "deepseek-chat", "protocol": "responses", "maxOutputTokens": 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(d); err != nil {
+		t.Fatal(err)
+	}
+	models, err := protocol.ValidateModelsAny(Rows(d["models"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int64{16384, 4096, 0, 8192} {
+		got := models[i].MaxOutputTokens
+		if want == 0 {
+			if got != nil {
+				t.Fatalf("%s maxOutputTokens = %d; want unset", models[i].ID, *got)
+			}
+			continue
+		}
+		if got == nil || *got != want {
+			t.Fatalf("%s maxOutputTokens = %v; want %d", models[i].ID, got, want)
+		}
+	}
+}
+
 func TestBudgetCatalogPricingRespectsCurrencyAndManualPrices(t *testing.T) {
 	d := Document{"models": []any{
 		Document{"id": "aliased", "upstreamModelId": "openai/gpt-4.1-mini"},

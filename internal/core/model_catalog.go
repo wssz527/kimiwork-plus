@@ -14,6 +14,7 @@ type ModelCatalogHint struct {
 	Patterns         []string          `json:"patterns"`
 	Name             string            `json:"name"`
 	ContextWindow    int               `json:"contextWindow"`
+	MaxOutputTokens  int               `json:"maxOutputTokens,omitempty"`
 	Tools            bool              `json:"tools"`
 	Reasoning        bool              `json:"reasoning"`
 	InputModalities  []string          `json:"inputModalities"`
@@ -38,7 +39,18 @@ func catalogHint(id, name string, context int, reasoning, image bool, efforts []
 	if efforts == nil {
 		efforts = []string{}
 	}
-	return ModelCatalogHint{id, patterns, name, context, true, reasoning, modalities, efforts, price}
+	return ModelCatalogHint{
+		ID:               id,
+		Patterns:         patterns,
+		Name:             name,
+		ContextWindow:    context,
+		MaxOutputTokens:  catalogMaxOutputTokens[id],
+		Tools:            true,
+		Reasoning:        reasoning,
+		InputModalities:  modalities,
+		ReasoningEfforts: efforts,
+		ReferencePricing: price,
+	}
 }
 
 var (
@@ -46,6 +58,40 @@ var (
 	extendedEfforts = []string{"low", "medium", "high", "xhigh"}
 	glmEfforts      = []string{"low", "high", "max"}
 )
+
+var catalogMaxOutputTokens = map[string]int{
+	"deepseek-chat":          8192,
+	"deepseek-reasoner":      65536,
+	"deepseek-v4-pro":        384000,
+	"deepseek-v4-flash":      384000,
+	"glm-4.6":                131072,
+	"glm-4.7":                131072,
+	"glm-5":                  131072,
+	"glm-5.3-flash":          131072,
+	"glm-5.3":                131072,
+	"qwen3.8-max":            131072,
+	"qwen3.7-plus":           131072,
+	"gpt-4o-mini":            16384,
+	"gpt-4o":                 16384,
+	"gpt-4.1-nano":           32768,
+	"gpt-4.1-mini":           32768,
+	"gpt-4.1":                32768,
+	"gpt-5-mini":             128000,
+	"gpt-5":                  128000,
+	"claude-3-7-sonnet":      64000,
+	"claude-sonnet-4-5":      64000,
+	"claude-sonnet-4-6":      64000,
+	"claude-sonnet-4":        64000,
+	"claude-opus-4-6":        64000,
+	"claude-opus-4-5":        64000,
+	"claude-opus-4":          32000,
+	"gemini-2.5-pro":         65536,
+	"gemini-2.5-flash-lite":  65536,
+	"gemini-2.5-flash":       65536,
+	"gemini-3-pro-preview":   65536,
+	"gemini-3-flash-preview": 65536,
+	"gemini-3.1-pro-preview": 65536,
+}
 
 var modelCatalogHints = []ModelCatalogHint{
 	catalogHint("deepseek-chat", "DeepSeek V3", 131072, false, false, nil, referencePrice("USD", 0.28, 0.42, 0.028), "deepseek-v3", "deepseek-v3-0324", "deepseek-v3.1", "deepseek-v3.2"),
@@ -132,8 +178,10 @@ func applyModelDefaults(row map[string]any, toolsCleared bool) {
 	window, hasWindow := row["contextWindow"]
 	_, hasTools := row["tools"]
 	hasTools = hasTools || toolsCleared
+	output := row["maxOutputTokens"]
 	needWindow := !hasWindow || window == 0 || window == int64(0) || window == float64(0)
-	if !needWindow && hasTools {
+	needOutput := output == nil || output == 0 || output == int64(0) || output == float64(0)
+	if !needWindow && hasTools && !needOutput {
 		return
 	}
 	hint := modelCatalogHint(row)
@@ -145,5 +193,8 @@ func applyModelDefaults(row map[string]any, toolsCleared bool) {
 	}
 	if !hasTools {
 		row["tools"] = hint == nil || hint.Tools
+	}
+	if needOutput && hint != nil && hint.MaxOutputTokens > 0 {
+		row["maxOutputTokens"] = hint.MaxOutputTokens
 	}
 }
