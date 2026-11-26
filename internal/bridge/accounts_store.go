@@ -235,6 +235,9 @@ func (v *accountVault) stage(snapshot accountCapture, background bool) (AccountS
 		index.Accounts = append(index.Accounts, row)
 	}
 	index.CurrentID = id
+	// A session captured from the signed-in page supersedes any offline switch
+	// still waiting for a page sync.
+	index.PendingAccountID = ""
 	if oldRef != "" {
 		index.RetiredCredentials = append(index.RetiredCredentials, oldRef)
 	}
@@ -356,7 +359,13 @@ func (v *accountVault) markActivation(id string, needsLogin, offline bool) error
 	for i := range index.Accounts {
 		if index.Accounts[i].ID == id {
 			index.Accounts[i].NeedsLogin = needsLogin
-			if !needsLogin {
+			if needsLogin {
+				// Rejected credentials end the switch: a lingering pending id
+				// would re-run the page sync every few seconds.
+				if index.PendingAccountID == id {
+					index.PendingAccountID = ""
+				}
+			} else {
 				index.CurrentID = id
 				index.PendingAccountID = ""
 				if offline {

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
 	"github.com/wssz527/kimiwork-plus/internal/kimi"
@@ -165,6 +166,71 @@ func TestOfflineAccountSwitchPersistsWithoutCapturingAndCompletesAfterLaunch(t *
 	n.observeAccounts(context.Background())
 	if calls != 2 || n.accountsState()["pendingAccountId"] != nil || n.accountsState()["currentId"] != target.ID {
 		t.Fatal("observer did not settle the pending account after a verified activation")
+	}
+}
+
+func TestOfflinePendingSyncMarksRejectedCredentialsForLogin(t *testing.T) {
+	n, _ := offlineAccountNative(t, false)
+	target, _ := seedOfflineAccount(t, n, "target")
+	if err := n.accounts.vault.markActivation(target.ID, false, true); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	n.accounts.hooks.Busy = func(context.Context) error { return nil }
+	n.accounts.hooks.SyncPending = func(context.Context, json.RawMessage) (string, error) {
+		calls++
+		return "", errors.New("account_credentials_rejected")
+	}
+	n.observeAccounts(context.Background())
+	rows, current, pending, err := n.accounts.vault.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || pending != "" || current != target.ID {
+		t.Fatalf("calls=%d pending=%q current=%q", calls, pending, current)
+	}
+	if len(rows) != 1 || !rows[0].NeedsLogin {
+		t.Fatalf("rejected account was not marked for login: %+v", rows)
+	}
+	n.observeAccounts(context.Background())
+	if calls != 1 {
+		t.Fatalf("a rejected pending account was synced again: %d", calls)
+	}
+}
+
+func TestOfflinePendingSyncBacksOffRepeatedFailures(t *testing.T) {
+	n, _ := offlineAccountNative(t, false)
+	target, _ := seedOfflineAccount(t, n, "target")
+	if err := n.accounts.vault.markActivation(target.ID, false, true); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	n.accounts.hooks.Busy = func(context.Context) error { return nil }
+	n.accounts.hooks.SyncPending = func(context.Context, json.RawMessage) (string, error) {
+		calls++
+		return "", errors.New("account_identity_mismatch")
+	}
+	n.observeAccounts(context.Background())
+	n.observeAccounts(context.Background())
+	if calls != 2 {
+		t.Fatalf("first two page syncs were not attempted: %d", calls)
+	}
+	n.mu.Lock()
+	failures, retryAt := n.pendingFailures, n.pendingRetryAt
+	n.mu.Unlock()
+	if failures != 2 || retryAt.IsZero() || !retryAt.After(time.Now()) {
+		t.Fatalf("no cooldown after two failures: %d %v", failures, retryAt)
+	}
+	n.observeAccounts(context.Background())
+	if calls != 2 {
+		t.Fatalf("a retry inside the cooldown reached the page: %d", calls)
+	}
+	n.mu.Lock()
+	n.pendingRetryAt = time.Now().Add(-time.Second)
+	n.mu.Unlock()
+	n.observeAccounts(context.Background())
+	if calls != 3 {
+		t.Fatalf("the page was not retried after the cooldown: %d", calls)
 	}
 }
 

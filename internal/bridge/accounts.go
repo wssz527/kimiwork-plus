@@ -287,6 +287,9 @@ func (a *accountManager) action(ctx context.Context, in core.Document, offline b
 func (a *accountManager) syncPending(ctx context.Context, id string, session json.RawMessage) error {
 	user, err := a.hooks.SyncPending(ctx, session)
 	if err != nil {
+		if code := core.ErrorCode(err); code == "account_credentials_rejected" || code == "account_session_expired" {
+			_ = a.vault.mark(id, true)
+		}
 		return err
 	}
 	if accountID(user) != id {

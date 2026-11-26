@@ -198,6 +198,16 @@ func (n *Native) observeAccounts(ctx context.Context) {
 }
 
 func (n *Native) completePendingAccount(ctx context.Context, id string) {
+	n.mu.Lock()
+	if n.pendingAccountID != id {
+		n.resetPendingAccountRetryLocked()
+		n.pendingAccountID = id
+	}
+	waiting := !n.pendingRetryAt.IsZero() && time.Now().Before(n.pendingRetryAt)
+	n.mu.Unlock()
+	if waiting {
+		return
+	}
 	probe, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
 	err := n.accounts.hooks.Busy(probe)
 	cancelProbe()
@@ -225,9 +235,38 @@ func (n *Native) completePendingAccount(ctx context.Context, id string) {
 	}()
 	deadline, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	if err = n.accounts.syncPending(deadline, id, session); err == nil {
-		n.refreshAccountQuota(deadline)
+	if err = n.accounts.syncPending(deadline, id, session); err != nil {
+		n.recordPendingAccountFailure(id)
+		return
 	}
+	n.mu.Lock()
+	n.pendingFailures, n.pendingRetryAt = 0, time.Time{}
+	n.mu.Unlock()
+	n.refreshAccountQuota(deadline)
+}
+
+func (n *Native) resetPendingAccountRetryLocked() {
+	n.pendingAccountID, n.pendingFailures, n.pendingRetryAt = "", 0, time.Time{}
+}
+
+func (n *Native) recordPendingAccountFailure(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pendingAccountID != id {
+		n.pendingAccountID, n.pendingFailures = id, 0
+	}
+	n.pendingFailures++
+	if n.pendingFailures < 2 {
+		return
+	}
+	delay := 15 * time.Second
+	for attempt := 2; attempt < n.pendingFailures && delay < time.Minute; attempt++ {
+		delay *= 2
+	}
+	if delay > time.Minute {
+		delay = time.Minute
+	}
+	n.pendingRetryAt = time.Now().Add(delay)
 }
 
 func (n *Native) syncCurrentAccountCredentials(ctx context.Context, id string, rows []AccountSummary) {

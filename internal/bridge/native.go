@@ -57,6 +57,9 @@ type Native struct {
 	accountReason      string
 	accountSyncID      string
 	accountSyncAt      time.Time
+	pendingAccountID   string
+	pendingFailures    int
+	pendingRetryAt     time.Time
 	swarm              kimi.SwarmSnapshot
 	workUsage          *workUsageCollector
 	diagnostics        *diagnosticsLog
@@ -745,9 +748,13 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 				}
 				if action == "account-switch" {
 					if offline {
-						activation := result.(core.Document)["activation"].(kimi.AccountActivation)
 						n.mu.Lock()
-						n.accountActivation = core.Document{"state": activation.State, "accountId": activation.AccountID, "verified": activation.Verified}
+						n.resetPendingAccountRetryLocked()
+						if state, ok := result.(core.Document); ok {
+							if activation, ok := state["activation"].(kimi.AccountActivation); ok {
+								n.accountActivation = core.Document{"state": activation.State, "accountId": activation.AccountID, "verified": activation.Verified}
+							}
+						}
 						n.mu.Unlock()
 					}
 					if n.policies != nil && n.service != nil && n.service.Store != nil {
