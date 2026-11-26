@@ -62,6 +62,20 @@ type SurfaceSession struct {
 	seenBlocks      int
 	failed          bool
 	pendingContexts map[string]int
+	// retired closes when the host lets this session go: the target left the
+	// surface or the view was withdrawn. A reply in flight listens to it, so a
+	// page that is no longer attached cannot keep a provider call alive.
+	retired    chan struct{}
+	retireOnce sync.Once
+}
+
+// retire tells everything bound to this session that it is no longer attached.
+// It is safe to call more than once and on a session built without a channel.
+func (s *SurfaceSession) retire() {
+	if s.retired == nil {
+		return
+	}
+	s.retireOnce.Do(func() { close(s.retired) })
 }
 
 // Generation is the current injection generation. A reply is only delivered to
@@ -175,7 +189,12 @@ type Host struct {
 	// disabling translation or retiring the host cancels an upstream request
 	// that would otherwise run to its full provider deadline.
 	cancelBindings chan struct{}
-
+	// withdrawing is closed from the moment a withdrawal starts until it
+	// completes, and open otherwise. A context wait selects on it: the batch
+	// channel alone only interrupts the wait that was current when the withdrawal
+	// started, and the next wait in the same sync would read the fresh batch and
+	// park for its whole deadline behind the lock the withdrawal needs.
+	withdrawing chan struct{}
 	// contextWaiters are released when a session's main world is reported.
 	contextWaiters map[*SurfaceSession][]chan int
 }
@@ -188,9 +207,13 @@ func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 	if options.ReplyTimeout <= 0 {
 		options.ReplyTimeout = DefaultReplyTimeout
 	}
+	// The settings are copied in and out: a caller that keeps the map it passed
+	// (or mutates what Options returned) must not change what an injection reads.
+	options.Settings = cloneSettings(options.Settings)
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
 		replySlots: make(chan struct{}, 8), stopCh: make(chan struct{}), loopDone: make(chan struct{}),
-		cancelBindings: make(chan struct{}), contextWaiters: map[*SurfaceSession][]chan int{}}
+		cancelBindings: make(chan struct{}), withdrawing: make(chan struct{}),
+		contextWaiters: map[*SurfaceSession][]chan int{}}
 	// One permanent reader for unsolicited events. Without it, navigation and
 	// binding messages would only be seen while a context wait happened to be
 	// running, which is exactly the window where they matter least.
@@ -206,7 +229,9 @@ func (h *Host) Pipe() *Pipe { return h.pipe }
 func (h *Host) Options() InjectionOptions {
 	h.optionsMu.RLock()
 	defer h.optionsMu.RUnlock()
-	return h.options
+	options := h.options
+	options.Settings = cloneSettings(h.options.Settings)
+	return options
 }
 
 // Configure replaces the settings scope and the renderer settings atomically.
@@ -218,7 +243,7 @@ func (h *Host) Options() InjectionOptions {
 func (h *Host) Configure(settings map[string]any, revision string) {
 	h.optionsMu.Lock()
 	previous := h.options.Revision
-	h.options.Settings = settings
+	h.options.Settings = cloneSettings(settings)
 	h.options.Revision = revision
 	h.optionsMu.Unlock()
 
@@ -429,6 +454,7 @@ func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
 		// Leaving the surface (a cross-origin navigation, a SPA route out of
 		// /chat, a closed tab) retires the entry and every reply pending for it.
 		delete(h.sessions, targetID)
+		session.retire()
 		h.mu.Unlock()
 		_ = h.detach(ctx, session)
 		h.mu.Lock()
@@ -540,7 +566,7 @@ func (h *Host) attach(ctx context.Context, targetID, surface string) (*SurfaceSe
 		return nil, ErrRendererUnconfirmed
 	}
 	return &SurfaceSession{SessionID: sessionID, TargetID: targetID, Surface: surface,
-		pendingContexts: map[string]int{}}, nil
+		pendingContexts: map[string]int{}, retired: make(chan struct{})}, nil
 }
 
 func (h *Host) detach(ctx context.Context, session *SurfaceSession) error {
@@ -725,6 +751,13 @@ func (h *Host) status(ctx context.Context, sessionID string, contextID int) (map
 // window: the waiter is then never released and the attach fails on the deadline
 // even though the world exists.
 func (h *Host) waitForMainContext(ctx context.Context, session *SurfaceSession) (int, error) {
+	// Read both signals before registering the waiter. A withdrawal that starts
+	// after this read closes exactly these channels, and it cannot complete while
+	// this call holds syncMu, so the select below always wakes for it. Reading
+	// afterwards would let a withdrawal that began a moment earlier hand over the
+	// fresh channels and leave this call to run out its five-second deadline.
+	cancelled := h.currentCancelBindings()
+	withdrawing := h.currentWithdrawal()
 	waiter := h.awaitMainContext(session)
 	defer h.forgetMainContextWaiter(session)
 	session.mu.Lock()
@@ -750,6 +783,16 @@ func (h *Host) waitForMainContext(ctx context.Context, session *SurfaceSession) 
 		// release the waiter has exited, so waiting out the deadline would only
 		// delay the caller's own shutdown.
 		return 0, ErrPipeClosed
+	case <-cancelled:
+		// The view was withdrawn while this call waited. The withdrawal is waiting
+		// for the lock this caller holds, so returning now is what lets it run
+		// instead of after the deadline.
+		return 0, ErrRendererUnconfirmed
+	case <-withdrawing:
+		// A withdrawal is in progress. This wait belongs to a sync it will undo,
+		// so it stops here even when the batch it holds was opened after the
+		// withdrawal began.
+		return 0, ErrRendererUnconfirmed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -791,9 +834,11 @@ func (h *Host) handleEvent(session *SurfaceSession, event Event) {
 	case "Page.loadEventFired", "Page.navigatedWithinDocument":
 		// The world survives a load or a same-document route change, but the
 		// acknowledgement cannot: the next tick re-injects under a new
-		// generation.
+		// generation, and a configure that was in flight describes the document
+		// that was replaced.
 		session.mu.Lock()
 		session.revision = ""
+		session.appliedSettings = ""
 		session.state = ""
 		session.mu.Unlock()
 	case "Runtime.bindingCalled":
@@ -832,10 +877,17 @@ func (h *Host) trackContext(session *SurfaceSession, context map[string]any) {
 func (h *Host) dropContext(session *SurfaceSession, id int) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.mainContextID == id {
-		session.mainContextID = 0
-		session.bindingContextID = 0
+	if session.mainContextID != id {
+		return
 	}
+	// The world that held the injection is gone, so its acknowledgement and the
+	// settings it was running are gone with it: a session that kept the revision
+	// would look applied and skip the binding the new world needs.
+	session.mainContextID = 0
+	session.bindingContextID = 0
+	session.revision = ""
+	session.appliedSettings = ""
+	session.state = ""
 }
 
 func (h *Host) dropWorld(session *SurfaceSession) {
@@ -902,13 +954,15 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 		return
 	}
 	id := fmt.Sprint(idValue)
-	timeout := h.replyTimeout()
-	// The batch is read before the dispatch, so a withdrawal cancels the requests
-	// already running rather than only the ones dispatched afterwards.
-	batch := h.bindingCancel()
-	select {
-	case <-h.stopCh:
+	// The liveness check and the batch read happen under one lock: a withdrawal
+	// that lands between them would hand this reply the fresh, open batch and let
+	// a request for a page nobody shows any more run to its full deadline.
+	batch, live := h.acquireBindingBatch(session)
+	if !live {
 		return
+	}
+	timeout := h.replyTimeout()
+	select {
 	case <-h.pipe.Done():
 		return
 	default:
@@ -920,22 +974,23 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			// A provider call is allowed to outlive the page that asked for it by
-			// minutes. A withdrawal, a retired host or the end of the managed child
-			// must end it at once instead of holding a reply slot that the next
-			// translation needs.
+			// minutes. A withdrawal, a session that left the surface, a retired host
+			// or the end of the managed child must end it at once instead of holding
+			// a reply slot that the next translation needs.
 			done := make(chan struct{})
 			defer close(done)
 			go func() {
 				select {
 				case <-ctx.Done():
-				case <-batch:
-					cancel()
-				case <-h.stopCh:
-					cancel()
-				case <-h.pipe.Done():
-					cancel()
+					return
 				case <-done:
+					return
+				case <-batch:
+				case <-session.retired:
+				case <-h.stopCh:
+				case <-h.pipe.Done():
 				}
+				cancel()
 			}()
 			handler(ctx, session, generation, id, value)
 		}()
@@ -1022,6 +1077,7 @@ func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession
 	generation := session.generation
 	revision := session.revision
 	previous := session.scriptID
+	applied := session.appliedSettings
 	session.mu.Unlock()
 	// A page that is not attached, or one whose scope was never acknowledged,
 	// has nothing to configure; the next Sync injects the current settings.
@@ -1033,6 +1089,11 @@ func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession
 		session.markSettingsFailed()
 		return err
 	}
+	if applied == string(configJSON) {
+		// The page already runs this configuration, so a tick between a successful
+		// update and the next snapshot must not replace the script again.
+		return nil
+	}
 	script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
 		map[string]any{"source": source}, session.SessionID, h.callTimeout())
 	if err != nil {
@@ -1041,8 +1102,13 @@ func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession
 	}
 	newScriptID := stringField(script.Result, "identifier")
 	if previous != "" {
-		_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
+		// Removing the previous script is cleanup, not part of the caller's
+		// request: its budget may have ended with the registration above, and an
+		// expired context here would leak the script it was meant to replace.
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), h.callTimeout())
+		_, _ = h.pipe.Send(removeCtx, "Page.removeScriptToEvaluateOnNewDocument",
 			map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
+		removeCancel()
 	}
 	session.mu.Lock()
 	session.scriptID = newScriptID
@@ -1051,10 +1117,11 @@ func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession
 	value, err := h.Evaluate(ctx, session.SessionID,
 		"globalThis.__kwgTranslation?.configure("+string(configJSON)+")", contextID)
 	status, ok := value.(map[string]any)
-	// A configure that fails, answers for another surface or leaves translation
-	// inactive while it is enabled did not take effect: the page still shows the
-	// previous view, so it is not acknowledged as applied.
-	if err != nil || !ok || !validStatus(status, session.Surface) ||
+	top, isTop := status["top"].(bool)
+	// A configure that fails, answers for another surface or frame, or leaves
+	// translation inactive while it is enabled did not take effect: the page
+	// still shows the previous view, so it is not acknowledged as applied.
+	if err != nil || !ok || !validStatus(status, session.Surface) || !isTop || !top ||
 		(snap.enabled && stringField(status, "state") != "active") {
 		session.markSettingsFailed()
 		if err != nil {
@@ -1063,13 +1130,24 @@ func (h *Host) applySessionSettings(ctx context.Context, session *SurfaceSession
 		return ErrRendererUnconfirmed
 	}
 	session.mu.Lock()
+	defer session.mu.Unlock()
+	// The document may have navigated, cleared its world or been reconfigured
+	// while the configure was in flight. Its answer then describes a page this
+	// session no longer tracks, and accepting it would overwrite the reset the
+	// event loop just recorded.
+	if session.generation != generation || session.revision != snap.revision || session.mainContextID != contextID {
+		session.appliedSettings = ""
+		session.revision = ""
+		session.state = "failed"
+		session.failed = true
+		return ErrRendererUnconfirmed
+	}
 	session.state = stringField(status, "state")
 	session.structure = stringField(status, "structure")
 	session.blocks = intField(status, "blocks")
 	session.seenBlocks = intField(status, "seenBlocks")
 	session.appliedSettings = string(configJSON)
 	session.failed = false
-	session.mu.Unlock()
 	return nil
 }
 
@@ -1085,28 +1163,38 @@ func (s *SurfaceSession) markSettingsFailed() {
 	s.failed = true
 }
 
+// withdraw removes translation from every attached page. The caller's context is
+// not used for the cleanup: by the time the lock below is available it has
+// usually spent its budget waiting, and a cleanup that inherits an expired
+// context would fail every call and leave the script and the CDP session behind.
 func (h *Host) withdraw(ctx context.Context, stop bool) {
+	// Retire the pending replies — and, for a stop, the host — before waiting for
+	// syncMu. A Sync parked in waitForMainContext must see one of these closed and
+	// release the lock, or this call would wait out the context deadline and then
+	// run the cleanup with nothing left.
+	h.mu.Lock()
 	if stop {
-		// Retire first so a Sync parked in waitForMainContext sees the stop
-		// channel and releases syncMu, instead of this call waiting out the
-		// context deadline behind it.
-		h.mu.Lock()
 		h.stopped = true
 		h.stopOnce.Do(func() { close(h.stopCh) })
-		h.cancelPendingBindingsLocked()
-		h.mu.Unlock()
 	}
+	h.beginWithdrawalLocked()
+	h.cancelPendingBindingsLocked()
+	h.mu.Unlock()
+
 	h.syncMu.Lock()
-	defer h.syncMu.Unlock()
+	defer func() {
+		if !stop {
+			h.mu.Lock()
+			h.completeWithdrawalLocked()
+			h.mu.Unlock()
+		}
+		h.syncMu.Unlock()
+	}()
 
 	h.mu.Lock()
 	sessions := make([]*SurfaceSession, 0, len(h.sessions))
 	for _, session := range h.sessions {
 		sessions = append(sessions, session)
-	}
-	h.sessions = map[string]*SurfaceSession{}
-	if !stop {
-		h.cancelPendingBindingsLocked()
 	}
 	h.mu.Unlock()
 
@@ -1123,9 +1211,34 @@ func (h *Host) withdraw(ctx context.Context, stop bool) {
 		session.appliedSettings = ""
 		session.revision = ""
 		session.mu.Unlock()
-		_, _ = h.Evaluate(ctx, session.SessionID,
+		cleanCtx, cancel := context.WithTimeout(context.Background(), h.callTimeout())
+		_, _ = h.Evaluate(cleanCtx, session.SessionID,
 			"globalThis.__kwgTranslation?.configure("+string(encoded)+")", contextID)
-		_ = h.detach(ctx, session)
+		err := h.detach(cleanCtx, session)
+		cancel()
+
+		h.mu.Lock()
+		if !stop && err != nil && !h.pipeClosed() {
+			// The detach failed on a pipe that is still usable, so the page may
+			// still hold the script. Keeping the entry makes the next tick retry
+			// the withdrawal instead of losing the session.
+			h.sessions[session.TargetID] = session
+		} else {
+			delete(h.sessions, session.TargetID)
+			session.retire()
+		}
+		h.mu.Unlock()
+	}
+}
+
+// pipeClosed reports whether the transport ended. It is safe to call while
+// holding h.mu: it reads only the pipe's own done channel.
+func (h *Host) pipeClosed() bool {
+	select {
+	case <-h.pipe.Done():
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1136,13 +1249,53 @@ func (h *Host) cancelPendingBindingsLocked() {
 	h.cancelBindings = make(chan struct{})
 }
 
-// bindingCancel returns the batch a reply dispatched now belongs to. Reading it
-// before the handler starts is what makes a withdrawal cancel a request that is
-// already waiting on the provider.
-func (h *Host) bindingCancel() <-chan struct{} {
+// acquireBindingBatch validates that the session is still attached and returns
+// the batch a reply dispatched now belongs to, under a single lock. A withdrawal
+// therefore either happens before this call (and the reply is refused) or after
+// it (and the reply is cancelled with the batch).
+func (h *Host) acquireBindingBatch(session *SurfaceSession) (<-chan struct{}, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stopped || h.sessions[session.TargetID] != session {
+		return nil, false
+	}
+	return h.cancelBindings, true
+}
+
+// currentCancelBindings returns the live batch. It is what a context wait
+// listens to so a withdrawal does not have to run the deadline out.
+func (h *Host) currentCancelBindings() <-chan struct{} {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.cancelBindings
+}
+
+// currentWithdrawal returns the pending-withdrawal signal, closed while a
+// withdrawal runs.
+func (h *Host) currentWithdrawal() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.withdrawing
+}
+
+// beginWithdrawalLocked marks a withdrawal as pending. Callers hold h.mu. The
+// channel stays closed until the withdrawal completes, so every context wait it
+// can see stops — not only the one that was current when it started.
+func (h *Host) beginWithdrawalLocked() {
+	if h.withdrawing == nil {
+		return
+	}
+	select {
+	case <-h.withdrawing:
+		// A withdrawal is already pending; the close below would panic.
+	default:
+		close(h.withdrawing)
+	}
+}
+
+// completeWithdrawalLocked reopens the signal. Callers hold h.mu.
+func (h *Host) completeWithdrawalLocked() {
+	h.withdrawing = make(chan struct{})
 }
 
 // WithdrawAll disables and removes translation scripts from every attached view
@@ -1167,6 +1320,20 @@ func (h *Host) DetachAll(ctx context.Context) {
 
 // ---------------------------------------------------------------------------
 // helpers
+
+// cloneSettings copies a settings map shallowly. The values are the primitives
+// the renderer reads (strings, numbers, booleans), so the map is the only shared
+// mutable state.
+func cloneSettings(settings map[string]any) map[string]any {
+	if settings == nil {
+		return nil
+	}
+	copied := make(map[string]any, len(settings))
+	for key, value := range settings {
+		copied[key] = value
+	}
+	return copied
+}
 
 func nestedString(object map[string]any, path ...string) string {
 	var current any = object

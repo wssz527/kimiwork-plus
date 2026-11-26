@@ -119,6 +119,9 @@ type fakePage struct {
 	configureCalls       int
 	configureFailures    int
 	configureInactiveFor int
+	// onConfigure runs before the configure answer, so a test can deliver a page
+	// event while the call is still in flight.
+	onConfigure func(sessionID string)
 }
 
 func (p *fakePage) record(method string) {
@@ -260,6 +263,9 @@ func (p *fakePage) handle(write func(string)) func(string) {
 				}
 				result["result"] = reply
 			case strings.Contains(expression, "__kwgTranslation?.configure("):
+				if hook := p.configureHook(); hook != nil {
+					hook(request.SessionID)
+				}
 				reply := p.configureReply(request.SessionID, expression)
 				if reply == nil {
 					// A page that replaced its document under the call answers with
@@ -348,6 +354,24 @@ func (p *fakePage) installedFor(sessionID string) []string {
 		identifiers = append(identifiers, identifier)
 	}
 	return identifiers
+}
+
+func (p *fakePage) configureHook() func(string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.onConfigure
+}
+
+func (p *fakePage) methodCount(method string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	count := 0
+	for _, recorded := range p.methods {
+		if recorded == method {
+			count++
+		}
+	}
+	return count
 }
 
 // actionReply models the official preload API for the CDP actions. It is the
@@ -1157,6 +1181,357 @@ func TestWithdrawalCancelsAnInFlightTranslation(t *testing.T) {
 				t.Fatal("the host did not re-attach after a withdrawal")
 			}
 		})
+	}
+}
+
+// TestWithdrawAllWakesABlockedSyncAndCleansUpAnExpiredCaller covers the window a
+// controller with a three-second budget hits: a sync is waiting for a world with
+// the host lock held, and the withdrawal is called with a context that is already
+// spent. The withdrawal must interrupt the wait, and the cleanup must not inherit
+// the expired context — a failed cleanup with an emptied session map would leak
+// the script and the CDP session for good.
+func TestWithdrawAllWakesABlockedSyncAndCleansUpAnExpiredCaller(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		Settings: map[string]any{"enabled": true, "provider": "bing", "targetLanguage": "zh"}})
+	t.Cleanup(func() { host.DetachAll(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("sync: %v, sessions=%d", err, len(sessions))
+	}
+	if installed := page.installed(); len(installed) != len(sessions) {
+		t.Fatalf("boot scripts before the withdrawal = %v", installed)
+	}
+
+	// The worlds are cleared and the fake reports no new one until Runtime.enable
+	// is issued again, so the next injection parks in waitForMainContext with
+	// syncMu held.
+	for _, session := range sessions {
+		harness.pipe.dispatch(`{"method":"Runtime.executionContextsCleared","sessionId":"` + session.SessionID + `"}`)
+	}
+	eventually(t, "the worlds to be dropped", func() bool {
+		return sessions[0].ContextID() == 0 && sessions[1].ContextID() == 0
+	})
+	enables := page.methodCount("Page.enable")
+
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := host.Sync(context.Background())
+		blocked <- err
+	}()
+	eventually(t, "the injection to reach the world wait", func() bool {
+		if page.methodCount("Page.enable") < enables+1 {
+			return false
+		}
+		// The waiter is registered after the cancel batch is read, so seeing it
+		// means a withdrawal now is guaranteed to close the channel the sync holds.
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return len(host.contextWaiters) > 0
+	})
+
+	caller, cancelCaller := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelCaller()
+	<-caller.Done()
+
+	start := time.Now()
+	host.WithdrawAll(caller)
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second {
+		t.Fatalf("the withdrawal waited %v for the blocked sync", elapsed)
+	}
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the withdrawal did not release the blocked sync")
+	}
+	if installed := page.installed(); len(installed) != 0 {
+		t.Fatalf("the withdrawal left new-document scripts behind: %v", installed)
+	}
+	if host.HasSessions() {
+		t.Fatal("the withdrawal left sessions attached")
+	}
+}
+
+// TestWithdrawnSessionIgnoresALateBinding pins the atomic liveness check: the
+// event loop takes an event under the lock, and the withdrawal may retire the
+// session before the binding is dispatched. The late request must be dropped, not
+// handed the fresh batch and left to run for the whole provider deadline.
+func TestWithdrawnSessionIgnoresALateBinding(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	var mu sync.Mutex
+	calls := 0
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		OnReply: func(context.Context, *SurfaceSession, int, string, any) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+		}})
+	t.Cleanup(func() { host.DetachAll(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	session := workSession(t, sessions)
+	host.WithdrawAll(ctx)
+	if host.HasSessions() {
+		t.Fatal("the withdrawal left the session attached")
+	}
+
+	// The event loop already holds this session reference from an event taken
+	// before the withdrawal.
+	host.deliverBinding(session, Event{Method: "Runtime.bindingCalled", SessionID: session.SessionID,
+		Params: map[string]any{"name": BindingName, "executionContextId": float64(session.ContextID()),
+			"payload": `{"type":"translate","id":"late-1","generation":` + itoa(session.Generation()) +
+				`,"text":"hello","protectedTexts":[]}`}})
+	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("a withdrawn session delivered %d late requests", calls)
+	}
+}
+
+// TestLeavingTheSurfaceCancelsThePendingReply proves a session that leaves the
+// surface retires on its own: the provider call it started is cancelled instead
+// of holding a reply slot until the deadline.
+func TestLeavingTheSurfaceCancelsThePendingReply(t *testing.T) {
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	started := make(chan struct{}, 1)
+	waited := make(chan time.Duration, 4)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		ReplyTimeout: 10 * time.Second,
+		OnReply: func(ctx context.Context, _ *SurfaceSession, _ int, _ string, _ any) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			began := time.Now()
+			<-ctx.Done()
+			waited <- time.Since(began)
+		}})
+	t.Cleanup(func() { host.DetachAll(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	session := workSession(t, sessions)
+
+	harness.pipe.dispatch(bindingPayload(session, "slow-1", "hello"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the provider call did not start")
+	}
+
+	page.mu.Lock()
+	page.workURL = "https://example.com/away"
+	page.mu.Unlock()
+	sessions, err = host.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync after the page left: %v", err)
+	}
+	for _, live := range sessions {
+		if live.TargetID == session.TargetID {
+			t.Fatalf("the page that left the surface is still attached: %s", live.SessionID)
+		}
+	}
+	select {
+	case elapsed := <-waited:
+		if elapsed > 200*time.Millisecond {
+			t.Fatalf("the pending reply took %v to end after the page left", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reply for a page that left the surface was not cancelled")
+	}
+	if installed := page.installedFor(session.SessionID); len(installed) != 0 {
+		t.Fatalf("the retired session kept its boot script: %v", installed)
+	}
+}
+
+// TestStaleConfigureIsNotAcknowledged covers a configure that was in flight while
+// the document was replaced: accepting its answer would overwrite the reset the
+// event loop just recorded and leave the page on the previous view with no retry.
+func TestStaleConfigureIsNotAcknowledged(t *testing.T) {
+	settings := func(view string) map[string]any {
+		return map[string]any{"enabled": true, "provider": "bing", "targetLanguage": "zh", "view": view}
+	}
+	t.Run("load event during the configure", func(t *testing.T) {
+		page := &fakePage{surface: "work"}
+		harness := newHarness(t, page)
+		host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+			Settings: settings("translated")})
+		t.Cleanup(func() { host.DetachAll(context.Background()) })
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		sessions, err := host.Sync(ctx)
+		if err != nil {
+			t.Fatalf("sync: %v", err)
+		}
+		session := workSession(t, sessions)
+		generation := session.Generation()
+
+		var once sync.Once
+		page.mu.Lock()
+		page.onConfigure = func(sessionID string) {
+			if sessionID != session.SessionID {
+				return
+			}
+			once.Do(func() {
+				harness.pipe.dispatch(`{"method":"Page.loadEventFired","sessionId":"` + session.SessionID + `"}`)
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) && session.State() != "" {
+					time.Sleep(time.Millisecond)
+				}
+			})
+		}
+		page.mu.Unlock()
+
+		host.Configure(settings("original"), "rev-1")
+		host.ApplySettings(ctx)
+		if !session.Failed() || session.State() == "active" {
+			t.Fatalf("a configure for a replaced document was acknowledged: state=%q failed=%v",
+				session.State(), session.Failed())
+		}
+
+		sessions, err = host.Sync(ctx)
+		if err != nil {
+			t.Fatalf("healing sync: %v", err)
+		}
+		session = workSession(t, sessions)
+		if session.State() != "active" || session.Failed() {
+			t.Fatalf("the next sync did not restore the page: state=%q failed=%v", session.State(), session.Failed())
+		}
+		if session.Generation() != generation+1 {
+			t.Fatalf("generation = %d, want %d", session.Generation(), generation+1)
+		}
+	})
+
+	t.Run("destroyed world", func(t *testing.T) {
+		page := &fakePage{surface: "work"}
+		harness := newHarness(t, page)
+		host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+			Settings: settings("translated")})
+		t.Cleanup(func() { host.DetachAll(context.Background()) })
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		sessions, err := host.Sync(ctx)
+		if err != nil {
+			t.Fatalf("sync: %v", err)
+		}
+		session := workSession(t, sessions)
+		generation := session.Generation()
+		bindings := page.methodCount("Runtime.addBinding")
+
+		// The world that carried the injection is destroyed. A session that kept
+		// its acknowledgement would skip the re-injection, so the new world would
+		// never get its binding.
+		harness.pipe.dispatch(`{"method":"Runtime.executionContextDestroyed","sessionId":"` + session.SessionID +
+			`","params":{"executionContextId":` + itoa(session.ContextID()) + `}}`)
+		eventually(t, "the acknowledgement to be voided with the world", func() bool {
+			return session.ContextID() == 0 && session.State() == ""
+		})
+		harness.pipe.dispatch(`{"method":"Runtime.executionContextCreated","sessionId":"` + session.SessionID +
+			`","params":{"context":{"id":9,"auxData":{"isDefault":true,"frameId":"main-frame"}}}}`)
+		eventually(t, "the new world to be tracked", func() bool { return session.ContextID() == 9 })
+
+		sessions, err = host.Sync(ctx)
+		if err != nil {
+			t.Fatalf("sync after the world was replaced: %v", err)
+		}
+		session = workSession(t, sessions)
+		if session.State() != "active" || session.Failed() {
+			t.Fatalf("the new world did not recover: state=%q failed=%v", session.State(), session.Failed())
+		}
+		if session.Generation() != generation+1 {
+			t.Fatalf("generation = %d, want %d", session.Generation(), generation+1)
+		}
+		if now := page.methodCount("Runtime.addBinding"); now <= bindings {
+			t.Fatal("the new world did not get the binding again")
+		}
+	})
+}
+
+// TestSyncAppliesAViewChangeInPlace proves a view-only switch does not wait for a
+// controller push: the next tick sees the settings the page is not running and
+// updates the live document and its boot script without a new generation.
+func TestSyncAppliesAViewChangeInPlace(t *testing.T) {
+	settings := func(view string) map[string]any {
+		return map[string]any{"enabled": true, "provider": "bing", "targetLanguage": "zh", "view": view}
+	}
+	page := &fakePage{surface: "work"}
+	harness := newHarness(t, page)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		Settings: settings("translated")})
+	t.Cleanup(func() { host.DetachAll(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	session := workSession(t, sessions)
+	generation := session.Generation()
+	configures := func() int {
+		count := 0
+		for _, expression := range page.snapshotEvaluations() {
+			if strings.Contains(expression, "__kwgTranslation?.configure(") {
+				count++
+			}
+		}
+		return count
+	}
+	before := configures()
+
+	host.Configure(settings("original"), "rev-1")
+	sessions, err = host.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync after the view change: %v", err)
+	}
+	session = workSession(t, sessions)
+	if session.Generation() != generation {
+		t.Fatalf("the view change re-injected the page: generation=%d", session.Generation())
+	}
+	if session.State() != "active" || session.Failed() {
+		t.Fatalf("the in-place update failed: state=%q failed=%v", session.State(), session.Failed())
+	}
+	page.mu.Lock()
+	source := page.lastSource
+	page.mu.Unlock()
+	if !strings.Contains(source, `"view":"original"`) {
+		t.Fatal("the boot script still carries the previous view")
+	}
+	found := false
+	for _, expression := range page.snapshotEvaluations() {
+		if strings.Contains(expression, "__kwgTranslation?.configure(") &&
+			strings.Contains(expression, `"view":"original"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("the live document was not told about the new view")
+	}
+
+	// The update is acknowledged now, so another tick does not repeat it.
+	applied := configures()
+	if applied <= before {
+		t.Fatalf("the view change was not configured (%d -> %d)", before, applied)
+	}
+	if _, err := host.Sync(ctx); err != nil {
+		t.Fatalf("settled sync: %v", err)
+	}
+	if again := configures(); again != applied {
+		t.Fatalf("an acknowledged view change was configured again (%d -> %d)", applied, again)
 	}
 }
 
