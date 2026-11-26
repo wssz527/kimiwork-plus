@@ -399,7 +399,17 @@ async function confirmActionResult(action, opId) {
     return;
   }
   if (action === 'disconnect-models' && op.state === 'removed') {
-    showToast('已移除本产品接管的模型来源。服务商与模型仍保留，可随时重新同步接管。', 'ok');
+    /* 移除模型成功但本机解析记录没清干净：不能报成完全成功，也不能沿用
+       「尚未继续原生接入」这类面向接入方向的原文案。 */
+    const dnsWarning = op.result && op.result.dnsWarning;
+    if (dnsWarning === 'setup_cancelled') {
+      showToast('已移除本产品接管的模型来源；系统授权已取消，本机域名解析记录未一并清理。服务商与模型仍保留，可随时重新同步接管。', 'warn');
+    } else if (dnsWarning) {
+      showToast('已移除本产品接管的模型来源；本机域名解析记录未一并清理（'
+        + (reasonText(dnsWarning) || dnsWarning) + '）。服务商与模型仍保留，可随时重新同步接管。', 'warn');
+    } else {
+      showToast('已移除本产品接管的模型来源。服务商与模型仍保留，可随时重新同步接管。', 'ok');
+    }
     return;
   }
   if (failed) {
@@ -1308,12 +1318,6 @@ function bindEvents() {
   if (dom.onboardSave) dom.onboardSave.addEventListener('click', () => { void saveOnboard(); });
   if (dom.onboardRetryApply) dom.onboardRetryApply.addEventListener('click', () => { void applyConnections(); });
   if (dom.applyButton) dom.applyButton.addEventListener('click', () => { void applyConnections(); });
-  if (dom.onboardAdvancedToggle) dom.onboardAdvancedToggle.addEventListener('click', () => {
-    state.onboard.advanced = !state.onboard.advanced;
-    setHidden(dom.onboardAdvanced, !state.onboard.advanced);
-    dom.onboardAdvancedToggle.setAttribute('aria-expanded', state.onboard.advanced ? 'true' : 'false');
-    setText(dom.onboardAdvancedToggle, state.onboard.advanced ? '收起高级恢复选项' : '高级恢复选项');
-  });
 
   document.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1397,7 +1401,7 @@ function adoptLocationKey() {
   state.picker = { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null };
   /* 新会话属于另一份配置：向导里读到的目录与 Key 不能跨会话沿用。 */
-  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: state.onboard.advanced === true, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null };
+  state.onboard = { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null };
   if (dom.onboardKey) dom.onboardKey.value = '';
   if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
   state.applyUnsupported = false;

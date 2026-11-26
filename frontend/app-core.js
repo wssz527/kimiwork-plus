@@ -690,8 +690,6 @@ const dom = {
   onboardLaunch: $('ob-launch'),
   onboardLaunchHint: $('ob-launch-hint'),
   onboardRetryApply: $('ob-retry-apply'),
-  onboardAdvancedToggle: $('ob-advanced-toggle'),
-  onboardAdvanced: $('ob-advanced'),
   onboardAdvancedFields: $('ob-advanced-fields'),
   onboardProbeResult: $('ob-probe-result'),
   onboardDisclosure: $('onboard-disclosure'),
@@ -854,7 +852,7 @@ const state = {
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,

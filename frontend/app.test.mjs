@@ -6214,6 +6214,47 @@ test('a local build without an updater never triggers the focus check', () => {
   assert.equal(focusUpdateDue({ autoCheck: false, state: 'idle', lastCheckedAt: '' }, now), false);
 });
 
+test('a disconnect that leaves DNS records behind reports a warning instead of plain success', async () => {
+  const toasts = [];
+  const code = `
+    const ACTION_STATE = { failed: '失败' };
+    const ACTION_LABEL = {};
+    const showToast = (message, tone) => toasts.push({ message, tone });
+    ${sourceFunction('isInFlight')}
+    ${sourceFunction('confirmActionResult')}
+    return confirmActionResult;
+  `;
+  const make = (operation) => new Function('state', 'toasts', 'reasonText', code)(
+    { data: { operation } }, toasts, makeReasonText());
+  const confirm = async (operation) => {
+    toasts.length = 0;
+    const call = make({ id: 'op-d', action: 'disconnect-models', ...operation });
+    await call('disconnect-models', 'op-d');
+    return toasts.at(-1);
+  };
+
+  const clean = await confirm({ state: 'removed', result: { dnsRemoved: true } });
+  assert.deepEqual(clean, {
+    message: '已移除本产品接管的模型来源。服务商与模型仍保留，可随时重新同步接管。',
+    tone: 'ok',
+  });
+
+  const cancelled = await confirm({ state: 'removed', result: { dnsRemoved: false, dnsWarning: 'setup_cancelled' } });
+  assert.equal(cancelled.tone, 'warn');
+  assert.equal(cancelled.message,
+    '已移除本产品接管的模型来源；系统授权已取消，本机域名解析记录未一并清理。服务商与模型仍保留，可随时重新同步接管。');
+  assert.doesNotMatch(cancelled.message, /尚未继续原生接入/);
+
+  const failed = await confirm({ state: 'removed', result: { dnsRemoved: false, dnsWarning: 'setup_authorization_failed' } });
+  assert.equal(failed.tone, 'warn');
+  assert.equal(failed.message,
+    '已移除本产品接管的模型来源；本机域名解析记录未一并清理（系统管理员授权失败；尚未写入新的接入配置。）。服务商与模型仍保留，可随时重新同步接管。');
+
+  const unknown = await confirm({ state: 'removed', result: { dnsRemoved: false, dnsWarning: 'dns_cleanup_failed' } });
+  assert.equal(unknown.tone, 'warn');
+  assert.match(unknown.message, /本机域名解析记录未一并清理（dns_cleanup_failed）/);
+});
+
 test('a tray update request before the shell is revealed is replayed once', () => {
   const calls = [];
   const dom = { shell: { hidden: true } };
