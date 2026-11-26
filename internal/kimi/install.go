@@ -171,27 +171,21 @@ func ClassifySurface(targetType, targetURL string) string {
 	if targetType != "page" {
 		return "other"
 	}
-	parsed, err := url.Parse(targetURL)
-	if err != nil {
-		return "other"
-	}
-	// A query or fragment is refused outright. The surface check exists to keep
-	// reasoning text off pages it does not belong to, and a URL carrying
-	// parameters is a different document than the one this allowlist describes.
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
+	parsed, ok := surfaceURL(targetURL)
+	if !ok {
 		return "other"
 	}
 	switch parsed.Scheme {
-	case "file", "app", "kimi":
+	case "app":
+		if localhostDesktop(parsed) && parsed.Path == "/kimi-agent.html" {
+			return "work"
+		}
+	case "file", "kimi":
 		if strings.HasSuffix(parsed.Path, "/kimi-agent.html") {
 			return "work"
 		}
-		return "other"
 	case "https":
-		if parsed.Host != "www.kimi.com" {
-			return "other"
-		}
-		if chatPath(parsed.Path) {
+		if parsed.Host == "www.kimi.com" && parsed.RawQuery == "" && chatPath(parsed.Path) {
 			return "chat"
 		}
 	}

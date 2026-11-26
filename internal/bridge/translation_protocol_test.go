@@ -55,6 +55,10 @@ func TestTranslationFromConnectionFollowsTheDeclaredProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a Chat connection was refused: %v", err)
 	}
+	settings := result["settings"].(publicTranslationConfig)
+	if result["hasApiKey"] != true || !settings.HasAPIKey || settings.APIKeySource != "connection" || settings.APIKeyRef != "" {
+		t.Fatalf("copied settings did not report a redacted connection key: %+v", result)
+	}
 	source := core.Object(result["source"])
 	if core.String(source["chatSupport"]) != "declared" || core.String(source["baseURL"]) != "https://chat.example/v1" {
 		t.Fatalf("source = %+v", source)

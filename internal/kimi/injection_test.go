@@ -18,6 +18,7 @@ type fakePage struct {
 
 	// behaviour
 	surface       string
+	workURL       string
 	statusReply   map[string]any
 	attachFailure bool
 	navigateOn    bool
@@ -141,6 +142,10 @@ func (p *fakePage) handle(write func(string)) func(string) {
 				(p.workRequiresActivate && !p.workActivated)
 			mainDesktop := p.mainDesktopTarget
 			workerWork := p.workerWorkURL
+			workURL := p.workURL
+			if workURL == "" {
+				workURL = "app://localhost/kimi-agent.html"
+			}
 			workTarget := "work-1"
 			if p.replaceWorkTarget {
 				workTarget = "work-2"
@@ -160,7 +165,7 @@ func (p *fakePage) handle(write func(string)) func(string) {
 			}
 			if !hideWork {
 				targets = append([]any{map[string]any{"targetId": workTarget, "type": "page",
-					"url": "app://localhost/kimi-agent.html"}}, targets...)
+					"url": workURL}}, targets...)
 			}
 			if workerWork {
 				targets = append(targets, map[string]any{"targetId": "worker-work", "type": "worker",
@@ -170,7 +175,7 @@ func (p *fakePage) handle(write func(string)) func(string) {
 			// is what a real desktop does: the page is created by openSettings.
 			if !p.hideSettings || settingsOpen {
 				targets = append(targets, map[string]any{"targetId": "settings", "type": "page",
-					"url": "app://localhost/work-settings.html"})
+					"url": "app://localhost/work-settings.html?theme=dark"})
 			}
 			result["targetInfos"] = targets
 		case "Target.attachToTarget":
@@ -522,34 +527,6 @@ globalThis.__kwgTranslate = () => {};
 globalThis.__kwgTranslationReceive = () => {};
 `
 
-func TestSurfaceClassificationIsAnAllowlist(t *testing.T) {
-	cases := map[string]string{
-		"app://localhost/kimi-agent.html":               "work",
-		"file:///Applications/Kimi.app/kimi-agent.html": "work",
-		"https://www.kimi.com/chat/abc-123":             "chat",
-		"https://www.kimi.com/chat/history":             "chat",
-		"https://www.kimi.com/":                         "chat",
-		// Everything below must never receive a script or reasoning text.
-		"app://localhost/work-settings.html":       "other",
-		"https://www.kimi.com/settings":            "other",
-		"https://www.kimi.com.evil.test/chat/abc":  "other",
-		"https://evil.test/chat/abc":               "other",
-		"https://www.kimi.com/chat/abc?token=leak": "other",
-		"https://www.kimi.com/chat/abc/extra":      "other",
-	}
-	for raw, want := range cases {
-		if got := ClassifySurface("page", raw); got != want {
-			t.Fatalf("%s -> %s, want %s", raw, got, want)
-		}
-	}
-	if ClassifySurface("worker", "https://www.kimi.com/chat/abc") != "other" {
-		t.Fatal("a worker must never be a surface")
-	}
-	if ClassifySurface("iframe", "app://localhost/kimi-agent.html") != "other" {
-		t.Fatal("a non-page target must never be a surface")
-	}
-}
-
 func TestHostAttachesOnlyToAllowedTargets(t *testing.T) {
 	page := &fakePage{surface: "work"}
 	harness := newHarness(t, page)
@@ -575,6 +552,41 @@ func TestHostAttachesOnlyToAllowedTargets(t *testing.T) {
 	}
 	if page.bindingCalls != 2 {
 		t.Fatalf("binding registrations=%d, want 2", page.bindingCalls)
+	}
+}
+
+func TestHostSyncTracksWorkURLParameters(t *testing.T) {
+	page := &fakePage{surface: "work", workURL: "app://localhost/kimi-agent.html?theme=dark&locale=zh-CN&platform=darwin"}
+	harness := newHarness(t, page)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defer host.DetachAll(ctx)
+
+	syncWork := func() *SurfaceSession {
+		t.Helper()
+		sessions, err := host.Sync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, session := range sessions {
+			if session.TargetID == "work-1" && session.State() == "active" && !session.Failed() {
+				return session
+			}
+		}
+		t.Fatal("Work page did not accept injection")
+		return nil
+	}
+	work := syncWork()
+	generation := work.Generation()
+	if same := syncWork(); same != work || same.Generation() != generation {
+		t.Fatal("unchanged URL triggered a new injection")
+	}
+	page.mu.Lock()
+	page.workURL = "app://localhost/kimi-agent.html?theme=light&locale=zh-CN&platform=darwin"
+	page.mu.Unlock()
+	if same := syncWork(); same != work || same.Generation() != generation+1 {
+		t.Fatal("changed query did not trigger a new injection in the attached session")
 	}
 }
 

@@ -411,9 +411,7 @@ func (h *Host) Sync(ctx context.Context) ([]*SurfaceSession, error) {
 			h.mu.Unlock()
 		}
 
-		// The document changed under a session that stays attached: a reload, a
-		// cross-site navigation back into the surface, or anything else that
-		// replaced the page.
+		// Compare the full URL so a changed query can trigger a new injection.
 		session.mu.Lock()
 		moved := targetURL != session.injectedURL
 		needsInjection := moved || session.revision != h.revision()

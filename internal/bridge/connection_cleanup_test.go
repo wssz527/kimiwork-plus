@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"errors"
+	"net/http"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/wssz527/kimiwork-plus/internal/core"
@@ -201,5 +203,102 @@ func TestFailedStageLeavesNoCredentialOrReference(t *testing.T) {
 	}
 	if len(stagedRefs(t, saved)) != 0 {
 		t.Fatal("a failed stage committed a reference")
+	}
+}
+
+func TestConnectionDeleteCascadeIsAtomicAndCleansCredentials(t *testing.T) {
+	const path = "/api/connections/delete"
+	s := newConfigPanelTestService(t, testKeys{"retired-ref": "retired-test-key", "keep-ref": "kept-test-key"})
+	_, rev, _ := s.Store.Read()
+	kept := core.Document{"id": "keep", "name": "Kept", "baseURL": "https://kept.example/v1", "apiKeyEnv": "KEEP_TEST_KEY", "apiKeyRef": "keep-ref"}
+	before, rev, err := s.Store.Update(rev, func(d core.Document) error {
+		d["connections"] = []any{
+			core.Document{"id": "retire", "name": "Retired", "baseURL": "https://retired.example/v1", "apiKeyRef": "retired-ref"}, kept,
+		}
+		d["models"] = []any{
+			core.Document{"id": "retired-model", "connectionId": "retire", "protocol": "responses", "contextWindow": 32000, "tools": true},
+			core.Document{"id": "kept-model", "connectionId": "keep", "protocol": "responses", "contextWindow": 32000, "failover": []any{core.Document{"connectionId": "retire"}}},
+		}
+		d["subagents"] = core.Document{"mode": "force", "model": "retired-model"}
+		d["k3CompatibleModelId"] = "retired-model"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applied, scheduled int
+	s.OnConfig = func(d core.Document) error {
+		applied++
+		if stored, _, err := s.Store.Read(); err != nil || core.Revision(d) != core.Revision(stored) {
+			t.Fatalf("OnConfig called before commit: %v", err)
+		}
+		return nil
+	}
+	s.ScheduleAutoSync = func(gotPath string, prev, next core.Document) {
+		scheduled++
+		if applied != 1 || gotPath != path || core.Revision(prev) != core.Revision(before) || len(core.Rows(next["models"])) != 1 {
+			t.Fatalf("incorrect auto-sync invocation for committed delete: %s %v %v", gotPath, prev, next)
+		}
+	}
+	for _, tc := range []struct {
+		body   core.Document
+		status int
+		code   string
+	}{
+		{core.Document{"revision": "stale", "connectionId": "retire", "cascade": true}, http.StatusConflict, "configuration_conflict"},
+		{core.Document{"revision": rev, "connectionId": ""}, http.StatusBadRequest, "invalid_connections"},
+		{core.Document{"revision": rev, "connectionId": "bad/id"}, http.StatusBadRequest, "invalid_connections"},
+		{core.Document{"revision": rev, "connectionId": "missing"}, http.StatusConflict, "connection_unavailable"},
+		{core.Document{"revision": rev, "connectionId": "retire"}, http.StatusConflict, "connection_in_use"},
+	} {
+		out := callConfigPanel(t, s, http.MethodPost, path, tc.body, tc.status)
+		if core.Object(out["error"])["code"] != tc.code {
+			t.Fatal(out)
+		}
+	}
+	if _, unchanged, err := s.Store.Read(); err != nil || unchanged != rev || applied != 0 || scheduled != 0 {
+		t.Fatalf("rejected delete had side effects: %v", err)
+	}
+	out := callConfigPanel(t, s, http.MethodPost, path, core.Document{"revision": rev, "connectionId": "retire", "cascade": true}, http.StatusOK)
+	removed := core.Object(out["removed"])
+	if out["ok"] != true || removed["connectionId"] != "retire" || removed["subagentsReset"] != true ||
+		!reflect.DeepEqual(removed["models"], []any{"retired-model"}) ||
+		!reflect.DeepEqual(removed["failoverStripped"], []any{"kept-model"}) || removed["apiKeyRef"] != nil {
+		t.Fatalf("unexpected delete receipt: %v", removed)
+	}
+	d, afterRev, err := s.Store.Read()
+	if err != nil || core.Object(out["state"])["revision"] != afterRev || applied != 1 || scheduled != 1 ||
+		!reflect.DeepEqual(core.Rows(d["connections"]), []any{map[string]any(kept)}) ||
+		d["k3CompatibleModelId"] != nil || core.Object(d["subagents"])["mode"] != "inherit" {
+		t.Fatalf("delete not applied in one save: %v %v", d, err)
+	}
+	if key, _ := s.Keys.Get("retired-ref"); key != "" {
+		t.Fatal("removed connection credential was not cleaned")
+	}
+	if key, _ := s.Keys.Get("keep-ref"); key != "kept-test-key" {
+		t.Fatal("surviving connection credential was lost")
+	}
+}
+
+func TestConnectionDeleteKeepsSharedCredential(t *testing.T) {
+	const ref = "shared-test-ref"
+	s := newConfigPanelTestService(t, testKeys{ref: "shared-test-key"})
+	_, rev, _ := s.Store.Read()
+	_, rev, err := s.Store.Update(rev, func(d core.Document) error {
+		d["connections"] = []any{
+			core.Document{"id": "retire", "name": "Retired", "baseURL": "https://retired.example/v1", "apiKeyRef": ref},
+			core.Document{"id": "keep", "name": "Kept", "baseURL": "https://kept.example/v1", "apiKeyRef": ref},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := callConfigPanel(t, s, http.MethodPost, "/api/connections/delete", core.Document{"revision": rev, "connectionId": "retire"}, http.StatusOK)
+	if removed := core.Object(out["removed"]); !reflect.DeepEqual(removed["models"], []any{}) || !reflect.DeepEqual(removed["failoverStripped"], []any{}) {
+		t.Fatalf("an unused connection reported removed models: %v", removed)
+	}
+	if key, _ := s.Keys.Get(ref); key != "shared-test-key" {
+		t.Fatal("delete removed a key that another connection uses")
 	}
 }

@@ -410,6 +410,28 @@ func TestAutoSyncGatewayOnlySaveNeverWrites(t *testing.T) {
 	}
 }
 
+func TestAutoSyncImportsCatalogAfterConnectionCascade(t *testing.T) {
+	d := autoSyncGatewayDoc()
+	d["connections"] = append(core.Rows(d["connections"]), core.Document{"id": "beta", "name": "Beta", "baseURL": "https://beta.example/v1"})
+	model := autoSyncModel("gpt-beta", "Beta")
+	model["connectionId"] = "beta"
+	d["models"] = append(core.Rows(d["models"]), model)
+	h := newAutoSyncHarness(t, false, d)
+	h.set(func(h *autoSyncHarness) { h.managed, h.running, h.adopted = true, true, true })
+	h.n.service.ScheduleAutoSync = h.n.ScheduleAutoSync
+	_, rev, err := h.n.service.Store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.n.service.configure("/api/connections/delete", core.Document{"revision": rev, "connectionId": "beta", "cascade": true}); err != nil {
+		t.Fatal(err)
+	}
+	waitAutoSyncState(t, h, autoSyncSynced)
+	if imports := h.counts(); imports != 1 {
+		t.Fatalf("connection cascade ran %d imports, want one", imports)
+	}
+}
+
 // Continuous edits inside the debounce window collapse into one write.
 func TestAutoSyncMergesBurstsIntoOneImport(t *testing.T) {
 	h := newAutoSyncHarness(t, false, autoSyncGatewayDoc())

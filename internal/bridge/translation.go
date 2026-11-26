@@ -15,33 +15,71 @@ func translationRevision(c core.TranslationConfig) string {
 	_ = json.Unmarshal(b, &d)
 	return core.Revision(d)
 }
-func translationPublicConfig(c core.TranslationConfig) core.TranslationConfig {
+
+type publicTranslationConfig struct {
+	core.TranslationConfig
+	HasAPIKey    bool   `json:"hasApiKey"`
+	APIKeySource string `json:"apiKeySource"`
+}
+
+func translationPublicConfig(c core.TranslationConfig, source string) publicTranslationConfig {
 	c.APIKeyRef = ""
-	return c
+	return publicTranslationConfig{TranslationConfig: c, HasAPIKey: source != "", APIKeySource: source}
+}
+
+func (s *Service) translationState(d core.Document, c core.TranslationConfig, runtime any) core.Document {
+	_, source := s.translationCredential(d, c)
+	configured := translationPublicConfig(c, source)
+	return core.Document{"configured": configured, "revision": translationRevision(c),
+		"environment": core.Document{"keySet": configured.HasAPIKey}, "runtime": runtime}
 }
 
 func (s *Service) translationKey(d core.Document, c core.TranslationConfig) string {
+	key, _ := s.translationCredential(d, c)
+	return key
+}
+
+func (s *Service) translationCredential(d core.Document, c core.TranslationConfig) (string, string) {
 	if s.Keys == nil {
-		return ""
+		return "", ""
 	}
 	if c.APIKeyRef != "" {
 		key, _ := s.Keys.Get(c.APIKeyRef)
-		return key
+		if key != "" {
+			return key, "managed"
+		}
+		return "", ""
 	}
 	for _, v := range core.Rows(d["connections"]) {
 		row := core.Object(v)
 		if row["apiKeyEnv"] == c.APIKeyEnv {
 			key, _ := credentialFor(row, s.Keys)
-			return key
+			if key != "" {
+				return key, "connection"
+			}
+			return "", ""
 		}
 	}
-	if s.Keys != nil {
-		key, _ := s.Keys.Get(c.APIKeyEnv)
-		return key
+	key, _ := s.Keys.Get(c.APIKeyEnv)
+	if key != "" {
+		return key, "environment"
 	}
-	return ""
+	return "", ""
 }
-func (s *Service) saveTranslation(in core.Document) (result any, err error) {
+
+func translationInput(in map[string]any) core.Document {
+	value := core.Document{}
+	for k, v := range in {
+		switch k {
+		case "revision", "documentRevision", "translationRevision", "apiKey", "apiKeyRef", "clearApiKey", "hasApiKey", "apiKeySource", "apiKeyMasked":
+		default:
+			value[k] = v
+		}
+	}
+	return value
+}
+
+func (s *Service) saveTranslation(in core.Document) (any, error) {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
 	d, rev, e := s.Store.Read()
@@ -66,48 +104,63 @@ func (s *Service) saveTranslation(in core.Document) (result any, err error) {
 	if hasToken && token != translationRevision(current) {
 		return nil, errors.New("translation_settings_conflict")
 	}
-	value := core.Document{}
-	for k, v := range in {
-		if k != "revision" && k != "documentRevision" && k != "translationRevision" && k != "apiKey" && k != "apiKeyRef" {
-			value[k] = v
-		}
+	clear, validClear := in["clearApiKey"].(bool)
+	_, hasClear := in["clearApiKey"]
+	supplied, _ := in["apiKey"].(string)
+	if hasClear && !validClear || clear && supplied != "" {
+		return nil, errors.New("invalid_translation_config")
+	}
+	value := translationInput(in)
+	if env, exists := value["apiKeyEnv"]; !exists || env == "" {
+		value["apiKeyEnv"] = current.APIKeyEnv
 	}
 	settings, e := core.TranslationSettings(value)
 	if e != nil {
 		return nil, e
 	}
-	if current.APIKeyEnv == settings.APIKeyEnv {
+	if settings.APIKeyRef != "" {
+		return nil, errors.New("invalid_translation_config")
+	}
+	if !clear && current.APIKeyEnv == settings.APIKeyEnv {
 		settings.APIKeyRef = current.APIKeyRef
+	}
+	staged := ""
+	if supplied != "" {
+		if s.Keys == nil {
+			return nil, errors.New("credentials_unavailable")
+		}
+		staged = "translation-" + RandomKey()
+		if err := stageCredential(s.Keys, staged, supplied); err != nil {
+			if deleteErr := s.Keys.Delete(staged); deleteErr != nil {
+				return nil, errors.New("credentials_cleanup_failed")
+			}
+			return nil, err
+		}
+		settings.APIKeyRef = staged
 	}
 	b, _ := json.Marshal(settings)
 	var normalized map[string]any
 	_ = json.Unmarshal(b, &normalized)
-	staged := ""
-	defer func() {
-		if err != nil && staged != "" {
-			if deleteErr := s.Keys.Delete(staged); deleteErr != nil {
-				err = errors.New("credentials_cleanup_failed")
-				result = nil
-			}
-		}
-	}()
-	if supplied, ok := in["apiKey"].(string); ok && supplied != "" {
-		if s.Keys == nil {
-			return nil, errors.New("credentials_unavailable")
-		}
-		ref := "translation-" + RandomKey()
-		staged = ref
-		if err := stageCredential(s.Keys, ref, supplied); err != nil {
-			return nil, err
-		}
-		normalized["apiKeyRef"] = ref
-	}
 	d["translation"] = normalized
 	d, _, e = s.Store.Commit(d, rev)
 	if e != nil {
+		if staged != "" {
+			s.discardStagedCredentials([]string{staged})
+		}
 		return nil, e
 	}
-	staged = ""
+	obsolete := []string{}
+	if current.APIKeyRef != "" && current.APIKeyRef != settings.APIKeyRef {
+		obsolete = append(obsolete, current.APIKeyRef)
+	}
+	clearedEnv := ""
+	if clear {
+		clearedEnv = current.APIKeyEnv
+		if clearedEnv != "" {
+			obsolete = append(obsolete, clearedEnv)
+		}
+	}
+	s.discardUnreferencedCredentials(obsolete, clearedEnv)
 	if s.OnConfig != nil {
 		if e = s.OnConfig(d); e != nil {
 			return nil, e
@@ -122,7 +175,11 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 		return nil, e
 	}
 	if path == "/api/translation/preview" {
-		c, e := core.TranslationSettings(in["settings"])
+		value := in["settings"]
+		if settings := core.Object(value); settings != nil {
+			value = translationInput(settings)
+		}
+		c, e := core.TranslationSettings(value)
 		if e != nil {
 			return nil, e
 		}
@@ -131,8 +188,10 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 			return nil, e
 		}
 		c.APIKeyRef = ""
-		if c == translationPublicConfig(saved) {
-			c.APIKeyRef = saved.APIKeyRef
+		ref := saved.APIKeyRef
+		saved.APIKeyRef = ""
+		if c == saved {
+			c.APIKeyRef = ref
 		}
 		const original = "Open `src/app.js`, read https://example.test/docs and update config.json before the next step."
 		translated, e := core.NewTranslator().Translate(ctx, original, c, s.translationKey(d, c), []string{"src/app.js", "https://example.test/docs", "config.json"})
@@ -204,5 +263,5 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 		settings.CustomModel = id
 	}
 	settings.APIKeyEnv = core.String(connection["apiKeyEnv"])
-	return core.Document{"settings": settings, "source": core.Document{"connectionId": connection["id"], "connectionName": connection["name"], "modelId": id, "upstreamModelId": settings.CustomModel, "baseURL": base, "chatSupport": support}, "keyAvailable": true}, nil
+	return core.Document{"settings": translationPublicConfig(settings, "connection"), "hasApiKey": true, "source": core.Document{"connectionId": connection["id"], "connectionName": connection["name"], "modelId": id, "upstreamModelId": settings.CustomModel, "baseURL": base, "chatSupport": support}, "keyAvailable": true}, nil
 }

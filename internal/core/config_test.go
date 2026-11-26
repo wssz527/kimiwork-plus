@@ -1,6 +1,7 @@
 package core
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -360,5 +361,70 @@ func TestMergeConnectionsCarriesALegacyProtocolListForward(t *testing.T) {
 	}
 	if got := ConnectionProtocol(Object(Rows(d["connections"])[0])); got != ConnectionProtocolChat {
 		t.Fatalf("explicit choice = %q", got)
+	}
+}
+
+func TestDeleteConnectionPrunesModelReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy Document
+		mode   string
+		reset  bool
+	}{
+		{"inherit", Document{"mode": "inherit"}, "inherit", false},
+		{"force", Document{"mode": "force", "model": "retired"}, "inherit", true},
+		{"pool without roles", Document{"mode": "pool", "model": "kept"}, "pool", false},
+		{"pool with roles", Document{"mode": "pool", "model": "kept", "roles": Document{"plan": "retired", "coder": "kept"}}, "pool", false},
+		{"removed pool default", Document{"mode": "pool", "model": "retired"}, "inherit", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.policy["mode"] == "pool" {
+				tc.policy["models"] = []any{Document{"id": "retired", "description": "Removed model"}, Document{"id": "kept", "description": "Kept model"}}
+			}
+			retired := Document{"id": "delete", "name": "Removed", "baseURL": "https://removed.example/v1"}
+			kept := Document{"id": "keep", "name": "Kept", "baseURL": "https://kept.example/v1", "apiKeyEnv": "KEPT_TEST_KEY", "apiKeyRef": "kept-ref"}
+			backup := Document{"id": "backup", "name": "Backup", "baseURL": "https://backup.example/v1"}
+			standby := Document{"connectionId": "backup", "upstreamModelId": "alternate"}
+			d := Document{
+				"connections": []any{retired, kept, backup},
+				"models": []any{
+					Document{"id": "retired", "connectionId": "delete", "protocol": "responses", "contextWindow": 32000, "tools": true},
+					Document{"id": "kept", "connectionId": "keep", "protocol": "responses", "contextWindow": 32000, "tools": true, "failover": []any{Document{"connectionId": "delete"}, standby}},
+					Document{"id": "sole-standby", "connectionId": "keep", "protocol": "responses", "contextWindow": 32000, "failover": []any{Document{"connectionId": "delete"}}},
+				},
+				"k3CompatibleModelId": "retired", KimiK3CompatibilityKey: true, "subagents": tc.policy,
+			}
+			original := Revision(d)
+			if _, err := DeleteConnection(d, "delete", false); ErrorCode(err) != "connection_in_use" || Revision(d) != original {
+				t.Fatalf("non-cascade delete did not reject model references atomically: %v", err)
+			}
+			got, err := DeleteConnection(d, "delete", true)
+			if err != nil || !reflect.DeepEqual(got.Models, []string{"retired"}) ||
+				!reflect.DeepEqual(got.FailoverStripped, []string{"kept", "sole-standby"}) || got.SubagentsReset != tc.reset {
+				t.Fatalf("delete receipt = %+v, %v", got, err)
+			}
+			if !reflect.DeepEqual(d["connections"], []any{kept, backup}) || d["k3CompatibleModelId"] != nil || d[KimiK3CompatibilityKey] != true {
+				t.Fatalf("connection or K3 references incorrect after delete: %v", d)
+			}
+			models := Rows(d["models"])
+			if !reflect.DeepEqual(Object(models[0])["failover"], []any{standby}) || Object(models[1])["failover"] != nil {
+				t.Fatalf("standby routes were not filtered: %v", models)
+			}
+			policy := Object(d["subagents"])
+			if policy["mode"] != tc.mode {
+				t.Fatalf("subagents = %v", policy)
+			}
+			if tc.mode == "pool" {
+				pool := Rows(policy["models"])
+				roles := Object(policy["roles"])
+				if len(pool) != 1 || Object(pool[0])["id"] != "kept" || roles["plan"] != nil ||
+					tc.policy["roles"] != nil && roles["coder"] != "kept" {
+					t.Fatalf("surviving pool or roles incorrect: %v", policy)
+				}
+			}
+			if err := Validate(d); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

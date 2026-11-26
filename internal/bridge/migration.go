@@ -275,7 +275,7 @@ func CollectCredentialRefs(dir string) []string {
 			After core.Document `json:"after"`
 		}
 		if json.Unmarshal(raw, &pending) == nil && pending.After != nil {
-			collectCredentialRefs(pending.After, refs)
+			collectCredentialRefs(pending.After, refs, "")
 		}
 	}
 	if raw, err := core.ReadPrivateFile(filepath.Join(dir, "accounts.json"), 256<<10); err == nil {

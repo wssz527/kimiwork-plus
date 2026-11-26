@@ -9,6 +9,14 @@ import (
 	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
+func deleteConnection(d, in core.Document) (core.ConnectionRemoval, error) {
+	cascade, valid := in["cascade"].(bool)
+	if _, exists := in["cascade"]; exists && !valid {
+		return core.ConnectionRemoval{}, errors.New("invalid_connections")
+	}
+	return core.DeleteConnection(d, core.String(in["connectionId"]), cascade)
+}
+
 func credentialReference(c map[string]any) string {
 	if ref, ok := c["apiKeyRef"]; ok {
 		return core.String(ref)
@@ -81,10 +89,14 @@ func (s *Service) stageCredentials(d core.Document, changes map[string]*string) 
 // it wrote the recovery journal, and the next start applies that journal, so a
 // reference in either durable document keeps the key alive.
 func (s *Service) discardStagedCredentials(refs []string) {
+	s.discardUnreferencedCredentials(refs, "")
+}
+
+func (s *Service) discardUnreferencedCredentials(refs []string, clearedTranslationEnv string) {
 	if len(refs) == 0 || s.Keys == nil {
 		return
 	}
-	referenced, known := s.durableCredentialRefs()
+	referenced, known := s.durableCredentialRefs(clearedTranslationEnv)
 	if !known {
 		return
 	}
@@ -95,13 +107,13 @@ func (s *Service) discardStagedCredentials(refs []string) {
 	}
 }
 
-func (s *Service) durableCredentialRefs() (map[string]bool, bool) {
+func (s *Service) durableCredentialRefs(clearedTranslationEnv string) (map[string]bool, bool) {
 	refs := map[string]bool{}
 	current, _, err := s.Store.Read()
 	if err != nil {
 		return nil, false
 	}
-	collectCredentialRefs(current, refs)
+	collectCredentialRefs(current, refs, clearedTranslationEnv)
 	// Without the state directory the recovery journal cannot be inspected, and
 	// a pending journal is the one document that can still activate these keys.
 	if s.StateDir == "" {
@@ -120,18 +132,31 @@ func (s *Service) durableCredentialRefs() (map[string]bool, bool) {
 	if json.Unmarshal(raw, &pending) != nil || pending.After == nil {
 		return nil, false
 	}
-	collectCredentialRefs(pending.After, refs)
+	collectCredentialRefs(pending.After, refs, "")
 	return refs, true
 }
 
-func collectCredentialRefs(d core.Document, refs map[string]bool) {
+func collectCredentialRefs(d core.Document, refs map[string]bool, clearedTranslationEnv string) {
 	for _, v := range core.Rows(d["connections"]) {
-		if ref := core.String(core.Object(v)["apiKeyRef"]); ref != "" {
+		connection := core.Object(v)
+		if ref := credentialReference(connection); ref != "" {
 			refs[ref] = true
 		}
+		if env := core.String(connection["apiKeyEnv"]); env != "" {
+			refs[env] = true
+		}
 	}
-	if ref := core.String(core.Object(d["translation"])["apiKeyRef"]); ref != "" {
-		refs[ref] = true
+	settings, err := core.TranslationSettings(d["translation"])
+	if err != nil {
+		translation := core.Object(d["translation"])
+		settings.APIKeyRef = core.String(translation["apiKeyRef"])
+		settings.APIKeyEnv = core.String(translation["apiKeyEnv"])
+	}
+	if settings.APIKeyRef != "" {
+		refs[settings.APIKeyRef] = true
+	}
+	if settings.APIKeyEnv != "" && settings.APIKeyEnv != clearedTranslationEnv {
+		refs[settings.APIKeyEnv] = true
 	}
 }
 func connectionRows(d core.Document, keys KeyStore) []any {

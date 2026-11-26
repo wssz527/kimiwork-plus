@@ -154,6 +154,47 @@ func TestValidFiletimeRejectsImpossibleValues(t *testing.T) {
 	}
 }
 
+func TestSurfaceClassificationIsAnAllowlist(t *testing.T) {
+	cases := map[string]string{
+		"app://localhost/kimi-agent.html":                                         "work",
+		"app://localhost/kimi-agent.html?theme=dark&locale=zh-CN&platform=darwin": "work",
+		"file:///Applications/Kimi.app/kimi-agent.html?theme=dark":                "work",
+		"kimi://local/work/kimi-agent.html?theme=dark":                            "work",
+		"https://www.kimi.com/chat/abc-123":                                       "chat",
+		"https://www.kimi.com/chat/history":                                       "chat",
+		"https://www.kimi.com/":                                                   "chat",
+		// Everything below must never receive a script or reasoning text.
+		"app://localhost/work-settings.html?theme=dark":      "other",
+		"app://localhost/desktopclaw.html":                   "other",
+		"app://localhost/work/kimi-agent.html":               "other",
+		"app://evil/kimi-agent.html":                         "other",
+		"app://localhost:123/kimi-agent.html":                "other",
+		"app://user@localhost/kimi-agent.html":               "other",
+		"app://localhost/kimi-agent.html?theme=dark#work":    "other",
+		"file:///Applications/Kimi.app/kimi-agent.html#work": "other",
+		"kimi://user@local/work/kimi-agent.html":             "other",
+		"https://user@www.kimi.com/chat/abc":                 "other",
+		"https://www.kimi.com/chat/abc#chat":                 "other",
+		"app://localhost/%zz":                                "other",
+		"https://www.kimi.com/settings":                      "other",
+		"https://www.kimi.com.evil.test/chat/abc":            "other",
+		"https://evil.test/chat/abc":                         "other",
+		"https://www.kimi.com/chat/abc?token=leak":           "other",
+		"https://www.kimi.com/chat/abc/extra":                "other",
+	}
+	for raw, want := range cases {
+		if got := ClassifySurface("page", raw); got != want {
+			t.Fatalf("%s -> %s, want %s", raw, got, want)
+		}
+	}
+	if ClassifySurface("worker", "https://www.kimi.com/chat/abc") != "other" {
+		t.Fatal("a worker must never be a surface")
+	}
+	if ClassifySurface("iframe", "app://localhost/kimi-agent.html") != "other" {
+		t.Fatal("a non-page target must never be a surface")
+	}
+}
+
 func TestSanitizeTargetURLDropsParameters(t *testing.T) {
 	got := SanitizeTargetURL("https://www.kimi.com/chat/abc?token=secret#frag")
 	if strings.Contains(got, "secret") || strings.Contains(got, "frag") {

@@ -2,7 +2,9 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/wssz527/kimiwork-plus/internal/protocol"
@@ -307,6 +309,14 @@ func MergeBudget(d Document, input any) error {
 }
 
 func MergeModels(d Document, input []any) error {
+	return mergeModels(d, input, false)
+}
+
+func MergeModelsPruningReferences(d Document, input []any) error {
+	return mergeModels(d, input, true)
+}
+
+func mergeModels(d Document, input []any, prune bool) error {
 	old := map[string]map[string]any{}
 	for _, v := range Rows(d["models"]) {
 		m := Object(v)
@@ -344,11 +354,169 @@ func MergeModels(d Document, input []any) error {
 		applyModelDefaults(merged, toolsProvided && tools == nil)
 		out = append(out, merged)
 	}
-	if _, err := NormalizeSubagents(d["subagents"], out); err != nil {
+	if prune {
+		removed := make(map[string]bool, len(old))
+		for id := range old {
+			removed[id] = true
+		}
+		for _, row := range out {
+			delete(removed, String(Object(row)["id"]))
+		}
+		changes, _, err := pruneModelReferences(d, out, removed)
+		if err != nil {
+			return subagentModelUseError(d["subagents"], old, out)
+		}
+		applyModelReferenceChanges(d, changes)
+	} else if _, err := NormalizeSubagents(d["subagents"], out); err != nil {
 		return subagentModelUseError(d["subagents"], old, out)
 	}
 	d["models"] = out
 	return nil
+}
+
+func pruneModelReferences(d Document, models []any, removed map[string]bool) (Document, bool, error) {
+	changes := Document{}
+	if removed[String(d["k3CompatibleModelId"])] {
+		changes["k3CompatibleModelId"] = nil
+	}
+	value := d["subagents"]
+	policy := Object(value)
+	mode := String(policy["mode"])
+	reset := (mode == "force" || mode == "pool") && removed[String(policy["model"])]
+	changed := false
+	if !reset && mode == "pool" && len(removed) > 0 {
+		rows := Rows(policy["models"])
+		pool := make([]any, 0, len(rows))
+		for _, row := range rows {
+			if !removed[String(Object(row)["id"])] {
+				pool = append(pool, row)
+			}
+		}
+		roles := Object(policy["roles"])
+		keptRoles := maps.Clone(roles)
+		for role, id := range roles {
+			if removed[String(id)] {
+				delete(keptRoles, role)
+			}
+		}
+		reset = len(pool) == 0 && len(rows) > 0
+		changed = len(pool) != len(rows) || len(keptRoles) != len(roles)
+		if changed {
+			policy = maps.Clone(policy)
+			policy["models"] = pool
+			if len(keptRoles) != len(roles) {
+				policy["roles"] = keptRoles
+			}
+			value = policy
+		}
+	}
+	if reset {
+		value = Document{"mode": "inherit"}
+	}
+	normalized, err := NormalizeSubagents(value, models)
+	if err != nil {
+		return nil, false, err
+	}
+	if reset {
+		changes["subagents"] = value
+	} else if changed {
+		changes["subagents"] = normalized
+	}
+	return changes, reset, nil
+}
+
+func applyModelReferenceChanges(d, changes Document) {
+	for key, value := range changes {
+		if value == nil {
+			delete(d, key)
+		} else {
+			d[key] = value
+		}
+	}
+}
+
+type ConnectionRemoval struct {
+	ConnectionID     string   `json:"connectionId"`
+	Models           []string `json:"models"`
+	FailoverStripped []string `json:"failoverStripped"`
+	SubagentsReset   bool     `json:"subagentsReset"`
+	APIKeyRef        string   `json:"-"`
+}
+
+func DeleteConnection(d Document, id string, cascade bool) (ConnectionRemoval, error) {
+	if !idPattern.MatchString(id) {
+		return ConnectionRemoval{}, errors.New("invalid_connections")
+	}
+	var connection map[string]any
+	rows := Rows(d["connections"])
+	connections := make([]any, 0, len(rows))
+	for _, row := range rows {
+		if c := Object(row); c["id"] == id {
+			connection = c
+		} else {
+			connections = append(connections, row)
+		}
+	}
+	if connection == nil {
+		return ConnectionRemoval{}, errors.New("connection_unavailable")
+	}
+	result := ConnectionRemoval{ConnectionID: id, Models: []string{}, FailoverStripped: []string{}, APIKeyRef: String(connection["apiKeyRef"])}
+	rows = Rows(d["models"])
+	if !cascade {
+		inUse := &ModelUseError{Code: "connection_in_use"}
+		for _, row := range rows {
+			model := Object(row)
+			if slices.Contains(modelConnections(model), id) {
+				inUse.add(model)
+			}
+		}
+		if len(inUse.Models) > 0 {
+			return ConnectionRemoval{}, inUse
+		}
+		d["connections"] = connections
+		return result, nil
+	}
+
+	models := make([]any, 0, len(rows))
+	removed := map[string]bool{}
+	for _, row := range rows {
+		model := Object(row)
+		modelID := String(model["id"])
+		if model["connectionId"] == id {
+			result.Models = append(result.Models, modelID)
+			removed[modelID] = true
+			continue
+		}
+		failover := Rows(model["failover"])
+		if len(failover) > 0 {
+			kept := make([]any, 0, len(failover))
+			for _, entry := range failover {
+				if Object(entry)["connectionId"] != id {
+					kept = append(kept, entry)
+				}
+			}
+			if len(kept) != len(failover) {
+				result.FailoverStripped = append(result.FailoverStripped, modelID)
+				model = maps.Clone(model)
+				if len(kept) == 0 {
+					delete(model, "failover")
+				} else {
+					model["failover"] = kept
+				}
+				row = model
+			}
+		}
+		models = append(models, row)
+	}
+	changes, reset, err := pruneModelReferences(d, models, removed)
+	if err != nil {
+		return ConnectionRemoval{}, err
+	}
+	applyModelReferenceChanges(d, changes)
+	d["models"] = models
+	d["connections"] = connections
+	result.SubagentsReset = reset
+	return result, nil
 }
 
 func MergeConnections(d Document, input []any) (map[string]*string, error) {

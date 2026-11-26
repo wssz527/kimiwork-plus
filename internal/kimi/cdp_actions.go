@@ -313,11 +313,8 @@ type actionTarget struct {
 }
 
 func desktopPath(raw string) (string, bool) {
-	parsed, err := parseURL(raw)
-	if err != nil || parsed.User != nil || parsed.Fragment != "" {
-		return "", false
-	}
-	if parsed.Scheme != "app" || parsed.Host != "localhost" {
+	parsed, ok := surfaceURL(raw)
+	if !ok || !localhostDesktop(parsed) {
 		return "", false
 	}
 	switch parsed.Path {

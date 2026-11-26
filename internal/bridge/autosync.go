@@ -62,7 +62,7 @@ const (
 // subagents and budget are gateway-side features Kimi never reads.
 func autoSyncPath(path string) bool {
 	switch path {
-	case "/api/workspace", "/api/models", "/api/connections", "/api/integration-mode", "/api/kimi-k3-compatibility":
+	case "/api/workspace", "/api/models", "/api/connections", "/api/connections/delete", "/api/integration-mode", "/api/kimi-k3-compatibility":
 		return true
 	}
 	return false

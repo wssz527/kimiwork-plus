@@ -591,7 +591,7 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return nil, err
 			}
 			return core.Document{"ok": true, "updates": st}, nil
-		case "/api/workspace", "/api/models", "/api/connections", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode", "/api/kimi-k3-compatibility":
+		case "/api/workspace", "/api/models", "/api/connections", "/api/connections/delete", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode", "/api/kimi-k3-compatibility":
 			return s.configure(path, in)
 		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie", "/api/work/conversations/rebind":
 			if s.Extra != nil {
@@ -666,6 +666,7 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 	// because the committed document already refers to them.
 	var pending []string
 	var previous core.Document
+	var removed core.ConnectionRemoval
 	d, rev, e := s.Store.Prepare(core.String(in["revision"]), func(d core.Document) error {
 		previous = cloneDocument(d)
 		switch path {
@@ -676,7 +677,17 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 			if _, ok := in["connections"].([]any); !ok {
 				return errors.New("invalid_connections")
 			}
-			if e := core.MergeModels(d, core.Rows(in["models"])); e != nil {
+			mergeModels := core.MergeModels
+			if raw, exists := in["pruneSubagents"]; exists {
+				prune, ok := raw.(bool)
+				if !ok {
+					return errors.New("invalid_models")
+				}
+				if prune {
+					mergeModels = core.MergeModelsPruningReferences
+				}
+			}
+			if e := mergeModels(d, core.Rows(in["models"])); e != nil {
 				return e
 			}
 			changes, e := core.MergeConnections(d, core.Rows(in["connections"]))
@@ -712,6 +723,13 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				pending = staged
 			}
 			return e
+		case "/api/connections/delete":
+			receipt, err := deleteConnection(d, in)
+			if err != nil {
+				return err
+			}
+			removed = receipt
+			return core.Validate(d)
 		case "/api/budget/save":
 			if core.String(in["revision"]) == "" {
 				return core.ErrConflict
@@ -750,6 +768,9 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 		s.discardStagedCredentials(pending)
 		return nil, e
 	}
+	if removed.APIKeyRef != "" {
+		defer s.discardUnreferencedCredentials([]string{removed.APIKeyRef}, "")
+	}
 	if s.OnConfig != nil {
 		if e = s.OnConfig(d); e != nil {
 			return nil, e
@@ -761,7 +782,11 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 		s.ScheduleAutoSync(path, previous, d)
 	}
 	state, e := s.State()
-	return core.Document{"ok": true, "state": state}, e
+	result := core.Document{"ok": true, "state": state}
+	if removed.ConnectionID != "" {
+		result["removed"] = removed
+	}
+	return result, e
 }
 
 // cloneDocument is the document as it was before a save: the merge helpers only
@@ -884,7 +909,6 @@ func (s *Service) State() (core.Document, error) {
 	if _, hasConnections := gatewayState["connections"]; !hasConnections {
 		connections = connectionRows(d, s.Keys)
 	}
-	trans := core.Document{"enabled": false, "provider": "bing", "targetLanguage": "zh", "view": "translated", "customEndpoint": "", "customModel": "", "apiKeyEnv": "KIMI_WORK_TRANSLATION_API_KEY"}
 	updatesDoc := core.Document{"currentVersion": Version, "buildId": BuildID, "state": "local"}
 	if s.Updates != nil {
 		updatesDoc = s.Updates.State()
@@ -896,7 +920,6 @@ func (s *Service) State() (core.Document, error) {
 		"connections": core.Document{"active": connections, "saved": connections, "restartRequired": false, "apply": core.Document{"state": "applied"}},
 		"connection":  core.Document{"active": core.Document{}, "saved": core.Document{}, "environment": core.Document{"apiKeySet": false, "tokenSet": true}},
 		"subagents":   core.Document{"configured": core.Document{"mode": "inherit"}, "policy": core.Document{"mode": "inherit"}, "runtime": core.Document{"state": "inherit", "mode": "inherit"}},
-		"translation": core.Document{"configured": trans, "revision": rev, "environment": core.Document{"keySet": false}, "runtime": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}},
 		"integration": core.Document{"state": "unchecked", "imported": false, "reason": "native_preview_unavailable", "desktop": core.Document{"state": "unavailable", "reason": "native_preview_unavailable"}, "autoSync": core.Document{"state": autoSyncIdle, "reason": "", "updatedAt": int64(0), "pending": false}},
 		"kimiProcess": core.Document{"running": nil, "state": "unknown"}, "context": core.Document{"policy": core.Document{"mode": "inherit"}, "status": "unavailable"},
 		"tools": core.Document{"available": false, "reason": "native_preview_unavailable", "servers": []any{}}, "search": core.Document{"status": "unavailable"},
@@ -917,7 +940,7 @@ func (s *Service) State() (core.Document, error) {
 		runtimeState = "disabled"
 		reason = "translation_disabled"
 	}
-	state["translation"] = core.Document{"configured": translationPublicConfig(settings), "revision": translationRevision(settings), "environment": core.Document{"keySet": s.translationKey(d, settings) != ""}, "runtime": core.Document{"state": runtimeState, "reason": reason}}
+	state["translation"] = s.translationState(d, settings, core.Document{"state": runtimeState, "reason": reason})
 	core.Object(state["gateway"])["url"] = s.Endpoint.URL + "/v1"
 	if s.Migration != nil {
 		state["migration"] = s.Migration.Status()

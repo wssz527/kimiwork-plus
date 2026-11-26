@@ -31,10 +31,16 @@ func TestWindowNavScriptsCoverAllTargets(t *testing.T) {
 			t.Fatalf("conversations script is missing %q: %s", needle, openConversationsJS)
 		}
 	}
-	for _, needle := range []string{"__kwpOpenUpdates", "nav-maintenance", "settings-tab-connection", "update-panel", "main.scrollTop", "getBoundingClientRect"} {
+	if strings.Index(openConversationsJS, "nav-conversations") >= strings.Index(openConversationsJS, "nav-maintenance") {
+		t.Fatal("conversation navigation must try the top-level entry first")
+	}
+	for _, needle := range []string{"__kwpOpenUpdates", "nav-maintenance", "settings-tab-updates", "settings-tab-connection", "update-panel", "main.scrollTop", "getBoundingClientRect"} {
 		if !strings.Contains(openUpdatesJS, needle) {
 			t.Fatalf("updates script is missing %q: %s", needle, openUpdatesJS)
 		}
+	}
+	if strings.Index(openUpdatesJS, "settings-tab-updates") >= strings.Index(openUpdatesJS, "settings-tab-connection") {
+		t.Fatal("update navigation must try the dedicated updates tab first")
 	}
 	if strings.Contains(openUpdatesJS, "scrollIntoView") {
 		t.Fatalf("updates script must scroll the main container instead of scrollIntoView: %s", openUpdatesJS)

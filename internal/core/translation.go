@@ -31,10 +31,12 @@ type TranslationConfig struct {
 
 var languages = map[string][3]string{"zh": {"zh-Hans", "zh-CN", "Simplified Chinese"}, "en": {"en", "en", "English"}, "ja": {"ja", "ja", "Japanese"}, "ko": {"ko", "ko", "Korean"}, "es": {"es", "es", "Spanish"}, "fr": {"fr", "fr", "French"}, "de": {"de", "de", "German"}, "ru": {"ru", "ru", "Russian"}}
 
+const defaultTranslationAPIKeyEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+
 var translationRefPattern = regexp.MustCompile(`^translation-[a-f0-9]{64}$`)
 
 func TranslationSettings(v any) (TranslationConfig, error) {
-	c := TranslationConfig{Provider: "bing", TargetLanguage: "zh", View: "translated", APIKeyEnv: "KIMI_WORK_TRANSLATION_API_KEY"}
+	c := TranslationConfig{Provider: "bing", TargetLanguage: "zh", View: "translated", APIKeyEnv: defaultTranslationAPIKeyEnv}
 	if v != nil {
 		obj := Object(v)
 		if obj == nil {
@@ -50,9 +52,12 @@ func TranslationSettings(v any) (TranslationConfig, error) {
 			return c, errors.New("invalid_translation_config")
 		}
 	}
+	if c.APIKeyEnv == "" {
+		c.APIKeyEnv = defaultTranslationAPIKeyEnv
+	}
 	if c.APIKeyRef == "" && translationRefPattern.MatchString(c.APIKeyEnv) {
 		c.APIKeyRef = c.APIKeyEnv
-		c.APIKeyEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+		c.APIKeyEnv = defaultTranslationAPIKeyEnv
 	}
 	if c.APIKeyRef != "" && !translationRefPattern.MatchString(c.APIKeyRef) {
 		return c, errors.New("invalid_translation_config")

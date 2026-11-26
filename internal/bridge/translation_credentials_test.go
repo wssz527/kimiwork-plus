@@ -65,6 +65,132 @@ func TestCustomTranslationCredentialSaveAndReadback(t *testing.T) {
 	}
 }
 
+func TestTranslationSaveWithoutAPIKeyEnvKeepsManagedRef(t *testing.T) {
+	s := newConfigPanelTestService(t, testKeys{})
+	_, rev, _ := s.Store.Read()
+	draft := core.Document{"revision": rev, "apiKeyEnv": "TEST_TRANSLATOR_KEY", "apiKey": "initial-test-key"}
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", draft, http.StatusOK)
+	saved, _ := readTranslation(t, s)
+	if saved.APIKeyRef == "" {
+		t.Fatal("managed key was not stored")
+	}
+	for _, envIncluded := range []bool{false, true} {
+		state := callConfigPanel(t, s, http.MethodGet, "/api/state", nil, http.StatusOK)
+		configured := assertTranslationKeyState(t, state, "managed")
+		configured["revision"] = state["revision"]
+		configured["enabled"] = !configured["enabled"].(bool)
+		configured["apiKeyMasked"] = "masked"
+		delete(configured, "apiKeyEnv")
+		if envIncluded {
+			configured["apiKeyEnv"] = ""
+		}
+		callConfigPanel(t, s, http.MethodPost, "/api/translation", configured, http.StatusOK)
+		current, _ := readTranslation(t, s)
+		if current.APIKeyEnv != saved.APIKeyEnv || current.APIKeyRef != saved.APIKeyRef {
+			t.Fatal("settings-only save lost the managed credential")
+		}
+	}
+	_, rev = readTranslation(t, s)
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": rev, "apiKey": "rotated-test-key",
+	}, http.StatusOK)
+	current, _ := readTranslation(t, s)
+	if key, _ := s.Keys.Get(current.APIKeyRef); current.APIKeyRef == saved.APIKeyRef || key != "rotated-test-key" {
+		t.Fatal("rotated credential was not stored under a new ref")
+	}
+	if old, _ := s.Keys.Get(saved.APIKeyRef); old != "" {
+		t.Fatal("unreferenced credential survived rotation")
+	}
+}
+
+func TestTranslationClearAPIKey(t *testing.T) {
+	const env = "TEST_TRANSLATION_KEY"
+	s := newConfigPanelTestService(t, testKeys{env: "legacy-test-key"})
+	_, rev, _ := s.Store.Read()
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{"revision": rev, "apiKeyEnv": env}, http.StatusOK)
+	state := callConfigPanel(t, s, http.MethodGet, "/api/state", nil, http.StatusOK)
+	assertTranslationKeyState(t, state, "environment")
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": state["revision"], "apiKey": "managed-test-key",
+	}, http.StatusOK)
+	managed, rev := readTranslation(t, s)
+	conflict := callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": rev, "apiKey": "another-test-key", "clearApiKey": true,
+	}, http.StatusBadRequest)
+	if core.Object(conflict["error"])["code"] != "invalid_translation_config" {
+		t.Fatal(conflict)
+	}
+	if current, currentRev := readTranslation(t, s); currentRev != rev || current.APIKeyRef != managed.APIKeyRef {
+		t.Fatal("rejected request changed configuration")
+	}
+	result := callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": rev, "clearApiKey": true,
+	}, http.StatusOK)
+	assertTranslationKeyState(t, core.Object(result["state"]), "")
+	if cleared, _ := readTranslation(t, s); cleared.APIKeyRef != "" || cleared.APIKeyEnv != env {
+		t.Fatal("clear did not remove only the private reference from the configuration")
+	}
+	for _, ref := range []string{env, managed.APIKeyRef} {
+		if key, _ := s.Keys.Get(ref); key != "" {
+			t.Fatal("clear left an unreferenced credential behind")
+		}
+	}
+}
+
+func TestTranslationClearAPIKeyPreservesConnectionCredentials(t *testing.T) {
+	const env = "TEST_SHARED_KEY"
+	s := newConfigPanelTestService(t, testKeys{env: "connection-test-key"})
+	_, rev, _ := s.Store.Read()
+	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": rev, "apiKeyEnv": env, "apiKey": "shared-test-key",
+	}, http.StatusOK)
+	managed, rev := readTranslation(t, s)
+	_, rev, err := s.Store.Update(rev, func(d core.Document) error {
+		d["connections"] = []any{
+			core.Document{"id": "legacy", "name": "Legacy", "baseURL": "https://legacy.example/v1", "apiKeyEnv": env},
+			core.Document{"id": "managed", "name": "Managed", "baseURL": "https://managed.example/v1", "apiKeyRef": managed.APIKeyRef},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
+		"revision": rev, "clearApiKey": true,
+	}, http.StatusOK)
+	assertTranslationKeyState(t, core.Object(result["state"]), "connection")
+	if key, _ := s.Keys.Get(managed.APIKeyRef); key != "shared-test-key" {
+		t.Fatal("clear deleted a credential shared with another connection")
+	}
+	if key, _ := s.Keys.Get(env); key != "connection-test-key" {
+		t.Fatal("clear deleted the legacy connection credential")
+	}
+}
+
+func readTranslation(t *testing.T, s *Service) (core.TranslationConfig, string) {
+	t.Helper()
+	d, rev, err := s.Store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := core.TranslationSettings(d["translation"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rev
+}
+
+func assertTranslationKeyState(t *testing.T, state core.Document, source string) core.Document {
+	t.Helper()
+	tr := core.Object(state["translation"])
+	configured := core.Object(tr["configured"])
+	if configured["apiKeySource"] != source || configured["hasApiKey"] != (source != "") ||
+		core.Object(tr["environment"])["keySet"] != configured["hasApiKey"] || configured["apiKeyRef"] != nil {
+		t.Fatalf("translation key state does not match source %q: %v", source, tr)
+	}
+	return configured
+}
+
 func TestFixedTranslationPreviewUsesSavedPrivateCredential(t *testing.T) {
 	const secret = "synthetic-independent-translation"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -162,8 +288,12 @@ func TestFixedTranslationPreviewUsesSavedPrivateCredential(t *testing.T) {
 		t.Fatalf("preview: %d %+v", status, result)
 	}
 	public["customEndpoint"] = upstream.URL + "/changed/chat/completions"
-	status, result = call("/api/translation/preview", core.Document{"settings": public})
-	if status == http.StatusOK || core.String(core.Object(result["error"])["code"]) != "translation_http_error" {
-		t.Fatalf("changed endpoint borrowed the old key: %d %+v", status, result)
+	saved, _ := readTranslation(t, service)
+	for _, env := range []string{core.String(public["apiKeyEnv"]), saved.APIKeyRef} {
+		public["apiKeyEnv"] = env
+		status, result = call("/api/translation/preview", core.Document{"settings": public})
+		if status == http.StatusOK || core.String(core.Object(result["error"])["code"]) != "translation_http_error" {
+			t.Fatalf("changed endpoint borrowed the old key: %d %+v", status, result)
+		}
 	}
 }

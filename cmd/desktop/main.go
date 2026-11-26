@@ -65,7 +65,8 @@ const openUpdatesJS = `(() => {
       return;
     }
     document.getElementById('nav-maintenance')?.click();
-    document.getElementById('settings-tab-connection')?.click();
+    const updatesTab = document.getElementById('settings-tab-updates') || document.getElementById('settings-tab-connection');
+    updatesTab?.click();
     const main = document.getElementById('main');
     const panel = document.getElementById('update-panel');
     if (main && panel && typeof main.getBoundingClientRect === 'function' && typeof panel.getBoundingClientRect === 'function') {
