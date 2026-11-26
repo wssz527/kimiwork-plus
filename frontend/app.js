@@ -1483,7 +1483,7 @@ function adoptLocationKey() {
   state.conns = { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] };
   state.connDeleteId = null;
   state.connDeletingId = null;
-  state.connPicker = { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0, detectedProtocol: null, detectedUpstreamProtocol: '' };
+  state.connPicker = { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], baseSavedIds: [], error: '', sourceNote: '', seq: 0, detectedProtocol: null, detectedUpstreamProtocol: '' };
   state.connUpstreamProtocols = {};
   state.draft = null;
   state.draftDirty = false;

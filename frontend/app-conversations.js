@@ -208,6 +208,7 @@ function mountConversationsPage() {
   };
 
   let lastSignature = '';
+  let selectionClearSeq = 0;
 
   function setStatus(text) {
     setText(ui.status, text);
@@ -402,6 +403,7 @@ function mountConversationsPage() {
     checkbox.checked = selectedKeys().has(key);
     checkbox.setAttribute('aria-label', '选择会话 ' + (conversation.title || ''));
     checkbox.addEventListener('change', () => {
+      selectionClearSeq += 1;
       const selected = selectedKeys();
       if (checkbox.checked) selected.add(key);
       else selected.delete(key);
@@ -638,6 +640,7 @@ function mountConversationsPage() {
     const c = state.conversations;
     if (c.loading || !state.key) return;
     const key = state.key;
+    const clearSeq = selectionClearSeq;
     const previous = preserveSelection
       ? { targets: { ...c.targets }, efforts: { ...c.efforts }, selected: Array.isArray(c.selected) ? c.selected.slice() : [] }
       : null;
@@ -652,6 +655,7 @@ function mountConversationsPage() {
       if (!Array.isArray(next?.conversations) || !Array.isArray(next?.models)) {
         throw new Error('无法读取 Kimi Work 会话。');
       }
+      const currentSelected = Array.isArray(c.selected) ? c.selected.slice() : [];
       c.list = next;
       c.stale = false;
       c.targets = {};
@@ -676,7 +680,10 @@ function mountConversationsPage() {
         const targetModel = next.models.find((model) => model && model.alias === targetAlias) || null;
         if (effortChoices(targetModel).values.includes(effort)) c.efforts[conversationKey] = effort;
       }
-      if (previous) c.selected = previous.selected.filter((conversationKey) => conversationKeys.has(conversationKey));
+      if (previous) {
+        const sourceSelected = clearSeq === selectionClearSeq ? previous.selected : currentSelected;
+        c.selected = sourceSelected.filter((conversationKey) => conversationKeys.has(conversationKey));
+      }
       /* 批量模型无论是否保留选择都要校验：模型被删后旧别名不能写回状态。 */
       if (c.batchModel && !aliases.has(c.batchModel)) {
         c.batchModel = '';
@@ -840,11 +847,17 @@ function mountConversationsPage() {
     state.conversations.batchEffort = ui.batchEffort.value;
   });
   if (ui.batchClear) ui.batchClear.addEventListener('click', () => {
+    selectionClearSeq += 1;
     state.conversations.selected = [];
     if (ui.list && typeof ui.list.querySelectorAll === 'function') {
       for (const box of ui.list.querySelectorAll('[data-conv-select]')) {
         if (box) box.checked = false;
       }
+    }
+    const confirm = state.conversations.confirm;
+    if (confirm && !confirm.migration && !confirm.migrate) {
+      hideConfirm();
+      return;
     }
     syncBatchState();
   });

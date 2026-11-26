@@ -2564,7 +2564,7 @@ function buildConnectionRow(row, index) {
     const confirmText = document.createElement('p');
     confirmText.className = 'inline-confirm__text';
     confirmText.textContent = count > 0
-      ? '移除「' + label + '」将一并移除旗下 ' + count + ' 个模型（若子代理引用了这些模型会自动切回跟随主会话）。确认移除？'
+      ? '将一并移除「' + label + '」及旗下 ' + count + ' 个模型，并自动清理指向它们的备用路由与子代理引用。确认移除？'
       : '确认移除服务商「' + label + '」？';
     const confirmActions = document.createElement('div');
     confirmActions.className = 'inline-confirm__actions';
@@ -2814,7 +2814,10 @@ async function confirmConnectionDelete(id) {
       await loadState({ silent: true });
       if (!current()) return false;
     }
-    const removedModels = Number(res?.removed?.models ?? res?.removed?.modelCount ?? 0);
+    const rawRemovedModels = Array.isArray(res?.removed?.models)
+      ? res.removed.models.length
+      : Number(res?.removed?.modelCount ?? res?.removed?.models ?? 0);
+    const removedModels = Number.isFinite(rawRemovedModels) ? rawRemovedModels : 0;
     showToast(removedModels > 0
       ? '已移除服务商及旗下 ' + fmtCount(removedModels) + ' 个模型，后台将自动同步到 Kimi Work。'
       : '已移除服务商，后台将自动同步到 Kimi Work。', 'ok');
@@ -2846,6 +2849,7 @@ function resetConnPickerState(seq = (state.connPicker?.seq || 0) + 1) {
     query: '',
     models: [],
     selectedIds: [],
+    baseSavedIds: [],
     error: '',
     sourceNote: '',
     seq,
@@ -2924,21 +2928,58 @@ function buildConnectionPickerListItems(cp, savedUpstreamSet) {
   return { nodes, visible };
 }
 
-function syncConnectionPickerDom() {
+function syncConnectionPickerDom({ selectionOnly = false } = {}) {
   const cp = state.connPicker;
   if (!cp || !cp.connectionId || !dom.connsList || typeof dom.connsList.querySelector !== 'function') return;
   const host = dom.connsList.querySelector(`[data-conn-picker="${cp.connectionId}"]`);
   if (!host) return;
-  const savedSet = new Set(((state.data && state.data.models) || [])
-    .filter((m) => m && m.connectionId === cp.connectionId)
-    .map((m) => m.upstreamModelId || m.id));
   const listEl = host.querySelector('[data-conn-picker-list]');
   const emptyEl = host.querySelector('[data-conn-picker-empty]');
   const countEl = host.querySelector('[data-conn-picker-count]');
   const selectAllBtn = host.querySelector('[data-conn-picker-select-all]');
   const saveBtn = host.querySelector('[data-conn-picker-save]');
-  const { nodes, visible } = buildConnectionPickerListItems(cp, savedSet);
-  if (listEl) listEl.replaceChildren(...nodes);
+  const selectedSet = new Set(cp.selectedIds || []);
+  let visible;
+  if (selectionOnly) {
+    visible = filteredConnectionPickerModels(cp);
+    if (listEl && typeof listEl.querySelectorAll === 'function') {
+      for (const box of listEl.querySelectorAll('[data-conn-picker-item]')) {
+        if (!box || !box.dataset) continue;
+        const uid = box.dataset.connPickerItem;
+        const nextChecked = selectedSet.has(uid);
+        if (box.checked !== nextChecked) box.checked = nextChecked;
+        box.disabled = cp.saving === true;
+      }
+    }
+  } else {
+    const savedSet = new Set(((state.data && state.data.models) || [])
+      .filter((m) => m && m.connectionId === cp.connectionId)
+      .map((m) => m.upstreamModelId || m.id));
+    visible = filteredConnectionPickerModels(cp);
+    const listSignature = JSON.stringify([
+      cp.saving === true,
+      visible.map((row) => {
+        const uid = row.upstreamModelId || row.id;
+        return [uid, savedSet.has(uid), connPickerRowMeta(row)];
+      }),
+    ]);
+    if (listEl && listEl.dataset && listEl.dataset.listSignature === listSignature) {
+      if (typeof listEl.querySelectorAll === 'function') {
+        for (const box of listEl.querySelectorAll('[data-conn-picker-item]')) {
+          if (!box || !box.dataset) continue;
+          const uid = box.dataset.connPickerItem;
+          const nextChecked = selectedSet.has(uid);
+          if (box.checked !== nextChecked) box.checked = nextChecked;
+          box.disabled = cp.saving === true;
+        }
+      }
+    } else if (listEl) {
+      const built = buildConnectionPickerListItems(cp, savedSet);
+      visible = built.visible;
+      listEl.replaceChildren(...built.nodes);
+      if (listEl.dataset) listEl.dataset.listSignature = listSignature;
+    }
+  }
   if (emptyEl) emptyEl.hidden = cp.loading || !cp.models.length || visible.length > 0;
   const selectedCount = (cp.selectedIds || []).length;
   if (countEl) {
@@ -2948,7 +2989,6 @@ function syncConnectionPickerDom() {
         + (cp.query ? '（匹配 ' + fmtCount(visible.length) + '）' : '');
   }
   if (selectAllBtn) {
-    const selectedSet = new Set(cp.selectedIds || []);
     const allVisible = visible.length > 0 && visible.every((row) => selectedSet.has(row.upstreamModelId || row.id));
     selectAllBtn.disabled = cp.loading || cp.saving || visible.length === 0;
     selectAllBtn.setAttribute('aria-pressed', String(allVisible));
@@ -3033,6 +3073,13 @@ function buildConnectionPickerPanel(row) {
   list.className = 'conn-picker__list';
   list.dataset.connPickerList = row.id;
   const { nodes, visible } = buildConnectionPickerListItems(cp, savedSet);
+  list.dataset.listSignature = JSON.stringify([
+    cp.saving === true,
+    visible.map((entry) => {
+      const uid = entry.upstreamModelId || entry.id;
+      return [uid, savedSet.has(uid), connPickerRowMeta(entry)];
+    }),
+  ]);
   list.append(...nodes);
   panel.append(list);
 
@@ -3126,10 +3173,16 @@ async function fetchConnectionPickerModels(id, seq, connRow) {
         body: { revision: state.data?.revision, connectionId: id },
       });
       if (!alive()) return;
-      if (discRes && Array.isArray(discRes.models) && discRes.models.length) {
-        rawModels = discRes.models;
+      const disc = discRes && typeof discRes.discovery === 'object' ? discRes.discovery : null;
+      const discModels = Array.isArray(disc?.models)
+        ? disc.models
+        : (Array.isArray(discRes?.models) ? discRes.models : []);
+      if (discModels.length) {
+        rawModels = discModels;
         fetchError = '';
         sourceNote = '已通过目录探测拉取 ' + fmtCount(rawModels.length) + ' 个模型。';
+      } else if (disc?.state && disc.state !== 'ok') {
+        fetchError = discoveryReasonText(disc.reason) || fetchError || '无法拉取远端模型列表。';
       }
     } catch (error) {
       if (!alive()) return;
@@ -3146,6 +3199,17 @@ async function fetchConnectionPickerModels(id, seq, connRow) {
   const seen = new Set();
 
   const savedForConn = ((state.data && state.data.models) || []).filter((m) => m && m.connectionId === id);
+  const latestSavedIds = Array.from(new Set(
+    savedForConn.map((m) => m.upstreamModelId || m.id).filter(Boolean),
+  ));
+  const prevBaseSet = new Set(Array.isArray(state.connPicker.baseSavedIds) ? state.connPicker.baseSavedIds : []);
+  const nextSelected = new Set(state.connPicker.selectedIds || []);
+  for (const uid of latestSavedIds) {
+    if (!prevBaseSet.has(uid)) nextSelected.add(uid);
+  }
+  state.connPicker.baseSavedIds = latestSavedIds;
+  state.connPicker.selectedIds = Array.from(nextSelected);
+
   const remoteEnriched = [];
   for (const item of rawModels) {
     const uid = item && (item.id || item.upstreamModelId);
@@ -3178,9 +3242,11 @@ function openConnectionModelPicker(id) {
   const connRow = findConnectionRow(id);
   if (!connRow) return;
   state.connDeleteId = null;
-  const savedIds = ((data.models || []).filter((m) => m && m.connectionId === id))
-    .map((m) => m.upstreamModelId || m.id)
-    .filter(Boolean);
+  const savedIds = Array.from(new Set(
+    ((data.models || []).filter((m) => m && m.connectionId === id))
+      .map((m) => m.upstreamModelId || m.id)
+      .filter(Boolean),
+  ));
   const seq = (state.connPicker?.seq || 0) + 1;
   state.connPicker = {
     connectionId: id,
@@ -3188,7 +3254,8 @@ function openConnectionModelPicker(id) {
     saving: false,
     query: '',
     models: [],
-    selectedIds: Array.from(new Set(savedIds)),
+    selectedIds: savedIds.slice(),
+    baseSavedIds: savedIds.slice(),
     error: '',
     sourceNote: '正在拉取远端模型列表…',
     seq,
@@ -3212,6 +3279,18 @@ function reloadConnectionModelPicker(id) {
   if (!cp || cp.connectionId !== id || cp.loading || cp.saving) return;
   const connRow = findConnectionRow(id);
   if (!connRow) return;
+  const latestSavedIds = Array.from(new Set(
+    (((state.data && state.data.models) || []).filter((m) => m && m.connectionId === id))
+      .map((m) => m.upstreamModelId || m.id)
+      .filter(Boolean),
+  ));
+  const prevBaseSet = new Set(Array.isArray(cp.baseSavedIds) ? cp.baseSavedIds : []);
+  const nextSelected = new Set(cp.selectedIds || []);
+  for (const uid of latestSavedIds) {
+    if (!prevBaseSet.has(uid)) nextSelected.add(uid);
+  }
+  cp.baseSavedIds = latestSavedIds;
+  cp.selectedIds = Array.from(nextSelected);
   const seq = (cp.seq || 0) + 1;
   cp.seq = seq;
   cp.loading = true;
@@ -3234,7 +3313,7 @@ function toggleConnectionPickerItem(upstreamId, checked) {
   if (checked) set.add(upstreamId);
   else set.delete(upstreamId);
   cp.selectedIds = Array.from(set);
-  syncConnectionPickerDom();
+  syncConnectionPickerDom({ selectionOnly: true });
 }
 
 function toggleConnectionPickerSelectAll() {
@@ -3250,7 +3329,7 @@ function toggleConnectionPickerSelectAll() {
     else set.add(uid);
   }
   cp.selectedIds = Array.from(set);
-  syncConnectionPickerDom();
+  syncConnectionPickerDom({ selectionOnly: true });
 }
 
 async function saveConnectionModelPicker() {
@@ -3265,12 +3344,13 @@ async function saveConnectionModelPicker() {
   const otherModels = existing.filter((m) => m && m.connectionId !== id);
   const savedForConn = existing.filter((m) => m && m.connectionId === id);
   const selectedSet = new Set(cp.selectedIds || []);
+  const baseSavedSet = new Set(Array.isArray(cp.baseSavedIds) ? cp.baseSavedIds : []);
 
   const keptModels = [];
   const keptUpstreams = new Set();
   for (const saved of savedForConn) {
     const uid = saved.upstreamModelId || saved.id;
-    if (selectedSet.has(uid)) {
+    if (selectedSet.has(uid) || !baseSavedSet.has(uid)) {
       keptModels.push(saved);
       keptUpstreams.add(uid);
     }

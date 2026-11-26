@@ -866,15 +866,15 @@ function renderOverviewSubagents(data) {
 
   if (mode === 'inherit') {
     setText(dom.overviewSubagentsValue, POLICY_MODE_WORD.inherit || '继承主模型');
-    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可在「模型」页底部按角色分配模型。');
+    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可在「模型」→「子代理角色」按角色分配模型。');
     return;
   }
   if (mode === 'force') {
     const model = configured.model ? catalogModelLabel(data, configured.model) : '已指定';
     setText(dom.overviewSubagentsValue, '固定 · ' + model);
     setText(dom.overviewSubagentsNote, runtimeState === 'file-applied' || runtimeState === 'loaded'
-      ? '已写入 Kimi Work config.toml，新建会话生效。'
-      : '目标已保存，待确认写入 Kimi Work 配置。');
+      ? '已同步至 Kimi Work 配置，新建会话生效。'
+      : '目标已保存，待同步至 Kimi Work 配置。');
     return;
   }
   const poolCount = Array.isArray(configured.models) ? configured.models.length : 0;
@@ -884,7 +884,7 @@ function renderOverviewSubagents(data) {
   const parts = [];
   if (configured.model) parts.push('默认 ' + catalogModelLabel(data, configured.model));
   if (assigned.length) parts.push('角色 ' + assigned.join('/'));
-  parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已写入 config.toml' : '待写入配置');
+  parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已同步至 Kimi Work' : '待同步配置');
   setText(dom.overviewSubagentsNote, parts.join(' · '));
 }
 

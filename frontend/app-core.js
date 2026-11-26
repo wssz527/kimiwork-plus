@@ -857,7 +857,7 @@ const state = {
   conns: { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] },
   connDeleteId: null,
   connDeletingId: null,
-  connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0 },
+  connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], baseSavedIds: [], error: '', sourceNote: '', seq: 0 },
   connChecks: {},
   connUpstreamProtocols: {},
   picker: { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,

@@ -3448,6 +3448,14 @@ test('subagent options, saved summaries and pool rows use names while preserving
   renderOverview({ models, subagents: { configured: { mode: 'force', model: models[0].id }, policy: {}, runtime: { state: 'file-applied' } } });
   assert.equal(overviewDom.overviewSubagentsValue.textContent, '固定 · DeepSeek V4');
   assert.doesNotMatch(overviewDom.overviewSubagentsValue.textContent, /magpie\//);
+  assert.doesNotMatch(overviewDom.overviewSubagentsNote.textContent, /config\.toml|模型页底部/);
+
+  renderOverview({ models, subagents: { configured: { mode: 'inherit' }, policy: {}, runtime: {} } });
+  assert.match(overviewDom.overviewSubagentsNote.textContent, /「模型」→「子代理角色」/);
+  assert.doesNotMatch(overviewDom.overviewSubagentsNote.textContent, /config\.toml|模型页底部/);
+
+  renderOverview({ models, subagents: { configured: { mode: 'pool', model: models[0].id, models: [models[0].id], roles: { coder: models[0].id } }, policy: {}, runtime: { state: 'file-applied' } } });
+  assert.doesNotMatch(overviewDom.overviewSubagentsNote.textContent, /config\.toml|模型页底部/);
 });
 
 test('direct mode keeps budget reminders out of the overview issue card', () => {
@@ -7226,7 +7234,7 @@ test('inline connection delete shows model-count confirmation and calls POST /ap
       requests.push({ path, method: options.method, body: options.body });
       return {
         ok: true,
-        removed: { models: 2 },
+        removed: { models: ['conn-a/chat/m1', 'conn-a/chat/m2'] },
         state: {
           revision: 'rev-11',
           configuration: { state: 'ready' },
@@ -7249,7 +7257,7 @@ test('inline connection delete shows model-count confirmation and calls POST /ap
   api.requestConnectionDelete('conn-a');
   assert.equal(state.connPicker.connectionId, null, 'requesting delete closes the same provider model picker');
   const cascadeRow = api.buildConnectionRow(state.conns.draft[0], 0);
-  assert.match(textOf(cascadeRow), /移除「DeepSeek 官方」将一并移除旗下 2 个模型（若子代理引用了这些模型会自动切回跟随主会话）。确认移除？/);
+  assert.match(textOf(cascadeRow), /将一并移除「DeepSeek 官方」及旗下 2 个模型，并自动清理指向它们的备用路由与子代理引用。确认移除？/);
   assert.match(textOf(cascadeRow), /一并移除/);
 
   const ok = await api.confirmConnectionDelete('conn-a');
@@ -7263,6 +7271,7 @@ test('inline connection delete shows model-count confirmation and calls POST /ap
   assert.equal(state.conns.editing, null);
   assert.equal(state.connDeleteId, null);
   assert.equal(toasts.at(-1)[1], 'ok');
+  assert.match(toasts.at(-1)[0], /旗下 2 个模型/);
 });
 
 test('inline provider model picker preserves existing models, applies defaults, sends pruneSubagents, and recovers on failure', async () => {
@@ -7571,15 +7580,16 @@ test('onboard wizard collapses by default when providers exist and resets to bla
   assert.equal(dom.onboardModelQuery.value, '');
 });
 
-test('inline provider model picker falls back to POST /api/discovery when probe returns no catalog', async () => {
+test('inline provider model picker falls back to POST /api/discovery with nested discovery payload and surfaces discovery failure reason', async () => {
   const requests = [];
+  let discoveryResponse = { discovery: { state: 'ok', models: [{ id: 'fallback-model' }] } };
   const state = {
     key: 'session',
     stateReadEpoch: 1,
     providers: { presets: [] },
     connDeleteId: null,
     connUpstreamProtocols: {},
-    connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], error: '', sourceNote: '', seq: 0 },
+    connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], baseSavedIds: [], error: '', sourceNote: '', seq: 0 },
     conns: { draft: [{ id: 'conn-a', name: 'A', baseURL: 'https://a.example/v1', protocols: ['chat'], apiKeySet: true, legacy: false }] },
     data: {
       revision: 'rev-30',
@@ -7590,7 +7600,8 @@ test('inline provider model picker falls back to POST /api/discovery when probe 
   const catalogHintConst = source.slice(source.indexOf('const CATALOG_MODEL_HINTS ='), source.indexOf('function matchCatalogHint'));
   const open = new Function('state', 'request', `
     const API = { connectionsProbe: '/api/connections/probe', discovery: '/api/discovery' };
-    const UPSTREAM_REASON = {}; const DIAG_REASON = {}; const DISCOVERY_REASON = {};
+    const UPSTREAM_REASON = {}; const DIAG_REASON = {};
+    const DISCOVERY_REASON = { upstream_timeout: '上游目录响应超时，请稍后重试。' };
     const fmtCount = n => String(n);
     const renderConnections = () => {};
     const connectionRowsOf = d => d?.connections?.saved || [];
@@ -7621,7 +7632,7 @@ test('inline provider model picker falls back to POST /api/discovery when probe 
   `)(state, async (path, options) => {
     requests.push({ path, body: options.body });
     if (path === '/api/connections/probe') return { ok: true, catalog: { models: [] } };
-    if (path === '/api/discovery') return { models: [{ id: 'fallback-model' }] };
+    if (path === '/api/discovery') return discoveryResponse;
     return {};
   });
 
@@ -7630,5 +7641,242 @@ test('inline provider model picker falls back to POST /api/discovery when probe 
   assert.deepEqual(requests.map((r) => r.path), ['/api/connections/probe', '/api/discovery']);
   assert.deepEqual(requests[1].body, { revision: 'rev-30', connectionId: 'conn-a' });
   assert.deepEqual(state.connPicker.models.map((m) => m.upstreamModelId), ['fallback-model']);
+  assert.equal(state.connPicker.error, '');
   assert.equal(state.connPicker.loading, false);
+
+  discoveryResponse = { discovery: { state: 'failed', reason: 'upstream_timeout', models: [] } };
+  open('conn-a');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(state.connPicker.models, []);
+  assert.equal(state.connPicker.error, '上游目录响应超时，请稍后重试。');
+  assert.equal(state.connPicker.loading, false);
+});
+
+test('inline provider model picker preserves concurrently added models and keeps baseline across reload', async () => {
+  const requests = [];
+  const savedA = { id: 'conn-a/chat/m-keep', connectionId: 'conn-a', upstreamModelId: 'm-keep', protocol: 'chat', contextWindow: 65536, tools: true };
+  const savedB = { id: 'conn-a/chat/m-drop', connectionId: 'conn-a', upstreamModelId: 'm-drop', protocol: 'chat', contextWindow: 65536, tools: true };
+  const addedAfterOpen = { id: 'conn-a/chat/m-concurrent', connectionId: 'conn-a', upstreamModelId: 'm-concurrent', protocol: 'chat', contextWindow: 131072, tools: true };
+  const addedBeforeReload = { id: 'conn-a/chat/m-reloaded', connectionId: 'conn-a', upstreamModelId: 'm-reloaded', protocol: 'chat', contextWindow: 131072, tools: true };
+  const state = {
+    key: 'session',
+    stateReadEpoch: 1,
+    providers: { presets: [] },
+    connDeleteId: null,
+    connUpstreamProtocols: {},
+    connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], baseSavedIds: [], error: '', sourceNote: '', seq: 0 },
+    conns: { draft: [{ id: 'conn-a', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true, legacy: false }] },
+    data: {
+      revision: 'rev-40',
+      configuration: { state: 'ready' },
+      connections: { saved: [{ id: 'conn-a', name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', protocols: ['chat'], apiKeySet: true }] },
+      models: [savedA, savedB],
+    },
+  };
+  const catalogHintConst = source.slice(source.indexOf('const CATALOG_MODEL_HINTS ='), source.indexOf('function matchCatalogHint'));
+  const api = new Function('state', 'request', `
+    const API = { connectionsProbe: '/api/connections/probe', discovery: '/api/discovery', workspace: '/api/workspace' };
+    const UPSTREAM_REASON = {}; const DIAG_REASON = {}; const DISCOVERY_REASON = {};
+    const dom = { connsList: null };
+    const fmtCount = n => String(n); const fmtK = n => String(n);
+    const renderConnections = () => {}; const renderAll = () => {};
+    const loadState = async () => true;
+    const showToast = () => {};
+    const adoptState = next => { state.data = next; };
+    const connectionRowsOf = d => d?.connections?.saved || [];
+    const routeIdFor = (cid, uid, proto) => cid + '/' + proto + '/' + uid;
+    ${catalogHintConst}
+    ${sourceFunction('matchCatalogHint')}
+    ${sourceFunction('providerPreset')}
+    ${sourceFunction('isAnthropicPreset')}
+    ${sourceFunction('presetMetadataSource')}
+    ${sourceFunction('presetOnboardModels')}
+    ${sourceFunction('inferModelDefaults')}
+    ${sourceFunction('protocolList')}
+    ${sourceFunction('connectionProtocol')}
+    ${sourceFunction('connectionDraftRow')}
+    ${sourceFunction('connectionDraftFrom')}
+    ${sourceFunction('connectionsSignature')}
+    ${sourceFunction('savedConnectionsSignature')}
+    ${sourceFunction('connectionPayload')}
+    ${sourceFunction('draftConnection')}
+    ${sourceFunction('connectionDefaultUpstreamProtocol')}
+    ${sourceFunction('mergeOnboardPresetMetadata')}
+    ${sourceFunction('positiveInteger')}
+    ${sourceFunction('sourceURLOf')}
+    ${sourceFunction('onboardRowSource')}
+    ${sourceFunction('onboardRowFrom')}
+    ${sourceFunction('enrichProbeCatalogRow')}
+    ${sourceFunction('savedOnboardRow')}
+    ${sourceFunction('savedOnboardModelRow')}
+    ${sourceFunction('currentConnectionLimit')}
+    ${sourceFunction('buildOnboardRow')}
+    ${sourceFunction('upstreamReasonText')}
+    ${sourceFunction('discoveryReasonText')}
+    ${sourceFunction('formatApiErrorWithModels')}
+    ${sourceFunction('resetConnPickerState')}
+    ${sourceFunction('closeConnectionModelPicker')}
+    ${sourceFunction('filteredConnectionPickerModels')}
+    ${sourceFunction('syncConnectionPickerDom')}
+    ${sourceFunction('findConnectionRow')}
+    ${sourceFunction('fetchConnectionPickerModels')}
+    ${sourceFunction('openConnectionModelPicker')}
+    ${sourceFunction('reloadConnectionModelPicker')}
+    ${sourceFunction('toggleConnectionPickerItem')}
+    ${sourceFunction('saveConnectionModelPicker')}
+    return { openConnectionModelPicker, reloadConnectionModelPicker, toggleConnectionPickerItem, saveConnectionModelPicker };
+  `)(state, async (path, options) => {
+    requests.push({ path, body: options.body });
+    if (path === '/api/connections/probe') return { ok: true, connectionProtocol: 'chat', catalog: { models: [{ id: 'm-keep' }, { id: 'm-drop' }] } };
+    if (path === '/api/workspace') return { state: { ...state.data, revision: 'rev-41', models: options.body.models } };
+    return {};
+  });
+
+  api.openConnectionModelPicker('conn-a');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(state.connPicker.baseSavedIds.slice().sort(), ['m-drop', 'm-keep']);
+
+  api.toggleConnectionPickerItem('m-drop', false);
+
+  state.data = { ...state.data, models: [...state.data.models, addedBeforeReload] };
+  api.reloadConnectionModelPicker('conn-a');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(state.connPicker.selectedIds.includes('m-drop'), false, 'reload preserves user uncheck of baseline model');
+  assert.equal(state.connPicker.selectedIds.includes('m-reloaded'), true, 'reload auto-selects newly saved model');
+  assert.equal(state.connPicker.baseSavedIds.includes('m-reloaded'), true, 'reload adds newly saved model to baseline');
+
+  state.data = { ...state.data, models: [...state.data.models, addedAfterOpen] };
+  const ok = await api.saveConnectionModelPicker();
+  assert.equal(ok, true);
+  const ws = requests.filter((r) => r.path === '/api/workspace').at(-1);
+  const savedIds = ws.body.models.map((m) => m.upstreamModelId).sort();
+  assert.deepEqual(savedIds, ['m-concurrent', 'm-keep', 'm-reloaded'], 'concurrently added model outside baseSavedIds is preserved while unchecked baseline model is removed');
+});
+
+test('inline provider model picker updates checkboxes in place without replacing list DOM on toggle or select-all', () => {
+  let replaceCount = 0;
+  const boxes = [
+    { dataset: { connPickerItem: 'm-1' }, checked: true, disabled: false },
+    { dataset: { connPickerItem: 'm-2' }, checked: false, disabled: false },
+  ];
+  const listEl = {
+    dataset: { listSignature: 'initial' },
+    querySelectorAll(sel) {
+      return sel === '[data-conn-picker-item]' ? boxes : [];
+    },
+    replaceChildren() {
+      replaceCount += 1;
+    },
+  };
+  const countEl = { textContent: '' };
+  const emptyEl = { hidden: false };
+  const selectAllBtn = { disabled: false, textContent: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+  const saveBtn = { disabled: false, textContent: '' };
+  const host = {
+    querySelector(sel) {
+      if (sel === '[data-conn-picker-list]') return listEl;
+      if (sel === '[data-conn-picker-empty]') return emptyEl;
+      if (sel === '[data-conn-picker-count]') return countEl;
+      if (sel === '[data-conn-picker-select-all]') return selectAllBtn;
+      if (sel === '[data-conn-picker-save]') return saveBtn;
+      return null;
+    },
+  };
+  const dom = {
+    connsList: {
+      querySelector(sel) {
+        return sel === '[data-conn-picker="conn-a"]' ? host : null;
+      },
+    },
+  };
+  const state = {
+    data: { models: [{ id: 'conn-a/chat/m-1', connectionId: 'conn-a', upstreamModelId: 'm-1' }] },
+    connPicker: {
+      connectionId: 'conn-a',
+      loading: false,
+      saving: false,
+      query: '',
+      models: [{ upstreamModelId: 'm-1' }, { upstreamModelId: 'm-2' }],
+      selectedIds: ['m-1'],
+      baseSavedIds: ['m-1'],
+    },
+  };
+  const api = new Function('state', 'dom', `
+    const fmtCount = n => String(n);
+    const fmtK = n => String(n);
+    ${sourceFunction('connPickerRowMeta')}
+    ${sourceFunction('filteredConnectionPickerModels')}
+    ${sourceFunction('syncConnectionPickerDom')}
+    ${sourceFunction('toggleConnectionPickerItem')}
+    ${sourceFunction('toggleConnectionPickerSelectAll')}
+    return { toggleConnectionPickerItem, toggleConnectionPickerSelectAll };
+  `)(state, dom);
+
+  api.toggleConnectionPickerItem('m-2', true);
+  assert.equal(replaceCount, 0, 'single item toggle never rebuilds list children');
+  assert.equal(boxes[0].checked, true);
+  assert.equal(boxes[1].checked, true);
+  assert.equal(countEl.textContent, '已选 2 / 共 2');
+  assert.equal(selectAllBtn.textContent, '取消全选筛选结果');
+  assert.equal(selectAllBtn.attrs['aria-pressed'], 'true');
+  assert.equal(saveBtn.disabled, false);
+
+  api.toggleConnectionPickerSelectAll();
+  assert.equal(replaceCount, 0, 'select-all toggle never rebuilds list children');
+  assert.equal(boxes[0].checked, false);
+  assert.equal(boxes[1].checked, false);
+  assert.equal(countEl.textContent, '已选 0 / 共 2');
+  assert.equal(selectAllBtn.textContent, '全选筛选结果');
+  assert.equal(selectAllBtn.attrs['aria-pressed'], 'false');
+});
+
+test('conversations batch clear blocks stale in-flight preserveSelection restore and dismisses pending batch confirm', async () => {
+  const env = makeConversationPageEnv({ kimiRunning: true });
+  await env.page.refresh();
+  const firstCheckbox = findNode(env.ui.list.children[0], (node) => node.dataset?.convSelect);
+  firstCheckbox.checked = true;
+  await firstCheckbox.fire('change');
+  assert.deepEqual(env.state.conversations.selected, ['recent']);
+
+  await env.ui.batchGo.fire('click');
+  assert.ok(env.state.conversations.confirm && !env.state.conversations.confirm.migrate, 'batch switch opens restart confirm when Kimi is running');
+  assert.equal(env.ui.confirm.hidden, false);
+
+  await env.ui.batchClear.fire('click');
+  assert.deepEqual(env.state.conversations.selected, []);
+  assert.equal(env.state.conversations.confirm, null, 'batch clear dismisses pending non-migration batch confirm');
+  assert.equal(env.ui.confirm.hidden, true);
+  assert.equal(env.ui.batch.hidden, true);
+
+  env.state.conversations.confirm = { migration: true };
+  env.ui.confirm.hidden = false;
+  firstCheckbox.checked = true;
+  await firstCheckbox.fire('change');
+  await env.ui.batchClear.fire('click');
+  assert.deepEqual(env.state.conversations.selected, []);
+  assert.deepEqual(env.state.conversations.confirm, { migration: true }, 'batch clear preserves active migration confirm');
+  assert.equal(env.ui.confirm.hidden, false);
+
+  let releaseLoad;
+  const rows = [
+    { conversationKey: 'recent', title: '重构网关路由', workspacePath: '/Users/dev/projects/kimiwork-plus', updatedAtMs: Date.now() - 120000, modelAlias: 'k2d8-preview', isByok: false },
+  ];
+  const models = [makeConversationModel()];
+  const deferredEnv = makeConversationPageEnv({ kimiRunning: false, models, conversations: rows });
+  await deferredEnv.page.refresh();
+  const box = findNode(deferredEnv.ui.list.children[0], (node) => node.dataset?.convSelect);
+  box.checked = true;
+  await box.fire('change');
+  assert.deepEqual(deferredEnv.state.conversations.selected, ['recent']);
+
+  deferredEnv.setList(new Promise((resolve) => {
+    releaseLoad = () => resolve({ conversations: rows, models, application: 'not_running', kimiRunning: false });
+  }));
+  const pendingRefresh = deferredEnv.page.refresh();
+  await deferredEnv.ui.batchClear.fire('click');
+  assert.deepEqual(deferredEnv.state.conversations.selected, []);
+  releaseLoad();
+  await pendingRefresh;
+  assert.deepEqual(deferredEnv.state.conversations.selected, [], 'in-flight refresh does not restore selection cleared during flight');
+  assert.equal(deferredEnv.ui.batch.hidden, true);
 });
