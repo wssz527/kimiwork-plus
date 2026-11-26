@@ -1425,8 +1425,17 @@ test('native search stays inside its single existing disclosure', () => {
       this.parent.children.splice(index, 0, child);
       child.parent = this.parent;
     },
+    insertBefore(child, reference) {
+      const index = this.children.indexOf(reference);
+      if (child.parent) child.parent.children.splice(child.parent.children.indexOf(child), 1);
+      child.parent = this;
+      if (index < 0) this.children.push(child);
+      else this.children.splice(index, 0, child);
+    },
   });
-  for (const id of ['view-tools', 'view-maintenance', 'native-search-details', 'native-search-settings', 'svc-panel', 'native-panel', 'update-panel', 'sa-diagnostics-body']) nodes[id] = makeNode(id);
+  for (const id of ['view-tools', 'view-maintenance', 'native-search-details', 'native-search-settings', 'svc-panel',
+    'native-panel', 'update-panel', 'sa-diagnostics-body', 'ob-advanced-toggle']) nodes[id] = makeNode(id);
+  nodes['view-maintenance'].append(nodes['ob-advanced-toggle']);
   nodes['native-search-settings'].append(nodes['svc-panel']);
   nodes['native-search-details'].append(nodes['native-search-settings']);
   nodes['view-tools'].append(nodes['native-search-details'], nodes['native-panel'], nodes['update-panel']);
@@ -2335,6 +2344,39 @@ test('the daily connection panels stay above the recovery toggles and run record
   assert.ok(order.indexOf('update-panel') < order.indexOf('overview-records'));
   assert.equal(order.filter(id => id === 'native-panel').length, 1);
   assert.ok(diagnostics.children.some(node => node.id === 'role-contract'));
+});
+
+test('the flattened maintenance page keeps native and update panels above diagnostics', () => {
+  const ids = ['native-panel', 'update-panel', 'diagnostics-details'];
+  const positions = ids.map((id) => htmlSource.indexOf(`id="${id}"`));
+  assert.ok(positions.every((position) => position >= 0), 'the real page must carry every maintenance panel');
+  assert.ok(htmlSource.indexOf('id="view-maintenance"') < positions[0]);
+  assert.equal(htmlSource.includes('id="ob-advanced-toggle"'), false, 'the legacy anchor is gone');
+  assert.ok(positions[0] < positions[1] && positions[1] < positions[2],
+    'the real page orders native and update before diagnostics');
+
+  /* 真实页面没有旧锚点：mountLegacy 不得再把面板挪到末尾（诊断区之后）。 */
+  const { makeNode, document } = makeDomTree();
+  const maintenance = makeNode('view-maintenance');
+  const nodes = ids.map((id) => makeNode(id, id === 'diagnostics-details' ? 'DETAILS' : 'SECTION'));
+  for (const node of nodes) maintenance.append(node);
+  const diagnosticsBody = makeNode('sa-diagnostics-body');
+  nodes[2].append(diagnosticsBody);
+
+  const code = [
+    'const $ = id => document.getElementById(id);',
+    growthFunction('relocate'),
+    growthFunction('mountLegacy'),
+    'return mountLegacy;',
+  ].join('\n');
+  const mount = new Function('document', code)(document);
+  mount();
+  mount();
+
+  assert.deepEqual(maintenance.children.map((node) => node.id),
+    ['native-panel', 'update-panel', 'diagnostics-details'],
+    'mountLegacy must leave the flat page order untouched when the legacy anchor is absent');
+  assert.ok(diagnosticsBody.children.some((node) => node.id === 'role-contract'));
 });
 
 function growingFunction(name) {

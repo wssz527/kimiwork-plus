@@ -58,8 +58,10 @@ function relocate(id, parent, beforeId) {
 
 function mountLegacy() {
   const maintenance = $('view-maintenance');
-  /* 新布局下接入与更新已在 settings-pane-connection 中；仅兼容旧版无分栏 DOM。 */
-  if (!$('settings-pane-connection')) {
+  /* 新布局下接入与更新已在 settings-pane-connection 中；仅兼容旧版无分栏 DOM。
+     扁平化后的页面没有 #ob-advanced-toggle 锚点，此时 relocate 会退化成追加到
+     末尾，把面板挤到诊断区之后；没有旧锚点就不该走这段兼容。 */
+  if (!$('settings-pane-connection') && $('ob-advanced-toggle')) {
     relocate('native-panel', maintenance, 'ob-advanced-toggle');
     relocate('update-panel', maintenance, 'ob-advanced-toggle');
   }
