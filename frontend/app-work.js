@@ -375,10 +375,10 @@ function renderSubagents() {
     setHidden(dom.saCapabilityNextRow, !missingCapable);
     setText(dom.saCapabilityNote, missingCapable
       ? (catalogue.length
-        ? '模型目录中的 ' + fmtCount(catalogue.length) + ' 个模型都没有声明支持工具调用（tools:true）；'
-          + '固定模型与模型池只列出这类模型。请到「模型」核实上游是否真的支持工具调用，'
+        ? '上方模型目录中的 ' + fmtCount(catalogue.length) + ' 个模型都没有声明支持工具调用（tools:true）；'
+          + '固定模型与模型池只列出这类模型。请在上方模型目录核实上游是否真的支持工具调用，'
           + '确认后再勾选「支持工具调用」，不要为了让它出现在这里而把纯文本模型标成工具模型。'
-        : '模型目录还是空的，固定模型与模型池没有可选模型。请先到「模型」添加或导入模型，'
+        : '模型目录还是空的，固定模型与模型池没有可选模型。请先在上方添加或导入模型，'
           + '并在上游确实声明工具调用时勾选「支持工具调用」。')
       : '');
   }

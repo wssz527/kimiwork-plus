@@ -1,4 +1,4 @@
-import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, clearKey, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
+import { $, API, ApiError, CONFIG_STATE, CONNECTION_ID_PATTERN, DIAG_REASON, DISCOVERY_REASON, LOOPBACK, UPSTREAM_REASON, actionUUID, catalogModelLabel, clearKey, dom, fmtCount, fmtK, fmtMs, fmtTokens, isInputActive, renderErrorList, request, scrollMainToElement, setConnErrors, setDot, setHidden, setText, shortRev, showGate, showToast, state, syncSelectOptions } from './app-core.js';
 import { closeEditor, connectionRowsOf, connectionsAvailable, connectionsChanged, editorDirty, routeIdFor } from './app-models.js';
 import { isInFlight, renderActions, renderOverviewStatus, syncState } from './app-overview.js';
 import { adoptState, clearOnboardSaveErrors, handleSaveFailure, loadState, renderAll, setView, stopPolling } from './app.js';
@@ -25,309 +25,145 @@ function connectionSource(data) {
   return connection.saved || connection.active || null;
 }
 
-const SVC_STATUS = {
-  inherit: { tone: 'neutral', word: '使用 Kimi 官方服务', note: '没有写入任何 services 表，搜索与抓取保持官方默认。' },
-  applied: { tone: 'ok', word: '已写入原生配置', note: '配置已写入；Kimi 内核监听该文件并热重载，新会话按新配置调用。' },
-  unchanged: { tone: 'ok', word: '与已保存一致', note: '磁盘上的值已等于保存的配置，本次没有写入文件。' },
-  repaired: { tone: 'warn', word: '已修复一次', note: '磁盘上的值被改动过，本次按保存的配置重写了一次。' },
-  restored: { tone: 'ok', word: '已还原', note: '该服务已还原为接管前的原始配置。' },
-  retained: { tone: 'warn', word: '保留他人改动', note: '磁盘上的值已被其他来源改写，未覆盖；所有权记录已清理。' },
-  overwritten: { tone: 'bad', word: '值已被改写', note: '磁盘上的值不再是保存的配置，等待下一次自动核对。' },
-  'reverted-by-daimon': { tone: 'warn', word: '被 Kimi 重新生成', note: 'Kimi 已把配置整体重写回官方值；本工具默认不再抢写，需要时重新保存即可。' },
-  'repair-suppressed': { tone: 'bad', word: '暂停修复', note: '短时间内反复被改写，已停止抢写以免形成写循环。' },
-  'pending-disable': { tone: 'warn', word: '待还原', note: '已关闭但仍检测到本工具写入的表，下一次核对会还原。' },
-  'waiting-config': { tone: 'warn', word: '等待原生配置', note: 'Kimi 的 config.toml 尚不存在；配置已保存，等它生成后自动写入。' },
-  'env-override': { tone: 'warn', word: '环境变量优先', note: '内核读取到 KIMI_WEB_* 环境变量，它优先于文件；文件写入不会生效。' },
-  conflict: { tone: 'bad', word: '冲突', note: '配置结构不受支持或所有权记录不一致，未写入任何内容。' },
-};
-
-const SVC_REASON = {
-  invalid_services: '提交的服务设置不被接受。',
-  invalid_service_endpoint: '端点必须是完整的 http(s) 地址，本机可用 http；不能带账号、查询参数或片段。',
-  invalid_service_key: '启用该服务时必须填写密钥；密钥不能有首尾空格或控制字符。',
-  receipt_unverified: '本工具的所有权记录已损坏或属于另一个配置，未写入。',
-  intent_unverified: '保存的搜索服务意图已损坏，未写入。',
-  concurrent_modification: '配置文件在你保存的同时被其他来源改写，本次未写入。',
-  write_raced: '写入后文件又被改写，本次结果未确认。',
-  repair_budget_exhausted: '短时间内多次被改写，已停止自动修复。',
-  foreign_value: '磁盘上的值来自其他来源，未覆盖。',
-  service_value_drifted: '磁盘上的值已不再是保存的配置。',
-  desktop_regenerated_services: 'Kimi 重新生成了原生配置。',
-  service_environment_override: '内核读到了 KIMI_WEB_* 环境变量，它优先于文件。',
-  config_missing: 'Kimi 的原生 config.toml 尚不存在。',
-  disable_not_applied: '关闭尚未写入文件。',
-  search_services_unavailable: '面板服务没有提供搜索服务接口。',
-  separator_unverified: '配置文件在表前的换行已不是本工具写入的那个，未改动任何一行以免粘连相邻内容。',
-  mixed_line_endings: '配置文件混用了不同换行风格，无法保证逐字节还原，未写入。',
-  unsupported_layout: '该 services 表的写法不受支持（内联表、点号键或数组表），未写入。',
-  unsupported_value: '该 services 表的值不是可识别的字符串，未写入。',
-  duplicate_table: '文件中已有重复的 services 表，未写入。',
-  duplicate_key: '该 services 表里有重复的键，未写入。',
-  unsupported_toml: '配置文件含无法安全解析的写法，未写入。',
-  config_symlink: '配置文件是符号链接，拒绝改写。',
-  config_not_file: '配置路径不是普通文件，拒绝改写。',
-  config_too_large: '配置文件超出允许大小，拒绝改写。',
-  path_symlink: 'Kimi 目录路径包含符号链接，拒绝改写。',
-  path_unavailable: '无法读取 Kimi 目录，未写入。',
-  path_not_directory: 'Kimi 路径不是目录，未写入。',
-  config_unavailable: '无法读取配置文件，未写入。',
-};
-
-function searchStateOf(data) {
-  const value = data && data.search;
-  return value && typeof value === 'object' && value.services && typeof value.services === 'object' ? value : null;
+function isAnthropicPreset(preset) {
+  if (!preset || typeof preset !== 'object') return false;
+  if (preset.upstreamProtocol === 'anthropic' || preset.protocol === 'anthropic') return true;
+  const id = String(preset.id || '').toLowerCase();
+  return id === 'anthropic' || id.startsWith('anthropic-');
 }
 
-function searchAvailable(data) {
-  return searchStateOf(data) !== null;
+function connectionDefaultUpstreamProtocol(connectionId) {
+  const id = String(connectionId || '').trim();
+  if (!id) return '';
+  if (state.connUpstreamProtocols && state.connUpstreamProtocols[id] === 'anthropic') return 'anthropic';
+  const conn = draftConnection(id);
+  if (conn) {
+    if (conn.upstreamProtocol === 'anthropic') return 'anthropic';
+    if (isAnthropicPreset(providerPreset(conn.providerPresetId))) return 'anthropic';
+  }
+  const existingModels = Array.isArray(state.data?.models) ? state.data.models : [];
+  const sameConn = existingModels.filter((m) => m && m.connectionId === id);
+  if (sameConn.length && sameConn.every((m) => m.upstreamProtocol === 'anthropic')) return 'anthropic';
+  return '';
 }
 
-function serviceRowOf(data, service) {
-  const search = searchStateOf(data);
-  const row = search && search.services ? search.services[service] : null;
-  return row && typeof row === 'object' ? row : null;
+function formatApiErrorWithModels(error, fallback) {
+  const base = (error && error.message) || fallback || '操作失败，请重试。';
+  const models = Array.isArray(error && error.models) ? error.models.filter(Boolean) : [];
+  if (!models.length) return base;
+  const labels = models.map((id) => catalogModelLabel(state.data, id));
+  const summary = labels.join('、');
+  if (base.includes(summary)) return base;
+  return base + '（占用模型：' + summary + '）';
 }
 
-function serviceDraftFrom(data) {
-  if (!searchAvailable(data)) return null;
-  return {
-    searchOn: serviceRowOf(data, 'search')?.enabled === true,
-    searchUrl: serviceRowOf(data, 'search')?.endpoint || '',
-    fetchOn: serviceRowOf(data, 'fetch')?.enabled === true,
-    fetchUrl: serviceRowOf(data, 'fetch')?.endpoint || '',
-  };
+function uniqueConnectionId(preset, existingRows, fallbackName = '') {
+  const taken = new Set((existingRows || []).filter((r) => r && !r.legacy && r.id).map((r) => r.id));
+  const seed = preset ? presetsSuggestedId(preset)
+    : presetsSuggestedId({ id: String(fallbackName || 'custom').trim() || 'custom' });
+  if (!taken.has(seed)) return seed;
+  for (let i = 2; i < 100; i++) {
+    const candidate = (seed.slice(0, 60) + '-' + i).slice(0, 64);
+    if (!taken.has(candidate)) return candidate;
+  }
+  return seed;
 }
 
-/* 密钥是只写的：草稿里保留用户本次输入的明文，但绝不从状态回填。 */
-function serviceSignature(draft) {
-  return draft ? JSON.stringify([draft.searchOn, draft.searchUrl, draft.fetchOn, draft.fetchUrl,
-    state.services.searchKey, state.services.fetchKey]) : '';
-}
-
-function servicesDirty() {
-  return serviceSignature(state.services.draft) !== state.services.base;
-}
-
-function validateServiceDraft(draft) {
-  const errors = [];
-  for (const [onKey, urlKey, label] of [['searchOn', 'searchUrl', '搜索'], ['fetchOn', 'fetchUrl', '抓取']]) {
-    if (!draft || !draft[onKey]) continue;
-    const raw = String(draft[urlKey] || '').trim();
-    if (!raw) { errors.push(label + '服务需要填写完整端点地址。'); continue; }
-    let parsed;
-    try { parsed = new URL(raw); } catch { errors.push(label + '服务的地址不是合法的 URL。'); continue; }
-    if (!['http:', 'https:'].includes(parsed.protocol)) errors.push(label + '服务只接受 http 或 https 地址。');
-    else if (parsed.username || parsed.password) errors.push(label + '服务的地址不能包含账号或密码。');
-    else if (parsed.search || parsed.hash) errors.push(label + '服务的地址不能带查询参数或片段。');
-    else if (parsed.protocol === 'http:' && !LOOPBACK.has(parsed.hostname)) {
-      errors.push(label + '服务用 http 时只能是本机地址；其他主机请用 https。');
+function matchCatalogHint(upstreamModelId) {
+  const raw = String(upstreamModelId || '').trim().toLowerCase();
+  if (!raw) return null;
+  const hints = Array.isArray(state.providers?.modelCatalogHints) ? state.providers.modelCatalogHints : [];
+  if (!hints.length) return null;
+  let bestPrefix = null;
+  let bestPrefixLen = -1;
+  for (const hint of hints) {
+    if (!hint || !Array.isArray(hint.patterns)) continue;
+    for (const rawPattern of hint.patterns) {
+      const pattern = String(rawPattern || '').trim().toLowerCase();
+      if (!pattern) continue;
+      if (pattern.endsWith('*')) {
+        const prefix = pattern.slice(0, -1);
+        if (prefix && raw.startsWith(prefix) && prefix.length > bestPrefixLen) {
+          bestPrefix = hint;
+          bestPrefixLen = prefix.length;
+        }
+      } else if (raw === pattern) {
+        return hint;
+      }
     }
   }
-  return { errors };
+  return bestPrefix;
 }
 
-/* 只有用户改过的服务才进载荷：省略即保持已保存意图，关闭时发 enabled:false。
-   apiKey 只在用户本次输入过时发送，避免空值把已存密钥清掉。 */
-function servicePayload(draft) {
-  const payload = {};
-  const row = (on, url, key) => {
-    if (!on) return { enabled: false };
-    const value = { enabled: true, baseURL: String(url || '').trim() };
-    if (typeof key === 'string' && key) value.apiKey = key;
-    return value;
-  };
-  const savedSearch = state.services.baseRow?.search;
-  const savedFetch = state.services.baseRow?.fetch;
-  const searchChanged = !savedSearch || savedSearch.enabled !== draft.searchOn
-    || (savedSearch.endpoint || '') !== String(draft.searchUrl || '').trim() || Boolean(state.services.searchKey);
-  const fetchChanged = !savedFetch || savedFetch.enabled !== draft.fetchOn
-    || (savedFetch.endpoint || '') !== String(draft.fetchUrl || '').trim() || Boolean(state.services.fetchKey);
-  if (searchChanged) payload.search = row(draft.searchOn, draft.searchUrl, state.services.searchKey);
-  if (fetchChanged) payload.fetch = row(draft.fetchOn, draft.fetchUrl, state.services.fetchKey);
-  return payload;
-}
-
-function evaluateServices(data) {
-  const search = searchStateOf(data);
-  if (!search) {
-    return { tone: 'neutral', word: '不可用', note: '面板服务没有提供搜索服务状态；搜索与抓取不受影响，仍走 Kimi 官方。', status: null };
-  }
-  const status = typeof search.status === 'string' ? search.status : 'inherit';
-  const info = SVC_STATUS[status] || { tone: 'neutral', word: status, note: '' };
-  const reason = typeof search.reason === 'string' && search.reason ? (SVC_REASON[search.reason] || search.reason) : '';
-  return { ...info, note: reason || info.note, status };
-}
-
-function serviceRowText(row) {
-  if (!row) return { word: '不可用', sub: '—' };
-  const state = SVC_STATUS[row.status] || { word: row.status || '未知' };
-  if (row.mode !== 'custom') return { word: state.word, sub: '未写入该服务表。' };
-  return { word: state.word, sub: (row.endpoint || '未提供端点') + (row.hasKey ? ' · 已保存密钥' : ' · 未保存密钥') };
-}
-
-function servicesObservedText(data, service) {
-  const row = serviceRowOf(data, service);
-  const observed = row && row.observed ? row.observed : null;
-  if (!observed || observed.present !== true) return '未观测到该 services 表。';
-  const bits = [observed.endpoint || '无 base_url'];
-  bits.push(observed.hasKey ? '有密钥' : '无密钥');
-  if (observed.oauth) bits.push('含 oauth 引用');
-  if (Number(observed.extraKeys) > 0) bits.push('另有 ' + observed.extraKeys + ' 个字段');
-  return bits.join(' · ');
-}
-
-function renderServices(data) {
-  if (!dom.svcPanel) return;
-  const available = searchAvailable(data);
-  setHidden(dom.svcUnavailable, available);
-  const savedDraft = serviceDraftFrom(data);
-  /* 轮询不得覆盖正在输入的内容：只有非脏状态才回填，密钥草稿永不回填。 */
-  if (available && (!state.services.dirty || !state.services.draft)) {
-    state.services.draft = savedDraft;
-    state.services.baseRow = {
-      search: serviceRowOf(data, 'search'),
-      fetch: serviceRowOf(data, 'fetch'),
+function inferModelDefaults(upstreamModelId, presetId = '') {
+  const id = String(upstreamModelId || '').trim();
+  const presetList = presetId ? presetOnboardModels(presetId) : [];
+  const lower = id.toLowerCase();
+  const presetMatch = presetList.find((item) => item && (item.upstreamModelId === id || item.id === id
+    || String(item.upstreamModelId || item.id || '').toLowerCase() === lower)) || null;
+  if (presetMatch) {
+    return {
+      source: 'preset',
+      name: presetMatch.name || '',
+      contextWindow: Number(presetMatch.contextWindow) > 0 ? Number(presetMatch.contextWindow) : 131072,
+      maxOutputTokens: Number(presetMatch.maxOutputTokens) > 0 ? Number(presetMatch.maxOutputTokens) : undefined,
+      tools: typeof presetMatch.tools === 'boolean' ? presetMatch.tools : true,
+      reasoning: typeof presetMatch.reasoning === 'boolean' ? presetMatch.reasoning : false,
+      inputModalities: Array.isArray(presetMatch.inputModalities) && presetMatch.inputModalities.length
+        ? presetMatch.inputModalities.slice() : ['text'],
+      reasoningEfforts: Array.isArray(presetMatch.reasoningEfforts) ? presetMatch.reasoningEfforts.slice() : [],
+      metadataSource: presetMetadataSource(presetMatch),
     };
-    state.services.base = serviceSignature(savedDraft);
-    state.services.dirty = false;
   }
-  const draft = state.services.draft;
-  if (!available || !draft) {
-    setText(dom.svcSave ? dom.svcSave : null, '保存搜索服务');
-    if (dom.svcSave) dom.svcSave.disabled = true;
-    if (dom.svcReset) dom.svcReset.disabled = true;
-    setDot(dom.svcVerdictDot, 'neutral');
-    setText(dom.svcVerdictWord, '不可用');
-    setText(dom.svcVerdictNote, '面板服务没有提供搜索服务接口。');
+  const hint = matchCatalogHint(id);
+  if (hint) {
+    return {
+      source: 'hint',
+      name: typeof hint.name === 'string' ? hint.name : '',
+      contextWindow: Number(hint.contextWindow) > 0 ? Number(hint.contextWindow) : 131072,
+      maxOutputTokens: Number(hint.maxOutputTokens) > 0 ? Number(hint.maxOutputTokens) : undefined,
+      tools: typeof hint.tools === 'boolean' ? hint.tools : true,
+      reasoning: typeof hint.reasoning === 'boolean' ? hint.reasoning : false,
+      inputModalities: Array.isArray(hint.inputModalities) && hint.inputModalities.length
+        ? hint.inputModalities.slice() : ['text'],
+      reasoningEfforts: Array.isArray(hint.reasoningEfforts) ? hint.reasoningEfforts.slice() : [],
+      metadataSource: { kind: 'manual' },
+    };
+  }
+  return {
+    source: 'default',
+    name: '',
+    contextWindow: 131072,
+    maxOutputTokens: undefined,
+    tools: true,
+    reasoning: false,
+    inputModalities: ['text'],
+    reasoningEfforts: [],
+    metadataSource: { kind: 'manual' },
+  };
+}
+
+function renderProbeNote(el, result) {
+  if (!el) return;
+  if (!result) {
+    setHidden(el, true);
+    delete el.dataset.tone;
+    setText(el, '');
     return;
   }
-  const dirty = servicesDirty();
-  state.services.dirty = dirty;
-  if (dom.svcSearchOn) dom.svcSearchOn.checked = draft.searchOn === true;
-  if (dom.svcFetchOn) dom.svcFetchOn.checked = draft.fetchOn === true;
-  if (dom.svcSearchUrl && !state.services.urlEditing?.search && !isInputActive(dom.svcSearchUrl) && dom.svcSearchUrl.value !== draft.searchUrl) {
-    dom.svcSearchUrl.value = draft.searchUrl;
+  el.dataset.tone = result.ok ? 'ok' : 'bad';
+  const parts = [];
+  if (result.message) parts.push(result.message);
+  else if (result.ok) {
+    const proto = result.upstreamProtocol === 'anthropic' ? 'Anthropic Messages'
+      : protocolLabel(result.connectionProtocol || result.detectedProtocol || '');
+    parts.push('连接测试通过' + (proto ? '（' + proto + (Number.isFinite(result.latencyMs) ? ' · ' + fmtMs(result.latencyMs) : '') + '）' : ''));
+  } else {
+    parts.push('连接测试未通过' + (result.reason ? '：' + (upstreamReasonText(result.reason) || result.reason) : ''));
   }
-  if (dom.svcFetchUrl && !state.services.urlEditing?.fetch && !isInputActive(dom.svcFetchUrl) && dom.svcFetchUrl.value !== draft.fetchUrl) {
-    dom.svcFetchUrl.value = draft.fetchUrl;
-  }
-  const config = data.configuration || {};
-  const blocked = config.state === 'unavailable';
-  if (dom.svcSearchUrl) dom.svcSearchUrl.disabled = draft.searchOn !== true || state.services.saving || blocked;
-  if (dom.svcSearchKey) dom.svcSearchKey.disabled = draft.searchOn !== true || state.services.saving || blocked;
-  if (dom.svcFetchUrl) dom.svcFetchUrl.disabled = draft.fetchOn !== true || state.services.saving || blocked;
-  if (dom.svcFetchKey) dom.svcFetchKey.disabled = draft.fetchOn !== true || state.services.saving || blocked;
-
-  const searchRow = serviceRowOf(data, 'search');
-  const fetchRow = serviceRowOf(data, 'fetch');
-  const searchText = serviceRowText(searchRow);
-  const fetchText = serviceRowText(fetchRow);
-  setText(dom.svcSearchSaved, searchText.word);
-  setText(dom.svcSearchSavedSub, searchText.sub + ' · 观测：' + servicesObservedText(data, 'search'));
-  setText(dom.svcFetchSaved, fetchText.word);
-  setText(dom.svcFetchSavedSub, fetchText.sub + ' · 观测：' + servicesObservedText(data, 'fetch'));
-  /* 已有密钥不回显：只提示「留空即沿用」，避免把密钥写进页面。 */
-  setText(dom.svcSearchKeyHint, searchRow?.hasKey
-    ? '已保存密钥；留空表示沿用，填写则替换。' : '该服务需要密钥；内核用它发送 Authorization: Bearer。');
-  if (dom.svcSearchKey && !state.services.searchKey && !isInputActive(dom.svcSearchKey)) dom.svcSearchKey.value = '';
-  if (dom.svcFetchKey && !state.services.fetchKey && !isInputActive(dom.svcFetchKey)) dom.svcFetchKey.value = '';
-
-  const verdict = evaluateServices(data);
-  setDot(dom.svcVerdictDot, verdict.tone);
-  setText(dom.svcVerdictWord, verdict.word);
-  setText(dom.svcVerdictNote, verdict.note);
-  if (dom.svcVerdict) dom.svcVerdict.dataset.status = verdict.status || '';
-
-  const { errors } = validateServiceDraft(draft);
-  const serverErrors = Array.isArray(state.services.serverErrors) ? state.services.serverErrors : [];
-  renderErrorList(dom.svcErrors, (errors.length ? errors : serverErrors).slice(0, 2));
-  if (dom.svcSave) {
-    dom.svcSave.disabled = !dirty || errors.length > 0 || state.services.saving || blocked;
-    setText(dom.svcSave, state.services.saving ? '正在保存…' : '保存搜索与抓取');
-  }
-  if (dom.svcReset) dom.svcReset.disabled = !dirty || state.services.saving;
-  if (dom.svcDraft) setText(dom.svcDraft, blocked ? '配置文件不可读，无法保存搜索服务'
-    : dirty ? '草稿尚未保存' : '草稿与已保存配置一致');
-}
-
-function readServiceForm() {
-  const draft = state.services.draft;
-  if (!draft) return;
-  if (dom.svcSearchOn) draft.searchOn = dom.svcSearchOn.checked;
-  if (dom.svcFetchOn) draft.fetchOn = dom.svcFetchOn.checked;
-  if (dom.svcSearchUrl) draft.searchUrl = dom.svcSearchUrl.value;
-  if (dom.svcFetchUrl) draft.fetchUrl = dom.svcFetchUrl.value;
-  if (dom.svcSearchKey) state.services.searchKey = dom.svcSearchKey.value;
-  if (dom.svcFetchKey) state.services.fetchKey = dom.svcFetchKey.value;
-  state.services.serverErrors = [];
-  state.services.dirty = servicesDirty();
-}
-
-function fillServiceForm() {
-  const draft = state.services.draft;
-  if (!draft) return;
-  if (dom.svcSearchOn) dom.svcSearchOn.checked = draft.searchOn === true;
-  if (dom.svcFetchOn) dom.svcFetchOn.checked = draft.fetchOn === true;
-  if (dom.svcSearchUrl) dom.svcSearchUrl.value = draft.searchUrl;
-  if (dom.svcFetchUrl) dom.svcFetchUrl.value = draft.fetchUrl;
-  if (dom.svcSearchKey) dom.svcSearchKey.value = state.services.searchKey;
-  if (dom.svcFetchKey) dom.svcFetchKey.value = state.services.fetchKey;
-}
-
-async function saveSearchServices() {
-  const data = state.data;
-  if (!data || state.services.saving || !searchAvailable(data)) return;
-  const draft = state.services.draft;
-  const { errors } = validateServiceDraft(draft);
-  renderErrorList(dom.svcErrors, errors);
-  if (errors.length) return;
-  const payload = servicePayload(draft);
-  if (!Object.keys(payload).length) {
-    showToast('搜索与抓取配置没有变化。', 'ok');
-    return;
-  }
-  state.services.saving = true;
-  state.services.serverErrors = [];
-  renderServices(data);
-  try {
-    const res = await request(API.context, { method: 'POST', body: { services: payload } });
-    const search = res && res.search;
-    if (search && typeof search === 'object' && search.services) {
-      state.data = { ...state.data, search };
-      state.services.saving = false;
-      state.services.searchKey = '';
-      state.services.fetchKey = '';
-      state.services.serverErrors = [];
-      state.services.baseRow = {
-        search: serviceRowOf(state.data, 'search'),
-        fetch: serviceRowOf(state.data, 'fetch'),
-      };
-      const next = serviceDraftFrom(state.data);
-      state.services.draft = next;
-      state.services.base = serviceSignature(next);
-      state.services.dirty = false;
-      fillServiceForm();
-      renderServices(state.data);
-      const verdict = evaluateServices(state.data);
-      const good = ['applied', 'unchanged', 'repaired', 'restored', 'inherit'].includes(verdict.status);
-      showToast(good ? '搜索服务：' + verdict.word + '。' : '搜索服务未完成：' + verdict.word + ' — ' + verdict.note,
-        good ? 'ok' : 'error');
-      return;
-    }
-    state.services.saving = false;
-    await loadState({ silent: true });
-    showToast('搜索服务已提交，状态已刷新。', 'ok');
-  } catch (error) {
-    state.services.saving = false;
-    if (error.status === 400) {
-      state.services.serverErrors = [error.message];
-      return;
-    }
-    await handleSaveFailure(error, 'services');
-  } finally {
-    state.services.saving = false;
-    if (state.data) renderServices(state.data);
-  }
+  if (!result.ok && result.detail && !parts[0].includes(result.detail)) parts.push(result.detail);
+  setText(el, parts.join(' '));
+  setHidden(el, false);
 }
 
 /* ---------- named connections ---------- */
@@ -502,24 +338,33 @@ function validateConnectionDraft(draft, rows, { originalId = null } = {}) {
 function openConnectionEditor(row) {
   const rows = state.conns.draft || [];
   state.composing = false;
+  const existingUpstream = row && !row.legacy ? connectionDefaultUpstreamProtocol(row.id) : '';
+  const singleProto = row ? connectionProtocol(row) : null;
+  const initialMode = row
+    ? (existingUpstream === 'anthropic' ? 'anthropic' : (singleProto || ''))
+    : 'auto';
   state.conns.editing = {
     originalId: row && !row.legacy ? row.id : null,
     baseRevision: state.conns.baseRevision ?? state.data?.revision ?? null,
     baseRow: row ? connectionDraftRow(row) : null,
-    draft: row ? { ...connectionDraftRow(row), apiKey: '', secretSet: row.apiKeySet === true }
-      : { id: '', name: '', providerPresetId: '', baseURL: '', apiKeyEnv: '', protocols: null,
+    draft: row ? { ...connectionDraftRow(row), apiKey: '', secretSet: row.apiKeySet === true, upstreamProtocol: existingUpstream }
+      : { id: '', name: '', providerPresetId: '', baseURL: '', apiKeyEnv: '', protocols: null, upstreamProtocol: '',
         legacy: false, modelCount: null, apiKeySet: false, credentialError: '', apiKey: '', secretSet: false },
+    protocolMode: initialMode,
+    probeResult: null,
     keyEdited: false,
     errors: [],
   };
+  if (dom.ceAdvanced) dom.ceAdvanced.open = !row || !row.providerPresetId;
   renderConnections();
   renderConnectionEditor({ force: true });
-  if (dom.ceName && dom.ceName.focus) dom.ceName.focus();
+  if (dom.cePreset && dom.cePreset.focus) dom.cePreset.focus();
 }
 
 function closeConnectionEditor() {
   state.composing = false;
   state.conns.editing = null;
+  renderProbeNote(dom.ceProbeResult, null);
   renderConnections();
 }
 
@@ -528,17 +373,32 @@ function readConnectionEditor() {
   if (!editing) return;
   editing.draft.name = dom.ceName ? dom.ceName.value : editing.draft.name;
   if (editing.originalId === null && dom.ceId) editing.draft.id = dom.ceId.value;
-  editing.draft.providerPresetId = dom.cePreset ? dom.cePreset.value : editing.draft.providerPresetId;
+  const rawPreset = dom.cePreset ? dom.cePreset.value : editing.draft.providerPresetId;
+  editing.draft.providerPresetId = rawPreset === 'custom' ? '' : rawPreset;
   editing.draft.baseURL = dom.ceBase ? dom.ceBase.value : editing.draft.baseURL;
   editing.draft.apiKey = dom.ceKey ? dom.ceKey.value : editing.draft.apiKey;
-  const protocols = [];
-  if (dom.ceChat && dom.ceChat.checked) protocols.push('chat');
-  if (dom.ceResponses && dom.ceResponses.checked) protocols.push('responses');
-  if (protocols.length) editing.draft.protocols = protocols;
-  /* 旧配置的多协议只读保留：用户只是在改名称或地址时，不能因为两个单选
-     都没选中就把「同时允许两种」悄悄改成「未选择」。 */
-  else if (!Array.isArray(editing.draft.protocols) || editing.draft.protocols.length < 2) {
-    editing.draft.protocols = [];
+  if (dom.ceAnthropic && dom.ceAnthropic.checked) {
+    editing.protocolMode = 'anthropic';
+    editing.draft.protocols = ['chat'];
+    editing.draft.upstreamProtocol = 'anthropic';
+  } else if (dom.ceChat && dom.ceChat.checked) {
+    editing.protocolMode = 'chat';
+    editing.draft.protocols = ['chat'];
+    editing.draft.upstreamProtocol = '';
+  } else if (dom.ceResponses && dom.ceResponses.checked) {
+    editing.protocolMode = 'responses';
+    editing.draft.protocols = ['responses'];
+    editing.draft.upstreamProtocol = '';
+  } else if (dom.ceProtoAuto && dom.ceProtoAuto.checked) {
+    editing.protocolMode = 'auto';
+    editing.draft.upstreamProtocol = '';
+  } else if (!Array.isArray(editing.draft.protocols) || editing.draft.protocols.length < 2) {
+    /* 旧配置的多协议或无协议只读保留：用户未触碰单选时保留原值以通过 keepsLegacy。 */
+    if (!editing.originalId) editing.draft.protocols = [];
+  }
+  if (editing.originalId === null && !String(editing.draft.id || '').trim() && String(editing.draft.name || '').trim()) {
+    editing.draft.id = uniqueConnectionId(providerPreset(editing.draft.providerPresetId), state.conns.draft || [], editing.draft.name);
+    if (dom.ceId && !isInputActive(dom.ceId)) dom.ceId.value = editing.draft.id;
   }
   if (editing.draft.apiKey) editing.draft.secretSet = true;
 }
@@ -566,6 +426,7 @@ function applyConnectionEditor() {
   const index = editing.originalId ? next.findIndex((row) => !row.legacy && row.id === editing.originalId) : -1;
   const stored = {
     ...value,
+    upstreamProtocol: editing.draft.upstreamProtocol === 'anthropic' ? 'anthropic' : '',
     modelCount: index >= 0 ? next[index].modelCount : 0,
     apiKeySet: index >= 0 ? next[index].apiKeySet : false,
     credentialError: value.apiKey ? '' : (index >= 0 ? (next[index].credentialError || '') : ''),
@@ -574,14 +435,20 @@ function applyConnectionEditor() {
   if (index >= 0) next[index] = stored;
   else next.push(stored);
   state.conns.draft = next;
+  if (!state.connUpstreamProtocols) state.connUpstreamProtocols = {};
+  if (stored.upstreamProtocol === 'anthropic') state.connUpstreamProtocols[stored.id] = 'anthropic';
+  else delete state.connUpstreamProtocols[stored.id];
   /* 同一页的向导与连接编辑器共用一个协议草稿：连接编辑器改了协议，
      向导里针对这条连接的协议选择也要跟着走。 */
   if (String(dom.onboardId?.value || '').trim() === stored.id) {
     const protocol = connectionProtocol(stored);
     state.onboard.protocol = protocol;
+    state.onboard.upstreamProtocol = stored.upstreamProtocol || '';
+    state.onboard.protocolMode = stored.upstreamProtocol === 'anthropic' ? 'anthropic' : (protocol || 'auto');
     state.onboard.protocolTouched = Boolean(protocol);
   }
   state.conns.editing = null;
+  renderProbeNote(dom.ceProbeResult, null);
   renderConnections();
   renderConnectionsDiff();
 }
@@ -589,32 +456,51 @@ function applyConnectionEditor() {
 /* 供应商预设只用来填地址与协议；字段可继续手改，不把预设当成不可推翻的事实。 */
 function applyProviderPreset(presetId) {
   const editing = state.conns.editing;
-  if (!editing || !presetId) return;
-  const preset = providerPreset(presetId);
-  if (!preset) return;
+  if (!editing) return;
+  editing.probeResult = null;
+  const normalizedId = presetId === 'custom' ? '' : presetId;
+  const preset = normalizedId ? providerPreset(normalizedId) : null;
+  if (!preset) {
+    editing.draft.providerPresetId = '';
+    if (dom.ceAdvanced) dom.ceAdvanced.open = true;
+    renderConnections();
+    renderConnectionEditor({ force: true });
+    return;
+  }
+  const previousPreset = providerPreset(editing.draft.providerPresetId);
   editing.draft.providerPresetId = preset.id;
   editing.draft.apiKey = '';
   editing.draft.secretSet = Boolean(editing.baseRow?.apiKeySet);
   editing.keyEdited = false;
   editing.draft.baseURL = typeof preset.baseURL === 'string' ? preset.baseURL : editing.draft.baseURL;
+  const anthropic = isAnthropicPreset(preset);
   const presetProtocols = protocolList(preset.protocols);
-  if (presetProtocols.length === 1) {
+  if (anthropic) {
+    editing.draft.protocols = [presetProtocols[0] || 'chat'];
+    editing.draft.upstreamProtocol = 'anthropic';
+    editing.protocolMode = 'anthropic';
+  } else if (presetProtocols.length === 1) {
     editing.draft.protocols = [presetProtocols[0]];
-  } else if (presetProtocols.length > 1) {
-    /* 多协议预设保留自己的元数据，但当前连接只能选一种：保留用户已经
-       选中的那个，没有选过就留空，绝不默认 Responses。 */
+    editing.draft.upstreamProtocol = '';
+    editing.protocolMode = presetProtocols[0];
+  } else {
+    editing.draft.upstreamProtocol = '';
     const current = connectionProtocol(editing.draft);
     editing.draft.protocols = current && presetProtocols.includes(current) ? [current] : [];
+    editing.protocolMode = editing.draft.protocols[0] || 'auto';
   }
-  if (!editing.draft.name) editing.draft.name = preset.name || '';
-  if (!editing.draft.id) editing.draft.id = presetsSuggestedId(preset);
+  const rows = state.conns.draft || [];
+  if (staleSuggested(editing.draft.name, [previousPreset?.name || ''])) editing.draft.name = preset.name || '';
+  if (editing.originalId === null && staleSuggested(editing.draft.id, [previousPreset ? presetsSuggestedId(previousPreset) : ''])) {
+    editing.draft.id = uniqueConnectionId(preset, rows, preset.name);
+  }
+  if (dom.ceAdvanced) dom.ceAdvanced.open = false;
   if (dom.ceBase) dom.ceBase.value = editing.draft.baseURL;
   if (dom.ceKey) dom.ceKey.value = '';
-  if (dom.ceChat) dom.ceChat.checked = connectionProtocol(editing.draft) === 'chat';
-  if (dom.ceResponses) dom.ceResponses.checked = connectionProtocol(editing.draft) === 'responses';
   if (dom.ceId && editing.originalId === null) dom.ceId.value = editing.draft.id;
   if (dom.ceName) dom.ceName.value = editing.draft.name;
   renderConnections();
+  renderConnectionEditor({ force: true });
 }
 
 function presetsSuggestedId(preset) {
@@ -769,13 +655,36 @@ function onboardBusy() {
 }
 
 function onboardConnectionValues() {
+  const rawPreset = String(dom.onboardPreset ? dom.onboardPreset.value : '');
+  const providerPresetId = rawPreset === 'custom' ? '' : rawPreset;
+  const preset = providerPreset(providerPresetId);
+  const baseURL = String(dom.onboardBase ? dom.onboardBase.value : '').trim();
+  const rawName = String(dom.onboardName ? dom.onboardName.value : '').trim();
+  const rawId = String(dom.onboardId ? dom.onboardId.value : '').trim();
+  const name = rawName || (preset ? (preset.name || preset.id || '') : '');
+  let id = rawId;
+  if (!id) {
+    const existingRows = state.conns?.draft || connectionRowsOf(state.data) || [];
+    if (preset) {
+      id = uniqueConnectionId(preset, existingRows, name);
+    } else if (name || baseURL) {
+      let hostSeed = '';
+      if (baseURL) {
+        try { hostSeed = new URL(baseURL).hostname; } catch { hostSeed = ''; }
+      }
+      const asciiName = name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+      id = uniqueConnectionId(null, existingRows, asciiName || hostSeed || 'custom');
+    }
+  }
   return {
-    id: String(dom.onboardId ? dom.onboardId.value : '').trim(),
-    name: String(dom.onboardName ? dom.onboardName.value : '').trim(),
-    baseURL: String(dom.onboardBase ? dom.onboardBase.value : '').trim(),
+    id,
+    name,
+    baseURL,
     apiKey: String(dom.onboardKey ? dom.onboardKey.value : ''),
-    providerPresetId: String(dom.onboardPreset ? dom.onboardPreset.value : ''),
+    providerPresetId,
     protocol: onboardProtocol(),
+    protocolMode: state.onboard?.protocolMode || onboardProtocol() || 'auto',
+    upstreamProtocol: state.onboard?.upstreamProtocol === 'anthropic' || isAnthropicPreset(preset) ? 'anthropic' : '',
   };
 }
 
@@ -788,25 +697,29 @@ function savedOnboardTarget() {
 
 function fillOnboardForm() {
   if (!dom.onboardId) return;
+  fillOnboardPresets();
   const target = savedOnboardTarget();
   if (target) {
-    if (!state.onboard.protocolTouched) state.onboard.protocol = connectionProtocol(target);
+    const upstream = connectionDefaultUpstreamProtocol(target.id);
+    if (!state.onboard.protocolTouched) {
+      const proto = connectionProtocol(target);
+      state.onboard.protocol = proto;
+      state.onboard.upstreamProtocol = upstream;
+      state.onboard.protocolMode = upstream === 'anthropic' ? 'anthropic' : (proto || 'auto');
+    }
     if (!isInputActive(dom.onboardId)) dom.onboardId.value = target.id || '';
     if (!isInputActive(dom.onboardName)) dom.onboardName.value = target.name || '';
     if (!isInputActive(dom.onboardBase)) dom.onboardBase.value = target.baseURL || '';
     if (dom.onboardPreset && target.providerPresetId && !isInputActive(dom.onboardPreset)) {
-      if (dom.onboardPreset.dataset?.providerFlow === 'managed') {
-        dom.onboardPreset.dataset.desiredPreset = target.providerPresetId;
-        if (typeof Event === 'function' && typeof dom.onboardPreset.dispatchEvent === 'function') {
-          dom.onboardPreset.dispatchEvent(new Event('kwp:sync-provider-flow'));
-        }
-      } else {
-        dom.onboardPreset.value = target.providerPresetId;
-      }
+      dom.onboardPreset.value = target.providerPresetId;
+      dom.onboardPreset.dataset.presetId = target.providerPresetId;
+    }
+    if (dom.onboardAdvancedFields && !state.onboard.touched) {
+      dom.onboardAdvancedFields.open = !target.providerPresetId;
     }
     if (dom.onboardKeyHint) {
       setText(dom.onboardKeyHint, target.apiKeySet
-        ? '已保存的 Key 不会显示；留空表示保持现有值。'
+        ? '已保存的 Key 不会显示；未改地址时留空表示保持现有值。'
         : '这个连接还没有保存 Key；填写后保存会写入本机私有凭据文件。');
     }
   }
@@ -888,10 +801,20 @@ function onboardProtocol() {
 }
 
 function setOnboardProtocol(protocol) {
-  if (protocol !== 'chat' && protocol !== 'responses') return;
-  state.onboard.protocol = protocol;
+  if (!['auto', 'chat', 'responses', 'anthropic'].includes(protocol)) return;
+  state.onboard.protocolMode = protocol;
   state.onboard.protocolTouched = true;
-  syncOnboardProtocolToDraft(protocol);
+  if (protocol === 'auto') {
+    state.onboard.upstreamProtocol = '';
+  } else if (protocol === 'anthropic') {
+    state.onboard.protocol = 'chat';
+    state.onboard.upstreamProtocol = 'anthropic';
+    syncOnboardProtocolToDraft('chat');
+  } else {
+    state.onboard.protocol = protocol;
+    state.onboard.upstreamProtocol = '';
+    syncOnboardProtocolToDraft(protocol);
+  }
   markOnboardEdited();
   renderOnboard();
 }
@@ -1105,6 +1028,7 @@ function buildOnboardRow(row, { existing = false, previousLimit = undefined, pro
     ...optional('reasoningEfforts', efforts.length ? efforts : undefined),
     ...optional('defaultEffort', defaultEffort || undefined),
     connectionId: row.connectionId,
+    ...(row.upstreamProtocol === 'anthropic' ? { upstreamProtocol: 'anthropic' } : {}),
     ...(row.metadataKind !== 'manual' && row.checkedAt
       ? { metadataSource: { kind: row.metadataKind || 'discovery', ...(row.sourceURL ? { url: row.sourceURL } : {}), checkedAt: row.checkedAt } }
       : { metadataSource: { kind: 'manual' } }),
@@ -1165,10 +1089,17 @@ function onboardProblems({ models = [] } = {}) {
   const built = [];
   const ids = new Set();
   for (const row of models) {
-    const draft = { ...row, connectionId: values.id };
+    const draft = {
+      ...row,
+      connectionId: values.id,
+      ...(row.upstreamProtocol === 'anthropic' || values.upstreamProtocol === 'anthropic' ? { upstreamProtocol: 'anthropic' } : {}),
+    };
     const previous = previousOnboardModel(previousByUpstream.get(row.upstreamModelId), row.protocol, protocol);
     const model = previous
-      ? buildOnboardRow(draft, {
+      ? buildOnboardRow({
+        ...draft,
+        upstreamProtocol: previous.upstreamProtocol === 'anthropic' ? 'anthropic' : draft.upstreamProtocol,
+      }, {
         existing: true,
         protocol: previous.protocol,
         id: previous.id,
@@ -1522,25 +1453,31 @@ function renderOnboard() {
     setText(dom.onboardSelectAll, allVisible ? '取消全选当前结果' : '全选当前结果');
   }
   const protocol = onboardProtocol();
+  const activeMode = draft.upstreamProtocol === 'anthropic' ? 'anthropic' : (draft.protocolMode || protocol || 'auto');
   const protocolButtons = dom.onboardProtocolGroup?.querySelectorAll
     ? Array.from(dom.onboardProtocolGroup.querySelectorAll('[data-onboard-protocol]'))
     : [];
   protocolButtons.forEach((button) => {
-    button.setAttribute('aria-pressed', button.dataset.onboardProtocol === protocol ? 'true' : 'false');
+    button.setAttribute('aria-pressed', button.dataset.onboardProtocol === activeMode ? 'true' : 'false');
     button.disabled = busy;
   });
   if (dom.onboardProtocolHint) {
     const target = savedOnboardTarget();
     const savedProtocols = protocolList(target && target.protocols);
     const presetProtocols = protocolList(providerPreset(dom.onboardPreset?.value || '')?.protocols);
-    setText(dom.onboardProtocolHint, protocol
-      ? '本次导入使用 ' + protocolLabel(protocol) + '。'
-      : savedProtocols.length > 1
-        ? '已保存的连接同时允许 ' + savedProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
-        : presetProtocols.length > 1
-          ? '该预设同时提供 ' + presetProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种接口协议。'
-          : '请选择 Chat Completions 或 Responses；一条连接只使用一种接口协议。');
+    setText(dom.onboardProtocolHint, draft.upstreamProtocol === 'anthropic'
+      ? '本次导入使用 Anthropic Messages 上游格式（连接协议：' + protocolLabel(protocol || 'chat') + '）。'
+      : protocol
+        ? '本次导入使用 ' + protocolLabel(protocol) + '。'
+        : activeMode === 'auto'
+          ? '已选自动识别；点「测试连接并拉取模型」会自动检测真实接口协议。'
+          : savedProtocols.length > 1
+            ? '已保存的连接同时允许 ' + savedProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种后保存。'
+            : presetProtocols.length > 1
+              ? '该预设同时提供 ' + presetProtocols.map(protocolLabel).join(' 与 ') + '；请选择一种或点测活自动识别。'
+              : '请选择接口协议，或选「自动识别」后点击测试连接。');
   }
+  renderProbeNote(dom.onboardProbeResult, draft.probeResult || null);
   if (dom.onboardBatchContext) dom.onboardBatchContext.disabled = busy || !selected.length;
   if (dom.onboardBatchContextApply) dom.onboardBatchContextApply.disabled = busy || !selected.length;
 
@@ -1555,7 +1492,7 @@ function renderOnboard() {
   }
   if (dom.onboardDiscover) {
     dom.onboardDiscover.disabled = !ready || busy;
-    setText(dom.onboardDiscover, draft.busy ? '正在读取…' : '读取模型');
+    setText(dom.onboardDiscover, draft.busy ? '正在测试连接…' : '测试连接并拉取模型');
   }
   if (dom.onboardRecommended) {
     const presetId = dom.onboardPreset?.value || '';
@@ -1626,23 +1563,46 @@ function openOnboardWizard() {
   dom.onboardPreset?.focus({ preventScroll: true });
 }
 
-function discoveryBody(values, saved, revision) {
-  if (!values.baseURL) return { error: '请先填写上游地址。' };
+function probeBody(values, saved, { protocolMode = 'auto', model = '' } = {}) {
+  if (!values.baseURL) return { error: '请先选择服务商或填写 API 基础地址。' };
   const base = normalizeBaseURL(values.baseURL);
   if (base.error) return { error: base.error };
 
-  /* 读取只需要地址与 Key。只有地址不变的已保存连接才可省略 Key；
-     新连接或改过地址的连接不能借用旧凭据。 */
   const sameEndpoint = Boolean(saved && saved.baseURL === base.value);
   const typedKey = String(values.apiKey || '').trim();
   if (!typedKey && !sameEndpoint) {
-    return { error: '请填写该上游的 API Key：读取只使用这一次填写的 Key，不会复用其它连接的凭据。' };
+    return { error: '请先填写 API Key；测试连接只使用本次填写的密钥，不会复用其它连接的凭据。' };
   }
-  const body = { revision, baseURL: base.value };
+  const chosenProtocol = ['chat', 'responses', 'anthropic'].includes(protocolMode) ? protocolMode : 'auto';
+  const body = {
+    baseUrl: base.value,
+    protocol: chosenProtocol,
+    timeoutMs: 15000,
+  };
   if (typedKey) body.apiKey = typedKey;
   if (values.providerPresetId) body.presetId = values.providerPresetId;
-  if (sameEndpoint) body.connectionId = saved.id;
+  if (sameEndpoint && saved.id) body.connectionId = saved.id;
+  if (model) body.model = model;
   return { body, sameEndpoint };
+}
+
+function enrichProbeCatalogRow(row, presetModels, presetId, connection, upstreamProtocol) {
+  const upstreamId = row && (row.id || row.upstreamModelId);
+  const presetMatch = presetModels.get(upstreamId);
+  const merged = mergeOnboardPresetMetadata(row, presetMatch);
+  const inferred = inferModelDefaults(upstreamId, presetId);
+  if (!(Number(merged.contextWindow) > 0)) merged.contextWindow = inferred.contextWindow;
+  if (!(Number(merged.maxOutputTokens) > 0) && inferred.maxOutputTokens) merged.maxOutputTokens = inferred.maxOutputTokens;
+  if (typeof merged.tools !== 'boolean') merged.tools = inferred.tools;
+  if (typeof merged.reasoning !== 'boolean') merged.reasoning = inferred.reasoning;
+  if (!Array.isArray(merged.inputModalities) || !merged.inputModalities.length) merged.inputModalities = inferred.inputModalities;
+  if (merged.reasoning === true && (!Array.isArray(merged.reasoningEfforts) || !merged.reasoningEfforts.length) && inferred.reasoningEfforts.length) {
+    merged.reasoningEfforts = inferred.reasoningEfforts;
+  }
+  if (!merged.name && inferred.name) merged.name = inferred.name;
+  const built = onboardRowFrom(merged, { connection });
+  if (upstreamProtocol === 'anthropic') built.upstreamProtocol = 'anthropic';
+  return built;
 }
 
 async function discoverConnectionEditorModels() {
@@ -1653,26 +1613,47 @@ async function discoverConnectionEditorModels() {
   const saved = editing.originalId
     ? (connectionRowsOf(data) || []).find(row => !row.legacy && row.id === editing.originalId) || null
     : null;
-  const target = discoveryBody(editing.draft, saved, data.revision);
+  const target = probeBody(editing.draft, saved, {
+    protocolMode: editing.protocolMode || connectionProtocol(editing.draft) || 'auto',
+  });
   if (target.error) { showToast(target.error, 'error'); return null; }
   editing.discovering = true;
+  editing.probeResult = null;
   renderConnectionEditor();
   try {
-    const res = await request(API.discovery, { method: 'POST', body: target.body });
+    const res = await request(API.connectionsProbe, { method: 'POST', body: target.body });
     if (state.conns.editing !== editing) return null;
-    const discovery = res && res.discovery;
-    if (!discovery || !Array.isArray(discovery.models)) {
-      showToast('上游目录读取结果格式不被接受。', 'error');
-      return null;
+    editing.probeResult = res || { ok: false, message: '连接测试未返回有效结果。' };
+    if (res && res.ok) {
+      const detectedConnProto = res.connectionProtocol === 'chat' || res.connectionProtocol === 'responses'
+        ? res.connectionProtocol : null;
+      const isAnthropic = res.upstreamProtocol === 'anthropic' || editing.protocolMode === 'anthropic'
+        || isAnthropicPreset(providerPreset(editing.draft.providerPresetId));
+      if (detectedConnProto) editing.draft.protocols = [detectedConnProto];
+      else if (isAnthropic) editing.draft.protocols = ['chat'];
+      if (isAnthropic) {
+        editing.draft.upstreamProtocol = 'anthropic';
+        editing.protocolMode = 'anthropic';
+        if (editing.draft.id) {
+          if (!state.connUpstreamProtocols) state.connUpstreamProtocols = {};
+          state.connUpstreamProtocols[editing.draft.id] = 'anthropic';
+        }
+      } else if (detectedConnProto) {
+        editing.draft.upstreamProtocol = '';
+        editing.protocolMode = detectedConnProto;
+      }
+      const count = Array.isArray(res.catalog?.models) ? res.catalog.models.length : res.catalog?.modelCount;
+      showToast((res.message || '连接测试通过') + (Number.isInteger(count) && count > 0 ? '，拉取到 ' + fmtCount(count) + ' 个模型。' : '。'), 'ok');
+    } else {
+      showToast((res && (res.message || upstreamReasonText(res.reason))) || '连接测试未通过，请检查地址与 API Key。', 'error');
     }
-    if (discovery.state !== 'passed') {
-      showToast('读取上游目录失败：' + (discoveryReasonText(discovery.reason) || '请稍后再试'), 'error');
-      return discovery;
-    }
-    showToast('连接可达，读到 ' + fmtCount(discovery.modelCount) + ' 个模型；读取不会保存连接或更改已有 Key。', 'ok');
-    return discovery;
+    return res;
   } catch (error) {
-    if (state.conns.editing === editing) showToast(discoveryReasonText(error.code) || error.message || '读取上游目录失败。', 'error');
+    if (state.conns.editing === editing) {
+      const msg = upstreamReasonText(error.code) || error.message || '连接测试失败。';
+      editing.probeResult = { ok: false, message: msg, detail: error.detail || '' };
+      showToast(msg, 'error');
+    }
     return null;
   } finally {
     if (state.conns.editing === editing) {
@@ -1689,7 +1670,7 @@ async function discoverOnboardModels() {
   setHidden(dom.onboardErrors, true);
   const values = onboardConnectionValues();
   const saved = savedOnboardRow(values.id);
-  const target = discoveryBody(values, saved, data.revision);
+  const target = probeBody(values, saved, { protocolMode: values.protocolMode || 'auto' });
   if (target.error) { showToast(target.error, 'error'); return null; }
   const { body, sameEndpoint } = target;
 
@@ -1697,49 +1678,76 @@ async function discoverOnboardModels() {
   const token = (state.onboard.seq || 0) + 1;
   state.onboard.seq = token;
   state.onboard.busy = true;
-  if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, '正在请求上游模型目录…');
+  state.onboard.probeResult = null;
+  if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, '正在测试连接、识别协议并拉取模型…');
   renderOnboard();
   try {
-    const res = await request(API.discovery, { method: 'POST', body });
-    /* 迟到的回包不属于当前端点：地址、预设或连接已被改过，这份目录不能再写进
-       向导，否则旧 endpoint 的结果会冒充新 endpoint 的答案。 */
+    const res = await request(API.connectionsProbe, { method: 'POST', body });
     if (state.onboard.seq !== token || onboardEndpointKey() !== key) return null;
-    const discovery = res && res.discovery;
-    if (!discovery || !Array.isArray(discovery.models)) {
-      showToast('上游目录读取结果格式不被接受。', 'error');
-      return null;
-    }
-    /* 重新读取不保留上一轮的勾选：目录可能已经变了，沿用旧选择会保存一条
-       上游并不存在的路由。 */
-    /* 同一条上游 ID 的预设资料只补上游缺的字段；真实返回值优先。 */
-    const presetModels = new Map(presetOnboardModels(values.providerPresetId)
-      .map((row) => [row.upstreamModelId, row]));
-    state.onboard.discoveryFor = key;
-    state.onboard.discovery = {
-      checkedAt: discovery.checkedAt || null,
-      modelCount: discovery.modelCount,
-      models: preserveOnboardModelNames(discovery.models.map((row) => onboardRowFrom(
-        mergeOnboardPresetMetadata(row, presetModels.get(row && row.id)),
-        { connection: sameEndpoint ? saved : null },
-      )), sameEndpoint ? state.data?.models : [], values.id),
-    };
-    if (discovery.state !== 'passed') {
-      if (dom.onboardDiscoverState) {
-        setText(dom.onboardDiscoverState, discoveryReasonText(discovery.reason) || '读取上游目录失败，请检查地址与 Key。');
+    state.onboard.probeResult = res || { ok: false, message: '连接测试未返回有效结果。' };
+    const isAnthropic = res?.upstreamProtocol === 'anthropic'
+      || values.protocolMode === 'anthropic'
+      || isAnthropicPreset(providerPreset(values.providerPresetId));
+    if (res && res.ok) {
+      const connProto = res.connectionProtocol === 'chat' || res.connectionProtocol === 'responses'
+        ? res.connectionProtocol : (isAnthropic ? 'chat' : null);
+      if (connProto) {
+        state.onboard.protocol = connProto;
+        state.onboard.protocolTouched = true;
+        syncOnboardProtocolToDraft(connProto);
       }
-      showToast('读取上游模型目录失败：' + (discoveryReasonText(discovery.reason) || '请稍后再试'), 'error');
-      return discovery;
+      if (isAnthropic) {
+        state.onboard.upstreamProtocol = 'anthropic';
+        state.onboard.protocolMode = 'anthropic';
+        if (values.id) {
+          if (!state.connUpstreamProtocols) state.connUpstreamProtocols = {};
+          state.connUpstreamProtocols[values.id] = 'anthropic';
+        }
+      } else if (connProto) {
+        state.onboard.upstreamProtocol = '';
+        state.onboard.protocolMode = connProto;
+      }
     }
-    if (dom.onboardDiscoverState) {
-      setText(dom.onboardDiscoverState, '读取到 ' + fmtCount(discovery.modelCount) + ' 个模型；勾选要接入 Kimi Work 的模型。');
+    const catalogModels = Array.isArray(res?.catalog?.models) ? res.catalog.models : [];
+    const effectiveUpstream = isAnthropic ? 'anthropic' : '';
+    if (catalogModels.length) {
+      const presetModels = new Map(presetOnboardModels(values.providerPresetId)
+        .map((row) => [row.upstreamModelId, row]));
+      state.onboard.discoveryFor = key;
+      state.onboard.discovery = {
+        checkedAt: new Date().toISOString(),
+        modelCount: res.catalog.modelCount || catalogModels.length,
+        models: preserveOnboardModelNames(
+          catalogModels.map((row) => enrichProbeCatalogRow(row, presetModels, values.providerPresetId, sameEndpoint ? saved : null, effectiveUpstream)),
+          sameEndpoint ? state.data?.models : [],
+          values.id,
+        ),
+      };
     }
-    showToast('读取到 ' + fmtCount(discovery.modelCount) + ' 个模型。', 'ok');
-    return discovery;
+    if (!res || !res.ok) {
+      const msg = (res && (res.message || upstreamReasonText(res.reason))) || '连接测试未通过，请检查地址与 API Key。';
+      if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, msg);
+      showToast(msg, 'error');
+      return res;
+    }
+    if (catalogModels.length) {
+      if (dom.onboardDiscoverState) {
+        setText(dom.onboardDiscoverState, '已拉取 ' + fmtCount(catalogModels.length) + ' 个模型；勾选要启用的模型后点「保存」即可。');
+      }
+      showToast((res.message || '连接测试通过') + '，拉取到 ' + fmtCount(catalogModels.length) + ' 个模型。', 'ok');
+    } else {
+      if (dom.onboardDiscoverState) {
+        setText(dom.onboardDiscoverState, '连接测试通过，但该服务商未返回模型列表；可使用「内置推荐模型」或保存后手动添加模型。');
+      }
+      showToast(res.message || '连接测试通过。', 'ok');
+    }
+    return res;
   } catch (error) {
-    /* 端点已被改过时，这份失败也不属于它：不要用旧请求的结论改写新端点的提示。 */
     if (state.onboard.seq !== token) return null;
-    if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, discoveryReasonText(error.code) || error.message || '读取失败。');
-    showToast(discoveryReasonText(error.code) || error.message || '读取上游模型目录失败。', 'error');
+    const msg = upstreamReasonText(error.code) || error.message || '连接测试失败。';
+    state.onboard.probeResult = { ok: false, message: msg, detail: error.detail || '' };
+    if (dom.onboardDiscoverState) setText(dom.onboardDiscoverState, msg);
+    showToast(msg, 'error');
     return null;
   } finally {
     if (state.onboard.seq === token) state.onboard.busy = false;
@@ -1748,22 +1756,25 @@ async function discoverOnboardModels() {
 }
 
 function useRecommendedOnboardModels() {
-  const presetId = dom.onboardPreset?.value;
+  const rawPreset = dom.onboardPreset?.value || '';
+  const presetId = rawPreset === 'custom' ? '' : rawPreset;
   const models = presetOnboardModels(presetId);
   if (!models.length) {
-    showToast('请先选择厂商、地区与服务类型；自定义服务请读取模型或手动添加。', 'error');
+    showToast('当前服务商没有内置推荐模型；请填好 API Key 后点击「测试连接并拉取模型」。', 'error');
     return null;
   }
   clearOnboardSaveErrors();
-  const connection = savedOnboardRow(onboardConnectionValues().id);
+  const values = onboardConnectionValues();
+  const connection = savedOnboardRow(values.id);
+  const presetModels = new Map(models.map((row) => [row.upstreamModelId, row]));
   state.onboard.discoveryFor = onboardEndpointKey();
   state.onboard.discovery = {
     checkedAt: null,
     modelCount: models.length,
-    models: models.map((row) => onboardRowFrom({
+    models: models.map((row) => enrichProbeCatalogRow({
       ...row,
       metadataSource: presetMetadataSource(row),
-    }, { connection })),
+    }, presetModels, presetId, connection, values.upstreamProtocol)),
   };
   renderOnboard();
   return models;
@@ -1838,8 +1849,13 @@ async function saveOnboard() {
     state.conns.baseEntity = connectionDraftFrom(result.state);
     state.conns.draft = connectionDraftFrom(result.state);
     state.conns.dirty = false;
+    if (values.upstreamProtocol === 'anthropic' && values.id) {
+      if (!state.connUpstreamProtocols) state.connUpstreamProtocols = {};
+      state.connUpstreamProtocols[values.id] = 'anthropic';
+    }
     state.onboard.touched = false;
     state.onboard.saving = false;
+    state.onboard.probeResult = null;
     adoptState(result.state, { external: true });
     state.onboard.discovery = null;
     state.onboard.discoveryFor = null;
@@ -1884,27 +1900,44 @@ function staleSuggested(value, candidates) {
 function applyOnboardPreset(presetId) {
   if (!dom.onboardBase) return;
   state.onboard.touched = true;
+  state.onboard.probeResult = null;
   clearOnboardSaveErrors();
-  const preset = providerPreset(presetId);
+  const normalizedId = presetId === 'custom' ? '' : presetId;
+  const preset = normalizedId ? providerPreset(normalizedId) : null;
   const previousId = dom.onboardPreset.dataset.presetId || '';
   const previousPreset = providerPreset(previousId);
   const savedId = savedOnboardTarget()?.id || '';
   const savedName = savedOnboardTarget()?.name || '';
-  if (previousId !== presetId && dom.onboardKey) dom.onboardKey.value = '';
-  dom.onboardPreset.dataset.presetId = presetId;
-  /* 切到自定义时立刻按当前地址重画：目录归属会随预设变化而清空。 */
+  if (previousId !== normalizedId && dom.onboardKey) dom.onboardKey.value = '';
+  dom.onboardPreset.dataset.presetId = normalizedId;
+  /* 切到自定义时展开自定义接口地址区，并按当前地址重画。 */
   if (!preset) {
-    if (dom.onboardPresetHint) setText(dom.onboardPresetHint, '已选自定义；地址仍由你填写。');
+    state.onboard.upstreamProtocol = '';
+    if (!state.onboard.protocol) state.onboard.protocolMode = 'auto';
+    if (dom.onboardAdvancedFields) dom.onboardAdvancedFields.open = true;
+    if (dom.onboardPresetHint) setText(dom.onboardPresetHint, '已选自定义兼容接口；请在下方展开区填写 API 基础地址与名称。');
     renderOnboard();
     return;
   }
   if (preset.baseURL) dom.onboardBase.value = preset.baseURL;
+  const anthropic = isAnthropicPreset(preset);
   const presetProtocols = protocolList(preset.protocols);
-  if (presetProtocols.length === 1) state.onboard.protocol = presetProtocols[0];
-  else if (presetProtocols.length > 1 && !presetProtocols.includes(state.onboard.protocol)) state.onboard.protocol = null;
-  else if (!presetProtocols.length && !state.onboard.protocol) state.onboard.protocol = null;
+  if (anthropic) {
+    state.onboard.protocol = presetProtocols[0] || 'chat';
+    state.onboard.upstreamProtocol = 'anthropic';
+    state.onboard.protocolMode = 'anthropic';
+  } else if (presetProtocols.length === 1) {
+    state.onboard.protocol = presetProtocols[0];
+    state.onboard.upstreamProtocol = '';
+    state.onboard.protocolMode = presetProtocols[0];
+  } else {
+    state.onboard.upstreamProtocol = '';
+    if (!presetProtocols.includes(state.onboard.protocol)) state.onboard.protocol = null;
+    state.onboard.protocolMode = state.onboard.protocol || 'auto';
+  }
   state.onboard.protocolTouched = true;
-  const nextId = onboardSuggestedId(preset);
+  const existingRows = state.conns?.draft || connectionRowsOf(state.data) || [];
+  const nextId = uniqueConnectionId(preset, existingRows, preset.name);
   if (dom.onboardId && nextId
     && staleSuggested(dom.onboardId.value, [savedId, onboardSuggestedId(previousPreset)])) {
     dom.onboardId.value = nextId;
@@ -1914,37 +1947,95 @@ function applyOnboardPreset(presetId) {
     && staleSuggested(dom.onboardName.value, [savedName, onboardSuggestedName(previousPreset)])) {
     dom.onboardName.value = nextName;
   }
+  if (dom.onboardAdvancedFields) dom.onboardAdvancedFields.open = false;
   if (dom.onboardPresetHint) setText(dom.onboardPresetHint, preset.name
-    ? '已套用「' + preset.name + '」的地址与已知协议；仍可改为自定义地址。'
-    : '已套用预设地址；仍可改为自定义地址。');
+    ? '已自动填入「' + preset.name + '」的接口地址与连接标识；填写 API Key 后点击测试连接即可。'
+    : '已自动填入服务商地址；填写 API Key 后点击测试连接即可。');
   syncOnboardProtocolToDraft(state.onboard.protocol);
   renderOnboard();
 }
 
+const PRESET_GROUP_ORDER = ['国内常用', '海外主流', '聚合与本地'];
+const AGGREGATOR_OR_LOCAL_PATTERN = /openrouter|ollama|lmstudio|vllm|local|oneapi|newapi|gateway|proxy|litellm|magpie|siliconflow/i;
+const DOMESTIC_PATTERN = /deepseek|dashscope|qwen|zhipu|glm|minimax|moonshot|kimi|volcengine|doubao|ark|baichuan|stepfun|hunyuan|yi/i;
+const GLOBAL_PATTERN = /openai|anthropic|claude|gemini|google|xai|grok|mistral|cohere|groq|together|fireworks|perplexity/i;
+
+function providerPresetGroup(preset) {
+  if (!preset || typeof preset !== 'object') return '聚合与本地';
+  const rawGroup = String(preset.group || preset.category || '').trim().toLowerCase();
+  if (rawGroup === 'cn' || rawGroup === 'domestic' || rawGroup === '国内常用') return '国内常用';
+  if (rawGroup === 'global' || rawGroup === 'international' || rawGroup === '海外主流') return '海外主流';
+  if (rawGroup === 'aggregator' || rawGroup === 'local' || rawGroup === '聚合与本地') return '聚合与本地';
+  const id = String(preset.id || '');
+  if (/openrouter|ollama|lmstudio|vllm|local|oneapi|newapi|gateway|proxy|litellm|magpie/i.test(id)) return '聚合与本地';
+  if (preset.region === 'cn') return '国内常用';
+  if (preset.region === 'global') return '海外主流';
+  if (DOMESTIC_PATTERN.test(id)) return '国内常用';
+  if (GLOBAL_PATTERN.test(id)) return '海外主流';
+  if (AGGREGATOR_OR_LOCAL_PATTERN.test(id)) return '聚合与本地';
+  return '聚合与本地';
+}
+
 function providerPresetLabel(preset) {
   const region = preset.region === 'cn' ? '国内' : preset.region === 'global' ? '海外' : '';
-  const plan = preset.kind === 'coding' ? 'Coding Plan' : '按量 API';
-  return [preset.familyName || preset.name || preset.id, region, plan, preset.name]
+  const plan = preset.kind === 'coding' ? 'Coding Plan' : '';
+  return [preset.name || preset.familyName || preset.id, region, plan]
     .filter((value, index, list) => value && list.indexOf(value) === index).join(' · ');
 }
 
-function providerPresetOptions() {
-  return [{ value: '', label: '自定义（不套用预设）' }].concat(providerPresets().map(preset => ({
-    value: preset.id, label: providerPresetLabel(preset),
-  })));
+function providerPresetGroups() {
+  const buckets = new Map(PRESET_GROUP_ORDER.map((label) => [label, []]));
+  for (const preset of providerPresets()) {
+    if (!preset || !preset.id) continue;
+    const group = providerPresetGroup(preset);
+    if (!buckets.has(group)) buckets.set(group, []);
+    buckets.get(group).push({ value: preset.id, label: providerPresetLabel(preset) });
+  }
+  const groups = [];
+  for (const [label, options] of buckets.entries()) {
+    if (options.length) groups.push({ label, options });
+  }
+  groups.push({ label: '自定义兼容接口', options: [{ value: '', label: '自定义兼容接口（手动填写地址）' }] });
+  return groups;
+}
+
+function syncGroupedPresetOptions(select, current) {
+  if (!select) return;
+  const groups = providerPresetGroups();
+  const normalizedCurrent = current === 'custom' ? '' : (current || '');
+  const signature = JSON.stringify(groups) + '#' + normalizedCurrent;
+  if (select.dataset.signature === signature) {
+    select.value = normalizedCurrent;
+    return;
+  }
+  select.dataset.signature = signature;
+  const children = [];
+  for (const group of groups) {
+    if (typeof document.createElement === 'function') {
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = group.label;
+      for (const option of group.options) {
+        const node = document.createElement('option');
+        node.value = option.value;
+        node.textContent = option.label;
+        optgroup.append(node);
+      }
+      children.push(optgroup);
+    }
+  }
+  select.replaceChildren(...children);
+  select.value = normalizedCurrent;
 }
 
 function fillOnboardPresets() {
   if (!dom.onboardPreset) return;
   const presets = providerPresets();
-  if (dom.onboardPreset.dataset?.providerFlow !== 'managed') {
-    const current = dom.onboardPreset.value || '';
-    syncSelectOptions(dom.onboardPreset, providerPresetOptions(), current);
-  }
+  const current = dom.onboardPreset.value || '';
+  syncGroupedPresetOptions(dom.onboardPreset, current);
   if (dom.onboardPresetHint) {
     setText(dom.onboardPresetHint, presets.length
-      ? '共 ' + fmtCount(presets.length) + ' 个供应商预设；选择后填入官方地址与已知协议。'
-      : '预设列表不可用；仍可直接填写地址。');
+      ? '共 ' + fmtCount(presets.length) + ' 个常用服务商；选好后自动填地址与标识，也可选择自定义兼容接口。'
+      : '预设列表不可用；请选择自定义兼容接口并手动填写地址。');
   }
 }
 
@@ -1963,7 +2054,7 @@ function fillOnboardPresets() {
 const APPLY_COPY = {
   idle: { tone: 'ok', word: '已应用', note: '当前网关正在使用已保存的连接与凭据。' },
   pending: { tone: 'warn', word: '等待应用',
-    note: '连接已保存，后台会自动应用到网关；若长时间未生效，请到「设置 → 接入与更新 → 高级排障」重新同步模型目录。' },
+    note: '连接已保存，后台会自动应用到网关；若长时间未生效，请到「设置」页手动重新同步模型目录。' },
   applying: { tone: 'warn', word: '正在应用',
     note: '后台服务正在应用连接；Kimi 忙时会等待空闲，不会打断正在进行的请求。' },
   waiting: { tone: 'warn', word: '等待空闲',
@@ -2333,7 +2424,7 @@ function buildConnectionRow(row, index) {
     + ' · ' + connectionProtocolText(row);
   meta.append(keyState, models);
 
-  /* 行内检查只探测本行连接；结果与按钮留在同一行，不新增任何导航或诊断页。 */
+  /* 行内测活只探测本行连接；结果与按钮留在同一行，就地反馈可用与延迟。 */
   const check = state.connChecks[row.id];
   const checkLine = document.createElement('p');
   checkLine.className = 'conn-row__line conn-row__check';
@@ -2342,17 +2433,19 @@ function buildConnectionRow(row, index) {
   const checkText = document.createElement('span');
   if (!check) {
     checkDot.dataset.tone = 'neutral';
-    checkText.textContent = '尚未检查本行连接';
+    checkText.textContent = '尚未测活';
   } else if (check.busy) {
     checkDot.dataset.tone = 'warn';
-    checkText.textContent = '正在检查本行连接…';
-  } else if (check.state === 'passed') {
+    checkText.textContent = '正在测活…';
+  } else if (check.state === 'passed' || check.ok === true) {
     checkDot.dataset.tone = 'ok';
-    checkText.textContent = '连接可用' + (Number.isInteger(check.modelCount) ? '：' + check.modelCount + ' 个模型'
-      : '') + (Number.isFinite(check.ms) ? ' · ' + fmtMs(check.ms) : '');
+    checkText.textContent = check.message || ('连接可用'
+      + (check.detectedProtocol ? '（' + protocolLabel(check.detectedProtocol) + '）' : '')
+      + (Number.isInteger(check.modelCount) && check.modelCount > 0 ? ' · ' + check.modelCount + ' 个模型' : '')
+      + (Number.isFinite(check.ms) ? ' · ' + fmtMs(check.ms) : ''));
   } else {
     checkDot.dataset.tone = 'bad';
-    checkText.textContent = '检查未通过：' + (upstreamReasonText(check.reason) || '无法连接本行上游');
+    checkText.textContent = check.message || ('测活未通过：' + (upstreamReasonText(check.reason) || '无法连接本行上游'));
   }
   checkLine.append(checkDot, checkText);
   meta.append(checkLine);
@@ -2365,7 +2458,7 @@ function buildConnectionRow(row, index) {
     checkButton.className = 'btn btn--quiet btn--sm';
     checkButton.dataset.connectionCheck = row.id;
     checkButton.disabled = Boolean(check && check.busy) || state.connsSaving;
-    checkButton.textContent = check && check.busy ? '正在检查…' : '检查连接';
+    checkButton.textContent = check && check.busy ? '测活中…' : '测活';
     const edit = document.createElement('button');
     edit.type = 'button';
     edit.className = 'btn btn--quiet btn--sm';
@@ -2416,47 +2509,48 @@ function renderConnectionEditor({ force = false } = {}) {
   if (dom.ceBase && (force || !isInputActive(dom.ceBase)) && dom.ceBase.value !== (draft.baseURL || '')) dom.ceBase.value = draft.baseURL || '';
   if (dom.ceKeyEnv && (force || !isInputActive(dom.ceKeyEnv)) && dom.ceKeyEnv.value !== (draft.apiKeyEnv || '')) dom.ceKeyEnv.value = draft.apiKeyEnv || '';
   const draftProtocol = connectionProtocol(draft);
-  if (dom.ceChat) dom.ceChat.checked = draftProtocol === 'chat';
-  if (dom.ceResponses) dom.ceResponses.checked = draftProtocol === 'responses';
+  const activeMode = editing.protocolMode || (draft.upstreamProtocol === 'anthropic' ? 'anthropic' : (draftProtocol || ''));
+  if (dom.ceProtoAuto) dom.ceProtoAuto.checked = activeMode === 'auto';
+  if (dom.ceChat) dom.ceChat.checked = activeMode === 'chat';
+  if (dom.ceResponses) dom.ceResponses.checked = activeMode === 'responses';
+  if (dom.ceAnthropic) dom.ceAnthropic.checked = activeMode === 'anthropic';
   if (dom.ceProtocolHint) {
-    setText(dom.ceProtocolHint, draftProtocol
-      ? '此连接使用 ' + protocolLabel(draftProtocol) + '。'
-      : editing.originalId
-        ? '继续沿用历史协议。导入新模型时请选择一种协议。'
-        : '请选择 Chat Completions 或 Responses。');
+    setText(dom.ceProtocolHint, activeMode === 'anthropic'
+      ? '此连接使用 Anthropic Messages 上游格式（连接协议：' + protocolLabel(draftProtocol || 'chat') + '）。'
+      : draftProtocol
+        ? '此连接使用 ' + protocolLabel(draftProtocol) + '。'
+        : activeMode === 'auto'
+          ? '已选自动识别；点击「测试连接并拉取模型」会自动检测并回填协议。'
+          : editing.originalId
+            ? '继续沿用历史协议。仅改名称或密钥可直接保存；导入新模型时请选择一种协议。'
+            : '请选择一种协议，或选「自动识别」后测试连接。');
   }
   if (dom.cePreset) {
     const desired = draft.providerPresetId || '';
-    if (dom.cePreset.dataset?.providerFlow === 'managed') {
-      if (force || (!isInputActive(dom.cePreset) && dom.cePreset.value !== desired)) {
-        dom.cePreset.dataset.desiredPreset = desired;
-        if (typeof Event === 'function' && typeof dom.cePreset.dispatchEvent === 'function') {
-          dom.cePreset.dispatchEvent(new Event('kwp:sync-provider-flow'));
-        }
-      }
-    } else {
-      syncSelectOptions(dom.cePreset, providerPresetOptions(), desired);
+    if (force || !isInputActive(dom.cePreset)) {
+      syncGroupedPresetOptions(dom.cePreset, desired);
     }
   }
   if (dom.cePresetHint) {
     const preset = providerPreset(draft.providerPresetId);
     setText(dom.cePresetHint, preset
-      ? '预设来源：' + (preset.source && preset.source.url ? preset.source.url : '未提供')
+      ? '已自动匹配「' + (preset.name || preset.id) + '」地址'
         + (preset.notes ? ' · ' + preset.notes : '')
-      : '选择预设会填入官方地址与已知能力；仍可改为自定义地址。');
+      : '选择服务商会自动填充接口地址与默认标识；自定义地址请展开下方高级选项。');
   }
   if (dom.ceKeyHint) {
     setText(dom.ceKeyHint, editing.originalId
-      ? '已保存的 Key 不会显示。留空表示保持现有值。'
+      ? '已保存的 Key 不会显示。未改地址时留空表示保持现有值。'
       : '新连接必须填写 API Key；只写入本机私有凭据文件，不回显。');
   }
   if (dom.ceKey) {
     if (force || (!editing.keyEdited && !isInputActive(dom.ceKey))) dom.ceKey.value = '';
     dom.ceKey.placeholder = editing.originalId ? '留空保持现有 Key' : 'sk-…';
   }
+  renderProbeNote(dom.ceProbeResult, editing.probeResult || null);
   if (dom.connEditorTest) {
     dom.connEditorTest.disabled = editing.discovering === true;
-    setText(dom.connEditorTest, editing.discovering ? '正在读取…' : '读取上游目录');
+    setText(dom.connEditorTest, editing.discovering ? '正在测试连接…' : '测试连接并拉取模型');
     setHidden(dom.connEditorTest, false);
   }
 }
@@ -2585,10 +2679,15 @@ async function saveConnections() {
       renderConnections();
       return;
     }
-    if (error.code === 'connection_in_use') {
-      setConnErrors(['仍有模型引用被移除的连接：' + (Array.isArray(error.models) ? error.models.join('、') : '')
-        + '。请先在模型管理改到其他连接，再移除该连接。']);
-      showToast('连接仍被模型引用，未保存。', 'error');
+    if (error.code === 'connection_in_use'
+      || ((error.status === 409 || error.status === 400) && Array.isArray(error.models) && error.models.length)) {
+      const msg = error.code === 'connection_in_use'
+        ? ('仍有模型引用被移除的连接：' + (Array.isArray(error.models)
+          ? error.models.map((id) => catalogModelLabel(state.data, id)).join('、') : '')
+          + '。请先在模型目录改到其他连接，再移除该连接。')
+        : formatApiErrorWithModels(error, '连接变更被占用模型阻止，未保存。');
+      setConnErrors([msg]);
+      showToast(msg, 'error');
       renderConnections();
       return;
     }
@@ -2615,12 +2714,13 @@ export {
   applyState,
   closeConnectionEditor,
   configInfo,
-  credentialAuthPending,
   configReady,
+  connectionDefaultUpstreamProtocol,
   connectionDraftFrom,
   connectionPayload,
   connectionProtocol,
   connectionsDirty,
+  credentialAuthPending,
   discoverConnectionEditorModels,
   discoverOnboardModels,
   discoveryReasonText,
@@ -2628,7 +2728,8 @@ export {
   draftConnectionProtocol,
   fillOnboardForm,
   fillOnboardPresets,
-  fillServiceForm,
+  formatApiErrorWithModels,
+  inferModelDefaults,
   onboardBusy,
   onboardEditingText,
   openConnectionEditor,
@@ -2636,23 +2737,17 @@ export {
   protocolLabel,
   providerPreset,
   readConnectionEditor,
-  readServiceForm,
   renderConnection,
   renderConnectionEditor,
   renderConnections,
   renderOnboard,
   renderOnboardOverview,
-  renderServices,
   saveConnections,
   saveOnboard,
-  saveSearchServices,
   savedConnectionsSignature,
   savedOnboardTarget,
-  searchAvailable,
-  serviceDraftFrom,
-  serviceRowOf,
-  serviceSignature,
   setOnboardProtocol,
+  syncGroupedPresetOptions,
   toggleFilteredOnboardModels,
   upstreamReasonText,
   useRecommendedOnboardModels,

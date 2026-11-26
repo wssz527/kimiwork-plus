@@ -4,6 +4,7 @@ const API = {
   models: '/api/models',
   connection: '/api/connection',
   connections: '/api/connections',
+  connectionsProbe: '/api/connections/probe',
   subagents: '/api/subagents',
   translation: '/api/translation',
   actions: '/api/actions',
@@ -95,13 +96,14 @@ const UPSTREAM_REASON = {
 };
 
 
+const VIEWS = ['overview', 'models', 'accounts', 'usage', 'maintenance'];
+
 const VIEW_COPY = {
   overview: { title: '总览', lede: '网关与 Kimi Work 接入状态、当前账号、子代理与今日用量。' },
-  models: { title: '模型与服务商', lede: '在同一页管理服务商连接与已启用模型；保存后立即生效并自动同步到 Kimi Work。' },
-  conversations: { title: '会话', lede: '为已有的 Kimi Work 对话切换模型；网关模式下通常直接在 Kimi 下拉框切换即可。' },
-  subagents: { title: '子代理', lede: '按角色分配子代理模型，管理模型池与当前会话 Swarm 并行。' },
+  models: { title: '模型', lede: '管理服务商连接、已启用模型与子代理角色分配；保存后立即生效并自动同步到 Kimi Work。' },
+  accounts: { title: '账号', lede: '保存、切换与管理本机官方 Kimi 多账号凭据。' },
   usage: { title: '用量', lede: '查看本机网关与 Kimi Work 会话用量、服务商余额与预算保护。' },
-  maintenance: { title: '设置', lede: '账号管理、接入与自动更新、扩展工具与高级诊断。' },
+  maintenance: { title: '设置', lede: 'Kimi 接入模式、版本更新、页面增强、会话模型维护与诊断记录。' },
 };
 
 const VIEW_ALIASES = {
@@ -109,12 +111,16 @@ const VIEW_ALIASES = {
   connections: 'models',
   provider: 'models',
   providers: 'models',
-  conversation: 'conversations',
-  sessions: 'conversations',
-  session: 'conversations',
-  rebind: 'conversations',
-  enhancements: 'subagents',
-  work: 'subagents',
+  subagents: 'models',
+  work: 'models',
+  enhancements: 'models',
+  accounts: 'accounts',
+  account: 'accounts',
+  conversations: 'maintenance',
+  conversation: 'maintenance',
+  sessions: 'maintenance',
+  session: 'maintenance',
+  rebind: 'maintenance',
   tools: 'maintenance',
   extensions: 'maintenance',
   translation: 'maintenance',
@@ -361,7 +367,7 @@ const DIAG_REASON = {
   kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
   kimi_not_running: '官方 Kimi 当前未运行。请先打开 Kimi Work 后再继续。',
   kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
-  conversation_rollback_failed: '会话绑定恢复尚未完成。请在「会话」页刷新。',
+  conversation_rollback_failed: '会话绑定恢复尚未完成。请在「设置」页的会话维护区刷新。',
   conversation_kimi_restart_failed: 'Kimi 未能自动重新打开，请手动打开 Kimi Work 后继续。',
   model_sync_write_blocked: '当前官方 Kimi 版本未通过模型同步兼容性检查，已暂停自动写入模型配置。',
   disconnected: '本产品接管的模型来源已从官方 Kimi 移除；本地服务商与模型仍保留，可随时重新同步接管。',
@@ -470,7 +476,7 @@ const ERROR_HINT = {
   subagent_pool_default_required: '默认模型必须在候选列表中。',
   subagent_model_unavailable: '所选模型已不在目录中，请重新选择。',
   subagent_model_tools_required: '此模型未声明工具调用，不能作为子代理。',
-  subagent_model_in_use: '当前子代理仍在使用此模型或档位，请先到「子代理」更改目标，再修改模型能力。',
+  subagent_model_in_use: '当前子代理仍在使用此模型或档位，请先在「模型」页底部的子代理设置中更改目标，再修改模型能力。',
   subagent_policy_owner_conflict: '另一实例已接管子代理策略，请停止重复运行的服务。',
   subagent_policy_unavailable: '无法读取当前子代理策略或配置归属存在冲突，请检查状态目录后重启面板。',
   subagent_policy_apply_failed: '目标已保存，但当前策略未能应用，请查看运行时状态。',
@@ -529,8 +535,7 @@ const dom = {
 
   navOverview: $('nav-overview'),
   navModels: $('nav-models'),
-  navConversations: $('nav-conversations'),
-  navSubagents: $('nav-subagents'),
+  navAccounts: $('nav-accounts'),
   navUsage: $('nav-usage'),
   navMaintenance: $('nav-maintenance'),
   navModelCount: $('nav-model-count'),
@@ -611,7 +616,7 @@ const dom = {
   mConnectionHint: $('m-connection-hint'),
   mCandidates: $('m-candidates'),
   mSourceField: $('m-source-field'),
-  mAdvanced: $('m-advanced'),
+  mAdvanced: $('model-advanced-details') || $('m-advanced'),
   mContextHint: $('m-context-hint'),
   mBudgetGroup: $('m-budget-group'),
   mName: $('m-name'),
@@ -687,6 +692,8 @@ const dom = {
   onboardRetryApply: $('ob-retry-apply'),
   onboardAdvancedToggle: $('ob-advanced-toggle'),
   onboardAdvanced: $('ob-advanced'),
+  onboardAdvancedFields: $('ob-advanced-fields'),
+  onboardProbeResult: $('ob-probe-result'),
   onboardDisclosure: $('onboard-disclosure'),
   handoff: $('handoff'),
 
@@ -713,32 +720,13 @@ const dom = {
   ceKey: $('ce-key'),
   ceKeyHint: $('ce-key-hint'),
   ceKeyEnv: $('ce-keyenv'),
+  ceProtoAuto: $('ce-proto-auto'),
   ceChat: $('ce-chat'),
   ceResponses: $('ce-responses'),
+  ceAnthropic: $('ce-anthropic'),
+  ceAdvanced: $('ce-advanced'),
+  ceProbeResult: $('ce-probe-result'),
   ceProtocolHint: $('ce-protocol-hint'),
-
-
-  svcPanel: $('svc-panel'),
-  svcUnavailable: $('svc-unavailable'),
-  svcSearchOn: $('svc-search-on'),
-  svcSearchUrl: $('svc-search-url'),
-  svcSearchKey: $('svc-search-key'),
-  svcSearchKeyHint: $('svc-search-key-hint'),
-  svcFetchOn: $('svc-fetch-on'),
-  svcFetchUrl: $('svc-fetch-url'),
-  svcFetchKey: $('svc-fetch-key'),
-  svcSearchSaved: $('svc-search-saved'),
-  svcSearchSavedSub: $('svc-search-saved-sub'),
-  svcFetchSaved: $('svc-fetch-saved'),
-  svcFetchSavedSub: $('svc-fetch-saved-sub'),
-  svcVerdict: $('svc-verdict'),
-  svcVerdictDot: $('svc-verdict-dot'),
-  svcVerdictWord: $('svc-verdict-word'),
-  svcVerdictNote: $('svc-verdict-note'),
-  svcErrors: $('svc-errors'),
-  svcDraft: $('svc-draft'),
-  svcReset: $('svc-reset'),
-  svcSave: $('svc-save'),
 
   picker: $('picker'),
   pickerTitle: $('picker-title'),
@@ -852,7 +840,7 @@ const state = {
   key: null,
   data: null,
   view: 'overview',
-  subtabs: { subagents: 'models', maintenance: 'accounts' },
+  subtabs: {},
   subagentModeCache: { force: null, pool: null },
   guideCollapsed: null,
   query: '',
@@ -860,13 +848,13 @@ const state = {
   editor: null,
   deleteId: null,
   conns: { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] },
-  services: { base: null, dirty: false, saving: false, searchKey: '', fetchKey: '', serverErrors: [] },
   connChecks: {},
+  connUpstreamProtocols: {},
   picker: { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
     busy: false, seq: 0, hint: null, scope: null },
   /* 接入向导：连接字段、上游目录候选与被勾选的模型留在本地草稿里，
      直到用户点「保存」才写配置；轮询不得覆盖正在输入的 Key。 */
-  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [], protocol: null, protocolTouched: false },
+  onboard: { discovery: null, discoveryFor: null, seq: 0, busy: false, saving: false, advanced: false, touched: false, query: '', saveErrors: [], protocol: null, protocolMode: 'auto', upstreamProtocol: '', protocolTouched: false, probeResult: null },
   /* 后端明确拒绝过 apply-connections 后记住结论：轮询不得把“自动应用不可用”
      改回“等待应用”，否则界面会在两份互相矛盾的结论之间来回跳。 */
   applyUnsupported: false,
@@ -996,6 +984,8 @@ async function request(path, { method = 'GET', body } = {}) {
     const error = new ApiError(ERROR_HINT[code] || directReasonText(code) || message || '请求失败，请稍后重试。', code || 'http_' + res.status, res.status);
     error.saved = Boolean(payload && payload.error && payload.error.saved);
     error.reason = payload && payload.error && payload.error.reason;
+    if (Array.isArray(payload && payload.error && payload.error.models)) error.models = payload.error.models;
+    if (payload && payload.error && typeof payload.error.detail === 'string') error.detail = payload.error.detail;
     throw error;
   }
 
@@ -1386,6 +1376,7 @@ export {
   RUNTIME_STATE,
   SUBTAB_STORE,
   UPSTREAM_REASON,
+  VIEWS,
   VIEW_ALIASES,
   VIEW_COPY,
   VIEW_STORE,
