@@ -355,14 +355,7 @@ func mergeModels(d Document, input []any, prune bool) error {
 		out = append(out, merged)
 	}
 	if prune {
-		removed := make(map[string]bool, len(old))
-		for id := range old {
-			removed[id] = true
-		}
-		for _, row := range out {
-			delete(removed, String(Object(row)["id"]))
-		}
-		changes, _, err := pruneModelReferences(d, out, removed)
+		changes, _, err := pruneModelReferences(d, out)
 		if err != nil {
 			return subagentModelUseError(d["subagents"], old, out)
 		}
@@ -374,39 +367,63 @@ func mergeModels(d Document, input []any, prune bool) error {
 	return nil
 }
 
-func pruneModelReferences(d Document, models []any, removed map[string]bool) (Document, bool, error) {
+func pruneModelReferences(d Document, models []any) (Document, bool, error) {
+	surviving := make(map[string]bool, len(models))
+	for _, model := range models {
+		surviving[String(Object(model)["id"])] = true
+	}
+	orphan := func(value any) bool {
+		id := strings.TrimSpace(String(value))
+		return id != "" && !surviving[id]
+	}
 	changes := Document{}
-	if removed[String(d["k3CompatibleModelId"])] {
+	if orphan(d["k3CompatibleModelId"]) {
 		changes["k3CompatibleModelId"] = nil
 	}
 	value := d["subagents"]
 	policy := Object(value)
 	mode := String(policy["mode"])
-	reset := (mode == "force" || mode == "pool") && removed[String(policy["model"])]
+	reset := (mode == "force" || mode == "pool") && orphan(policy["model"])
 	changed := false
-	if !reset && mode == "pool" && len(removed) > 0 {
-		rows := Rows(policy["models"])
-		pool := make([]any, 0, len(rows))
-		for _, row := range rows {
-			if !removed[String(Object(row)["id"])] {
+	if !reset && (mode == "force" || mode == "pool") {
+		policy = maps.Clone(policy)
+		if id := String(policy["model"]); id != strings.TrimSpace(id) {
+			policy["model"] = strings.TrimSpace(id)
+			changed = true
+		}
+		if mode == "pool" {
+			rows := Rows(policy["models"])
+			pool := make([]any, 0, len(rows))
+			for _, row := range rows {
+				entry := Object(row)
+				if orphan(entry["id"]) {
+					continue
+				}
+				if id := String(entry["id"]); id != strings.TrimSpace(id) {
+					entry = maps.Clone(entry)
+					entry["id"] = strings.TrimSpace(id)
+					row = entry
+					changed = true
+				}
 				pool = append(pool, row)
 			}
-		}
-		roles := Object(policy["roles"])
-		keptRoles := maps.Clone(roles)
-		for role, id := range roles {
-			if removed[String(id)] {
-				delete(keptRoles, role)
+			if len(pool) != len(rows) {
+				reset = len(pool) == 0
+				changed = true
 			}
-		}
-		reset = len(pool) == 0 && len(rows) > 0
-		changed = len(pool) != len(rows) || len(keptRoles) != len(roles)
-		if changed {
-			policy = maps.Clone(policy)
 			policy["models"] = pool
-			if len(keptRoles) != len(roles) {
+			if roles := Object(policy["roles"]); roles != nil {
+				keptRoles := maps.Clone(roles)
+				for role, id := range roles {
+					if orphan(id) {
+						delete(keptRoles, role)
+						changed = true
+					}
+				}
 				policy["roles"] = keptRoles
 			}
+		}
+		if changed {
 			value = policy
 		}
 	}
@@ -440,7 +457,7 @@ type ConnectionRemoval struct {
 	Models           []string `json:"models"`
 	FailoverStripped []string `json:"failoverStripped"`
 	SubagentsReset   bool     `json:"subagentsReset"`
-	APIKeyRef        string   `json:"-"`
+	CredentialRefs   []string `json:"-"`
 }
 
 func DeleteConnection(d Document, id string, cascade bool) (ConnectionRemoval, error) {
@@ -460,7 +477,12 @@ func DeleteConnection(d Document, id string, cascade bool) (ConnectionRemoval, e
 	if connection == nil {
 		return ConnectionRemoval{}, errors.New("connection_unavailable")
 	}
-	result := ConnectionRemoval{ConnectionID: id, Models: []string{}, FailoverStripped: []string{}, APIKeyRef: String(connection["apiKeyRef"])}
+	result := ConnectionRemoval{ConnectionID: id, Models: []string{}, FailoverStripped: []string{}}
+	for _, field := range []string{"apiKeyRef", "apiKeyEnv"} {
+		if ref := String(connection[field]); ref != "" && !slices.Contains(result.CredentialRefs, ref) {
+			result.CredentialRefs = append(result.CredentialRefs, ref)
+		}
+	}
 	rows = Rows(d["models"])
 	if !cascade {
 		inUse := &ModelUseError{Code: "connection_in_use"}
@@ -478,13 +500,11 @@ func DeleteConnection(d Document, id string, cascade bool) (ConnectionRemoval, e
 	}
 
 	models := make([]any, 0, len(rows))
-	removed := map[string]bool{}
 	for _, row := range rows {
 		model := Object(row)
 		modelID := String(model["id"])
 		if model["connectionId"] == id {
 			result.Models = append(result.Models, modelID)
-			removed[modelID] = true
 			continue
 		}
 		failover := Rows(model["failover"])
@@ -508,7 +528,7 @@ func DeleteConnection(d Document, id string, cascade bool) (ConnectionRemoval, e
 		}
 		models = append(models, row)
 	}
-	changes, reset, err := pruneModelReferences(d, models, removed)
+	changes, reset, err := pruneModelReferences(d, models)
 	if err != nil {
 		return ConnectionRemoval{}, err
 	}

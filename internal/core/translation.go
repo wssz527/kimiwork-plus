@@ -19,14 +19,15 @@ import (
 )
 
 type TranslationConfig struct {
-	Enabled        bool   `json:"enabled"`
-	Provider       string `json:"provider"`
-	TargetLanguage string `json:"targetLanguage"`
-	View           string `json:"view"`
-	CustomEndpoint string `json:"customEndpoint"`
-	CustomModel    string `json:"customModel"`
-	APIKeyEnv      string `json:"apiKeyEnv"`
-	APIKeyRef      string `json:"apiKeyRef,omitempty"`
+	Enabled           bool   `json:"enabled"`
+	Provider          string `json:"provider"`
+	TargetLanguage    string `json:"targetLanguage"`
+	View              string `json:"view"`
+	CustomEndpoint    string `json:"customEndpoint"`
+	CustomModel       string `json:"customModel"`
+	APIKeyEnv         string `json:"apiKeyEnv"`
+	APIKeyRef         string `json:"apiKeyRef,omitempty"`
+	APIKeyEnvDisabled bool   `json:"-"`
 }
 
 var languages = map[string][3]string{"zh": {"zh-Hans", "zh-CN", "Simplified Chinese"}, "en": {"en", "en", "English"}, "ja": {"ja", "ja", "Japanese"}, "ko": {"ko", "ko", "Korean"}, "es": {"es", "es", "Spanish"}, "fr": {"fr", "fr", "French"}, "de": {"de", "de", "German"}, "ru": {"ru", "ru", "Russian"}}

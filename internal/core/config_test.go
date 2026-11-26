@@ -376,10 +376,14 @@ func TestDeleteConnectionPrunesModelReferences(t *testing.T) {
 		{"pool without roles", Document{"mode": "pool", "model": "kept"}, "pool", false},
 		{"pool with roles", Document{"mode": "pool", "model": "kept", "roles": Document{"plan": "retired", "coder": "kept"}}, "pool", false},
 		{"removed pool default", Document{"mode": "pool", "model": "retired"}, "inherit", true},
+		{"historical force", Document{"mode": "force", "model": " unknown "}, "inherit", true},
+		{"historical pool default", Document{"mode": "pool", "model": " unknown "}, "inherit", true},
+		{"historical pool entries", Document{"mode": "pool", "model": " kept ", "roles": Document{"plan": " unknown ", "coder": " kept "}}, "pool", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.policy["mode"] == "pool" {
-				tc.policy["models"] = []any{Document{"id": "retired", "description": "Removed model"}, Document{"id": "kept", "description": "Kept model"}}
+				tc.policy["models"] = []any{Document{"id": "retired", "description": "Removed model"},
+					Document{"id": " kept ", "description": "Kept model"}, Document{"id": " unknown ", "description": "Historical orphan"}}
 			}
 			retired := Document{"id": "delete", "name": "Removed", "baseURL": "https://removed.example/v1"}
 			kept := Document{"id": "keep", "name": "Kept", "baseURL": "https://kept.example/v1", "apiKeyEnv": "KEPT_TEST_KEY", "apiKeyRef": "kept-ref"}

@@ -84,8 +84,11 @@ func TestWorkspacePrunesReferencesOnlyWhenRequested(t *testing.T) {
 	_, rev, err := s.Store.Update(rev, func(d core.Document) error {
 		d["models"] = []any{kept, removed}
 		d["connections"] = []any{connection}
-		d["subagents"] = core.Document{"mode": "force", "model": "removed"}
-		d["k3CompatibleModelId"] = "removed"
+		d["subagents"] = core.Document{"mode": "pool", "model": "kept",
+			"models": []any{core.Document{"id": "kept", "description": "Kept"}, core.Document{"id": "removed", "description": "Unselected"}, core.Document{"id": "historical-orphan", "description": "Missing"}},
+			"roles":  core.Document{"plan": "historical-orphan", "coder": "removed", "explore": "kept"},
+		}
+		d["k3CompatibleModelId"] = "historical-orphan"
 		return nil
 	})
 	if err != nil {
@@ -107,8 +110,12 @@ func TestWorkspacePrunesReferencesOnlyWhenRequested(t *testing.T) {
 	request["pruneSubagents"] = true
 	callConfigPanel(t, s, http.MethodPost, "/api/workspace", request, http.StatusOK)
 	d, nextRev, err := s.Store.Read()
+	policy := core.Object(d["subagents"])
+	pool := core.Rows(policy["models"])
+	roles := core.Object(policy["roles"])
 	if err != nil || nextRev == rev || len(core.Rows(d["models"])) != 1 ||
-		core.Object(d["subagents"])["mode"] != "inherit" || d["k3CompatibleModelId"] != nil {
+		policy["mode"] != "pool" || d["k3CompatibleModelId"] != nil ||
+		len(pool) != 1 || core.Object(pool[0])["id"] != "kept" || len(roles) != 1 || roles["explore"] != "kept" {
 		t.Fatalf("save did not prune model references: %v %v", d, err)
 	}
 }

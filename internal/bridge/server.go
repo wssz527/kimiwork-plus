@@ -141,7 +141,7 @@ func fail(w http.ResponseWriter, e error) {
 		status = 400
 	}
 	switch code {
-	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "connection_unavailable", "subagent_model_in_use", "operation_busy", "account_session_unavailable", "account_work_home_unavailable", "account_page_sync_pending", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
+	case "configuration_conflict", "translation_settings_conflict", "connection_in_use", "connection_unavailable", "subagent_model_in_use", "subagent_model_unavailable", "operation_busy", "account_session_unavailable", "account_work_home_unavailable", "account_page_sync_pending", "quota_source_not_removable", "quota_credential_connection_unavailable", "account_work_busy", "account_login_pending", "account_login_not_pending", "account_login_unchanged", "account_current_in_use", "update_not_available", "rollback_unavailable", "direct_duplicate_endpoint", "direct_mode_unsupported", "direct_foreign_source", "native_import_direct_mode", "native_import_gateway_mode":
 		status = 409
 	case "conversation_kimi_restart_required", "conversation_database_busy":
 		status = 409
@@ -202,6 +202,8 @@ func message(code string) string {
 		return "所选连接已不可用，请刷新列表并重新选择。"
 	case "subagent_model_in_use":
 		return "子代理仍在使用这些模型，请先修改子代理设置。"
+	case "subagent_model_unavailable":
+		return "所选子代理模型已不可用，请刷新列表并重新选择。"
 	case "account_session_unavailable":
 		return "请先打开并登录 Kimi Work，再保存当前账号。"
 	case "account_work_home_unavailable":
@@ -768,8 +770,8 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 		s.discardStagedCredentials(pending)
 		return nil, e
 	}
-	if removed.APIKeyRef != "" {
-		defer s.discardUnreferencedCredentials([]string{removed.APIKeyRef}, "")
+	if len(removed.CredentialRefs) > 0 {
+		defer s.discardUnreferencedCredentials(removed.CredentialRefs, "")
 	}
 	if s.OnConfig != nil {
 		if e = s.OnConfig(d); e != nil {
@@ -930,7 +932,7 @@ func (s *Service) State() (core.Document, error) {
 	for k, v := range gatewayState {
 		state[k] = v
 	}
-	settings, e := core.TranslationSettings(d["translation"])
+	settings, e := savedTranslationSettings(d)
 	if e != nil {
 		return nil, e
 	}

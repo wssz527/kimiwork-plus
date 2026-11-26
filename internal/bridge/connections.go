@@ -101,7 +101,7 @@ func (s *Service) discardUnreferencedCredentials(refs []string, clearedTranslati
 		return
 	}
 	for _, ref := range refs {
-		if !referenced[ref] {
+		if ref != "" && !referenced[ref] {
 			_ = s.Keys.Delete(ref)
 		}
 	}
@@ -146,16 +146,17 @@ func collectCredentialRefs(d core.Document, refs map[string]bool, clearedTransla
 			refs[env] = true
 		}
 	}
-	settings, err := core.TranslationSettings(d["translation"])
+	settings, err := savedTranslationSettings(d)
 	if err != nil {
 		translation := core.Object(d["translation"])
 		settings.APIKeyRef = core.String(translation["apiKeyRef"])
 		settings.APIKeyEnv = core.String(translation["apiKeyEnv"])
+		settings.APIKeyEnvDisabled = false
 	}
 	if settings.APIKeyRef != "" {
 		refs[settings.APIKeyRef] = true
 	}
-	if settings.APIKeyEnv != "" && settings.APIKeyEnv != clearedTranslationEnv {
+	if settings.APIKeyEnv != "" && !settings.APIKeyEnvDisabled && settings.APIKeyEnv != clearedTranslationEnv {
 		refs[settings.APIKeyEnv] = true
 	}
 }

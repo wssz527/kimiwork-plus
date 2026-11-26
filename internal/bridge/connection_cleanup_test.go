@@ -219,8 +219,8 @@ func TestConnectionDeleteCascadeIsAtomicAndCleansCredentials(t *testing.T) {
 			core.Document{"id": "retired-model", "connectionId": "retire", "protocol": "responses", "contextWindow": 32000, "tools": true},
 			core.Document{"id": "kept-model", "connectionId": "keep", "protocol": "responses", "contextWindow": 32000, "failover": []any{core.Document{"connectionId": "retire"}}},
 		}
-		d["subagents"] = core.Document{"mode": "force", "model": "retired-model"}
-		d["k3CompatibleModelId"] = "retired-model"
+		d["subagents"] = core.Document{"mode": "force", "model": "historical-orphan"}
+		d["k3CompatibleModelId"] = " historical-k3-orphan "
 		return nil
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestConnectionDeleteCascadeIsAtomicAndCleansCredentials(t *testing.T) {
 	removed := core.Object(out["removed"])
 	if out["ok"] != true || removed["connectionId"] != "retire" || removed["subagentsReset"] != true ||
 		!reflect.DeepEqual(removed["models"], []any{"retired-model"}) ||
-		!reflect.DeepEqual(removed["failoverStripped"], []any{"kept-model"}) || removed["apiKeyRef"] != nil {
+		!reflect.DeepEqual(removed["failoverStripped"], []any{"kept-model"}) || removed["apiKeyRef"] != nil || removed["CredentialRefs"] != nil {
 		t.Fatalf("unexpected delete receipt: %v", removed)
 	}
 	d, afterRev, err := s.Store.Read()
@@ -300,5 +300,50 @@ func TestConnectionDeleteKeepsSharedCredential(t *testing.T) {
 	}
 	if key, _ := s.Keys.Get(ref); key != "shared-test-key" {
 		t.Fatal("delete removed a key that another connection uses")
+	}
+}
+
+func TestConnectionDeleteCleansLegacyCredentialOnlyWhenUnreferenced(t *testing.T) {
+	const env = "KIMI_WORK_LEGACY_TEST_KEY"
+	for _, owner := range []string{"none", "translation", "journal"} {
+		t.Run(owner, func(t *testing.T) {
+			s := newConfigPanelTestService(t, testKeys{env: "legacy-test-key"})
+			_, rev, _ := s.Store.Read()
+			before, rev, err := s.Store.Update(rev, func(d core.Document) error {
+				d["connections"] = []any{core.Document{"id": "legacy", "name": "Legacy", "baseURL": "https://legacy.example/v1", "apiKeyEnv": env}}
+				if owner == "translation" {
+					d["translation"] = core.Document{"apiKeyEnv": env}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if owner == "journal" {
+				s.OnConfig = func(d core.Document) error {
+					pending := core.Document{"before": core.Revision(d), "after": before}
+					return core.AtomicJSON(filepath.Join(s.StateDir, "gateway.json.journal"), pending)
+				}
+			}
+			callConfigPanel(t, s, http.MethodPost, "/api/connections/delete", core.Document{"revision": rev, "connectionId": "legacy"}, http.StatusOK)
+			want := "legacy-test-key"
+			if owner == "none" {
+				want = ""
+			}
+			if got, err := s.Keys.Get(env); err != nil || got != want {
+				t.Fatalf("legacy key availability = %t, want %t (%v)", got != "", want != "", err)
+			}
+		})
+	}
+}
+
+func TestUnavailableSubagentModelReturnsConflict(t *testing.T) {
+	s := newConfigPanelTestService(t, testKeys{})
+	_, rev, _ := s.Store.Read()
+	out := callConfigPanel(t, s, http.MethodPost, "/api/subagents", core.Document{
+		"revision": rev, "mode": "force", "model": "unknown",
+	}, http.StatusConflict)
+	if core.Object(out["error"])["code"] != "subagent_model_unavailable" {
+		t.Fatal(out)
 	}
 }

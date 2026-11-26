@@ -189,7 +189,7 @@ func (n *Native) Configure(d core.Document) error {
 	if e := json.Unmarshal(raw, &models); e != nil {
 		return e
 	}
-	translation, e := core.TranslationSettings(d["translation"])
+	translation, e := savedTranslationSettings(d)
 	if e != nil {
 		return e
 	}
@@ -624,7 +624,7 @@ func (n *Native) State() core.Document {
 	if status.Translation != nil {
 		d, _, e := n.service.Store.Read()
 		if e == nil {
-			c, e := core.TranslationSettings(d["translation"])
+			c, e := savedTranslationSettings(d)
 			if e == nil {
 				out["translation"] = n.service.translationState(d, c, status.Translation)
 			}
@@ -1213,7 +1213,7 @@ func (n *Native) translate(ctx context.Context, reply kimi.TranslationReply) (an
 	if e != nil {
 		return fail("translation_invalid_config")
 	}
-	c, e := core.TranslationSettings(d["translation"])
+	c, e := savedTranslationSettings(d)
 	if e != nil {
 		return fail("translation_invalid_config")
 	}

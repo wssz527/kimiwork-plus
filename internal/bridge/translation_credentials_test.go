@@ -74,15 +74,15 @@ func TestTranslationSaveWithoutAPIKeyEnvKeepsManagedRef(t *testing.T) {
 	if saved.APIKeyRef == "" {
 		t.Fatal("managed key was not stored")
 	}
-	for _, envIncluded := range []bool{false, true} {
+	for i, env := range []any{nil, "", nil} {
 		state := callConfigPanel(t, s, http.MethodGet, "/api/state", nil, http.StatusOK)
 		configured := assertTranslationKeyState(t, state, "managed")
 		configured["revision"] = state["revision"]
 		configured["enabled"] = !configured["enabled"].(bool)
 		configured["apiKeyMasked"] = "masked"
 		delete(configured, "apiKeyEnv")
-		if envIncluded {
-			configured["apiKeyEnv"] = ""
+		if i != 0 {
+			configured["apiKeyEnv"] = env
 		}
 		callConfigPanel(t, s, http.MethodPost, "/api/translation", configured, http.StatusOK)
 		current, _ := readTranslation(t, s)
@@ -103,9 +103,28 @@ func TestTranslationSaveWithoutAPIKeyEnvKeepsManagedRef(t *testing.T) {
 	}
 }
 
+func TestTranslationRejectsInvalidKeyInputs(t *testing.T) {
+	s := newConfigPanelTestService(t, testKeys{})
+	_, rev, _ := s.Store.Read()
+	for _, input := range []core.Document{
+		{"apiKeyEnv": 1}, {"apiKeyEnv": []any{}}, {"apiKey": false}, {"apiKey": []any{}},
+		{"apiKey": "test\rkey"}, {"apiKey": "test\nkey"}, {"apiKey": "test\x00key"},
+	} {
+		input["revision"] = rev
+		result := callConfigPanel(t, s, http.MethodPost, "/api/translation", input, http.StatusBadRequest)
+		if core.Object(result["error"])["code"] != "invalid_translation_config" {
+			t.Fatal(result)
+		}
+		if _, unchanged, err := s.Store.Read(); err != nil || unchanged != rev {
+			t.Fatalf("an invalid credential input changed the configuration: %v", err)
+		}
+	}
+}
+
 func TestTranslationClearAPIKey(t *testing.T) {
 	const env = "TEST_TRANSLATION_KEY"
-	s := newConfigPanelTestService(t, testKeys{env: "legacy-test-key"})
+	const defaultEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+	s := newConfigPanelTestService(t, testKeys{env: "legacy-test-key", defaultEnv: "default-test-key"})
 	_, rev, _ := s.Store.Read()
 	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{"revision": rev, "apiKeyEnv": env}, http.StatusOK)
 	state := callConfigPanel(t, s, http.MethodGet, "/api/state", nil, http.StatusOK)
@@ -127,10 +146,17 @@ func TestTranslationClearAPIKey(t *testing.T) {
 		"revision": rev, "clearApiKey": true,
 	}, http.StatusOK)
 	assertTranslationKeyState(t, core.Object(result["state"]), "")
-	if cleared, _ := readTranslation(t, s); cleared.APIKeyRef != "" || cleared.APIKeyEnv != env {
-		t.Fatal("clear did not remove only the private reference from the configuration")
+	if cleared, _ := readTranslation(t, s); cleared.APIKeyRef != "" || cleared.APIKeyEnv != defaultEnv || !cleared.APIKeyEnvDisabled {
+		t.Fatal("clear did not reset the private reference and environment binding")
 	}
-	for _, ref := range []string{env, managed.APIKeyRef} {
+	stored, _, err := s.Store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.TranslationSettings(stored["translation"]); err != nil || core.Object(stored["translation"])[translationKeyEnvDisabled] != nil {
+		t.Fatalf("clear must preserve the stored translation settings schema: %v", err)
+	}
+	for _, ref := range []string{env, defaultEnv, managed.APIKeyRef} {
 		if key, _ := s.Keys.Get(ref); key != "" {
 			t.Fatal("clear left an unreferenced credential behind")
 		}
@@ -139,7 +165,8 @@ func TestTranslationClearAPIKey(t *testing.T) {
 
 func TestTranslationClearAPIKeyPreservesConnectionCredentials(t *testing.T) {
 	const env = "TEST_SHARED_KEY"
-	s := newConfigPanelTestService(t, testKeys{env: "connection-test-key"})
+	const defaultEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+	s := newConfigPanelTestService(t, testKeys{env: "connection-test-key", defaultEnv: "other-connection-test-key"})
 	_, rev, _ := s.Store.Read()
 	callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
 		"revision": rev, "apiKeyEnv": env, "apiKey": "shared-test-key",
@@ -148,6 +175,7 @@ func TestTranslationClearAPIKeyPreservesConnectionCredentials(t *testing.T) {
 	_, rev, err := s.Store.Update(rev, func(d core.Document) error {
 		d["connections"] = []any{
 			core.Document{"id": "legacy", "name": "Legacy", "baseURL": "https://legacy.example/v1", "apiKeyEnv": env},
+			core.Document{"id": "default-key", "name": "Default key", "baseURL": "https://default.example/v1", "apiKeyEnv": defaultEnv},
 			core.Document{"id": "managed", "name": "Managed", "baseURL": "https://managed.example/v1", "apiKeyRef": managed.APIKeyRef},
 		}
 		return nil
@@ -155,16 +183,26 @@ func TestTranslationClearAPIKeyPreservesConnectionCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := callConfigPanel(t, s, http.MethodPost, "/api/translation", core.Document{
-		"revision": rev, "clearApiKey": true,
-	}, http.StatusOK)
-	assertTranslationKeyState(t, core.Object(result["state"]), "connection")
+	draft := core.Document{"revision": rev, "clearApiKey": true, "apiKeyEnv": "",
+		"provider": "custom", "customEndpoint": "https://new.example/v1/chat/completions"}
+	result := callConfigPanel(t, s, http.MethodPost, "/api/translation", draft, http.StatusOK)
+	configured := assertTranslationKeyState(t, core.Object(result["state"]), "")
+	if configured["apiKeyEnv"] != defaultEnv || configured["apiKeyEnvDisabled"] != nil {
+		t.Fatalf("unexpected public cleared settings: %v", configured)
+	}
 	if key, _ := s.Keys.Get(managed.APIKeyRef); key != "shared-test-key" {
 		t.Fatal("clear deleted a credential shared with another connection")
 	}
 	if key, _ := s.Keys.Get(env); key != "connection-test-key" {
 		t.Fatal("clear deleted the legacy connection credential")
 	}
+	if key, _ := s.Keys.Get(defaultEnv); key != "other-connection-test-key" {
+		t.Fatal("clear deleted another connection's default-named credential")
+	}
+	_, rev = readTranslation(t, s)
+	draft["revision"], draft["apiKeyEnv"] = rev, env
+	result = callConfigPanel(t, s, http.MethodPost, "/api/translation", draft, http.StatusOK)
+	assertTranslationKeyState(t, core.Object(result["state"]), "connection")
 }
 
 func readTranslation(t *testing.T, s *Service) (core.TranslationConfig, string) {
@@ -173,7 +211,7 @@ func readTranslation(t *testing.T, s *Service) (core.TranslationConfig, string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := core.TranslationSettings(d["translation"])
+	c, err := savedTranslationSettings(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +227,74 @@ func assertTranslationKeyState(t *testing.T, state core.Document, source string)
 		t.Fatalf("translation key state does not match source %q: %v", source, tr)
 	}
 	return configured
+}
+
+func TestTranslationPreviewWithoutAPIKeyEnvUsesOnlyTheSavedService(t *testing.T) {
+	const env = "TEST_PREVIEW_KEY"
+	const defaultEnv = "KIMI_WORK_TRANSLATION_API_KEY"
+	const key = "test-preview-credential"
+	for _, source := range []string{"connection", "managed"} {
+		t.Run(source, func(t *testing.T) {
+			savedEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+key {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				var input struct {
+					Messages []struct{ Content string }
+				}
+				if json.NewDecoder(r.Body).Decode(&input) != nil || len(input.Messages) == 0 {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				content := input.Messages[len(input.Messages)-1].Content
+				_ = json.NewEncoder(w).Encode(core.Document{"choices": []any{core.Document{"message": core.Document{"content": content}}}})
+			}))
+			defer savedEndpoint.Close()
+			otherEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "" {
+					t.Error("changed URL received a stored credential")
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer otherEndpoint.Close()
+
+			s := newConfigPanelTestService(t, testKeys{env: key, defaultEnv: "test-default-credential"})
+			_, rev, _ := s.Store.Read()
+			draft := core.Document{"provider": "custom", "customModel": "kimi-preview-model",
+				"customEndpoint": savedEndpoint.URL + "/v1/chat/completions", "apiKeyEnv": env}
+			if source == "connection" {
+				_, updated, err := s.Store.Update(rev, func(d core.Document) error {
+					d["connections"] = []any{core.Document{"id": "api", "name": "API", "baseURL": savedEndpoint.URL + "/v1", "apiKeyEnv": env, "protocols": []any{"chat"}}}
+					d["models"] = []any{core.Document{"id": "kimi-preview-model", "connectionId": "api", "protocol": "chat", "contextWindow": 32000}}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rev = updated
+				copied := callConfigPanel(t, s, http.MethodPost, "/api/translation/from-connection", core.Document{"modelId": "kimi-preview-model"}, http.StatusOK)
+				draft = core.Object(copied["settings"])
+			} else {
+				draft["apiKey"] = key
+			}
+			draft["revision"] = rev
+			saved := callConfigPanel(t, s, http.MethodPost, "/api/translation", draft, http.StatusOK)
+			configured := assertTranslationKeyState(t, core.Object(saved["state"]), source)
+			delete(configured, "apiKeyEnv")
+			for _, body := range []core.Document{{}, {"settings": nil}, {"settings": configured}} {
+				callConfigPanel(t, s, http.MethodPost, "/api/translation/preview", body, http.StatusOK)
+			}
+			configured["apiKeyEnv"] = ""
+			callConfigPanel(t, s, http.MethodPost, "/api/translation/preview", core.Document{"settings": configured}, http.StatusOK)
+			delete(configured, "apiKeyEnv")
+			configured["customEndpoint"] = otherEndpoint.URL + "/v1/chat/completions"
+			_, err := s.translationAction(context.Background(), "/api/translation/preview", core.Document{"settings": configured})
+			if core.ErrorCode(err) != "translation_http_error" {
+				t.Fatalf("unexpected changed-endpoint preview result: %v", err)
+			}
+		})
+	}
 }
 
 func TestFixedTranslationPreviewUsesSavedPrivateCredential(t *testing.T) {

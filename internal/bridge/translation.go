@@ -9,10 +9,21 @@ import (
 	"github.com/wssz527/kimiwork-plus/internal/core"
 )
 
+const translationKeyEnvDisabled = "translationKeyEnvDisabled"
+
+func savedTranslationSettings(d core.Document) (core.TranslationConfig, error) {
+	settings, err := core.TranslationSettings(d["translation"])
+	settings.APIKeyEnvDisabled = d[translationKeyEnvDisabled] == true
+	return settings, err
+}
+
 func translationRevision(c core.TranslationConfig) string {
 	b, _ := json.Marshal(c)
 	var d core.Document
 	_ = json.Unmarshal(b, &d)
+	if c.APIKeyEnvDisabled {
+		d[translationKeyEnvDisabled] = true
+	}
 	return core.Revision(d)
 }
 
@@ -24,6 +35,7 @@ type publicTranslationConfig struct {
 
 func translationPublicConfig(c core.TranslationConfig, source string) publicTranslationConfig {
 	c.APIKeyRef = ""
+	c.APIKeyEnvDisabled = false
 	return publicTranslationConfig{TranslationConfig: c, HasAPIKey: source != "", APIKeySource: source}
 }
 
@@ -48,6 +60,9 @@ func (s *Service) translationCredential(d core.Document, c core.TranslationConfi
 		if key != "" {
 			return key, "managed"
 		}
+		return "", ""
+	}
+	if c.APIKeyEnvDisabled {
 		return "", ""
 	}
 	for _, v := range core.Rows(d["connections"]) {
@@ -86,7 +101,7 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	if e != nil {
 		return nil, e
 	}
-	current, e := core.TranslationSettings(d["translation"])
+	current, e := savedTranslationSettings(d)
 	if e != nil {
 		return nil, e
 	}
@@ -106,12 +121,17 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	}
 	clear, validClear := in["clearApiKey"].(bool)
 	_, hasClear := in["clearApiKey"]
-	supplied, _ := in["apiKey"].(string)
-	if hasClear && !validClear || clear && supplied != "" {
+	supplied, validKey := in["apiKey"].(string)
+	if hasClear && !validClear || in["apiKey"] != nil && !validKey ||
+		strings.ContainsAny(supplied, "\r\n\x00") || clear && supplied != "" {
 		return nil, errors.New("invalid_translation_config")
 	}
 	value := translationInput(in)
-	if env, exists := value["apiKeyEnv"]; !exists || env == "" {
+	env, validEnv := value["apiKeyEnv"].(string)
+	if value["apiKeyEnv"] != nil && !validEnv {
+		return nil, errors.New("invalid_translation_config")
+	}
+	if env == "" && !clear {
 		value["apiKeyEnv"] = current.APIKeyEnv
 	}
 	settings, e := core.TranslationSettings(value)
@@ -121,8 +141,11 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	if settings.APIKeyRef != "" {
 		return nil, errors.New("invalid_translation_config")
 	}
-	if !clear && current.APIKeyEnv == settings.APIKeyEnv {
+	if clear && env == "" {
+		settings.APIKeyEnvDisabled = true
+	} else if !clear && current.APIKeyEnv == settings.APIKeyEnv {
 		settings.APIKeyRef = current.APIKeyRef
+		settings.APIKeyEnvDisabled = current.APIKeyEnvDisabled
 	}
 	staged := ""
 	if supplied != "" {
@@ -142,6 +165,11 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	var normalized map[string]any
 	_ = json.Unmarshal(b, &normalized)
 	d["translation"] = normalized
+	if settings.APIKeyEnvDisabled {
+		d[translationKeyEnvDisabled] = true
+	} else {
+		delete(d, translationKeyEnvDisabled)
+	}
 	d, _, e = s.Store.Commit(d, rev)
 	if e != nil {
 		if staged != "" {
@@ -155,9 +183,12 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	}
 	clearedEnv := ""
 	if clear {
-		clearedEnv = current.APIKeyEnv
-		if clearedEnv != "" {
-			obsolete = append(obsolete, clearedEnv)
+		obsolete = append(obsolete, current.APIKeyEnv)
+		if env == "" && settings.APIKeyEnv != current.APIKeyEnv {
+			obsolete = append(obsolete, settings.APIKeyEnv)
+		}
+		if env != "" && settings.APIKeyEnv == current.APIKeyEnv {
+			clearedEnv = current.APIKeyEnv
 		}
 	}
 	s.discardUnreferencedCredentials(obsolete, clearedEnv)
@@ -169,29 +200,48 @@ func (s *Service) saveTranslation(in core.Document) (any, error) {
 	state, e := s.State()
 	return core.Document{"ok": true, "state": state}, e
 }
+func translationPreviewSettings(value any, d core.Document) (core.TranslationConfig, error) {
+	saved, err := savedTranslationSettings(d)
+	if err != nil || value == nil {
+		return saved, err
+	}
+	draft := core.Object(value)
+	if draft == nil {
+		return core.TranslationSettings(value)
+	}
+	c, err := core.TranslationSettings(translationInput(draft))
+	if err != nil {
+		return c, err
+	}
+	c.APIKeyRef = ""
+	sameService := c.Provider == saved.Provider && c.CustomEndpoint == saved.CustomEndpoint && c.CustomModel == saved.CustomModel
+	if core.String(draft["apiKeyEnv"]) == "" {
+		if !sameService {
+			c.APIKeyEnvDisabled = true
+			return c, nil
+		}
+		c.APIKeyEnv = saved.APIKeyEnv
+	}
+	if sameService && c.APIKeyEnv == saved.APIKeyEnv {
+		c.APIKeyEnvDisabled = saved.APIKeyEnvDisabled
+	}
+	ref := saved.APIKeyRef
+	saved.APIKeyRef = ""
+	if c == saved {
+		c.APIKeyRef = ref
+	}
+	return c, nil
+}
+
 func (s *Service) translationAction(ctx context.Context, path string, in core.Document) (any, error) {
 	d, _, e := s.Store.Read()
 	if e != nil {
 		return nil, e
 	}
 	if path == "/api/translation/preview" {
-		value := in["settings"]
-		if settings := core.Object(value); settings != nil {
-			value = translationInput(settings)
-		}
-		c, e := core.TranslationSettings(value)
+		c, e := translationPreviewSettings(in["settings"], d)
 		if e != nil {
 			return nil, e
-		}
-		saved, e := core.TranslationSettings(d["translation"])
-		if e != nil {
-			return nil, e
-		}
-		c.APIKeyRef = ""
-		ref := saved.APIKeyRef
-		saved.APIKeyRef = ""
-		if c == saved {
-			c.APIKeyRef = ref
 		}
 		const original = "Open `src/app.js`, read https://example.test/docs and update config.json before the next step."
 		translated, e := core.NewTranslator().Translate(ctx, original, c, s.translationKey(d, c), []string{"src/app.js", "https://example.test/docs", "config.json"})
@@ -252,7 +302,7 @@ func (s *Service) translationAction(ctx context.Context, path string, in core.Do
 	if strings.HasSuffix(strings.ToLower(base), "/chat/completions") || strings.HasSuffix(strings.ToLower(base), "/responses") {
 		return nil, errors.New("translation_connection_endpoint_not_base")
 	}
-	settings, e := core.TranslationSettings(d["translation"])
+	settings, e := savedTranslationSettings(d)
 	if e != nil {
 		return nil, e
 	}
