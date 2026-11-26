@@ -159,17 +159,17 @@ function syncState(data) {
      前者要先重启，后者还差一次清理。 */
   const nativePending = nativeRestartReceipt(data) || directRouteCleanupPending(data);
   if (info.readback && info.applied === true && !nativePending) {
-    return { code: 'synced', tone: 'ok', word: '目录与配置已读回',
+    return { code: 'synced', tone: 'ok', word: '配置已生效',
       note: unmanagedRunning
-        ? '已同步的模型配置仍保留在磁盘；当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」可恢复完整受管能力。'
-        : info.adopted === true ? '受管进程已加载对应配置代次；官方菜单实际采用仍需在 Kimi 窗口确认。' : '模型目录、账号、地址和配置代次一致；官方菜单实际采用尚未确认。' };
+        ? '已同步的模型配置仍保留在磁盘；当前 Kimi 是直接从桌面打开的，点击「正常退出并重启 Kimi」即可同步配置。'
+        : info.adopted === true ? '配置已生效；可在 Kimi 窗口的模型下拉框中确认。' : '模型目录与配置已一致；可在 Kimi 窗口的模型下拉框中确认。' };
   }
   if (info.desktop?.state === 'failed' && /^(work_storage_|existing_login_|profile_mode_)/.test(info.desktop.reason || '')) {
     return { code: 'conflict', tone: 'bad', word: '隔离启动未完成', note: nativeConnectionText(data) };
   }
   if (info.desktop?.state === 'needs_user_close') {
-    return { code: 'manual-exit', tone: 'warn', word: '可以受管重启 Kimi',
-      note: '点击「正常退出并重启 Kimi」，产品会请求系统正常退出当前实例，再使用官方登录和真实 Work 数据受管启动。' };
+    return { code: 'manual-exit', tone: 'warn', word: '重启 Kimi 使配置生效',
+      note: '点击「正常退出并重启 Kimi」，将安全退出当前 Kimi 并重新打开以同步配置，原有登录和 Work 数据都会保留。' };
   }
   if (has('account_changed', 'native_import_account_changed') && info.readback?.accountVerified === true) {
     return { code: 'pending', tone: 'warn', word: '当前账号待同步',
@@ -433,7 +433,7 @@ function renderOverviewStatus(data) {
       : info.code === 'repair'
         ? '将把临时来源标识修正为标准标识并重新写入模型目录，必要时先断开旧的临时来源；无需重启本软件。'
         : info.code === 'takeover'
-          ? '将正常退出当前外部启动的 Kimi，并由本产品受管重启后完成同步。'
+          ? '将安全退出当前直接从桌面打开的 Kimi，并由 KimiWork + 重新打开后完成同步。'
           : info.code === 'empty' || info.code === 'no-eligible'
             ? '先保存至少一个真实模型；后台会自动把它同步到 Kimi Work。'
             : '';
@@ -619,8 +619,8 @@ function directModeState(data) {
   /* 官方 Kimi 未受管时需先接管，后台才能写入直连配置。 */
   if (!synced) {
     if (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false)) {
-      return { code: 'manual-exit', tone: 'warn', word: '需先受管重启 Kimi',
-        note: '检测到当前官方 Kimi 未受本产品托管，写入直连配置前请先点击「正常退出并重启 Kimi」，完成受管启动后后台会同步。' };
+      return { code: 'manual-exit', tone: 'warn', word: '需从 KimiWork + 重启一次 Kimi',
+        note: '当前 Kimi 是直接从桌面打开的，写入直连配置前请先点击「正常退出并重启 Kimi」，重新打开后后台会自动同步。' };
     }
     return { code: 'pending', tone: 'warn', word: '等待自动写入直连配置',
       note: '已保存为零网关直连模式。' + integrationModeSyncText(data) };
@@ -632,7 +632,7 @@ function directModeState(data) {
        这时给警告让人「重启成受管进程」是错的。 */
     if (data?.kimiProcess?.running === true && info.desktop?.managed === false) {
       return { code: 'ready', tone: 'ok', word: '直连运行中（免开本软件）',
-        note: '官方 Kimi 正直连第三方模型，无需保持 KimiWork + 运行。如需思考翻译或多账号切换，再从这里重启托管。' };
+        note: '官方 Kimi 正直连第三方模型，无需保持 KimiWork + 运行。如需思考翻译或多账号切换，再从这里重启 Kimi 即可。' };
     }
     return { code: 'ready', tone: 'ok', word: '直连已就绪',
       note: '已写入直连模型与静态 hosts，退出本软件及后台服务后也可直接在官方 Kimi 中使用。' };
@@ -667,7 +667,7 @@ function nativeConnectionText(data) {
     }
     const directComplete = directImportComplete(data);
     if (!directComplete && (info.desktop?.state === 'needs_user_close' || (data?.kimiProcess?.running === true && info.desktop?.managed === false))) {
-      return '当前官方 Kimi 未受本产品托管，无法写入直连配置。请先点击「正常退出并重启 Kimi」，完成受管启动后后台会同步。';
+      return '当前 Kimi 是直接从桌面打开的，写入直连配置前请先点击「正常退出并重启 Kimi」，重新打开后后台会自动同步。';
     }
     /* 具体失败/等待码优先于宽泛的 direct_import_required，避免等待 Work、
        等待登录或启动失败被默认待同步提示吞掉。 */
@@ -708,10 +708,10 @@ function nativeConnectionText(data) {
      落到末尾兜底会把它说成「首次使用」，反而让用户重复点启动。 */
   if (data?.kimiProcess?.running === true && info.desktop?.managed === false) {
     return info.imported && info.readback
-      ? '当前 Kimi 由系统直接启动，未受本产品托管；已同步的模型配置仍保留在磁盘。点「正常退出并重启 Kimi」可恢复完整受管能力。'
-      : '当前 Kimi 由系统直接启动，未受本产品托管。点「正常退出并重启 Kimi」后，模型接入会在受管启动中继续。';
+      ? '当前 Kimi 是直接从桌面打开的，已同步的模型配置仍保留在磁盘；点击「正常退出并重启 Kimi」即可同步配置。'
+      : '当前 Kimi 是直接从桌面打开的，点击「正常退出并重启 Kimi」即可同步配置并继续接入。';
   }
-  if (info.imported && info.readback) return info.adopted ? '目录、账号与配置代次已读回；官方菜单采用请在 Kimi 窗口确认。' : '目录、账号与地址已读回，等待官方运行时采用。';
+  if (info.imported && info.readback) return info.adopted ? '配置已生效；可在 Kimi 窗口的模型下拉框中确认。' : '模型目录与配置已读回，等待 Kimi 窗口生效。';
   if (info.imported) return '原生接口已接受模型目录，等待目录、账号与地址读回。';
   const reason = info.nativeImport?.reason || info.desktop?.reason || info.reason;
   const reasons = {
@@ -720,7 +720,7 @@ function nativeConnectionText(data) {
     work_storage_restore_conflict: 'Work 数据位置已被其他操作改动，未覆盖。请先正常退出 Kimi，并核对数据位置后再继续。',
     work_storage_isolation_busy: '另一份增强服务正在使用当前登录，请先结束那次隔离会话。',
     work_storage_restore_failed: '原来的 Work 数据位置尚未恢复。请正常退出 Kimi 后重新打开本增强服务；恢复记录已保留。',
-    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「设置」页的会话维护区刷新。',
+    conversation_rollback_failed: '会话绑定恢复尚未完成。请在「会话」页刷新。',
     work_storage_journal_invalid: 'Work 数据位置的恢复记录无法验证，已暂停启动，请检查诊断信息。',
     native_byok_dns_unavailable: '本机单域名 DNS 端口被占用或不可用。请停止占用该端口的旧版本或其他接入实例，再重新准备。',
     native_byok_dns_stop_failed: '单域名 DNS 未能正常停止。请查看诊断并重新检查端口状态。',
@@ -740,9 +740,9 @@ function nativeConnectionText(data) {
     application_not_found: '官方 Kimi 应用入口不可用。请重新安装官方 Kimi 后再试。',
     base_url_changed: '检测到本机网关地址变化，正在通过官方接口恢复已有接入。',
     profile_mode_change_requires_exit: '切换登录方式前，请先正常退出当前 Kimi，再选择所需方式启动。',
-    official_kimi_already_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
-    unmanaged_kimi_running: '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。',
-    native_bridge_unavailable: '当前未连接到受管 Kimi 通道。点「重新同步模型目录」会自动启动受管 Kimi；若 Kimi 已在运行，请点「正常退出并重启 Kimi」。',
+    official_kimi_already_running: '当前 Kimi 是直接从桌面打开的，请点击「正常退出并重启 Kimi」，由 KimiWork + 重新打开即可同步配置。',
+    unmanaged_kimi_running: '当前 Kimi 是直接从桌面打开的，请点击「正常退出并重启 Kimi」，由 KimiWork + 重新打开即可同步配置。',
+    native_bridge_unavailable: '当前未连接到 Kimi 窗口。点「重新同步模型目录」会自动打开 Kimi；若 Kimi 已在运行，请点「正常退出并重启 Kimi」。',
     native_bridge_waiting_work: '官方 Kimi 已运行，但 Work 页面尚未就绪。请确认 Kimi 已登录并切换到 Work 视图，或点「打开 Kimi Work」后重试。',
     native_bridge_waiting_settings: '正在等待 Kimi 设置页完成原生导入。',
     native_bridge_settings_open_refused: '官方 Kimi 拒绝打开 Work 设置页。请确认 Kimi 窗口已就绪且无阻塞提示后重试。',
@@ -866,15 +866,15 @@ function renderOverviewSubagents(data) {
 
   if (mode === 'inherit') {
     setText(dom.overviewSubagentsValue, POLICY_MODE_WORD.inherit || '继承主模型');
-    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可在「模型」页底部按角色分配模型。');
+    setText(dom.overviewSubagentsNote, '普通子代理跟随主模型；可在「模型」→「子代理角色」按角色分配模型。');
     return;
   }
   if (mode === 'force') {
     const model = configured.model ? catalogModelLabel(data, configured.model) : '已指定';
     setText(dom.overviewSubagentsValue, '固定 · ' + model);
     setText(dom.overviewSubagentsNote, runtimeState === 'file-applied' || runtimeState === 'loaded'
-      ? '已写入 Kimi Work config.toml，新建会话生效。'
-      : '目标已保存，待确认写入 Kimi Work 配置。');
+      ? '已同步至 Kimi Work 配置，新建会话生效。'
+      : '目标已保存，待同步至 Kimi Work 配置。');
     return;
   }
   const poolCount = Array.isArray(configured.models) ? configured.models.length : 0;
@@ -884,7 +884,7 @@ function renderOverviewSubagents(data) {
   const parts = [];
   if (configured.model) parts.push('默认 ' + catalogModelLabel(data, configured.model));
   if (assigned.length) parts.push('角色 ' + assigned.join('/'));
-  parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已写入 config.toml' : '待写入配置');
+  parts.push(runtimeState === 'file-applied' || runtimeState === 'loaded' ? '已同步至 Kimi Work' : '待同步配置');
   setText(dom.overviewSubagentsNote, parts.join(' · '));
 }
 
@@ -1286,7 +1286,7 @@ function computeOverviewIssue(data) {
       tone: verdict.tone || 'warn',
       title: verdict.word,
       note: verdict.note,
-      actionLabel: '接入与恢复',
+      actionLabel: '切换模式（网关 / 直连）',
       action: { type: 'section', view: 'maintenance', section: 'native-panel' },
     };
   }
@@ -1497,7 +1497,7 @@ function isInFlight(op) {
 
 function operationNote(op) {
   if (op && op.state === 'waiting-kimi-exit') {
-    return '检测到另一个未受托管的官方 Kimi 正在运行。请点击「正常退出并重启 Kimi」，由产品正常退出并完成受管重启后再试。';
+    return '当前 Kimi 是直接从桌面打开的，请点击「正常退出并重启 Kimi」，由 KimiWork + 重新打开即可同步配置。';
   }
   if (op?.state === 'waiting-login') {
     return '已打开官方 Kimi，但尚未确认登录账号。请先在官方窗口完成登录，再重新操作。';
@@ -1701,7 +1701,7 @@ function renderWorkspaceSync(data) {
   let syncedNote = '已读回当前模型配置，可在 Work 的模型选择器中使用。';
   if (unmanaged) {
     syncedNote = data.kimiProcess?.running === true
-      ? '已读回当前模型配置。当前 Kimi 非托管运行，请在官方窗口确认模型。'
+      ? '已读回当前模型配置。当前 Kimi 是直接从桌面打开的，请在 Kimi 窗口确认模型，或重启 Kimi 同步配置。'
       : '已读回当前模型配置。打开 Kimi 后可在模型选择器中确认。';
   }
   setText($('workspace-sync-state'), !models.length ? '尚未添加模型' : synced ? '已同步到 Kimi Work' : restart ? '需要重启 Kimi' : '等待自动同步到 Kimi Work');

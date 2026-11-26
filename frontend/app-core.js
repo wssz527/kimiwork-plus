@@ -4,6 +4,7 @@ const API = {
   models: '/api/models',
   connection: '/api/connection',
   connections: '/api/connections',
+  connectionsDelete: '/api/connections/delete',
   connectionsProbe: '/api/connections/probe',
   subagents: '/api/subagents',
   translation: '/api/translation',
@@ -96,14 +97,15 @@ const UPSTREAM_REASON = {
 };
 
 
-const VIEWS = ['overview', 'models', 'accounts', 'usage', 'maintenance'];
+const VIEWS = ['overview', 'models', 'conversations', 'accounts', 'usage', 'maintenance'];
 
 const VIEW_COPY = {
   overview: { title: '总览', lede: '网关与 Kimi Work 接入状态、当前账号、子代理与今日用量。' },
   models: { title: '模型', lede: '管理服务商连接、已启用模型与子代理角色分配；保存后立即生效并自动同步到 Kimi Work。' },
+  conversations: { title: '会话', lede: '查看 Kimi Work 本地会话，直接为已有对话切换模型或批量迁移历史模型记录。' },
   accounts: { title: '账号', lede: '保存、切换与管理本机官方 Kimi 多账号凭据。' },
   usage: { title: '用量', lede: '查看本机网关与 Kimi Work 会话用量、服务商余额与预算保护。' },
-  maintenance: { title: '设置', lede: 'Kimi 接入模式、版本更新、页面增强、会话模型维护与诊断记录。' },
+  maintenance: { title: '设置', lede: 'Kimi 接入模式、扩展增强、版本更新与诊断排障。' },
 };
 
 const VIEW_ALIASES = {
@@ -116,11 +118,11 @@ const VIEW_ALIASES = {
   enhancements: 'models',
   accounts: 'accounts',
   account: 'accounts',
-  conversations: 'maintenance',
-  conversation: 'maintenance',
-  sessions: 'maintenance',
-  session: 'maintenance',
-  rebind: 'maintenance',
+  conversations: 'conversations',
+  conversation: 'conversations',
+  sessions: 'conversations',
+  session: 'conversations',
+  rebind: 'conversations',
   tools: 'maintenance',
   extensions: 'maintenance',
   translation: 'maintenance',
@@ -156,7 +158,9 @@ function setSubtab(group, tab, { persist = true } = {}) {
   state.subtabs = { ...(state.subtabs || {}), [group]: tab };
   if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
     document.querySelectorAll(`[data-subtab-group="${group}"][data-subtab]`).forEach((btn) => {
-      btn.setAttribute('aria-selected', String(btn.dataset.subtab === tab));
+      const selected = btn.dataset.subtab === tab;
+      btn.setAttribute('aria-selected', String(selected));
+      btn.setAttribute('tabindex', selected ? '0' : '-1');
     });
     document.querySelectorAll(`[data-subtab-group="${group}"][data-subtab-pane]`).forEach((pane) => {
       pane.hidden = pane.dataset.subtabPane !== tab;
@@ -535,6 +539,7 @@ const dom = {
 
   navOverview: $('nav-overview'),
   navModels: $('nav-models'),
+  navConversations: $('nav-conversations'),
   navAccounts: $('nav-accounts'),
   navUsage: $('nav-usage'),
   navMaintenance: $('nav-maintenance'),
@@ -549,6 +554,7 @@ const dom = {
   factGatewayDot: $('fact-gateway-dot'),
   factGateway: $('fact-gateway'),
   factGatewayUrl: $('fact-gateway-url'),
+  overviewSwitchMode: $('overview-switch-mode'),
   factModels: $('fact-models'),
   factModelsSub: $('fact-models-sub'),
   overviewOpenModels: $('overview-open-models'),
@@ -646,6 +652,7 @@ const dom = {
   modelSaveNote: $('model-save-note'),
 
 
+  restartPanel: $('restart-panel'),
   restartState: $('restart-state'),
   restartFile: $('restart-file'),
   restartHead: $('restart-head'),
@@ -821,6 +828,8 @@ const dom = {
   convMigrationTip: $('conv-migration-tip'),
   convMigrationText: $('conv-migration-text'),
   convMigrateAll: $('conv-migrate-all'),
+  convBatch: $('conv-batch'),
+  convBatchClear: $('conv-batch-clear'),
   convBatchModel: $('conv-batch-model'),
   convBatchEffort: $('conv-batch-effort'),
   convBatchGo: $('conv-batch-go'),
@@ -846,6 +855,9 @@ const state = {
   editor: null,
   deleteId: null,
   conns: { base: null, baseRevision: null, baseEntity: null, dirty: false, editing: null, draft: null, errors: [] },
+  connDeleteId: null,
+  connDeletingId: null,
+  connPicker: { connectionId: null, loading: false, saving: false, query: '', models: [], selectedIds: [], baseSavedIds: [], error: '', sourceNote: '', seq: 0 },
   connChecks: {},
   connUpstreamProtocols: {},
   picker: { open: false, models: null, query: '', state: null, checkedAt: null, source: null, reason: null,
