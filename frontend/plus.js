@@ -541,10 +541,24 @@
       reason: textOf(raw.reason),
       accounts: Array.isArray(raw.accounts) ? raw.accounts.filter(row => row && typeof row === 'object') : [],
       currentId: textOf(raw.currentId),
+      pendingAccountId: textOf(raw.pendingAccountId),
       adding: raw.adding === true,
       restoreAccountId: textOf(raw.restoreAccountId),
       activation: raw.activation && typeof raw.activation === 'object' ? raw.activation : {},
     };
+  }
+
+  function isWorkNotRunning(data, book) {
+    return data?.kimi?.running === false || Boolean(book && book.state !== 'ready');
+  }
+
+  function isOfflinePending(book) {
+    return Boolean(book && (textOf(book.activation?.state) === 'offline' || book.pendingAccountId));
+  }
+
+  function effectiveAccountId(book) {
+    if (!book) return '';
+    return book.pendingAccountId || (textOf(book.activation?.state) === 'offline' ? textOf(book.activation?.accountId) : '') || book.currentId;
   }
 
   /* 官方账号在没登录名称时只给一个 ID；显示尾号比显示一串 ID 更容易分辨，
@@ -599,10 +613,15 @@
     if (!slot) return;
     const book = accountsOf(data);
     const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+    const offlinePending = isOfflinePending(book);
+    const activeId = effectiveAccountId(book);
     const barSig = JSON.stringify([
       book ? book.state : null,
       book ? book.reason : '',
       book ? book.currentId : '',
+      book ? book.pendingAccountId : '',
+      book ? textOf(book.activation?.state) : '',
+      book ? textOf(book.activation?.accountId) : '',
       book ? book.adding : false,
       book ? book.restoreAccountId : '',
       book ? book.accounts.map(row => [textOf(row.id), accountName(row)]) : [],
@@ -611,14 +630,14 @@
     ]);
     if (slot.dataset.signature === barSig) return;
     slot.dataset.signature = barSig;
-    if (!book || book.state !== 'ready') {
+    if (!book || (book.state !== 'ready' && !book.accounts.length)) {
       slot.replaceChildren(node('span', 'plus-account-bar__label', '账号'));
       const reasonWord = book && book.reason ? accountReasonText(book.reason) : '';
       slot.append(node('span', 'plus-account-bar__hint', reasonWord ? '账号切换不可用（' + reasonWord + '）' : '账号切换不可用'));
       slot.append(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
       return;
     }
-    const current = book.accounts.find(row => textOf(row.id) === book.currentId);
+    const current = book.accounts.find(row => textOf(row.id) === activeId);
     const parts = [node('span', 'plus-account-bar__label', '账号')];
     if (book.accounts.length) {
       const wrap = node('span', 'plus-account-bar__select');
@@ -655,19 +674,37 @@
         className: 'btn btn--primary btn--sm', disabled: Boolean(account.busy),
         onClick: () => runAccount('account-cancel-add'),
       }));
+    } else if (offlinePending) {
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '下次打开 Kimi Work 自动同步'));
     } else if (book.accounts.length > 1 || account.busy) {
-      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : '必要时重启 Work'));
+      parts.push(node('span', 'plus-account-bar__hint', account.busy ? '正在切换…' : book.state !== 'ready' ? '可离线切换默认账号' : '必要时重启 Work'));
     }
     parts.push(button('账号管理', { className: 'btn btn--quiet btn--sm', onClick: () => openAccounts() }));
     slot.replaceChildren(...parts);
   }
 
   function requestSwitch(id) {
-    if (!id || id === (accountsOf(stateData())?.currentId || '')) return;
+    const data = stateData();
+    const book = accountsOf(data);
+    if (!id || id === effectiveAccountId(book)) return;
     /* 切换前的提示是信息而不是第二次危险确认：Work 里的任务会被检查，必要时
        正常重启。用户已经在下拉里选择了，就不再弹一个确认框拦一道。 */
-    notify('正在切换到所选账号。Work 里的任务会先被检查，必要时正常重启 Kimi 以应用登录。', 'ok');
+    notify(isWorkNotRunning(data, book)
+      ? '正在切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态。'
+      : '正在切换到所选账号。Work 里的任务会先被检查，必要时正常重启 Kimi 以应用登录。', 'ok');
     void runAccount('account-switch', { accountId: id });
+  }
+
+  function requestCapture() {
+    const data = stateData();
+    const book = accountsOf(data);
+    if (isWorkNotRunning(data, book) && !book?.restoreAccountId) {
+      account.error = { action: 'account-capture', reason: 'account_session_unavailable', message: '请先打开并登录 Kimi Work，再保存当前账号。' };
+      notify(account.error.message, 'error');
+      renderAccountsAll();
+      return Promise.resolve(null);
+    }
+    return runAccount('account-capture');
   }
 
   async function runAccount(action, extra = {}) {
@@ -684,7 +721,8 @@
       }
       return operation;
     } catch (error) {
-      account.error = { action, reason: textOf(error.code), message: error.message || '账号操作失败，请刷新状态后重试。' };
+      const reason = textOf(error.code);
+      account.error = { action, reason, message: accountErrorText(action, reason, error.message || '账号操作失败，请刷新状态后重试。') };
       notify(account.error.message, 'error');
       return null;
     } finally {
@@ -730,15 +768,26 @@
     }
   }
 
+  function accountErrorText(action, reason, fallback) {
+    if (action === 'account-capture' && reason === 'account_session_unavailable') {
+      return '请先打开并登录 Kimi Work，再保存当前账号。';
+    }
+    return ACCOUNT_REASON[reason] || fallback || '账号操作未完成，请刷新状态或重新准备 Kimi 接入。';
+  }
+
   function reportAccountResult(action, op) {
     const failed = ['failed', 'unavailable', 'interrupted'].includes(textOf(op.state));
     const reason = textOf(op.reason);
     if (failed) {
-      account.error = { action, reason, message: ACCOUNT_REASON[reason] || '账号操作未完成，请刷新状态或重新准备 Kimi 接入。' };
+      account.error = { action, reason, message: accountErrorText(action, reason) };
       notify(account.error.message, 'error');
       return;
     }
     account.error = null;
+    if (action === 'account-switch' && isOfflinePending(accountsOf(stateData()))) {
+      notify('已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态。', 'ok');
+      return;
+    }
     notify(ACTION_WORD[action] || '账号操作', 'ok');
   }
 
@@ -801,11 +850,12 @@
     if (!slot) return;
     const book = accountsOf(data);
     if (!book) { slot.replaceChildren(node('p', 'hint', '账号状态尚未读取。')); return; }
-    if (book.state !== 'ready') {
+    if (book.state !== 'ready' && !book.accounts.length) {
       slot.replaceChildren(node('p', 'hint', '账号切换不可用' + (book.reason ? '（' + accountReasonText(book.reason) + '）' : '') + '。'));
       return;
     }
-    const current = book.accounts.find(row => textOf(row.id) === book.currentId);
+    const activeId = effectiveAccountId(book);
+    const current = book.accounts.find(row => textOf(row.id) === activeId);
     const wrap = node('div', 'plus-overview');
     if (current) {
       wrap.append(node('strong', 'plus-overview__value', accountName(current)));
@@ -821,17 +871,25 @@
       }
     } else {
       wrap.append(node('strong', 'plus-overview__value', '当前账号未记录'));
-      wrap.append(node('small', null, '打开 Work 并登录后，可在设置里保存当前账号。'));
+      wrap.append(node('small', null, '打开 Work 并登录后，可在账号页保存当前账号。'));
     }
     const activation = book.activation || {};
     if (textOf(activation.state)) wrap.append(activationLine(activation));
+    else if (book.pendingAccountId) wrap.append(node('small', 'plus-overview__meta', '已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态'));
     slot.replaceChildren(wrap);
   }
 
   function activationLine(activation) {
     const state = textOf(activation.state);
     const rolledBack = activation.rolledBack === true || state === 'restored';
-    const words = { hot: '已应用', restarted: '已应用', 'needs-login': '需要重新登录', restored: '已恢复原账号', failed: '应用失败' };
+    const words = {
+      hot: '已应用',
+      restarted: '已应用',
+      offline: '已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态',
+      'needs-login': '需要重新登录',
+      restored: '已恢复原账号',
+      failed: '应用失败',
+    };
     const bits = [words[state] || state];
     if (activation.restarted === true) bits.push('已重启 Work');
     if (activation.verified === true) bits.push('读回一致');
@@ -851,11 +909,12 @@
     const { action, reason, message } = account.error;
     const box = node('div', 'plus-pending plus-pending--warn');
     box.setAttribute('role', 'alert');
-    box.append(node('p', null, ACCOUNT_REASON[reason] || message));
+    box.append(node('p', null, accountErrorText(action, reason, message)));
     const book = accountsOf(stateData());
     const restoring = Boolean(book?.restoreAccountId);
     const pendingCardHandlesRestart = restoring && !book?.adding;
     if (!pendingCardHandlesRestart
+      && !(action === 'account-capture' && reason === 'account_session_unavailable')
       && ['account-begin-add', 'account-capture', 'account-cancel-add', 'account-switch'].includes(action)
       && ['account_session_unavailable', 'account_session_page_timeout', 'unmanaged_kimi_running', 'account_session_restart_failed'].includes(reason)) {
       if (action === 'account-switch' && !restoring) {
@@ -880,10 +939,16 @@
     if (!slot) return;
     const book = accountsOf(data);
     const accountCompatBlocked = data?.compatibility?.guards?.accountSwitchWriteBlocked === true;
+    const offlinePending = isOfflinePending(book);
+    const pendingTargetId = book ? (book.pendingAccountId || (textOf(book.activation?.state) === 'offline' ? textOf(book.activation?.accountId) || book.currentId : '')) : '';
+    const activeId = effectiveAccountId(book);
     const mgmtSig = JSON.stringify([
       book ? book.state : null,
       book ? book.reason : '',
       book ? book.currentId : '',
+      book ? book.pendingAccountId : '',
+      book ? textOf(book.activation?.state) : '',
+      book ? textOf(book.activation?.accountId) : '',
       book ? book.adding : false,
       book ? book.restoreAccountId : '',
       book ? book.accounts.map(row => [
@@ -898,17 +963,24 @@
     if (slot.dataset.signature === mgmtSig) return;
     slot.dataset.signature = mgmtSig;
     if (!book) { slot.replaceChildren(node('p', 'hint', '账号状态尚未读取。')); return; }
-    if (book.state !== 'ready') {
+    if (book.state !== 'ready' && !book.accounts.length) {
       const wrap = node('div');
       wrap.append(node('p', 'note note--warn', '账号切换不可用' + (book.reason ? '：' + accountReasonText(book.reason) : '') + '。'));
       appendAccountError(wrap);
-      wrap.append(accountActionLine(book));
+      wrap.append(accountActionLine(book, accountCompatBlocked));
       slot.replaceChildren(wrap);
       return;
     }
     const wrap = node('div');
     if (accountCompatBlocked) {
       wrap.append(node('p', 'note note--warn', '当前官方 Kimi 版本未通过账号接口检查，账号切换与写入已暂停；本机网关与其他功能照常运行。'));
+    }
+    if (offlinePending) {
+      const pendingRow = pendingTargetId ? book.accounts.find(entry => textOf(entry.id) === pendingTargetId) : null;
+      const prefix = pendingRow ? '「' + accountName(pendingRow) + '」' : '';
+      wrap.append(node('p', 'note', prefix + '已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态。'));
+    } else if (book.state !== 'ready') {
+      wrap.append(node('p', 'note', 'Kimi Work 当前未运行，已保存账号仍可直接切换默认凭据，下次打开时将自动同步登录态。'));
     }
     appendAccountError(wrap);
 
@@ -947,15 +1019,18 @@
     }
     for (const row of book.accounts) {
       const id = textOf(row.id);
+      const isPendingRow = offlinePending && Boolean(pendingTargetId) && id === pendingTargetId;
       const item = node('div', 'plus-account');
-      item.dataset.current = id === book.currentId ? 'true' : 'false';
+      item.dataset.current = id === activeId ? 'true' : 'false';
       const main = node('div', 'plus-account__main');
       main.append(node('strong', null, accountName(row)));
       const meta = [];
       if (id === book.currentId) meta.push('当前');
+      if (isPendingRow) meta.push('已设为下次启动默认账号');
       if (row.capturedAt) meta.push('保存于 ' + stamp(row.capturedAt));
       if (row.lastUsedAt) meta.push('上次使用 ' + stamp(row.lastUsedAt));
       main.append(node('small', null, meta.join(' · ')));
+      if (isPendingRow) main.append(node('span', 'plus-tag', '已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态'));
       /* needsLogin 只描述这一行：别的账号要登录，不能变成整页的警告。 */
       if (row.needsLogin === true) main.append(node('span', 'plus-tag plus-tag--warn', '需要重新登录'));
       const tokenNotice = accountTokenNotice(row);
@@ -967,11 +1042,11 @@
       item.append(main);
 
       const actions = node('div', 'plus-account__actions');
-      if (id !== book.currentId) {
+      if (id !== activeId) {
         actions.append(button('切换', { disabled: Boolean(account.busy || book.adding || book.restoreAccountId || accountCompatBlocked), onClick: () => requestSwitch(id) }));
       }
       actions.append(button('移除', {
-        className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy || id === book.currentId || id === book.restoreAccountId),
+        className: 'btn btn--quiet btn--sm', disabled: Boolean(account.busy || id === book.currentId || id === pendingTargetId || id === book.restoreAccountId),
         onClick: () => confirmRemove(row),
       }));
       item.append(actions);
@@ -1012,11 +1087,11 @@
         onClick: () => runAccount('account-begin-add'),
       }));
       line.append(button(book.accounts.length ? '只保存当前登录' : '保存当前账号', {
-        disabled: Boolean(account.busy || accountCompatBlocked), onClick: () => runAccount('account-capture'),
+        disabled: Boolean(account.busy || accountCompatBlocked), onClick: requestCapture,
       }));
     }
     line.append(button('刷新账号列表', { className: 'btn btn--quiet btn--sm', onClick: refreshAccounts }));
-    line.append(node('span', 'hint', '切换时优先保持 Work 打开，必要时正常重启。添加账号会打开官方登录页。凭据仅保存在本机加密存储，不上传或写入日志。'));
+    line.append(node('span', 'hint', 'Work 未运行时可直接切换默认凭据，下次打开自动同步；运行中优先热切换，必要时正常重启。凭据仅保存在本机加密存储，不上传或写入日志。'));
     return line;
   }
 
@@ -1060,8 +1135,6 @@
     return {
       enabled: Boolean(configured && configured.enabled),
       currency: textOf(configured && configured.currency) || 'CNY',
-      timeZone: textOf(configured && configured.timeZone) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-      serialize: Boolean(configured && configured.serialize),
       daily: limitOf('daily'),
       monthly: limitOf('monthly'),
       dirty: false,
@@ -1157,7 +1230,6 @@
     const grid = node('div', 'field-row');
     grid.append(
       field('货币', selectField(CURRENCIES.map(code => [code, code]), form.currency, value => { form.currency = value; form.dirty = true; })),
-      field('时区', textField(form.timeZone, value => { form.timeZone = value; form.dirty = true; }, 'Asia/Shanghai')),
     );
     for (const name of ['daily', 'monthly']) {
       const row = form[name];
@@ -1166,13 +1238,6 @@
         field('达到上限时', selectField([['remind', '在面板提醒'], ['block', '拒绝新请求']], row.action, value => { row.action = value; form.dirty = true; })),
       );
     }
-    const serialize = node('label', 'check');
-    const box2 = doc().createElement('input');
-    box2.type = 'checkbox';
-    box2.checked = form.serialize;
-    box2.addEventListener('change', () => { form.serialize = box2.checked; form.dirty = true; renderBudget(); });
-    serialize.append(box2, node('span', null, '串行发送请求'));
-    const hint = node('p', 'field__hint', '开启后一次只处理一个请求，等上一笔入账再判断是否放行。最后一笔已放行的请求仍可能让花费超过上限。');
 
     const line = node('div', 'action-line action-line--start');
     line.append(
@@ -1186,7 +1251,7 @@
     errors.hidden = !budget.errors.length;
     errors.replaceChildren(...budget.errors.map(message => node('p', null, message)));
 
-    box.append(enabled, grid, serialize, hint, errors, line);
+    box.append(enabled, grid, errors, line);
     return box;
   }
 
@@ -1226,7 +1291,14 @@
     const view = budget.view;
     if (!form || budget.saving) return;
     const errors = [];
-    const policy = { enabled: form.enabled, currency: form.currency, timeZone: form.timeZone.trim(), serialize: form.serialize };
+    const configured = view && view.configured && typeof view.configured === 'object' ? view.configured : null;
+    const savedTimeZone = textOf(configured && configured.timeZone).trim();
+    const policy = {
+      enabled: form.enabled,
+      currency: form.currency,
+      ...(savedTimeZone ? { timeZone: savedTimeZone } : {}),
+      serialize: Boolean(configured && configured.serialize),
+    };
     for (const name of ['daily', 'monthly']) {
       const row = form[name];
       const text = String(row.limit === '' ? '' : row.limit).trim();
@@ -1238,7 +1310,6 @@
       }
       policy[name] = { limit: value, action: row.action === 'block' ? 'block' : 'remind' };
     }
-    if (!policy.timeZone) errors.push('请填写时区。');
     if (errors.length) { budget.errors = errors; renderBudget(); return; }
 
     budget.saving = true;
@@ -1297,157 +1368,41 @@
     work_tower_kernel_absent: '当前 Work 内核未包含 Tower 模块',
     work_swarm_kernel_absent: '当前 Work 内核未包含 Swarm 并行模块',
     work_swarm_requires_conversation: 'Swarm 只在具体会话里开启',
-    work_swarm_page_unavailable: '读不到当前 Work 页面，无法开关 Swarm',
-    work_swarm_conversation_unavailable: '当前没有打开的会话',
-    work_swarm_unsupported: '这个 Work 页面不支持 Swarm 接口',
-    work_swarm_unavailable: '这台机器上没有可用的 Swarm 接口',
-    work_swarm_conversation_changed: 'Work 会话已变化，请重新读取当前会话再操作',
-    work_swarm_not_confirmed: '写入后读回不一致，未确认生效',
-    native_preview_unavailable: '这个面板版本还没有提供 Swarm 接口，需要更新的后端',
     request_failed: '读取失败，稍后重试',
   };
 
-  const swarm = { snapshot: null, loading: false, reason: '', writing: false };
-
   function renderCapabilities(data) {
     const slot = $('plus-capabilities-body');
-    const swarmSlot = $('plus-swarm-body');
+    if (!slot) return;
     const caps = data && data.workCapabilities;
-    if (slot) {
-      if (!caps || typeof caps !== 'object') {
-        slot.replaceChildren(node('p', 'hint', '还没有读到 Work 能力信息。'));
-      } else {
-        const wrap = node('div');
-        const head = node('div', 'plus-cap-head');
-        head.append(node('strong', null, capabilityWords[textOf(caps.state)] || textOf(caps.state) || '未确认'));
-        const bits = [];
-        if (caps.kernelVersion) bits.push('内核 ' + caps.kernelVersion);
-        if (caps.kernelCommit) bits.push('提交 ' + String(caps.kernelCommit).slice(0, 7));
-        const force = caps.subagents && caps.subagents.forceKeySupported;
-        /* force 键是内核自己钉住单一默认模型时用的；内核声明不支持该键时，
-           只能写 default_model，不能说成「接受固定子代理模型」。 */
-        if (force === false) bits.push('固定子代理模型：当前内核不接受 force 键，改为只写默认模型');
-        else if (force === true) bits.push('固定子代理模型：当前内核支持');
+    if (!caps || typeof caps !== 'object') {
+      slot.replaceChildren(node('p', 'hint', '还没有读到 Work 能力信息。'));
+      return;
+    }
+    const wrap = node('div');
+    const head = node('div', 'plus-cap-head');
+    head.append(node('strong', null, capabilityWords[textOf(caps.state)] || textOf(caps.state) || '未确认'));
+    const bits = [];
+    if (caps.kernelVersion) bits.push('内核 ' + caps.kernelVersion);
+    if (caps.kernelCommit) bits.push('提交 ' + String(caps.kernelCommit).slice(0, 7));
+    const force = caps.subagents && caps.subagents.forceKeySupported;
+    /* force 键是内核自己钉住单一默认模型时用的；内核声明不支持该键时，
+       只能写 default_model，不能说成「接受固定子代理模型」。 */
+    if (force === false) bits.push('固定子代理模型：当前内核不接受 force 键，改为只写默认模型');
+    else if (force === true) bits.push('固定子代理模型：当前内核支持');
 
-        if (bits.length) head.append(node('small', null, bits.join(' · ')));
-        wrap.append(head);
+    if (bits.length) head.append(node('small', null, bits.join(' · ')));
+    wrap.append(head);
 
-        for (const [key, label] of [['swarm', 'Swarm 并行'], ['tower', 'Tower']]) {
-          const entry = caps[key] && typeof caps[key] === 'object' ? caps[key] : {};
-          const row = node('div', 'plus-cap-row');
-          row.append(node('strong', null, label));
-          row.append(node('small', null, (capabilityWords[textOf(entry.state)] || textOf(entry.state) || '未知')
-            + (entry.reason ? ' · ' + (capabilityReason[entry.reason] || entry.reason) : '')));
-          wrap.append(row);
-        }
-        if (!swarmSlot) wrap.append(renderSwarmControls(caps));
-        slot.replaceChildren(wrap);
-      }
+    for (const [key, label] of [['swarm', 'Swarm 并行'], ['tower', 'Tower']]) {
+      const entry = caps[key] && typeof caps[key] === 'object' ? caps[key] : {};
+      const row = node('div', 'plus-cap-row');
+      row.append(node('strong', null, label));
+      row.append(node('small', null, (capabilityWords[textOf(entry.state)] || textOf(entry.state) || '未知')
+        + (entry.reason ? ' · ' + (capabilityReason[entry.reason] || entry.reason) : '')));
+      wrap.append(row);
     }
-    if (swarmSlot) {
-      if (!caps || typeof caps !== 'object') {
-        swarmSlot.replaceChildren(node('p', 'hint', '还没有读到 Work 内核能力信息。'));
-      } else {
-        swarmSlot.replaceChildren(renderSwarmControls(caps));
-      }
-    }
-  }
-
-  function renderSwarmControls(caps) {
-    const box = node('div', 'plus-swarm');
-    const entry = caps && caps.swarm && typeof caps.swarm === 'object' ? caps.swarm : {};
-    box.append(node('p', 'plus-window__label', '当前会话的 Swarm'));
-    const snapshot = swarm.snapshot;
-    const known = snapshot && textOf(snapshot.conversationKey) && ['on', 'off'].includes(snapshot.state) && !snapshot.reason;
-    if (known) {
-      box.append(node('p', 'hint', '会话 ' + String(snapshot.conversationKey).slice(0, 12)
-        + '：当前' + (snapshot.enabled ? '已开启' : '已关闭')
-        + (snapshot.confirmed ? '，写入已确认' : '') + '。'));
-    } else if (swarm.reason) {
-      box.append(node('p', 'hint', capabilityReason[swarm.reason] || swarm.reason));
-    } else if (entry.state === 'user-controlled') {
-      box.append(node('p', 'hint', '读取当前会话后可以在这里显式开启或关闭。'));
-    } else {
-      box.append(node('p', 'hint', '无法判断当前会话的 Swarm 状态' + (entry.reason ? '：' + (capabilityReason[entry.reason] || entry.reason) : '') + '。'));
-    }
-    /* Swarm 只在用户显式点击时设置：不用页面默认值、不自动开启。 */
-    const line = node('div', 'action-line action-line--start');
-    line.append(button('读取当前会话', { disabled: swarm.writing || swarm.loading, onClick: () => loadSwarm() }));
-    if (known) {
-      line.append(button(snapshot.enabled ? '关闭这个会话的 Swarm' : '开启这个会话的 Swarm', {
-        className: 'btn btn--primary btn--sm',
-        disabled: swarm.writing || swarm.loading,
-        onClick: () => setSwarm(snapshot.conversationKey, !snapshot.enabled),
-      }));
-    }
-    box.append(line);
-    box.append(node('p', 'field__hint', '并行子代理与普通子代理共用模型策略，不会单独保存另一套模型。'));
-    box.append(node('p', 'field__hint', '开启需要你的账号有对应权限；没有权限时官方页面会拒绝，这里照实显示原因。'));
-    return box;
-  }
-
-  async function loadSwarm() {
-    if (swarm.loading) return;
-    swarm.loading = true;
-    swarm.reason = '';
-    renderCapabilities(stateData());
-    try {
-      const result = await request('/api/work/swarm');
-      const snapshot = result && (result.swarm || result);
-      if (snapshot && typeof snapshot === 'object') {
-        swarm.snapshot = snapshot;
-        if (snapshot.reason) swarm.reason = snapshot.reason;
-      }
-    } catch (error) {
-      swarm.snapshot = null;
-      /* 运算符优先级要写清楚：先取到错误码，再按「这个端点还没有」降级。
-         `error.code || error.status === 404 ? … : …` 会把错误码当成条件，
-         任何有错误码的情况都被说成「接口不存在」。 */
-      const code = textOf(error.code);
-      swarm.reason = code ? code : error.status === 404 ? 'work_swarm_unavailable' : 'request_failed';
-    } finally {
-      swarm.loading = false;
-    }
-    renderCapabilities(stateData());
-  }
-
-  async function setSwarm(conversationKey, enabled) {
-    if (swarm.writing || swarm.loading) return;
-    swarm.writing = true;
-    renderCapabilities(stateData());
-    try {
-      const result = await request('/api/actions', { method: 'POST', body: { action: 'set-swarm', conversationKey, enabled } });
-      const operation = result && result.operation ? result.operation : null;
-      notify(enabled ? '已请求开启当前会话的 Swarm。' : '已请求关闭当前会话的 Swarm。', 'ok');
-      if (operation && operation.id) {
-        const deadline = Date.now() + 40000;
-        while (Date.now() < deadline && ['running', 'pending'].includes(textOf(operation.state))) {
-          await new Promise(resolve => setTimeout(resolve, 900));
-          const id = operation.id;
-          let data = null;
-          try { data = await request('/api/state'); } catch { /* 继续等 */ }
-          if (data) stateSet(data);
-          const op = data && data.operation;
-          if (!op || op.id !== id) break;
-          if (!['running', 'pending'].includes(textOf(op.state))) {
-            if (['failed', 'unavailable', 'interrupted'].includes(textOf(op.state))) {
-              if (op.reason === 'work_swarm_conversation_changed') {
-                swarm.snapshot = null;
-                swarm.reason = op.reason;
-              }
-              notify('Swarm 未确认：' + (capabilityReason[textOf(op.reason)] || textOf(op.reason) || textOf(op.state)), 'error');
-            }
-            break;
-          }
-        }
-      }
-      if (swarm.reason !== 'work_swarm_conversation_changed') await loadSwarm();
-    } catch (error) {
-      notify(error.message || 'Swarm 操作失败', 'error');
-    } finally {
-      swarm.writing = false;
-      renderCapabilities(stateData());
-    }
+    slot.replaceChildren(wrap);
   }
 
   /* ---------- 状态与挂载 ---------- */
@@ -1469,13 +1424,13 @@
     mountAccountsManagement();
     mountCapabilities();
 
-    if (!$('plus-usage-panel') && !$('plus-account-bar')) return { render() {}, refresh() {} };
+    if (!$('plus-usage-panel') && !$('plus-account-bar') && !$('plus-accounts-panel')) return { render() {}, refresh() {} };
     return {
       render(data, { view } = {}) {
         const current = data || stateData();
         renderAccountsBar(current);
         if (!view || view === 'overview') renderAccountsOverview(current);
-        if (!view || view === 'maintenance') renderAccountsManagement(current);
+        if (!view || view === 'accounts' || view === 'maintenance') renderAccountsManagement(current);
         if (data && (!view || view === 'subagents' || view === 'maintenance')) renderCapabilities(data);
         if (data?.budget && (!view || view === 'usage') && budget.view?.status?.state !== 'error') renderBudgetSummary(data.budget);
       },
@@ -1567,14 +1522,14 @@
   }
 
   function mountAccountsManagement() {
-    const host = $('plus-accounts-host') || $('settings-pane-accounts') || $('view-maintenance');
+    const host = $('plus-accounts-host') || $('view-accounts') || $('settings-pane-accounts') || $('view-maintenance');
     if (!host || $('plus-accounts-panel')) return;
     const section = node('section', 'band plus-accounts-panel');
     section.id = 'plus-accounts-panel';
     const head = node('div', 'band__head');
     head.append(node('div'));
     head.firstChild.append(node('h2', null, '账号'));
-    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在本机加密存储；切换时优先保持 Work 打开，必要时正常重启。运行中的任务会阻止切换。'));
+    head.firstChild.append(node('p', null, '保存多个 Work 账号并按需切换。登录凭据只存在本机加密存储；Work 未运行时可直接切换默认凭据，下次打开自动同步；运行中优先热切换，必要时正常重启。'));
     section.append(head);
     const body = node('div');
     body.id = 'plus-accounts-body';
@@ -1583,20 +1538,6 @@
   }
 
   function mountCapabilities() {
-    const swarmHost = $('plus-swarm-host');
-    if (swarmHost && !$('plus-swarm-panel')) {
-      const swarmSection = node('section', 'band plus-swarm-panel');
-      swarmSection.id = 'plus-swarm-panel';
-      const swarmHead = node('div', 'band__head');
-      swarmHead.append(node('div'));
-      swarmHead.firstChild.append(node('h2', null, '并行子代理（Swarm）'));
-      swarmHead.firstChild.append(node('p', null, '读取当前 Kimi Work 会话并显式开关 Swarm 并行模式。并行子代理与「模型与角色」页共用同一套子代理模型策略。'));
-      swarmSection.append(swarmHead);
-      const swarmBody = node('div');
-      swarmBody.id = 'plus-swarm-body';
-      swarmSection.append(swarmBody);
-      swarmHost.append(swarmSection);
-    }
     const capHost = $('plus-capabilities-host') || $('view-work');
     if (!capHost || $('plus-capabilities-panel')) return;
     const section = node('section', 'band plus-cap-panel');
@@ -1604,7 +1545,7 @@
     const head = node('div', 'band__head');
     head.append(node('div'));
     head.firstChild.append(node('h2', null, 'Work 能力检测'));
-    head.firstChild.append(node('p', null, '这里只报告从 Work 内核文件里读到的能力，以及当前会话能被读到的状态。读不到就说读不到，不猜。'));
+    head.firstChild.append(node('p', null, '这里只报告从 Work 内核文件里读到的能力。读不到就说读不到，不猜。'));
     section.append(head);
     const body = node('div');
     body.id = 'plus-capabilities-body';
@@ -1616,5 +1557,5 @@
     }
   }
 
-  globalThis.KimiWorkPlus = Object.freeze({ mount, loadBudget, loadCode, loadMagpie, loadSwarm });
+  globalThis.KimiWorkPlus = Object.freeze({ mount, loadBudget, loadCode, loadMagpie });
 })();

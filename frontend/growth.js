@@ -14,9 +14,7 @@ const escapeMap = {
   translation_preview_failed: '试译未完成，原文保持不变。请检查翻译服务与目标语言。',
   translation_timeout: '翻译服务超时，原文保持不变。',
   translation_http_error: '翻译服务返回错误，请检查地址、Key 和模型。',
-  native_mcp_test_failed: '连接未成功；请检查命令、地址和服务日志。',
   native_mcp_timeout: '原生 MCP 操作超时，未自动重试。',
-  native_mcp_test_requires_kernel_runtime: '当前版本暂不支持连接测试；仍可管理已有服务配置。',
 };
 
 /* 翻译宿主状态来自内核，state 与 reason 都是英文内部值；面向用户只说结论，
@@ -26,30 +24,6 @@ const translationStateReasons = {
   translation_disabled: '翻译已在设置里关闭，Kimi 页面不会被注入。',
   no_managed_child: '还没有受管启动的 Kimi；启动后才会应用翻译。',
   translation_waiting_view: '已准备好，等待 Work 页面出现后接入。',
-};
-const contextStatusWords = {
-  inherit: '沿用 Kimi 默认',
-  applied: '已写入配置',
-  unchanged: '与已保存一致',
-  repaired: '已修复并写入',
-  restored: '已恢复原生默认',
-  conflict: '存在配置冲突（未覆盖）',
-  unavailable: '当前不可读取',
-  unsupported: '当前版本不支持',
-  waiting: '等待应用',
-  pending: '待写入',
-  error: '读取失败',
-};
-const contextReasonWords = {
-  config_not_found: '尚未找到 Kimi 配置文件',
-  config_unreadable: '配置文件不可读',
-  conflict: '存在外来配置块，未覆盖',
-  foreign_block: '存在外来配置块，未覆盖',
-  invalid_config: '配置内容无效',
-  read_failed: '读取失败',
-  write_failed: '写入失败',
-  unsupported: '当前版本不支持',
-  unavailable: '当前不可用',
 };
 const mcpTransportWords = {
   stdio: '本地命令（stdio）',
@@ -105,32 +79,28 @@ function mountLegacy() {
 }
 
 function fieldFromDraft(draft) {
+  if (!$('tr-enabled')) return;
   $('tr-enabled').checked = draft.enabled;
-  $('tr-provider').value = draft.provider;
-  $('tr-language').value = draft.targetLanguage;
-  $('tr-endpoint').value = draft.customEndpoint;
-  $('tr-model').value = draft.customModel;
-  $('tr-keyenv').value = draft.apiKeyEnv;
-  $(draft.view === 'original' ? 'tr-view-original' : 'tr-view-translated').checked = true;
-  $('tr-custom-details').open = draft.provider === 'custom';
+  if ($('tr-provider')) $('tr-provider').value = draft.provider;
+  if ($('tr-language')) $('tr-language').value = draft.targetLanguage;
+  if ($('tr-endpoint')) $('tr-endpoint').value = draft.customEndpoint;
+  if ($('tr-model')) $('tr-model').value = draft.customModel;
+  if ($('tr-keyenv')) $('tr-keyenv').value = draft.apiKeyEnv;
+  const viewNode = $(draft.view === 'original' ? 'tr-view-original' : 'tr-view-translated');
+  if (viewNode) viewNode.checked = true;
+  if ($('tr-custom-details')) $('tr-custom-details').open = draft.provider === 'custom';
 }
 
 function translationDraft() {
   return {
-    enabled: $('tr-enabled').checked,
-    provider: $('tr-provider').value,
-    targetLanguage: $('tr-language').value.trim(),
-    view: $('tr-view-original').checked ? 'original' : 'translated',
-    customEndpoint: $('tr-endpoint').value.trim(),
-    customModel: $('tr-model').value.trim(),
-    apiKeyEnv: $('tr-keyenv').value.trim(),
+    enabled: Boolean($('tr-enabled')?.checked),
+    provider: $('tr-provider')?.value || 'bing',
+    targetLanguage: ($('tr-language')?.value || '').trim(),
+    view: $('tr-view-original')?.checked ? 'original' : 'translated',
+    customEndpoint: ($('tr-endpoint')?.value || '').trim(),
+    customModel: ($('tr-model')?.value || '').trim(),
+    apiKeyEnv: ($('tr-keyenv')?.value || '').trim(),
   };
-}
-
-function contextDraft() {
-  return $('context-custom').checked ? {
-    mode: 'custom', triggerRatio: Number($('context-ratio').value), reservedTokens: Number($('context-reserved').value),
-  } : { mode: 'inherit' };
 }
 
 function mcpRows(value, pattern) {
@@ -154,14 +124,17 @@ function capabilityText(value) {
 
 function providerDocument(selectId, hintId, providers, openExternalUrl) {
   const select = $(selectId);
-  const preset = providers?.presets?.find(row => row.id === select?.value);
+  const hint = $(hintId);
+  if (!select) return;
+  const preset = providers?.presets?.find(row => row.id === select.value);
   const id = 'provider-document-' + selectId;
   let note = $(id);
   if (!note) {
+    if (!hint) return;
     note = document.createElement('p');
     note.id = id;
     note.className = 'hint provider-document';
-    $(hintId)?.after(note);
+    hint.after(note);
   }
   note.replaceChildren();
   note.hidden = !preset;
@@ -191,130 +164,9 @@ function providerDocument(selectId, hintId, providers, openExternalUrl) {
   }
 }
 
-function providerFlowField(id, labelText, before) {
-  const label = document.createElement('label');
-  label.className = 'field';
-  label.htmlFor = id;
-  const caption = document.createElement('span');
-  caption.className = 'field__label';
-  caption.textContent = labelText;
-  const select = document.createElement('select');
-  select.id = id;
-  label.append(caption, select);
-  before.before(label);
-  return select;
-}
-
-function fillProviderOptions(select, rows, value) {
-  const signature = JSON.stringify([rows, value]);
-  if (select.dataset.providerOptions === signature) return;
-  select.dataset.providerOptions = signature;
-  select.replaceChildren();
-  for (const row of rows) {
-    const option = document.createElement('option');
-    option.value = row.value;
-    option.textContent = row.label;
-    select.append(option);
-  }
-  select.value = value;
-}
-
-function mountProviderFlow(selectId) {
-  const select = $(selectId);
-  if (!select) return () => {};
-  const label = select.closest('label');
-  const family = providerFlowField(selectId + '-family', '厂商', label);
-  const region = providerFlowField(selectId + '-region', '地区', label);
-  const plan = providerFlowField(selectId + '-plan', '服务类型', label);
-  const caption = label.querySelector('.field__label');
-  if (caption) caption.textContent = '接口与端点（预设）';
-  const state = { family: '', region: '', plan: '' };
-  let providers = null;
-  let syncing = false;
-
-  function choose(value) {
-    if (select.value === value) return;
-    syncing = true;
-    select.value = value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    syncing = false;
-  }
-
-  function render(nextProviders) {
-    providers = nextProviders || providers;
-    const families = providers?.menu?.families || [];
-    if (!families.length) {
-      delete select.dataset.providerFlow;
-      family.closest('label').hidden = true;
-      region.closest('label').hidden = true;
-      plan.closest('label').hidden = true;
-      select.disabled = false;
-      return;
-    }
-    select.dataset.providerFlow = 'managed';
-    family.closest('label').hidden = false;
-    region.closest('label').hidden = false;
-    plan.closest('label').hidden = false;
-    const desired = select.dataset.desiredPreset;
-    if (desired !== undefined) delete select.dataset.desiredPreset;
-    const targetPreset = desired !== undefined ? desired : select.value;
-    const current = providers?.presets?.find(row => row.id === targetPreset);
-    if (current) {
-      state.family = current.family || current.id;
-      state.region = current.region || 'null';
-      state.plan = current.kind;
-    } else if (desired === '') {
-      state.family = '';
-      state.region = '';
-      state.plan = '';
-    }
-    fillProviderOptions(family, [{ value: '', label: '自定义（不套用预设）' },
-      ...families.map(row => ({ value: row.family, label: row.name }))], state.family);
-    const selectedFamily = families.find(row => row.family === state.family);
-    const regions = selectedFamily?.regions || [];
-    if (!regions.some(row => String(row.region) === state.region)) state.region = regions.length === 1 ? String(regions[0].region) : '';
-    fillProviderOptions(region, [{ value: '', label: regions.length ? '选择地区' : '先选择厂商' },
-      ...regions.map(row => ({ value: String(row.region), label: row.name || '通用' }))], state.region);
-    region.disabled = !selectedFamily || regions.length < 2;
-    const selectedRegion = regions.find(row => String(row.region) === state.region);
-    const plans = selectedRegion?.plans || [];
-    if (!plans.some(row => row.plan === state.plan)) state.plan = plans.length === 1 ? plans[0].plan : '';
-    fillProviderOptions(plan, [{ value: '', label: plans.length ? '选择服务类型' : '先选择地区' },
-      ...plans.map(row => ({ value: row.plan, label: row.name }))], state.plan);
-    plan.disabled = !selectedRegion || plans.length < 2;
-    const variants = plans.find(row => row.plan === state.plan)?.variants || [];
-    const nextValue = variants.some(row => row.presetId === targetPreset) ? targetPreset : '';
-    fillProviderOptions(select, [{ value: '', label: variants.length ? '选择接口与端点' : '先选择厂商、地区与服务类型' },
-      ...variants.map(row => ({ value: row.presetId, label: row.name }))], nextValue);
-    select.disabled = !selectedFamily || !state.plan;
-  }
-
-  family.addEventListener('change', () => {
-    state.family = family.value;
-    state.region = '';
-    state.plan = '';
-    choose('');
-    render(providers);
-  });
-  region.addEventListener('change', () => {
-    state.region = region.value;
-    state.plan = '';
-    choose('');
-    render(providers);
-  });
-  plan.addEventListener('change', () => {
-    state.plan = plan.value;
-    choose('');
-    render(providers);
-  });
-  select.addEventListener('change', () => { if (!syncing) render(providers); });
-  select.addEventListener('kwp:sync-provider-flow', () => render(providers));
-  return render;
-}
-
 function mountGrowth({ request, getState, getProviders = () => null, refresh, notify, runAction }) {
   mountLegacy();
-  const local = { trKey: '', trDraft: null, trCopyKey: '', ctxKey: '', ctxDraft: null, mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false, webDraft: null, webResult: null };
+  const local = { trKey: '', trDraft: null, trCopyKey: '', mcp: null, mcpConfirm: null, mcpConfirmTimer: null, busy: false, webDraft: null, webResult: null };
   async function openExternalUrl(href, anchor) {
     let parsed;
     try {
@@ -346,13 +198,13 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
   const copySelect = document.createElement('select');
   copySelect.id = 'tr-copy-model';
   copyLabel.append(copyText, copySelect);
-  $('tr-copy').before(copyLabel);
+  $('tr-copy')?.before(copyLabel);
   copyLabel.hidden = true;
 
   function trDirty() { return Boolean(local.trDraft && !same(local.trDraft, translationDraft())); }
   function renderTranslation(data) {
     const config = data.translation?.configured;
-    if (!config) return;
+    if (!config || !$('tr-enabled')) return;
     const key = JSON.stringify([config, data.translation.revision]);
     if (!local.trDraft || local.trKey !== key && !trDirty()) {
       local.trDraft = { ...config };
@@ -373,7 +225,8 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       runtimeNode.title = [runtime.state, runtime.reason].filter(Boolean).join(' · ');
     }
     text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致');
-    $('tr-copy').disabled = !copySelect.value;
+    const trCopyBtn = $('tr-copy');
+    if (trCopyBtn) trCopyBtn.disabled = !copySelect.value;
     const modelKey = JSON.stringify(data.models.map(row => [row.id, row.name, row.connectionId, row.protocol]));
     if (local.trCopyKey !== modelKey) {
       local.trCopyKey = modelKey;
@@ -385,7 +238,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
         copySelect.append(option);
       }
       copyLabel.hidden = !copySelect.options.length;
-      $('tr-copy').disabled = !copySelect.value;
+      if (trCopyBtn) trCopyBtn.disabled = !copySelect.value;
     }
   }
 
@@ -433,51 +286,6 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     } catch (error) { showError('tr-errors', errorText(error)); }
   }
 
-  function renderContext(data) {
-    const ctx = data.context;
-    if (!ctx) return;
-    const config = ctx.policy || { mode: 'inherit' };
-    const key = JSON.stringify(config);
-    if (!local.ctxDraft || local.ctxKey !== key && same(local.ctxDraft, contextDraft())) {
-      local.ctxDraft = { ...config };
-      local.ctxKey = key;
-      $(config.mode === 'custom' ? 'context-custom' : 'context-inherit').checked = true;
-      if (config.mode === 'custom') {
-        $('context-ratio').value = config.triggerRatio;
-        $('context-reserved').value = config.reservedTokens;
-      }
-    }
-    $('context-ratio').disabled = !$('context-custom').checked;
-    $('context-reserved').disabled = !$('context-custom').checked;
-    const statusLabel = contextStatusWords[ctx.status] || (ctx.status ? '状态未确认' : '未报告');
-    const reasonLabel = ctx.reason ? (contextReasonWords[ctx.reason] || escapeMap[ctx.reason] || '详见诊断信息') : '';
-    text('context-state', `原生配置状态：${statusLabel}。${reasonLabel ? `原因：${reasonLabel}。` : ''} 保存成功不代表当前会话已经采用。`);
-    const ctxStateNode = $('context-state');
-    if (ctxStateNode) ctxStateNode.title = [ctx.status, ctx.reason].filter(Boolean).join(' · ');
-    text('context-draft', same(local.ctxDraft, contextDraft()) ? '与已保存策略一致' : '有未保存的修改');
-  }
-
-  async function saveContext() {
-    const nextPolicy = contextDraft();
-    showError('context-errors', '');
-    if (nextPolicy.mode === 'custom' && (!Number.isFinite(nextPolicy.triggerRatio)
-      || nextPolicy.triggerRatio < 0.5 || nextPolicy.triggerRatio > 0.99
-      || !Number.isSafeInteger(nextPolicy.reservedTokens) || nextPolicy.reservedTokens < 0)) {
-      showError('context-errors', '触发比例须为 0.50–0.99，预留 token 须为非负整数。');
-      return;
-    }
-    try {
-      const res = await request('/api/context', { method: 'POST', body: { policy: nextPolicy } });
-      const data = getState();
-      if (data && res.context) data.context = res.context;
-      const saved = res.context?.policy || nextPolicy;
-      local.ctxDraft = { ...saved };
-      local.ctxKey = JSON.stringify(saved);
-      renderContext(getState());
-      notify('长对话设置已保存；新建会话或重新加载后使用。', 'ok');
-    } catch (error) { showError('context-errors', errorText(error)); }
-  }
-
   function clearMcpConfirm() {
     if (local.mcpConfirmTimer) {
       clearTimeout(local.mcpConfirmTimer);
@@ -491,6 +299,7 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     text('mcp-state', tools.available ? `原生接口可用，共 ${tools.servers.length} 个服务。读取列表不会启动服务。`
       : `MCP 配置当前不可读取：${tools.reason ? errorText({ code: tools.reason }) : '等待原生接口'}。其他功能不受影响。`);
     const list = $('mcp-list');
+    if (!list) return;
     const signature = JSON.stringify([tools.available, tools.reason, tools.servers, local.busy, local.mcpConfirm]);
     if (local.mcpKey === signature) return;
     local.mcpKey = signature;
@@ -508,15 +317,14 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       meta.textContent = `参数 ${server.argsCount ?? '—'} 项；环境变量 ${(server.envNames || []).join('、') || '无／未公开'}；请求头 ${(server.headerNames || []).join('、') || '无／未公开'}`;
       const actions = document.createElement('div');
       actions.className = 'action-line action-line--start';
-      for (const [label, action] of [['编辑', 'edit'], [server.enabled ? '停用' : '启用', 'toggle'], ['测试服务', 'test'], ['删除', 'remove']]) {
+      for (const [label, action] of [['编辑', 'edit'], [server.enabled ? '停用' : '启用', 'toggle'], ['删除', 'remove']]) {
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = action === 'test' ? 'btn btn--outline btn--sm' : 'btn btn--quiet btn--sm';
+        button.className = 'btn btn--quiet btn--sm';
         button.textContent = label;
         button.dataset.mcpAction = action;
         button.dataset.mcpName = server.name;
-        button.disabled = local.busy || (action === 'test' && tools.probe?.available === false);
-        if (action === 'test' && tools.probe?.available === false) button.title = '当前版本暂不支持连接测试；配置管理仍可使用。';
+        button.disabled = local.busy;
         actions.append(button);
       }
       row.append(title, detail, meta, actions);
@@ -603,30 +411,33 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       renderMcp(getState());
       return;
     }
+    if (action === 'test') return;
     clearMcpConfirm();
     const apiAction = action === 'remove-confirm' ? 'remove' : action;
     local.busy = true;
     showError('mcp-errors', '');
     renderMcp(getState());
     try {
-      const body = apiAction === 'test' ? { action: apiAction, name } : apiAction === 'toggle'
+      const body = apiAction === 'toggle'
         ? { action: 'update', name, patch: { enabled: !server.enabled } } : { action: apiAction, name };
       const res = await request('/api/tools', { method: 'POST', body });
       const data = getState();
       if (data && res.tools) data.tools = res.tools;
       renderMcp(getState());
-      hidden('mcp-result', false);
-      $('mcp-result').replaceChildren();
-      const heading = document.createElement('strong');
-      const stateWord = mcpResultWords[res.result?.state] || '已处理';
-      heading.textContent = apiAction === 'test' ? res.result?.ok ? `${name} 连接成功` : `${name} 测试未完成` : `${name}：${stateWord}`;
-      const names = document.createElement('p');
-      const reasonWord = res.result?.reason ? (escapeMap[res.result.reason] || mcpResultWords[res.result.reason] || '详见诊断信息') : '';
-      names.textContent = res.result?.tools?.length ? `工具：${res.result.tools.join('、')}` : `状态：${reasonWord || stateWord || '未返回工具名单'}`;
-      names.title = [res.result?.state, res.result?.reason].filter(Boolean).join(' · ');
-      $('mcp-result').append(heading, names);
-      if (apiAction === 'test') notify(res.result?.ok ? 'MCP 显式测试已通过。' : 'MCP 测试未通过，请查看原因。', res.result?.ok ? 'ok' : 'error');
-      else if (apiAction === 'remove') notify(`已从全局 MCP 配置中移除 ${name}。`, 'ok');
+      const resultBox = $('mcp-result');
+      if (resultBox) {
+        hidden('mcp-result', false);
+        resultBox.replaceChildren();
+        const heading = document.createElement('strong');
+        const stateWord = mcpResultWords[res.result?.state] || '已处理';
+        heading.textContent = `${name}：${stateWord}`;
+        const names = document.createElement('p');
+        const reasonWord = res.result?.reason ? (escapeMap[res.result.reason] || mcpResultWords[res.result.reason] || '详见诊断信息') : '';
+        names.textContent = res.result?.tools?.length ? `工具：${res.result.tools.join('、')}` : `状态：${reasonWord || stateWord}`;
+        names.title = [res.result?.state, res.result?.reason].filter(Boolean).join(' · ');
+        resultBox.append(heading, names);
+      }
+      if (apiAction === 'remove') notify(`已从全局 MCP 配置中移除 ${name}。`, 'ok');
     } catch (error) { showError('mcp-errors', errorText(error)); }
     finally { local.busy = false; renderMcp(getState()); }
   }
@@ -661,86 +472,94 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
       if (!res.result?.ok) throw Error(res.result?.reason || '原生 MCP 未接受此设置。');
       const data = getState();
       if (data && res.tools) data.tools = res.tools;
-      $('mcp-form').hidden = true;
+      hidden('mcp-form', true);
       local.mcp = null;
       renderMcp(getState());
-      notify('MCP 设置已保存，尚未测试或启动服务。', 'ok');
+      notify('MCP 设置已保存，尚未启动服务。', 'ok');
     } catch (error) { showError('mcp-errors', errorText(error)); }
   }
 
   function renderWeb(data) {
     const web = data.webTools;
     if (!web) { text('web-state', '本机适配服务尚未接入，请刷新面板状态。'); return; }
-    const providerWords = { official: '沿用 Kimi 官方服务', tavily: 'Tavily（本机适配）', native: '自定义原生服务' };
+    const providerSelect = $('web-provider');
+    if (!providerSelect) return;
+    const providerWords = { official: '沿用 Kimi 官方服务', tavily: 'Tavily（本机适配）' };
     const probeWords = { passed: '正常', ok: '正常', ready: '就绪', failed: '失败', error: '失败', timeout: '超时', unavailable: '不可用', unsupported: '不支持', not_configured: '未配置', skipped: '已跳过' };
-    $('web-provider').value = local.webDraft || web.provider || 'official';
-    hidden('web-key-field', $('web-provider').value !== 'tavily');
+    const savedProvider = web.provider === 'tavily' ? 'tavily' : 'official';
+    const activeProvider = local.webDraft === 'tavily' ? 'tavily' : local.webDraft === 'official' ? 'official' : savedProvider;
+    providerSelect.value = activeProvider;
+    hidden('web-key-field', activeProvider !== 'tavily');
     text('web-key-state', web.keySet ? '已保存 Tavily Key；留空保留，不会回显。' : 'Tavily Key 尚未保存或当前构建不可读，请重新输入并保存。');
-    const providerLabel = providerWords[web.provider || 'official'] || '自定义服务';
+    const providerLabel = providerWords[savedProvider];
     text('web-state', local.webResult?.message || web.message || `当前方式：${providerLabel}。测试与当前会话采用分开报告。`);
-    hidden('native-search-details', $('web-provider').value !== 'native');
     const searchWord = local.webResult?.search?.state ? (probeWords[local.webResult.search.state] || '已检查') : '—';
     const fetchWord = local.webResult?.fetch?.state ? (probeWords[local.webResult.fetch.state] || '已检查') : '—';
     text('web-draft', local.webResult
       ? `搜索：${searchWord}；正文读取：${fetchWord}。这不是当前会话已重新加载的证明。`
-      : local.webDraft && local.webDraft !== web.provider ? '服务方式有未保存修改。'
+      : local.webDraft && local.webDraft !== savedProvider ? '服务方式有未保存修改。'
         : web.pendingRestart ? '已保存；需要重新加载 Kimi 会话后使用。' : '默认官方服务不会写入接管配置。');
   }
 
   async function webTest() {
     showError('web-errors', '');
-    $('web-test').disabled = true;
+    const testBtn = $('web-test');
+    if (testBtn) testBtn.disabled = true;
     try {
-      const res = await request('/api/web-tools', { method: 'POST', body: { action: 'test', provider: $('web-provider').value,
-        ...($('web-key').value ? { apiKey: $('web-key').value } : {}) } });
+      const provider = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
+      const apiKey = provider === 'tavily' ? ($('web-key')?.value || '') : '';
+      const res = await request('/api/web-tools', { method: 'POST', body: { action: 'test', provider,
+        ...(apiKey ? { apiKey } : {}) } });
       local.webResult = res;
       renderWeb(getState());
     } catch (error) { showError('web-errors', errorText(error)); }
-    finally { $('web-test').disabled = false; }
+    finally { if (testBtn) testBtn.disabled = false; }
   }
 
   async function webSave() {
     showError('web-errors', '');
     try {
-      const res = await request('/api/web-tools', { method: 'POST', body: { action: 'save', provider: $('web-provider').value,
-        ...($('web-key').value ? { apiKey: $('web-key').value } : {}) } });
+      const provider = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
+      const apiKey = provider === 'tavily' ? ($('web-key')?.value || '') : '';
+      const res = await request('/api/web-tools', { method: 'POST', body: { action: 'save', provider,
+        ...(apiKey ? { apiKey } : {}) } });
       if (res.state && getState()) getState().webTools = res.state;
       local.webDraft = null;
       local.webResult = null;
-      $('web-key').value = '';
+      if ($('web-key')) $('web-key').value = '';
       renderWeb(getState());
       notify('服务方式已保存；测试和当前会话采用请分别查看。', 'ok');
     } catch (error) { showError('web-errors', errorText(error)); }
   }
 
-  $('tr-save').addEventListener('click', saveTranslation);
-  $('tr-test').addEventListener('click', preview);
-  $('tr-copy').addEventListener('click', copyConnection);
-  $('tr-provider').addEventListener('change', () => { $('tr-custom-details').open = $('tr-provider').value === 'custom'; renderTranslation(getState()); });
-  $('tr-check').addEventListener('click', () => runAction('check-translation'));
-  $('translation-panel').addEventListener('input', () => { text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致'); });
-  $('context-save').addEventListener('click', saveContext);
-  for (const id of ['context-inherit', 'context-custom']) $(id).addEventListener('change', () => renderContext(getState()));
-  $('context-panel').addEventListener('input', () => { text('context-draft', same(local.ctxDraft, contextDraft()) ? '与已保存策略一致' : '有未保存的修改'); });
-  $('mcp-add').addEventListener('click', () => editMcp());
-  $('mcp-close').addEventListener('click', () => { $('mcp-form').hidden = true; local.mcp = null; });
-  $('mcp-cancel').addEventListener('click', () => { $('mcp-form').hidden = true; local.mcp = null; });
-  $('mcp-transport').addEventListener('change', syncMcpTransport);
-  $('mcp-form').addEventListener('submit', saveMcp);
-  $('mcp-list').addEventListener('click', event => {
+  $('tr-save')?.addEventListener('click', saveTranslation);
+  $('tr-test')?.addEventListener('click', preview);
+  $('tr-copy')?.addEventListener('click', copyConnection);
+  $('tr-provider')?.addEventListener('change', () => {
+    const details = $('tr-custom-details');
+    if (details) details.open = $('tr-provider')?.value === 'custom';
+    renderTranslation(getState());
+  });
+  $('tr-check')?.addEventListener('click', () => runAction('check-translation'));
+  $('translation-panel')?.addEventListener('input', () => { text('tr-draft', trDirty() ? '有未保存的修改' : '与已保存设置一致'); });
+  $('mcp-add')?.addEventListener('click', () => editMcp());
+  $('mcp-close')?.addEventListener('click', () => { hidden('mcp-form', true); local.mcp = null; });
+  $('mcp-cancel')?.addEventListener('click', () => { hidden('mcp-form', true); local.mcp = null; });
+  $('mcp-transport')?.addEventListener('change', syncMcpTransport);
+  $('mcp-form')?.addEventListener('submit', saveMcp);
+  $('mcp-list')?.addEventListener('click', event => {
     const button = event.target.closest('[data-mcp-action]');
     if (button) void mcpAction(button.dataset.mcpAction, button.dataset.mcpName);
   });
-  $('web-provider').addEventListener('change', () => {
-    local.webDraft = $('web-provider').value;
+  $('web-provider')?.addEventListener('change', () => {
+    local.webDraft = $('web-provider')?.value === 'tavily' ? 'tavily' : 'official';
     local.webResult = null;
     renderWeb(getState());
   });
-  $('web-test').addEventListener('click', webTest);
-  $('web-save').addEventListener('click', webSave);
-  const providerFlows = [['ob-preset', 'ob-preset-hint'], ['ce-preset', 'ce-preset-hint']]
-    .map(([select, hint]) => ({ select, hint, render: mountProviderFlow(select) }));
-  for (const { select, hint } of providerFlows) {
+  $('web-test')?.addEventListener('click', webTest);
+  $('web-save')?.addEventListener('click', webSave);
+  const providerDocPairs = [['ob-preset', 'ob-preset-hint'], ['ce-preset', 'ce-preset-hint']];
+  for (const [select, hint] of providerDocPairs) {
     $(select)?.addEventListener('change', () => providerDocument(select, hint, getProviders(), openExternalUrl));
   }
 
@@ -748,13 +567,11 @@ function mountGrowth({ request, getState, getProviders = () => null, refresh, no
     if (!data) return;
     if (!view || view === 'maintenance') {
       renderTranslation(data);
-      renderContext(data);
       renderMcp(data);
       renderWeb(data);
     }
     if (!view || view === 'models') {
-      for (const { select, hint, render } of providerFlows) {
-        render(getProviders());
+      for (const [select, hint] of providerDocPairs) {
         providerDocument(select, hint, getProviders(), openExternalUrl);
       }
     }

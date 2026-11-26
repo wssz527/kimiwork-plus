@@ -9,7 +9,7 @@ import test from 'node:test';
 const source = readFileSync(new URL('./plus.js', import.meta.url), 'utf8');
 
 /* 最小 DOM：只实现 plus.js 用到的那几个成员，并记录渲染出的文本。 */
-function makeDom() {
+function makeDom(extraRoots = []) {
   class El {
     constructor(tag) {
       this.tagName = tag.toUpperCase();
@@ -61,6 +61,7 @@ function makeDom() {
     'usage-pane-quotas': mount('usage-pane-quotas'),
     'usage-pane-budget': mount('usage-pane-budget'),
   };
+  for (const id of extraRoots) roots[id] = mount(id);
   roots['view-usage'].append(roots['usage-pane-quotas'], roots['usage-pane-budget']);
   const tools = new El('div');
   tools.className = 'masthead__tools';
@@ -123,8 +124,8 @@ function allButtons(node, output = []) {
   return output;
 }
 
-function makePlus({ data = {}, routes = {}, onAccounts } = {}) {
-  const dom = makeDom();
+function makePlus({ data = {}, routes = {}, onAccounts, extraRoots = [] } = {}) {
+  const dom = makeDom(extraRoots);
   const calls = [];
   const notices = [];
   const previous = {};
@@ -494,11 +495,13 @@ test('budget zero limits are refused locally instead of submitted to a positive-
 
 test('budget saves reload the revisioned view and preserve the saved form', async () => {
   let revision = 3;
-  let configured = { enabled: true, currency: 'CNY', timeZone: 'Asia/Shanghai', daily: { limit: 20, action: 'block' } };
+  let configured = { enabled: true, currency: 'CNY', timeZone: 'Asia/Shanghai', serialize: true, daily: { limit: 20, action: 'block' } };
+  const savedPayloads = [];
   const env = makePlus({ routes: {
     '/api/budget': () => ({ budget: { configured, revision, status: { enabled: Boolean(configured), currency: 'CNY' } } }),
     '/api/budget/save': body => {
       assert.equal(body.revision, revision);
+      savedPayloads.push(body.budget);
       configured = body.budget;
       revision++;
       return { ok: true, state: { budget: { enabled: Boolean(configured), currency: 'CNY' }, marker: revision } };
@@ -506,8 +509,17 @@ test('budget saves reload the revisioned view and preserve the saved form', asyn
   } });
   try {
     await env.panel.refresh();
+    const formText = textOf(env.byId('plus-budget-body'));
+    assert.doesNotMatch(formText, /时区/);
+    assert.doesNotMatch(formText, /串行发送请求/);
+    const initialInputs = controlsOf(env.byId('plus-budget-body'), 'INPUT');
+    assert.equal(initialInputs.filter(input => input.type === 'checkbox').length, 1);
+    assert.equal(initialInputs.filter(input => input.type === 'text').length, 0);
+
     await findButton(env.byId('plus-budget-body'), '保存预算').listeners.click[0]();
     assert.equal(env.getState().marker, 4);
+    assert.equal(savedPayloads[0].timeZone, 'Asia/Shanghai');
+    assert.equal(savedPayloads[0].serialize, true);
     const inputs = controlsOf(env.byId('plus-budget-body'), 'INPUT');
     assert.equal(inputs[0].checked, true);
     assert.equal(inputs.find(input => input.type === 'number').value, '20');
@@ -515,6 +527,9 @@ test('budget saves reload the revisioned view and preserve the saved form', asyn
     await findButton(env.byId('plus-budget-body'), '清除预算设置').listeners.click[0]();
     assert.equal(revision, 6);
     assert.equal(controlsOf(env.byId('plus-budget-body'), 'INPUT')[0].checked, false);
+    await findButton(env.byId('plus-budget-body'), '保存预算').listeners.click[0]();
+    assert.equal(Object.hasOwn(savedPayloads.at(-1), 'timeZone'), false);
+    assert.equal(savedPayloads.at(-1).serialize, false);
     assert.equal(env.notices.some(notice => notice.tone === 'error'), false);
   } finally { env.restore(); }
 });
@@ -548,38 +563,6 @@ test('refresh accounts really reads the latest account index', async () => {
   } finally { env.restore(); }
 });
 
-test('an unknown swarm snapshot cannot masquerade as an off switch', async () => {
-  const env = makePlus({ data: { workCapabilities: { state: 'inspected', swarm: { state: 'user-controlled' } } }, routes: {
-    '/api/work/swarm': () => ({ swarm: { state: 'unknown', conversationKey: 'conv-1', enabled: false, reason: 'request_failed' } }),
-  } });
-  try {
-    env.panel.render(env.getState());
-    await findButton(env.byId('plus-capabilities-body'), '读取当前会话').listeners.click[0]();
-    const body = env.byId('plus-capabilities-body');
-    assert.doesNotMatch(textOf(body), /当前已关闭/);
-    assert.match(textOf(body), /读取失败/);
-    assert.equal(findButton(body, '开启这个会话的 Swarm'), null);
-  } finally { env.restore(); }
-});
-
-test('swarm submits the displayed conversation and requires a fresh read on conflict', async () => {
-  const env = makePlus({ data: { workCapabilities: { state: 'inspected', swarm: { state: 'user-controlled' } } }, routes: {
-    '/api/work/swarm': () => ({ swarm: { state: 'off', conversationKey: 'conv-1', enabled: false } }),
-    '/api/actions': () => ({ operation: { id: 'swarm-1', state: 'running' } }),
-    '/api/state': () => ({ workCapabilities: env.getState().workCapabilities, operation: { id: 'swarm-1', state: 'failed', reason: 'work_swarm_conversation_changed' } }),
-  } });
-  try {
-    env.panel.render(env.getState());
-    const body = env.byId('plus-capabilities-body');
-    await findButton(body, '读取当前会话').listeners.click[0]();
-    await findButton(body, '开启这个会话的 Swarm').listeners.click[0]();
-    assert.deepEqual(env.calls.find(call => call.path === '/api/actions').body, { action: 'set-swarm', conversationKey: 'conv-1', enabled: true });
-    assert.match(textOf(body), /会话已变化，请重新读取/);
-    assert.equal(findButton(body, '开启这个会话的 Swarm'), null);
-    assert.equal(env.calls.filter(call => call.path === '/api/work/swarm').length, 1);
-  } finally { env.restore(); }
-});
-
 test('an unsupported tower is reported as such, not as missing', async () => {
   const env = makePlus({
     data: {
@@ -602,7 +585,9 @@ test('an unsupported tower is reported as such, not as missing', async () => {
     const text = textOf(env.byId('plus-capabilities-body'));
     assert.match(text, /当前版本不支持/);
     assert.match(text, /没有提供 Tower 入口/);
-    assert.match(text, /与普通子代理共用模型策略/);
+    assert.equal(findButton(env.byId('plus-capabilities-body'), '读取当前会话'), null);
+    assert.equal(env.byId('plus-swarm-panel'), null);
+    assert.equal(env.api.loadSwarm, undefined);
   } finally { env.restore(); }
 });
 
@@ -1126,5 +1111,96 @@ test('unavailable accounts book maps raw reason codes to Chinese copy instead of
     assert.doesNotMatch(barText, /account_switch_unavailable/);
     assert.doesNotMatch(bodyText, /account_switch_unavailable/);
     assert.match(bodyText, /这台机器上没有可用的账号切换接口/);
+  } finally { env.restore(); }
+});
+
+test('offline account switching stays clickable when Kimi Work is not running and displays pending sync notice', async () => {
+  const actions = [];
+  let switched = false;
+  const baseAccounts = {
+    state: 'offline',
+    currentId: 'acct-a',
+    accounts: [
+      { id: 'acct-a', name: '主账号' },
+      { id: 'acct-b', name: '备账号' },
+    ],
+  };
+  const env = makePlus({
+    extraRoots: ['view-accounts'],
+    data: { accounts: baseAccounts },
+    routes: {
+      '/api/actions': body => {
+        actions.push(body);
+        if (body.action === 'account-switch') {
+          switched = true;
+          return {
+            operation: { id: 'op-offline', action: 'account-switch', state: 'done' },
+            activation: { state: 'offline', accountId: body.accountId, verified: true },
+          };
+        }
+        return { operation: { id: 'op-other', action: body.action, state: 'done' } };
+      },
+      '/api/state': () => ({
+        operation: { id: 'op-offline', action: 'account-switch', state: 'done' },
+        accounts: switched
+          ? {
+            ...baseAccounts,
+            pendingAccountId: 'acct-b',
+            activation: { state: 'offline', accountId: 'acct-b', verified: true },
+          }
+          : baseAccounts,
+      }),
+    },
+  });
+  try {
+    assert.equal(env.dom.roots['view-accounts'].firstChild.id, 'plus-accounts-panel');
+    env.panel.render(env.getState(), { view: 'accounts' });
+
+    const body = env.byId('plus-accounts-body');
+    const switchBtn = findButton(body, '切换');
+    assert.ok(switchBtn, 'switch button must render even when accounts.state !== ready');
+    assert.equal(switchBtn.disabled, false, 'switch button must remain clickable when Kimi Work is not running');
+
+    const select = env.byId('plus-account-select');
+    assert.ok(select && !select.disabled, 'top bar account switcher must remain enabled offline');
+
+    switchBtn.listeners.click[0]();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+
+    assert.deepEqual(actions[0], { action: 'account-switch', accountId: 'acct-b' });
+    env.panel.render(env.getState(), { view: 'accounts' });
+    const afterText = textOf(env.byId('plus-accounts-body'));
+    assert.match(afterText, /已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态/);
+
+    env.panel.render(env.getState(), { view: 'overview' });
+    const overviewText = textOf(env.byId('plus-overview-account'));
+    assert.match(overviewText, /已切换默认账号凭据，下次打开 Kimi Work 时将自动同步登录态/);
+    assert.doesNotMatch(overviewText, /\boffline\b/);
+
+    const captureBtn = findButton(env.byId('plus-accounts-body'), '只保存当前登录');
+    assert.ok(captureBtn);
+    captureBtn.listeners.click[0]();
+    assert.equal(actions.some(item => item.action === 'account-capture'), false);
+    assert.match(textOf(env.byId('plus-accounts-body')), /请先打开并登录 Kimi Work，再保存当前账号/);
+  } finally { env.restore(); }
+});
+
+test('account capture surfaces a plain login prompt when backend returns account_session_unavailable', async () => {
+  const book = { state: 'ready', currentId: '', accounts: [] };
+  const env = makePlus({
+    extraRoots: ['plus-accounts-host'],
+    data: { accounts: book },
+    routes: {
+      '/api/actions': body => ({ operation: { id: 'cap-1', action: body.action, state: 'failed', reason: 'account_session_unavailable' } }),
+      '/api/state': () => ({ accounts: book, operation: { id: 'cap-1', action: 'account-capture', state: 'failed', reason: 'account_session_unavailable' } }),
+    },
+  });
+  try {
+    assert.equal(env.dom.roots['plus-accounts-host'].firstChild.id, 'plus-accounts-panel');
+    env.panel.render(env.getState(), { view: 'accounts' });
+    await findButton(env.byId('plus-accounts-body'), '保存当前账号').listeners.click[0]();
+    const body = env.byId('plus-accounts-body');
+    assert.match(textOf(body), /请先打开并登录 Kimi Work，再保存当前账号/);
+    assert.equal(findButton(body, '正常重启 Kimi 并继续添加'), null);
   } finally { env.restore(); }
 });

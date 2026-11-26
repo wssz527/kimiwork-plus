@@ -21,20 +21,6 @@
     invalid_path: '请填写有效的 JSON 数值路径', invalid_window: '额度周期说明不能超过 40 个字符',
     inference_endpoint: '这是模型推理地址，请填写非推理的额度接口', unsupported_source: '当前来源尚未接入只读查询',
   })[code] || code;
-  function quotaPathProblem(value, required = false) {
-    const text = String(value || '').trim();
-    if (!text) return required ? '请填写 JSON 数值路径，例如 data.balance。' : '';
-    if (text.length > 200) return 'JSON 路径最长 200 个字符。';
-    const segments = text.split('.');
-    if (segments.length > 8) return 'JSON 路径最多包含 8 层。';
-    if (segments.some(segment => !/^(?:[A-Za-z_][A-Za-z0-9_-]{0,63}|\d{1,3})$/.test(segment))) {
-      return '路径使用点号分隔字段；字段可含字母、数字、下划线与连字符，数组下标使用数字。';
-    }
-    if (segments.some(segment => ['__proto__', 'prototype', 'constructor'].includes(segment))) {
-      return 'JSON 路径不能包含保留字段名。';
-    }
-    return '';
-  }
 
   const quotaStatus = record => record.stale ? '上次成功值 · 已过期'
     : record.status === 'unsupported' ? '暂不支持自动查询'
@@ -469,20 +455,18 @@
 
   function renderSourceEditor() {
     const root = $('quota-source-editor');
+    const presets = {
+      deepseek: { name: 'DeepSeek 余额', url: 'https://api.deepseek.com/user/balance', path: 'balance_infos.0.total_balance', unit: 'CNY' },
+      'moonshot-cn': { name: 'Moonshot 国内余额', url: 'https://api.moonshot.cn/v1/users/me/balance', path: 'data.available_balance', unit: 'CNY' },
+      'moonshot-global': { name: 'Moonshot 国际余额', url: 'https://api.moonshot.ai/v1/users/me/balance', path: 'data.available_balance', unit: 'USD' },
+    };
     root.innerHTML = `<form class="usage-source-form" id="quota-source-form">
-      <div class="band__head"><div><h3>添加余额或外部网关额度来源</h3><p>这里只保存非敏感配置。认证复用连接中已有的 Key，页面不会回显或另存 Key；保存后不会自动查询。</p></div></div>
-      <label class="field" for="quota-source-adapter"><span class="field__label">厂商适配器</span><select id="quota-source-adapter"><option value="deepseek">DeepSeek 官方余额</option><option value="moonshot-cn">Moonshot 国内余额</option><option value="moonshot-global">Moonshot 国际余额</option><option value="custom">高级：自定义非推理接口</option></select><span class="field__hint">官方适配器使用固定文档端点；自定义接口只读取声明的数值路径。</span></label>
-      <div class="field-row"><label class="field" for="quota-source-name"><span class="field__label">显示名称</span><input id="quota-source-name" maxlength="80" required placeholder="例如：DeepSeek 余额"></label><label class="field" for="quota-source-id" id="quota-source-id-field"><span class="field__label">来源标识</span><input id="quota-source-id" class="mono" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="my-balance"><span class="field__hint">自定义来源使用；官方来源按连接自动生成。</span></label></div>
+      <div class="band__head"><div><h3>添加官方余额数据来源</h3><p>这里只保存非敏感配置。认证复用连接中已有的 Key，页面不会回显或另存 Key；保存后不会自动查询。</p></div></div>
+      <label class="field" for="quota-source-adapter"><span class="field__label">厂商适配器</span><select id="quota-source-adapter"><option value="deepseek">DeepSeek 官方余额</option><option value="moonshot-cn">Moonshot 国内余额</option><option value="moonshot-global">Moonshot 国际余额</option></select><span class="field__hint">内置官方适配器使用固定文档端点，只读查询余额，不调用模型推理。</span></label>
+      <label class="field" for="quota-source-name"><span class="field__label">显示名称</span><input id="quota-source-name" maxlength="80" required placeholder="例如：DeepSeek 余额"></label>
       <label class="field" for="quota-source-connection"><span class="field__label">复用连接凭据</span><select id="quota-source-connection"></select><span class="field__hint">没有可用连接时，先到「模型 → 服务商连接」保存并应用。</span></label>
       <details class="growth-disclosure" id="quota-adapter-details"><summary id="quota-adapter-summary">查看官方接口与适配规则</summary><div class="growth-disclosure__body">
-      <p class="note" id="quota-custom-note">请使用服务方文档提供的余额或额度接口；此处只查询数据，不调用模型。</p>
-      <div class="field-row"><label class="field" for="quota-source-kind"><span class="field__label">账目类型</span><select id="quota-source-kind"><option value="api_balance">API 余额</option><option value="gateway_limit">外部网关自设额度</option><option value="coding_plan">外部网关 Coding Plan 窗口</option></select></label><label class="field" for="quota-source-unit"><span class="field__label">数值单位</span><select id="quota-source-unit"><option>CNY</option><option>USD</option><option>EUR</option><option>JPY</option><option>HKD</option><option>GBP</option><option>credits</option><option>requests</option><option>tokens</option></select><span class="field__hint">必须与服务方返回单位一致。</span></label></div>
-      <label class="field" for="quota-source-url"><span class="field__label">非推理余额查询地址</span><input id="quota-source-url" type="url" required placeholder="https://gateway.example/api/user/balance"><span class="field__hint">只接受明确的额度接口，不能填写模型、工具、图片或长上下文地址。</span></label>
-      <div class="field-row"><label class="field" for="quota-source-method"><span class="field__label">查询方法</span><select id="quota-source-method"><option value="GET">GET</option><option value="POST">POST（静态非推理请求）</option></select></label><label class="field" for="quota-source-path"><span class="field__label">JSON 数值路径</span><input id="quota-source-path" class="mono" required placeholder="data.balance"><span class="field__hint" id="quota-source-path-hint">例如 data.balance 或 balance_infos.0.total_balance。</span></label></div>
-      <label class="field" for="quota-source-auth"><span class="field__label">认证方式</span><select id="quota-source-auth"><option value="bearer">复用连接 Key · Bearer</option><option value="x-api-key">复用连接 Key · X-API-Key</option></select></label>
-      <div id="quota-custom-window" class="field-row"><label class="field" for="quota-source-window"><span class="field__label">额度周期（可选）</span><input id="quota-source-window" maxlength="40" placeholder="例如：5 小时 / 每月"></label><label class="field" for="quota-source-reset"><span class="field__label">重置时间 JSON 路径（可选）</span><input id="quota-source-reset" class="mono" placeholder="data.reset_at"><span class="field__hint" id="quota-source-reset-hint">服务方提供的 ISO 时间或 Unix 时间戳。</span></label></div>
-      <div id="quota-custom-fields" class="field-row"><label class="field" for="quota-source-used"><span class="field__label">已用数值 JSON 路径（可选）</span><input id="quota-source-used" class="mono" placeholder="data.used"><span class="field__hint" id="quota-source-used-hint">留空表示不读取这个数值。</span></label><label class="field" for="quota-source-limit"><span class="field__label">总额度 JSON 路径（可选）</span><input id="quota-source-limit" class="mono" placeholder="data.limit"><span class="field__hint" id="quota-source-limit-hint">留空表示不读取这个数值。</span></label></div>
-      <label class="field" for="quota-source-body" id="quota-source-body-field" hidden><span class="field__label">POST 静态 JSON</span><textarea id="quota-source-body" class="mono" rows="3">{}</textarea><span class="field__hint">不能包含 prompt、model、messages、工具或图片等推理字段。</span></label>
+      <p class="note" id="quota-adapter-info"></p>
       </div></details>
       <p class="errors" id="quota-source-error" hidden></p><div class="action-line"><button class="btn btn--quiet" id="quota-source-cancel" type="button">取消</button><button class="btn btn--primary" type="submit">保存数据来源</button></div>
     </form>`;
@@ -495,62 +479,31 @@
     if (!connections.length) { const option = document.createElement('option'); option.value = ''; option.textContent = '暂无已生效连接'; select.append(option); }
     const applyAdapter = () => {
       const adapter = $('quota-source-adapter').value;
-      const preset = {
-        deepseek: { name: 'DeepSeek 余额', url: 'https://api.deepseek.com/user/balance', path: 'balance_infos.0.total_balance', unit: 'CNY' },
-        'moonshot-cn': { name: 'Moonshot 国内余额', url: 'https://api.moonshot.cn/v1/users/me/balance', path: 'data.available_balance', unit: 'CNY' },
-        'moonshot-global': { name: 'Moonshot 国际余额', url: 'https://api.moonshot.ai/v1/users/me/balance', path: 'data.available_balance', unit: 'USD' },
-      }[adapter];
-      hide('quota-custom-window', Boolean(preset)); hide('quota-custom-fields', Boolean(preset)); hide('quota-custom-note', Boolean(preset));
-      hide('quota-source-id-field', Boolean(preset));
-      $('quota-adapter-details').open = !preset;
-      text('quota-adapter-summary', preset ? '查看官方接口与适配规则' : '自定义接口与 JSON 路径');
-      for (const id of ['quota-source-kind', 'quota-source-unit', 'quota-source-method', 'quota-source-auth']) $(id).disabled = Boolean(preset);
-      for (const id of ['quota-source-url', 'quota-source-path']) $(id).readOnly = Boolean(preset);
-      if (!preset) return;
-      $('quota-source-id').value = adapter;
+      const preset = presets[adapter] || presets.deepseek;
       $('quota-source-name').value = preset.name;
-      $('quota-source-kind').value = 'api_balance';
-      $('quota-source-unit').value = preset.unit;
-      $('quota-source-url').value = preset.url;
-      $('quota-source-method').value = 'GET';
-      $('quota-source-path').value = preset.path;
-      $('quota-source-auth').value = 'bearer';
-      hide('quota-source-body-field', true);
+      text('quota-adapter-info', `只读接口：GET ${preset.url} · 账目类型：API 余额 · 认证：复用连接 Key（Bearer） · 单位：${preset.unit}`);
     };
     $('quota-source-adapter').addEventListener('change', applyAdapter);
     applyAdapter();
-    for (const [id, required] of [['quota-source-path', true], ['quota-source-reset', false], ['quota-source-used', false], ['quota-source-limit', false]]) {
-      const input = $(id);
-      const hint = $(id + '-hint');
-      const original = hint.textContent;
-      input.addEventListener('input', () => {
-        const problem = quotaPathProblem(input.value, required);
-        input.setAttribute('aria-invalid', problem ? 'true' : 'false');
-        input.setCustomValidity(problem);
-        hint.textContent = problem || original;
-      });
-    }
-    $('quota-source-method').addEventListener('change', () => hide('quota-source-body-field', $('quota-source-method').value !== 'POST'));
     $('quota-source-cancel').addEventListener('click', () => root.replaceChildren());
     $('quota-source-form').addEventListener('submit', async event => {
       event.preventDefault();
       const error = $('quota-source-error'); error.hidden = true;
-      let body;
-      try { body = $('quota-source-method').value === 'POST' ? JSON.parse($('quota-source-body').value || '{}') : undefined; }
-      catch { error.textContent = 'POST 内容必须是有效 JSON。'; error.hidden = false; return; }
+      const adapter = $('quota-source-adapter').value;
+      const preset = presets[adapter] || presets.deepseek;
+      const connectionId = select.disabled ? '' : select.value;
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(connectionId));
       const source = {
-        adapter: $('quota-source-adapter').value,
-        sourceId: $('quota-source-id').value.trim(), sourceName: $('quota-source-name').value.trim(), kind: $('quota-source-kind').value,
-        windowLabel: $('quota-source-window').value.trim(), resetAtPath: $('quota-source-reset').value.trim(),
-        usedPath: $('quota-source-used').value.trim(), limitPath: $('quota-source-limit').value.trim(),
-        endpoint: $('quota-source-url').value.trim(), method: $('quota-source-method').value, valuePath: $('quota-source-path').value.trim(), unit: $('quota-source-unit').value.trim(),
-        auth: { type: $('quota-source-auth').value, ...(select.disabled ? {} : { connectionId: select.value }) },
-        ...(body === undefined ? {} : { body }),
+        adapter,
+        sourceId: adapter + '-' + Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, '0')).join('').slice(0, 12),
+        sourceName: $('quota-source-name').value.trim() || preset.name,
+        kind: 'api_balance',
+        endpoint: preset.url,
+        method: 'GET',
+        valuePath: preset.path,
+        unit: preset.unit,
+        auth: { type: 'bearer', ...(connectionId ? { connectionId } : {}) },
       };
-      if (source.adapter !== 'custom') {
-        const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source.auth.connectionId));
-        source.sourceId = source.adapter + '-' + Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, '0')).join('').slice(0, 12);
-      }
       const submit = event.target.querySelector('[type="submit"]'); submit.disabled = true;
       try {
         state.quota = await request('/api/quota/sources', { method: 'POST', body: { action: 'upsert', source } });
