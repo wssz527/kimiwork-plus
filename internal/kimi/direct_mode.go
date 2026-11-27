@@ -273,13 +273,23 @@ const normalizeURL=(value,protocol)=>{
   return text.toLowerCase();
 };
 const isLoopback=value=>/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+\//i.test(String(value??""));
+let listCode="";
 const readSnapshot=async()=>{
-  const snapshot=unwrap(await sources.list());
-  if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string")return null;
+  const reply=await sources.list();
+  if(reply&&typeof reply==="object"&&reply.ok===false){
+    listCode=(typeof reply.reasonCode==="string"&&reply.reasonCode)?reply.reasonCode:"failed";
+    return null;
+  }
+  const snapshot=reply?.ok===true?reply.value:null;
+  if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string"){
+    listCode="contract-changed";
+    return null;
+  }
+  listCode="";
   return snapshot;
 };
 let snapshot=await readSnapshot();
-if(!snapshot)return {ok:false,code:"contract-changed"};
+if(!snapshot)return {ok:false,code:listCode||"contract-changed"};
 if(cleanupScopeToken&&snapshot.scopeToken!==cleanupScopeToken)return {ok:false,code:"account-changed"};
 let gatewayDisconnected=false;
 const ownGateway=source=>{
@@ -352,7 +362,7 @@ const importDraft=async(current,existing,allowApply)=>{
   let status=saved.value.status;
   if(status==="pending"&&allowApply&&typeof sources.applyPending==="function"){
     const latest=await readSnapshot();
-    if(!latest||latest.scopeToken!==current.scopeToken||latest.accountRevision!==saved.value.accountRevision)return {error:"byok-source-stale"};
+    if(!latest||latest.scopeToken!==current.scopeToken||latest.accountRevision!==saved.value.accountRevision)return {error:listCode||"byok-source-stale"};
     const applied=await sources.applyPending(saved.value.accountRevision);
     if(!applied?.ok)return {error:applied?.reasonCode||"import-failed"};
     status=applied.value?.status;
@@ -397,7 +407,7 @@ const officialProviderIDs=source=>{
 const cleanupGateway=async()=>{
   if(!request.disconnectGateway||status!=="applied")return {settled:!hadManagedGateway};
   const current=await readSnapshot();
-  if(!current||current.scopeToken!==snapshot.scopeToken)return {error:"contract-changed"};
+  if(!current||current.scopeToken!==snapshot.scopeToken)return {error:listCode||"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
   const directModels=Array.isArray(direct?.models)?direct.models:[];
   const ids=officialProviderIDs(direct);
@@ -418,7 +428,7 @@ if(cleanup?.error)return {ok:false,code:cleanup.error};
 let routeCleanupPending=cleanup?.settled!==true||(!!cleanupScopeToken&&status!=="applied");
 if(request.disconnectGateway&&routeCleanupPending&&status==="applied"){
   const current=await readSnapshot();
-  if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:"contract-changed"};
+  if(!current||current.scopeToken!==snapshot.scopeToken)return {ok:false,code:listCode||"contract-changed"};
   const direct=current.sources.find(source=>source.id===saved.sourceId&&source.kind==="custom");
   const directModels=Array.isArray(direct?.models)?direct.models:[];
   const directPending=directModels.some(model=>model.status==="pending");

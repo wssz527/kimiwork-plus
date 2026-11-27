@@ -103,7 +103,6 @@ const sources=globalThis.clawBridgeAPI?.byokSources;
 if(!sources||typeof sources.list!=="function"||typeof sources.disconnect!=="function"){
   return {ok:false,code:"unsupported"};
 }
-const unwrap=result=>result?.ok===true?result.value:null;
 const inactive=source=>source?.quarantined===true||source?.status==="disconnected";
 const settledApplyState=state=>state==null||state==="idle"||state==="applied"||state==="ready";
 const loopback=value=>/^http:\/\/(?:127\.0\.0\.1|\[::1\]):\d+\/v1(?:\/models\/api\.json)?\/?$/i.test(String(value??""));
@@ -120,23 +119,28 @@ const managed=source=>!inactive(source)&&(managedGateway(source)||managedDirect(
 const otherForeignPending=snapshot=>snapshot.sources.some(source=>!managed(source)&&
   Array.isArray(source.models)&&source.models.some(model=>model?.status==="pending"));
 const read=async()=>{
-  const snapshot=unwrap(await sources.list());
+  const reply=await sources.list();
+  if(reply&&typeof reply==="object"&&reply.ok===false){
+    return {code:(typeof reply.reasonCode==="string"&&reply.reasonCode)?reply.reasonCode:"failed"};
+  }
+  const snapshot=reply?.ok===true?reply.value:null;
   if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string"||
-    (snapshot.accountRevision!==null&&typeof snapshot.accountRevision!=="string"))return null;
-  return snapshot;
+    (snapshot.accountRevision!==null&&typeof snapshot.accountRevision!=="string"))return {code:"contract-changed"};
+  return {snapshot:snapshot};
 };
 const initial=await read();
-if(!initial)return {ok:false,code:"contract-changed"};
-const initialScope=initial.scopeToken;
-if(directSourceID&&initial.sources.some(source=>source.id===directSourceID&&source.kind!=="custom"&&!inactive(source))){
+if(!initial.snapshot)return {ok:false,code:initial.code};
+const initialScope=initial.snapshot.scopeToken;
+if(directSourceID&&initial.snapshot.sources.some(source=>source.id===directSourceID&&source.kind!=="custom"&&!inactive(source))){
   return {ok:false,code:"source-conflict"};
 }
-const ids=initial.sources.filter(managed).map(source=>source.id).filter(id=>typeof id==="string"&&id);
+const ids=initial.snapshot.sources.filter(managed).map(source=>source.id).filter(id=>typeof id==="string"&&id);
 let disconnected=0;
 let lastStatus="";
 for(const id of ids){
-  const current=await read();
-  if(!current)return {ok:false,code:"contract-changed",sources:disconnected};
+  const currentRead=await read();
+  if(!currentRead.snapshot)return {ok:false,code:currentRead.code,sources:disconnected};
+  const current=currentRead.snapshot;
   if(current.scopeToken!==initialScope)return {ok:false,code:"account-changed",sources:disconnected};
   const source=current.sources.find(candidate=>candidate.id===id);
   if(!source||!managed(source))continue;
@@ -154,8 +158,9 @@ for(const id of ids){
   let status=typeof reply.value?.status==="string"?reply.value.status:"";
   if(status==="pending"&&!otherForeignPending(current)&&typeof sources.applyPending==="function"&&
     typeof reply.value?.accountRevision==="string"&&reply.value.accountRevision){
-    const latest=await read();
-    if(!latest)return {ok:false,code:"contract-changed",sources:disconnected};
+    const latestRead=await read();
+    if(!latestRead.snapshot)return {ok:false,code:latestRead.code,sources:disconnected};
+    const latest=latestRead.snapshot;
     if(latest.scopeToken!==initialScope)return {ok:false,code:"account-changed",sources:disconnected};
     if(latest.accountRevision!==reply.value.accountRevision){
       return {ok:false,code:"byok-source-stale",sources:disconnected};
@@ -175,8 +180,9 @@ for(const id of ids){
   }
   lastStatus=status;
 }
-let verified=await read();
-if(!verified)return {ok:false,code:"contract-changed",sources:disconnected};
+let verifiedRead=await read();
+if(!verifiedRead.snapshot)return {ok:false,code:verifiedRead.code,sources:disconnected};
+let verified=verifiedRead.snapshot;
 if(verified.scopeToken!==initialScope)return {ok:false,code:"account-changed",sources:disconnected};
 if(verified.sources.some(managed))return {ok:false,code:"not-verified",sources:disconnected};
 if(lastStatus===""&&!settledApplyState(verified.applyState)&&!otherForeignPending(verified)&&
@@ -194,8 +200,9 @@ if(lastStatus===""&&!settledApplyState(verified.applyState)&&!otherForeignPendin
     return {ok:false,code:"contract-changed",sources:disconnected};
   }
   lastStatus=status;
-  verified=await read();
-  if(!verified)return {ok:false,code:"contract-changed",sources:disconnected};
+  verifiedRead=await read();
+  if(!verifiedRead.snapshot)return {ok:false,code:verifiedRead.code,sources:disconnected};
+  verified=verifiedRead.snapshot;
   if(verified.scopeToken!==initialScope)return {ok:false,code:"account-changed",sources:disconnected};
   if(verified.sources.some(managed))return {ok:false,code:"not-verified",sources:disconnected};
 }

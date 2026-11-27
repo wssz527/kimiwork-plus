@@ -1314,7 +1314,11 @@ const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS 
 const disconnectDirect=async()=>{
   if(!directSourceID)return {ok:true,settled:true};
   if(typeof sources?.list!=="function"||typeof sources.disconnect!=="function")return {ok:false,settled:false};
-  const current=unwrap(await sources.list());
+  const listed=await sources.list();
+  if(listed&&typeof listed==="object"&&listed.ok===false){
+    return {ok:false,settled:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+  }
+  const current=listed?.ok===true?listed.value:null;
   if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string")return {ok:false,settled:false};
   let direct=current.sources.find(source=>source.id===directSourceID);
   if(!direct)direct=current.sources.find(source=>source.kind==="custom"&&source.displayName==="` + DirectDisplayName + `");
@@ -1345,7 +1349,11 @@ if(!sources||typeof sources?.list!=="function"||typeof sources.preview!=="functi
 }
 baseURL=baseURL.replace(/\/$/,"");
 const catalogURL=baseURL+"/models/api.json";
-const snapshot=unwrap(await sources.list());
+const listed=await sources.list();
+if(listed&&typeof listed==="object"&&listed.ok===false){
+  return {ok:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+}
+const snapshot=listed?.ok===true?listed.value:null;
 if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string"){
   return {ok:false,code:"contract-changed"};
 }
@@ -1416,7 +1424,11 @@ const saved=await sources.save({previewId:preview.previewId,accountRevision:prev
 if(!saved?.ok||saved.value?.sourceId!==preview.sourceId)return {ok:false,code:saved?.reasonCode||"import-failed"};
 let status=saved.value.status;
 if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function"){
-  const current=unwrap(await sources.list());
+  const listedLatest=await sources.list();
+  if(listedLatest&&typeof listedLatest==="object"&&listedLatest.ok===false){
+    return {ok:false,code:(typeof listedLatest.reasonCode==="string"&&listedLatest.reasonCode)?listedLatest.reasonCode:"failed"};
+  }
+  const current=listedLatest?.ok===true?listedLatest.value:null;
   if(current?.scopeToken!==snapshot.scopeToken||current.accountRevision!==saved.value.accountRevision){
     return {ok:false,code:"byok-source-stale"};
   }

@@ -219,15 +219,16 @@ func TestCatalogSurfaceDigestDirectCoversConnectionsModelsAndCredentials(t *test
 type autoSyncHarness struct {
 	n *Native
 
-	mu            sync.Mutex
-	imports       int
-	directImports int
-	applied       bool
-	adopted       bool
-	waiting       bool
-	restart       bool
-	failImport    string
-	reconciles    int
+	mu             sync.Mutex
+	imports        int
+	directImports  int
+	applied        bool
+	adopted        bool
+	waiting        bool
+	restart        bool
+	accountChanged bool
+	failImport     string
+	reconciles     int
 
 	managed bool
 	running bool
@@ -284,6 +285,10 @@ func newAutoSyncHarness(t *testing.T, direct bool, d core.Document) *autoSyncHar
 				}
 			}
 		}
+	} else {
+		// The gateway write settles the shared BYOK gate first. The harness keeps
+		// that step off the machine; the refusal path has its own test below.
+		n.byokPrepare = func(context.Context) error { return nil }
 	}
 	n.autoSync = newAutoSyncCoordinator(context.Background(), n)
 	n.autoSync.debounce = 5 * time.Millisecond
@@ -296,6 +301,9 @@ func (h *autoSyncHarness) integration() kimi.IntegrationResult {
 	defer h.mu.Unlock()
 	if h.waiting {
 		return kimi.IntegrationResult{State: kimi.IntegrationAccountUnknown, Reason: "waiting-login"}
+	}
+	if h.accountChanged && !h.applied {
+		return kimi.IntegrationResult{State: kimi.IntegrationNeedsImport, Reason: "account_changed"}
 	}
 	if !h.applied {
 		return kimi.IntegrationResult{State: kimi.IntegrationNeedsImport, Reason: "models_missing"}

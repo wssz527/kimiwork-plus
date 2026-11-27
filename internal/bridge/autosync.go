@@ -49,6 +49,9 @@ const (
 	autoSyncReasonUnmanaged     = "unmanaged_kimi_running"
 	autoSyncReasonWriteBlocked  = "model_sync_write_blocked"
 	autoSyncReasonPrepareNeeded = "direct_prepare_required"
+	// autoSyncReasonGatewayPrepareNeeded is the gateway form of the same refusal:
+	// the shared BYOK flag or the intranet name still needs the elevated step.
+	autoSyncReasonGatewayPrepareNeeded = "native_prepare_required"
 )
 
 // autoSyncTimeout bounds one background catalog write. A direct import settles
@@ -180,6 +183,10 @@ type autoSyncCoordinator struct {
 	// disconnected is set when the user removed the managed models on purpose.
 	// Only a save that changes the surface lifts it again.
 	disconnected bool
+	// allowAccountRebind says the explicit account switch this product just
+	// finished owns the queued catch-up, so a readback of `account_changed` is
+	// that switch's own pending import instead of a foreign sign-in.
+	allowAccountRebind bool
 	// blocked says a run is due but another operation holds the slot; only that
 	// operation finishing can wake it. deferred says a run came due while the
 	// coordinator itself was running.
@@ -259,6 +266,9 @@ func (c *autoSyncCoordinator) schedule(path string, prev, next core.Document) {
 		// A surface change is the user asking for the catalog again, which is
 		// also the one thing that ends a deliberate disconnect.
 		c.disconnected = false
+		// The catch-up an explicit account switch queued answered for the surface
+		// as it was then; a save that moved it owns the next write.
+		c.allowAccountRebind = false
 		if !c.running && c.synced != "" && target == c.synced && len(core.Rows(next["models"])) > 0 {
 			// The newest surface is the one already in place. While a run is
 			// writing an older generation this must not short-circuit: the user
@@ -335,6 +345,7 @@ func (c *autoSyncCoordinator) reset() {
 	}
 	c.pending, c.target, c.blocked, c.disconnected, c.repairOnly = false, "", false, true, false
 	c.deferred = false
+	c.allowAccountRebind = false
 	c.attemptedProviderRepair = ""
 	// The profile no longer holds the catalog, so the old baseline proves
 	// nothing about the next connection.
@@ -370,6 +381,7 @@ func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, re
 		// generation that was already queued keeps its target: it is the edit the
 		// user saved, and the new account still owes it.
 		c.synced, c.syncedAdopted = "", false
+		c.allowAccountRebind = !c.disconnected
 		if !c.disconnected {
 			c.pending, c.blocked, c.repairOnly = true, false, false
 			c.setStateLocked(autoSyncScheduled, "")
@@ -601,6 +613,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	}
 	target, disconnected, adopted := c.target, c.disconnected, c.syncedAdopted
 	baseline, repairOnly := c.synced, c.repairOnly
+	allowRebind := c.allowAccountRebind
 	c.mu.Unlock()
 	if disconnected {
 		c.hold(autoSyncIdle, autoSyncReasonDisconnected)
@@ -633,7 +646,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		c.finish(autoSyncFailed, autoSyncReasonWriteBlocked, false, digest, target)
 		return autoSyncFailed, autoSyncReasonWriteBlocked, nil, nil
 	}
-	if !n.autoSyncManaged() {
+	if !n.managedKimiRunning() {
 		return c.waitForManagedKimi(nil)
 	}
 	timeout := autoSyncGatewayTimeout
@@ -649,6 +662,11 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 	var repair kimi.IntegrationResult
 	if target == "" {
 		observed := c.reconcile(ctx)
+		// An account switch this product just performed leaves the previous
+		// account's import record behind, so the readback names the account
+		// change. That import is exactly what the queued catch-up owes. A sign-in
+		// inside the Kimi window is a user decision and keeps the old answer.
+		rebind := allowRebind && observed.State == kimi.IntegrationNeedsImport && observed.Reason == "account_changed"
 		if repairOnly {
 			if signature := providerRepairSignature(observed, d); signature != "" {
 				c.mu.Lock()
@@ -663,7 +681,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 				return autoSyncIdle, "", nil, nil
 			}
 		}
-		if repair.GatewayProviderMismatch == "" && !observed.NeedsNativeImport() &&
+		if repair.GatewayProviderMismatch == "" && !observed.NeedsNativeImport() && !rebind &&
 			!(n.isDirectMode() && observed.State == kimi.IntegrationDisabled && observed.Reason == "direct_spec_missing") {
 			// A catch-up with nothing to write: the readback is the answer.
 			state, reason := autoSyncOutcome(imported, observed)
@@ -686,7 +704,7 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		return autoSyncFailed, autoSyncReasonPrepareNeeded, nil, nil
 	}
 	imported, err = c.importCatalog(ctx, repair)
-	if err != nil && autoSyncUnmanagedFailure(err) && !n.autoSyncManaged() {
+	if err != nil && autoSyncUnmanagedFailure(err) && !n.managedKimiRunning() {
 		// The managed process left between the check above and the write. Nothing
 		// is written into a process this build does not own, and the generation
 		// stays queued for the next managed launch.
@@ -728,10 +746,11 @@ func (c *autoSyncCoordinator) sync() (string, string, any, error) {
 		}
 		applied = false
 	}
-	if err != nil && imported.State == kimi.ImportStateFailed && imported.Reason == autoSyncReasonPrepareNeeded {
+	if err != nil && imported.State == kimi.ImportStateFailed &&
+		(imported.Reason == autoSyncReasonPrepareNeeded || imported.Reason == autoSyncReasonGatewayPrepareNeeded) {
 		// The prepare step never reached the write, so a readback of the previous
 		// catalog cannot prove this generation landed.
-		state, reason, applied = autoSyncFailed, autoSyncReasonPrepareNeeded, false
+		state, reason, applied = autoSyncFailed, imported.Reason, false
 	}
 	c.finish(state, reason, applied, digest, target)
 	if state == autoSyncFailed {
@@ -770,6 +789,18 @@ func (c *autoSyncCoordinator) importCatalog(ctx context.Context, repair kimi.Int
 		// No ensure step: a background timer must never launch Kimi.
 		return n.importDirectWithEnsure(ctx, func(context.Context) error { return nil })
 	}
+	if n.probe != nil {
+		// The shared BYOK gate is what makes the page offer its source API. A
+		// machine that already has it costs nothing and no prompt; one that still
+		// needs the elevated step is reported for the panel to settle.
+		if err := n.prepareBYOKSilent(ctx); err != nil {
+			reason := core.ErrorCode(err)
+			if reason == autoSyncReasonPrepareNeeded {
+				reason = autoSyncReasonGatewayPrepareNeeded
+			}
+			return kimi.ImportResult{State: kimi.ImportStateFailed, Reason: reason}, errors.New(reason)
+		}
+	}
 	run := n.importModels
 	if run == nil {
 		run = n.controller.ImportModelsAuthorized
@@ -794,7 +825,7 @@ func (c *autoSyncCoordinator) disconnectCatalog(ctx context.Context, digest, tar
 		c.finish(autoSyncSynced, "", true, digest, target)
 		return autoSyncSynced, "", removed, nil
 	}
-	if autoSyncUnmanagedFailure(err) && !c.native.autoSyncManaged() {
+	if autoSyncUnmanagedFailure(err) && !c.native.managedKimiRunning() {
 		return c.waitForManagedKimi(removed)
 	}
 	state := autoSyncFailed
@@ -863,6 +894,7 @@ func (c *autoSyncCoordinator) finish(state, reason string, applied bool, digest,
 		c.armLocked(c.debounce)
 		return
 	}
+	c.allowAccountRebind = false
 	c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
 	c.setStateLocked(state, reason)
 }
@@ -901,7 +933,7 @@ func (c *autoSyncCoordinator) kickIfReady() {
 	c.mu.Lock()
 	queued := c.canKickLocked()
 	c.mu.Unlock()
-	if !queued || !c.native.autoSyncManaged() {
+	if !queued || !c.native.managedKimiRunning() {
 		return
 	}
 	c.mu.Lock()
@@ -924,6 +956,7 @@ func (c *autoSyncCoordinator) abandon(state, reason string) {
 		return
 	}
 	c.pending, c.target, c.blocked, c.repairOnly = false, "", false, false
+	c.allowAccountRebind = false
 	c.setStateLocked(state, reason)
 }
 
@@ -998,13 +1031,6 @@ func (n *Native) beginAutoSyncOperation() (string, bool) {
 	id := RandomKey()[:16]
 	n.operation = core.Document{"id": id, "action": "auto-sync", "state": "running", "startedAt": time.Now().UnixMilli()}
 	return id, true
-}
-
-func (n *Native) autoSyncManaged() bool {
-	if n.managedProbe != nil {
-		return n.managedProbe()
-	}
-	return n.controller != nil && n.controller.HasManagedBridge()
 }
 
 // currentSurfaceDigest reads the saved surface. Callers use it after releasing

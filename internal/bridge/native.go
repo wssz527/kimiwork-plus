@@ -69,6 +69,11 @@ type Native struct {
 	importModels       func(context.Context) (kimi.ImportResult, error)
 	importDirectModels func(context.Context, kimi.DirectImportRequest) (kimi.ImportResult, error)
 	disconnectModels   func(context.Context) (kimi.DisconnectResult, error)
+	// byokPrepare and restartOfficial exist so a test can settle the BYOK gates
+	// and clear the official build's cached answer without elevating or stopping
+	// a real Kimi.
+	byokPrepare     func(context.Context) error
+	restartOfficial func(context.Context) error
 	// The probes below exist so a test can place the process and the readback
 	// without starting or touching a real Kimi.
 	discoverInstallation  func() []kimi.Installation
@@ -812,6 +817,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			n.setOperationStage(id, diagnosticStageDisconnectModels)
 			var removed kimi.DisconnectResult
 			removed, err = n.disconnectModelsWithAutoStart(deadline)
+			removed, err = n.recoverDisconnectFeatureDisabled(deadline, removed, err)
 			if err == nil && !removed.OK {
 				reason := removed.Reason
 				if reason == "" {
@@ -845,18 +851,20 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 			n.cleanupOrphanedLegacy()
 			var imported kimi.ImportResult
-			if n.isDirectMode() {
-				// The import needs the intranet name to resolve without this
-				// product's listener, so the static entry is settled first. A
-				// machine that already has it costs no administrator prompt.
-				n.setOperationStage(id, diagnosticStagePrepare)
-				if err = n.prepareBYOK(deadline); err == nil {
-					n.setOperationStage(id, diagnosticStageImportDirect)
-					imported, err = n.importDirect(deadline)
+			// Both routes need the availability flag and the intranet name before
+			// the page offers its BYOK surface. A machine that already has them
+			// costs no administrator prompt, and the static entry a direct import
+			// needs is settled by the same call.
+			n.setOperationStage(id, diagnosticStagePrepare)
+			if err = n.prepareBYOK(deadline); err == nil {
+				importRun, stage := n.importModelsWithAutoStart, diagnosticStageImportModels
+				if n.isDirectMode() {
+					importRun = func(ctx context.Context) (kimi.ImportResult, error) { return n.importDirect(ctx) }
+					stage = diagnosticStageImportDirect
 				}
-			} else {
-				n.setOperationStage(id, diagnosticStageImportModels)
-				imported, err = n.importModelsWithAutoStart(deadline)
+				n.setOperationStage(id, stage)
+				imported, err = importRun(deadline)
+				imported, err = n.importAfterStaleFeatureDisabled(deadline, imported, err, importRun)
 			}
 			if err == nil {
 				err = importResultError(imported)
@@ -881,17 +889,16 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			n.cleanupOrphanedLegacy()
 			n.setOperationStage(id, diagnosticStagePrepare)
 			err = n.prepareBYOK(deadline)
+			importRun, stage := n.importModelsWithAutoStart, diagnosticStageImportModels
+			if n.isDirectMode() {
+				importRun = func(ctx context.Context) (kimi.ImportResult, error) { return n.importDirect(ctx) }
+				stage = diagnosticStageImportDirect
+			}
 			var imported *kimi.ImportResult
 			if err == nil {
-				var value kimi.ImportResult
-				var importErr error
-				if n.isDirectMode() {
-					n.setOperationStage(id, diagnosticStageImportDirect)
-					value, importErr = n.importDirect(deadline)
-				} else {
-					n.setOperationStage(id, diagnosticStageImportModels)
-					value, importErr = n.importModelsWithAutoStart(deadline)
-				}
+				n.setOperationStage(id, stage)
+				value, importErr := importRun(deadline)
+				value, importErr = n.importAfterStaleFeatureDisabled(deadline, value, importErr, importRun)
 				if value.OK || value.State != "" || value.Reason != "" {
 					imported = &value
 				}
@@ -975,6 +982,15 @@ func (n *Native) startManagedOfficial(ctx context.Context) error {
 		return err
 	}
 	return n.syncWorkHome()
+}
+
+// managedKimiRunning reports whether the managed application this build
+// launched is still up. managedProbe places the answer without starting one.
+func (n *Native) managedKimiRunning() bool {
+	if n.managedProbe != nil {
+		return n.managedProbe()
+	}
+	return n.controller != nil && n.controller.HasManagedBridge()
 }
 
 func (n *Native) ensureManagedKimi(ctx context.Context) error {
