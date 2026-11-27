@@ -68,6 +68,7 @@
   const SETTLE_MS = 260;
   const QUIET_MS = 900;
   const SCAN_MS = 400;
+  const EXPAND_GRACE_MS = 450;
   const REPLY_TIMEOUT_MS = 150000;
   const MAX_REPLY_CHARS = 400000;
   const MAX_PROTECTED_ITEMS = 200;
@@ -713,12 +714,24 @@
       source: '', sourceNode: null, sourceFingerprint: null,
       translation: '', rendered: false, mirror: null,
       token: 0, timer: 0, pending: [], lastMutation: NaN,
-      manualTrigger: false,
+      manualTrigger: false, expandGraceUntil: 0,
     };
     state.ctxs.set(block, ctx);
     state.live.add(ctx);
 
     const stop = event => { if (event?.preventDefault) event.preventDefault(); if (event?.stopPropagation) event.stopPropagation(); };
+    const triggerExpand = () => {
+      if (ctx.surface.expand(ctx.block)) {
+        ctx.manualTrigger = true;
+        ctx.expandGraceUntil = Date.now() + EXPAND_GRACE_MS;
+        setStatus(ctx, '正在展开…', 'busy');
+        schedule(ctx, 80);
+      } else {
+        ctx.manualTrigger = false;
+        ctx.expandGraceUntil = 0;
+        setStatus(ctx, '请先展开思考内容', '');
+      }
+    };
     translatedBtn.addEventListener('click', (event) => {
       try {
         stop(event);
@@ -726,16 +739,10 @@
         state.settings.view = 'translated';
         if (changed) applyView();
         if (!ctx.surface.expanded(ctx.block)) {
-          if (ctx.surface.expand(ctx.block)) {
-            ctx.manualTrigger = true;
-            setStatus(ctx, '正在展开…', 'busy');
-            schedule(ctx, 80);
-          } else {
-            ctx.manualTrigger = false;
-            setStatus(ctx, '请先展开思考内容', '');
-          }
+          triggerExpand();
         } else if (!ctx.translation) {
           ctx.manualTrigger = true;
+          ctx.expandGraceUntil = 0;
           schedule(ctx, 0);
         }
       } catch {}
@@ -764,16 +771,10 @@
         state.settings.view = 'translated';
         applyView();
         if (!ctx.surface.expanded(ctx.block)) {
-          if (ctx.surface.expand(ctx.block)) {
-            ctx.manualTrigger = true;
-            setStatus(ctx, '正在展开…', 'busy');
-            schedule(ctx, 80);
-          } else {
-            ctx.manualTrigger = false;
-            setStatus(ctx, '请先展开思考内容', '');
-          }
+          triggerExpand();
         } else {
           ctx.manualTrigger = true;
+          ctx.expandGraceUntil = 0;
           schedule(ctx, 0);
         }
       } catch {}
@@ -786,6 +787,8 @@
   function drop(ctx) {
     clearTimeout(ctx.timer);
     ctx.timer = 0;
+    ctx.manualTrigger = false;
+    ctx.expandGraceUntil = 0;
     // Retiring the token makes every reply still in flight for this context
     // stale, so a late answer cannot repaint a block that is no longer ours.
     ctx.token += 1;
@@ -833,8 +836,15 @@
     if (!text) {
       if (!ctx.source) clearTranslation(ctx);
       if (ctx.manualTrigger) {
+        const expanded = surface.expanded(ctx.block);
+        if (expanded && Date.now() < ctx.expandGraceUntil) {
+          setStatus(ctx, '正在展开…', 'busy');
+          schedule(ctx, 120);
+          return;
+        }
         ctx.manualTrigger = false;
-        setStatus(ctx, surface.expanded(ctx.block) ? '暂无可翻译内容' : '请先展开思考内容', '');
+        ctx.expandGraceUntil = 0;
+        setStatus(ctx, expanded ? '暂无可翻译内容' : '请先展开思考内容', '');
       } else {
         syncVisibility(ctx);
       }
@@ -853,6 +863,7 @@
     // A collapsed block is not visible, whatever its DOM contains. Keeping its
     // existing translation is right; sending the text it hides is not.
     if (!surface.expanded(ctx.block)) {
+      ctx.expandGraceUntil = 0;
       if (ctx.manualTrigger) {
         ctx.manualTrigger = false;
         setStatus(ctx, '请先展开思考内容', '');
@@ -861,6 +872,7 @@
       return;
     }
     ctx.manualTrigger = false;
+    ctx.expandGraceUntil = 0;
     if (TRANSIENT_STATUSES.has(ctx.statusEl.textContent)) setStatus(ctx, '', '');
     // Chat marks a still-running block with .enable-grow-animation; Work's
     // equivalent is the shimmer class and label wording heuristic below.

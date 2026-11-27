@@ -610,3 +610,72 @@ test('collapsed Chat thinking block auto-expands via .toolcall-title-container a
   assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0].text, 'Chat thinking text kept in collapsed DOM.');
 });
+
+test('async think-body mount after expand keeps busy status without flashing empty-content notice', async () => {
+  const h = createHarness();
+  const asyncItem = h.makeWorkBlock({ expanded: false, labelText: '思考已完成', expandable: true });
+  asyncItem.summary.listeners.set('click', [() => {
+    asyncItem.summary.setAttribute('aria-expanded', 'true');
+    h.notifyMutations([{ type: 'attributes', target: asyncItem.summary }]);
+    h.clock.setTimeout(() => {
+      asyncItem.mountBody('Asynchronously mounted thinking body.');
+      h.notifyMutations([
+        { type: 'childList', target: asyncItem.wrap, addedNodes: [...asyncItem.wrap.childNodes], removedNodes: [] },
+      ]);
+    }, 140);
+  }]);
+
+  const emptyItem = h.makeWorkBlock({ expanded: false, labelText: '思考已完成', expandable: true });
+  emptyItem.summary.listeners.set('click', [() => {
+    emptyItem.summary.setAttribute('aria-expanded', 'true');
+    h.notifyMutations([{ type: 'attributes', target: emptyItem.summary }]);
+  }]);
+
+  h.boot();
+
+  const bar = asyncItem.block.querySelector('.kwg-bar');
+  const statusEl = bar.querySelector('.kwg-status');
+  const translatedBtn = bar.querySelectorAll('button')[0];
+  const seenStatuses = [];
+  const origDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(statusEl), 'textContent');
+  Object.defineProperty(statusEl, 'textContent', {
+    get() { return origDesc.get.call(this); },
+    set(value) {
+      seenStatuses.push(String(value ?? ''));
+      origDesc.set.call(this, value);
+    },
+    configurable: true,
+  });
+
+  translatedBtn.click();
+  assert.equal(asyncItem.summary.getAttribute('aria-expanded'), 'true');
+  assert.equal(statusEl.textContent, '正在展开…');
+  assert.equal(statusEl.dataset.state, 'busy');
+
+  // At 80ms and 120ms, .think-body has not mounted yet: grace window must keep 正在展开…
+  await h.clock.advance(80);
+  assert.equal(statusEl.textContent, '正在展开…');
+  assert.equal(statusEl.dataset.state, 'busy');
+  await h.clock.advance(40);
+  assert.equal(statusEl.textContent, '正在展开…');
+
+  // At 140ms .think-body mounts asynchronously, then after quiet window translation dispatches cleanly
+  await h.clock.advance(1200);
+  assert.equal(seenStatuses.includes('暂无可翻译内容'), false, 'must never flash 暂无可翻译内容 while async think-body mounts');
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].text, 'Asynchronously mounted thinking body.');
+
+  h.contextObj.__kwgTranslationReceive(h.requests[0].id, { id: h.requests[0].id, text: '异步挂载的思考译文。' });
+  await h.clock.advance(10);
+  assert.equal(asyncItem.block.querySelector('.kwg-translated')?.textContent, '异步挂载的思考译文。');
+  assert.equal(statusEl.textContent, '');
+
+  // A genuinely empty expanded block transitions to 暂无可翻译内容 once the 450ms grace expires
+  const emptyBar = emptyItem.block.querySelector('.kwg-bar');
+  const emptyStatus = emptyBar.querySelector('.kwg-status');
+  emptyBar.querySelectorAll('button')[0].click();
+  await h.clock.advance(200);
+  assert.equal(emptyStatus.textContent, '正在展开…');
+  await h.clock.advance(400);
+  assert.equal(emptyStatus.textContent, '暂无可翻译内容');
+});
