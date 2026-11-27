@@ -40,7 +40,8 @@ const DIRECT_REASON_SOURCE = (() => {
 })();
 const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'integrationModeLabel', 'integrationModeTransition', 'integrationModeSyncText', 'directModeOf',
   'directHasNoEligibleModels', 'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
-  'directRestartRequired', 'nativeImportFeatureDisabled', 'nativeAccountSyncPending', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
+  'directRestartRequired', 'nativeImportFeatureDisabled', 'isAccountChangedReason', 'nativeAccountSyncPending', 'endSentence',
+  'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
 /* 真实原因码翻译：测试直接执行 app-core.js 的三张表与 reasonText，
    不再手写一张小映射，避免生产表缺项时被假 mock 掩盖。 */
@@ -3093,6 +3094,7 @@ function makeWorkspaceSyncEnv() {
     'const setText = (element, text) => { if (element) element.textContent = text; };',
     'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
     sourceFunction('autoSyncOf'),
+    sourceFunction('isInFlight'),
     sourceFunction('renderWorkspaceSync'),
     'return renderWorkspaceSync;',
   ].join('\n');
@@ -6310,6 +6312,12 @@ test('recoverable sync failures turn the overview action into a connect-kimi rec
   const unverified = overviewState(failed('account_changed'));
   assert.notEqual(unverified.code, 'account-sync');
   assert.notEqual(unverified.launch, 'connect-kimi');
+
+  /* 兜底文案自带句号时不能再补一个。 */
+  const generic = overviewState(failed('direct_import_failed'));
+  assert.equal(generic.code, 'failed');
+  assert.doesNotMatch(generic.note, /。。/);
+  assert.match(generic.note, /可在「设置」页查看原因并重试/);
 });
 
 test('an idle integration that still needs a native import keeps the recovery action', () => {
@@ -6787,8 +6795,20 @@ test('the connection line points a changed account at a model sync instead of an
       integration: { state: 'needs-native-import', nativeImport: { reason } },
     });
     assert.match(text, /重新准备并同步/, reason);
+    assert.match(text, /重新同步模型目录/, reason);
     assert.match(text, /自定义模型入口/, reason);
   }
+});
+
+test('model disconnect recovery codes also have ERROR_HINT copy', () => {
+  const start = source.indexOf('const ERROR_HINT = {');
+  assert.notEqual(start, -1);
+  const end = source.indexOf('\n};', start);
+  assert.notEqual(end, -1);
+  const hints = new Function(`${source.slice(start, end + 3)}; return ERROR_HINT;`)();
+  assert.match(hints.model_disconnect_feature_disabled, /重新同步模型目录/);
+  assert.match(hints.model_disconnect_no_account, /完成登录/);
+  assert.match(hints.model_disconnect_byok_not_ready, /重启官方 Kimi/);
 });
 
 test('the workspace bar offers a manual resync when static hosts are still missing', () => {
@@ -6813,10 +6833,19 @@ test('the models page exposes a one-click resync for recoverable sync failures',
     kimiProcess: { running: true, state: 'running' },
     integration: { imported: false, applied: false, desktop: { managed: true } },
   };
-
-  render({
+  const directMode = { mode: 'direct', supported: true, staticHostsReady: true,
+    eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 };
+  const directBase = {
     ...base,
-    integration: { ...base.integration, autoSync: { state: 'failed', reason: 'direct_prepare_required' } },
+    integrationMode: 'direct',
+    directMode,
+    integration: { ...base.integration, mode: 'direct' },
+  };
+
+  /* 这些失败码只在直连模式出现：恢复分支必须在 direct 稳态之前生效。 */
+  render({
+    ...directBase,
+    integration: { ...directBase.integration, autoSync: { state: 'failed', reason: 'direct_prepare_required' } },
   });
   assert.equal(nodes['workspace-resync'].hidden, false);
   assert.equal(nodes['workspace-sync-state'].textContent, '同步未完成，可重新同步');
@@ -6825,12 +6854,27 @@ test('the models page exposes a one-click resync for recoverable sync failures',
   assert.doesNotMatch(nodes['workspace-sync-note'].textContent, /在设置页/);
 
   render({
-    ...base,
-    integration: { ...base.integration, autoSync: { state: 'failed', reason: 'direct_import_failed' } },
+    ...directBase,
+    integration: { ...directBase.integration, autoSync: { state: 'failed', reason: 'direct_import_failed' } },
   });
   assert.equal(nodes['workspace-resync'].hidden, false);
   assert.match(nodes['workspace-sync-note'].textContent, /官方 Kimi 没有接受这次直连写入/);
   assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
+  assert.doesNotMatch(nodes['workspace-sync-note'].textContent, /。。/);
+
+  /* 旧目录已经完整同步过，但新一次自动同步失败：不能继续报「已直连同步」。 */
+  render({
+    ...directBase,
+    integration: {
+      mode: 'direct', state: 'ready', applied: true, adopted: true,
+      aliases: { 'conn/resp/model-a': 'byok-uuid/model-a' },
+      desktop: { managed: true },
+      autoSync: { state: 'failed', reason: 'direct_import_failed' },
+    },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '同步未完成，可重新同步');
+  assert.doesNotMatch(nodes['workspace-sync-state'].textContent, /已直连同步/);
+  assert.equal(nodes['workspace-resync'].hidden, false, 'a new failure must not be masked by an older synced catalog');
 
   render({
     ...base,
@@ -6849,7 +6893,17 @@ test('the models page exposes a one-click resync for recoverable sync failures',
     assert.equal(nodes['workspace-resync'].hidden, false, reason + ' needs one manual repair sync');
     assert.equal(nodes['workspace-sync-state'].textContent, '需重新准备接入');
     assert.match(nodes['workspace-sync-note'].textContent, /准备本机解析/);
+    assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
   }
+
+  /* 自动同步失败且账号未核实时：先要求登录，不露出会失败的重同步按钮。 */
+  render({
+    ...base,
+    integration: { ...base.integration, autoSync: { state: 'failed', reason: 'account_changed' },
+      readback: { accountVerified: false } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要登录 Kimi');
+  assert.equal(nodes['workspace-resync'].hidden, true);
 
   /* 账号尚未核实时不冒充可同步：保持普通等待提示并收起按钮。 */
   render({
@@ -6858,6 +6912,122 @@ test('the models page exposes a one-click resync for recoverable sync failures',
       readback: { accountVerified: false } },
   });
   assert.equal(nodes['workspace-resync'].hidden, true);
+});
+
+test('stale native import receipts never override a settled or restarting sync', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const aliases = { 'conn/resp/model-a': 'byok-uuid/model-a' };
+  const staleFeature = { ok: false, reason: 'native_import_feature-disabled' };
+
+  /* 已读回并生效的网关配置：历史 feature-disabled 回执不能把它降级。 */
+  render({
+    integrationMode: 'gateway',
+    models,
+    integration: { state: 'ready', applied: true, adopted: true, aliases, nativeImport: staleFeature },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已同步到 Kimi Work');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+  assert.equal(nodes['workspace-restart'].hidden, true);
+
+  /* 账号变化回执也可能来自历史同步；applied 后同样不能重新拉回待同步。 */
+  render({
+    integrationMode: 'gateway',
+    models,
+    integration: { state: 'ready', applied: true, adopted: true, aliases,
+      readback: { accountVerified: true }, nativeImport: { reason: 'account_changed' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已同步到 Kimi Work');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  /* 已直连同步完成的配置同理。 */
+  render({
+    integrationMode: 'direct',
+    models,
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: ['conn/resp/model-a'], eligibleModels: 1, totalModels: 1 },
+    integration: { mode: 'direct', state: 'ready', applied: true, adopted: true, aliases, nativeImport: staleFeature },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  /* 回执要求重启：重启按钮不能被历史失败码或重同步入口盖掉。 */
+  render({
+    integrationMode: 'gateway',
+    models,
+    integration: { applied: true, adopted: false, desktop: { managed: true },
+      nativeImport: { state: 'requires-restart', requiresRestart: true, reason: 'native_import_feature-disabled' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
+  assert.equal(nodes['workspace-restart'].hidden, false);
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  render({
+    integrationMode: 'gateway',
+    models,
+    integration: { applied: true, adopted: false,
+      autoSync: { state: 'requires_restart', reason: 'native_import_feature-disabled' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启 Kimi');
+  assert.equal(nodes['workspace-restart'].hidden, false);
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  /* 空模型时只提示先添加模型：不露出会失败的重同步，重启按钮保持收起。 */
+  render({
+    integrationMode: 'direct',
+    models: [],
+    directMode: { mode: 'direct', supported: true, staticHostsReady: true,
+      eligibleModelIds: [], eligibleModels: 0, totalModels: 0 },
+    integration: { mode: 'direct', autoSync: { state: 'failed', reason: 'direct_prepare_required' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '尚未添加模型');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+  assert.equal(nodes['workspace-restart'].hidden, true);
+
+  /* 等待登录优先于历史 feature-disabled。 */
+  render({
+    integrationMode: 'gateway',
+    models,
+    kimiProcess: { running: true },
+    integration: { applied: false, desktop: { managed: true }, autoSync: { state: 'waiting_login' },
+      nativeImport: { reason: 'native_import_feature-disabled' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要登录 Kimi');
+  assert.equal(nodes['workspace-resync'].hidden, true);
+
+  /* 未托管运行且存在恢复需求：先重启接管，不显示会失败的重同步。 */
+  render({
+    integrationMode: 'gateway',
+    models,
+    kimiProcess: { running: true },
+    integration: { applied: false, desktop: { managed: false },
+      autoSync: { state: 'failed', reason: 'native_prepare_required' } },
+  });
+  assert.equal(nodes['workspace-sync-state'].textContent, '需要重启并接管 Kimi');
+  assert.equal(nodes['workspace-restart'].hidden, false);
+  assert.equal(nodes['workspace-resync'].hidden, true);
+});
+
+test('a live account change is not masked by a stale native import failure', () => {
+  const overviewState = makeOverviewState();
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const data = {
+    integrationMode: 'gateway',
+    models,
+    kimiProcess: { running: true, state: 'running' },
+    integration: { state: 'needs-native-import', applied: false, readback: { accountVerified: true },
+      desktop: { managed: true }, reason: 'account_changed', nativeImport: { reason: 'native_import_failed' } },
+  };
+
+  const verdict = overviewState(data);
+  assert.equal(verdict.code, 'account-sync');
+  assert.equal(verdict.launch, 'connect-kimi');
+  assert.equal(verdict.launchLabel, '同步到当前账号');
+
+  render(data);
+  assert.equal(nodes['workspace-sync-state'].textContent, '当前账号待同步');
+  assert.equal(nodes['workspace-resync'].hidden, false);
 });
 
 test('a deleted model drops its stale effort and batch selection instead of submitting an invalid level', async () => {

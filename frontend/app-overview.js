@@ -27,13 +27,24 @@ function nativeImportFeatureDisabled(value) {
   return value === 'native_import_feature-disabled' || value === 'native_import_feature_disabled';
 }
 
+function isAccountChangedReason(value) {
+  return value === 'account_changed' || value === 'native_import_account_changed';
+}
+
 /* 官方账号已变化且新账号已经确认登录：缺的不是登录，而是一次把模型
-   同步到当前账号的 connect-kimi。 */
+   同步到当前账号的 connect-kimi。nativeImport.reason 可能是历史回执，
+   所以 live reason 与它要分别判断，不能用一个 || 把后者遮掉。 */
 function nativeAccountSyncPending(data) {
   const info = data?.integration || {};
-  const reason = info.nativeImport?.reason || info.reason || '';
-  return (reason === 'account_changed' || reason === 'native_import_account_changed')
-    && info.readback?.accountVerified === true;
+  return info.state === 'needs-native-import'
+    && info.applied !== true
+    && info.readback?.accountVerified === true
+    && (isAccountChangedReason(info.reason) || isAccountChangedReason(info.nativeImport?.reason));
+}
+
+/* 原因码文案自带句号时不要再补一个，避免出现「。。」。 */
+function endSentence(text) {
+  return /[。！？!?]$/.test(text) ? text : text + '。';
 }
 
 function restartBannerState(data) {
@@ -368,7 +379,8 @@ function overviewState(data) {
         note: '本机原生接入解析尚未准备，需要一次系统授权。点「准备并同步模型」会完成这次准备并同步模型目录。',
         launch: 'connect-kimi', launchLabel: '准备并同步模型' };
     }
-    if ((reason === 'account_changed' || reason === 'native_import_account_changed') && info.readback?.accountVerified === true) {
+    if ((isAccountChangedReason(reason) || isAccountChangedReason(info.reason) || isAccountChangedReason(info.nativeImport?.reason))
+      && info.readback?.accountVerified === true) {
       return { code: 'account-sync', tone: 'warn', word: '当前账号待同步',
         note: '官方 Kimi 已切换到另一个登录账号。请先在官方窗口确认当前账号，再点「同步到当前账号」把已保存的模型同步过去。',
         launch: 'connect-kimi', launchLabel: '同步到当前账号' };
@@ -380,12 +392,12 @@ function overviewState(data) {
     }
     const translated = reason ? reasonText(reason) : '';
     return { code: 'failed', tone: 'bad', word: '同步需要处理',
-      note: (translated || '后台自动同步未能完成') + '。可在「设置」页查看原因并重试。', ...base };
+      note: endSentence(translated || '后台自动同步未能完成') + '可在「设置」页查看原因并重试。', ...base };
   }
   /* 守护进程重启或一次手动同步失败后，autoSync 可能回到 idle：
      下面两种状态仍然需要一次 connect-kimi，不能落回「已就绪」或
      「打开 Kimi 时自动同步」。 */
-  if (nativeAccountSyncPending(data) && info.state === 'needs-native-import' && running && managed) {
+  if (nativeAccountSyncPending(data) && running && managed) {
     return { code: 'account-sync', tone: 'warn', word: '当前账号待同步',
       note: '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录。点「同步到当前账号」即可把已保存的模型同步过去。',
       launch: 'connect-kimi', launchLabel: '同步到当前账号' };
@@ -807,8 +819,8 @@ function nativeConnectionText(data) {
     native_prepare_required: '本机原生接入解析尚未准备，需要一次系统授权。点「准备并同步模型」或「重新同步模型目录」完成准备并同步。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
-    'native_import_feature-disabled': '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
-    native_import_feature_disabled: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
+    'native_import_feature-disabled': '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」或「重新同步模型目录」会自动修复本机解析并同步模型目录。',
+    native_import_feature_disabled: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」或「重新同步模型目录」会自动修复本机解析并同步模型目录。',
     disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或在设置页「手动重新同步模型目录」可重新接管。',
     profile_missing: '当前账号尚未同步本产品模型目录。请在设置页「手动重新同步模型目录」接入。',
     profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在设置页「手动重新同步模型目录」重新接入。',
@@ -1699,6 +1711,12 @@ function renderWorkspaceSync(data) {
   const integration = data.integration || {};
   const models = Array.isArray(data.models) ? data.models : [];
   const auto = autoSyncOf(data);
+  const mode = savedIntegrationMode(data);
+  const direct = mode === 'direct';
+  const effective = effectiveIntegrationMode(data);
+  const running = data?.kimiProcess?.running === true;
+  const managed = integration.desktop?.managed === true;
+  const cleanupPending = directRouteCleanupPending(data);
   /* 日常保存与切模式都由后台自动同步；只有「必须用户手动触发一次
      connect-kimi」的少数状态才露出这个快捷入口。 */
   const resync = $('workspace-resync');
@@ -1717,29 +1735,128 @@ function renderWorkspaceSync(data) {
     showResync(true);
     return;
   }
-  const mode = savedIntegrationMode(data);
-  const effective = effectiveIntegrationMode(data);
-  const cleanupPending = directRouteCleanupPending(data);
-  /* 保存目标和官方读回可能暂时不同，旧别名仍在时不能显示成已同步。 */
-  const modeChanged = models.length > 0 && mode !== effective;
+  /* 版本不支持或没有可直连模型时，重同步只会重复失败：先说清原因。 */
+  if (direct && directModeOf(data)?.supported === false) {
+    setText($('workspace-sync-state'), '当前官方 Kimi 不支持直连');
+    setText($('workspace-sync-note'), '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或在下方「接入模式」改用本机网关模式。');
+    setHidden($('workspace-restart'), true);
+    showResync(false);
+    return;
+  }
+  if (direct && models.length && directHasNoEligibleModels(data)) {
+    setText($('workspace-sync-state'), '没有可直连的模型');
+    setText($('workspace-sync-note'), '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在下方「已启用模型目录」补齐，后台会自动写入。');
+    setHidden($('workspace-restart'), true);
+    showResync(false);
+    return;
+  }
+  /* 空模型、等待登录、需要重启和未托管运行都必须先于恢复动作：
+     这些状态下重同步既不会成功，也不该把重启按钮藏起来。 */
+  if (!models.length) {
+    setText($('workspace-sync-state'), '尚未添加模型');
+    setText($('workspace-sync-note'), '添加服务商并选择模型，保存后会自动同步。');
+    setHidden($('workspace-restart'), true);
+    showResync(false);
+    return;
+  }
+  if (auto.state === 'waiting_login') {
+    setText($('workspace-sync-state'), '需要登录 Kimi');
+    setText($('workspace-sync-note'), '请先在官方 Kimi 窗口完成登录；保存的模型会在登录后自动同步。');
+    setHidden($('workspace-restart'), true);
+    showResync(false);
+    return;
+  }
+  /* 直连用 directRestartRequired 合并回执与 adopted 证据；网关沿用回执。
+     已经 complete 的直连不会被历史 requires-restart 回执重新拉回重启态。 */
+  const restartRequired = auto.state === 'requires_restart'
+    || (direct ? directRestartRequired(data) : nativeRestartReceipt(data));
+  if (restartRequired) {
+    setText($('workspace-sync-state'), '需要重启 Kimi');
+    setText($('workspace-sync-note'), direct
+      ? '直连配置已写入，正常重启 Kimi 后完成应用；在此之前请保留后台服务。'
+      : '模型配置已写入。正常重启 Kimi 后，在选择器中确认。');
+    setHidden($('workspace-restart'), false);
+    showResync(false);
+    return;
+  }
+  /* 恢复动作要同时覆盖网关与直连：直连失败码同样只在 direct 模式出现。
+     nativeImport.reason 可能保留历史回执，所以三个来源分别判断。 */
+  const reasons = [auto.reason, integration.reason, integration.nativeImport?.reason]
+    .filter((value) => typeof value === 'string' && value);
+  const hasReason = (...codes) => reasons.some((value) => codes.includes(value));
+  const accountChanged = hasReason('account_changed', 'native_import_account_changed');
+  const featureDisabled = integration.applied !== true
+    && reasons.some((value) => nativeImportFeatureDisabled(value));
+  const recovering = auto.state === 'failed' || nativeAccountSyncPending(data) || featureDisabled;
+  if (recovering && running && !managed) {
+    setText($('workspace-sync-state'), '需要重启并接管 Kimi');
+    setText($('workspace-sync-note'), '当前 Kimi 是直接从桌面打开的；请先正常退出并重启 Kimi，接管后再同步模型。');
+    setHidden($('workspace-restart'), false);
+    showResync(false);
+    return;
+  }
+  if (auto.state === 'scheduled' || auto.state === 'syncing'
+    || (data?.operation?.action === 'auto-sync' && isInFlight(data.operation))) {
+    setText($('workspace-sync-state'), '正在自动同步模型目录…');
+    setText($('workspace-sync-note'), '保存的更改由后台自动写入 Kimi Work，不需要手动点同步；需要重启时会在这里提示。');
+    setHidden($('workspace-restart'), true);
+    showResync(false);
+    return;
+  }
+  if (auto.state === 'failed') {
+    const reason = auto.reason || integration.reason || integration.nativeImport?.reason || '';
+    if (hasReason('direct_prepare_required', 'native_prepare_required')) {
+      setText($('workspace-sync-state'), '同步未完成，可重新同步');
+      setText($('workspace-sync-note'), '本机接入解析需要一次系统授权；点「重新同步模型目录」会完成准备并继续同步。');
+      setHidden($('workspace-restart'), true);
+      showResync(true);
+      return;
+    }
+    if (accountChanged) {
+      if (integration.readback?.accountVerified === true) {
+        setText($('workspace-sync-state'), '当前账号待同步');
+        setText($('workspace-sync-note'), '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录；点「重新同步模型目录」把模型同步到当前账号。');
+        setHidden($('workspace-restart'), true);
+        showResync(true);
+        return;
+      }
+      setText($('workspace-sync-state'), '需要登录 Kimi');
+      setText($('workspace-sync-note'), '官方 Kimi 已切换到另一个登录账号，但尚未确认登录；请先在官方窗口完成登录，再点「重新同步模型目录」。');
+      setHidden($('workspace-restart'), true);
+      showResync(false);
+      return;
+    }
+    if (featureDisabled || nativeImportFeatureDisabled(auto.reason)) {
+      setText($('workspace-sync-state'), '需重新准备接入');
+      setText($('workspace-sync-note'), '官方 Kimi 的自定义模型入口尚未就绪；点「重新同步模型目录」会先准备本机解析，再同步模型。');
+      setHidden($('workspace-restart'), true);
+      showResync(true);
+      return;
+    }
+    setText($('workspace-sync-state'), '同步未完成，可重新同步');
+    setText($('workspace-sync-note'), endSentence(reason ? reasonText(reason) : '后台自动同步未能完成')
+      + '点「重新同步模型目录」可立即重试。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
+    return;
+  }
+  if (nativeAccountSyncPending(data)) {
+    setText($('workspace-sync-state'), '当前账号待同步');
+    setText($('workspace-sync-note'), '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录；点「重新同步模型目录」把模型同步到当前账号。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
+    return;
+  }
+  if (featureDisabled) {
+    setText($('workspace-sync-state'), '需重新准备接入');
+    setText($('workspace-sync-note'), '官方 Kimi 的自定义模型入口尚未就绪；点「重新同步模型目录」会先准备本机解析，再同步模型。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
+    return;
+  }
   // Direct mode can legitimately leave models behind (no tools, no key, ...),
   // so completeness is measured against the eligible set, never the total.
-  if (mode === 'direct') {
-    /* 版本不支持或没有可直连模型时，重同步只会重复失败：先说清原因。 */
-    if (directModeOf(data)?.supported === false) {
-      setText($('workspace-sync-state'), '当前官方 Kimi 不支持直连');
-      setText($('workspace-sync-note'), '原生直连需要 3.2.28+ 的 byokSources v3 存储；请更新官方 Kimi，或在下方「接入模式」改用本机网关模式。');
-      setHidden($('workspace-restart'), true);
-      showResync(false);
-      return;
-    }
-    if (models.length && directHasNoEligibleModels(data)) {
-      setText($('workspace-sync-state'), '没有可直连的模型');
-      setText($('workspace-sync-note'), '直连只导入已声明工具调用、已绑定连接并配置了密钥的模型；请先在下方「已启用模型目录」补齐，后台会自动写入。');
-      setHidden($('workspace-restart'), true);
-      showResync(false);
-      return;
-    }
+  if (direct) {
     /* directImportComplete 已经要求官方 Kimi 处于 direct，所以模式改了这里必然是 false。 */
     const synced = directImportComplete(data);
     const restart = directRestartRequired(data);
@@ -1759,41 +1876,8 @@ function renderWorkspaceSync(data) {
     showResync(!restart && (!synced || !hosts || cleanup));
     return;
   }
-  /* 自动同步失败、账号待同步或官方入口未就绪时，后台不会自己恢复；
-     模型页也要能直接点一次「重新同步模型目录」，不必回总览或设置页。 */
-  if (auto.state === 'failed') {
-    const reason = auto.reason || integration.nativeImport?.reason || integration.reason || '';
-    const prepare = reason === 'direct_prepare_required' || reason === 'native_prepare_required';
-    setText($('workspace-sync-state'), '同步未完成，可重新同步');
-    setText($('workspace-sync-note'), prepare
-      ? '本机接入解析需要一次系统授权；点「重新同步模型目录」会完成准备并继续同步。'
-      : (reason ? reasonText(reason) : '后台自动同步未能完成') + '点「重新同步模型目录」可立即重试。');
-    setHidden($('workspace-restart'), true);
-    showResync(true);
-    return;
-  }
-  if (nativeAccountSyncPending(data)) {
-    setText($('workspace-sync-state'), '当前账号待同步');
-    setText($('workspace-sync-note'), '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录；点「重新同步模型目录」把模型同步到当前账号。');
-    setHidden($('workspace-restart'), true);
-    showResync(true);
-    return;
-  }
-  if (nativeImportFeatureDisabled(integration.nativeImport?.reason) || nativeImportFeatureDisabled(integration.reason)) {
-    setText($('workspace-sync-state'), '需重新准备接入');
-    setText($('workspace-sync-note'), '官方 Kimi 的自定义模型入口尚未就绪；点「重新同步模型目录」会先准备本机解析，再同步模型。');
-    setHidden($('workspace-restart'), true);
-    showResync(true);
-    return;
-  }
-  /* 回执要求重启时，重启提示必须先于模式/清理提示；否则用户会去重复同步。 */
-  if (nativeRestartReceipt(data)) {
-    setText($('workspace-sync-state'), '需要重启 Kimi');
-    setText($('workspace-sync-note'), '模型配置已写入。正常重启 Kimi 后，在选择器中确认。');
-    setHidden($('workspace-restart'), false);
-    showResync(false);
-    return;
-  }
+  /* 保存目标和官方读回可能暂时不同，旧别名仍在时不能显示成已同步。 */
+  const modeChanged = mode !== effective;
   /* Direct → Gateway 也共用收尾判断：旧来源没清理就不能显示绿色已同步，
      但同步入口要保留，让用户能用同一次同步重试清理。这条也要排在
      「待切回网关」之前：官方还停在直连时，缺的正是这次清理。 */
