@@ -430,6 +430,14 @@
     <p class="direct-notice__line" id="direct-mode-skipped" hidden></p>
     <p class="hint" id="direct-mode-hint">模型更改保存后会自动同步。官方更新后如提示同步失败，可在下方重试。</p>
   </div>
+  <label class="choice" for="auto-takeover-enabled" id="auto-takeover-choice">
+    <input type="checkbox" id="auto-takeover-enabled">
+    <span class="choice__body">
+      <span class="choice__title">官方更新或外部启动后自动重新接管</span>
+      <span class="choice__note">检测到非受管的官方 Kimi 正在运行且当前无活跃请求或任务写入时，自动平滑重启一次以恢复模型同步、思考翻译与多账号能力（不会强杀进程）。建议同时关闭官方 Kimi 自带的开机自启，改从本软件启动。</span>
+    </span>
+  </label>
+  <p class="note" id="auto-takeover-state" role="status" hidden></p>
   <p class="note" id="native-state" role="status">正在检查接入…</p>
   <p class="verdict" id="native-remote" role="status" hidden><span class="dot" id="native-remote-dot" data-tone="neutral"></span><span>接入范围</span><strong id="native-remote-word">仅桌面</strong><span class="verdict__note" id="native-remote-note">只接入本机官方 Kimi 桌面 Work，不同步到 Kimi 手机端。</span></p>
   <div class="action-line action-line--start"><button class="btn btn--primary" id="native-launch" data-action="launch-kimi" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span class="btn__label">打开 / 启动 Kimi</span></button><button class="btn btn--outline" data-action="launch-kimi" data-profile-mode="existing-authorized" type="button" hidden>诊断：沿用登录，隔离 Work</button><button class="btn btn--quiet" data-action="disconnect-models" data-confirm-target="native-disconnect-confirm" type="button">移除接管并还原</button></div>

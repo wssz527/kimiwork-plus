@@ -17,6 +17,7 @@ const API = {
   context: '/api/context',
   tools: '/api/tools',
   integrationMode: '/api/integration-mode',
+  autoTakeover: '/api/auto-takeover',
   diagnosticsExport: '/api/diagnostics/export',
   openUrl: '/api/open-url',
   updatesCheck: '/api/updates/check',
@@ -218,6 +219,7 @@ const ACTION_LABEL = {
   'set-swarm': '设置并行模式',
   'rebind-conversations': '改绑旧会话模型',
   'auto-sync': '自动同步模型目录',
+  'auto-takeover': '自动重新接管 Kimi',
   'check-compatibility': '官方版本自检',
 };
 
@@ -386,6 +388,11 @@ const DIAG_REASON = {
   native_bridge_failed: '与官方 Kimi 的受管通信未完成，请确认 Kimi 正常运行后重试。',
   native_bridge_invalid_request: '发送给官方 Kimi 的操作请求无效，请刷新状态后重试。',
   native_bridge_unauthorized: '受管 Kimi 通道会话校验未通过，请点击「正常退出并重启 Kimi」重建连接。',
+  work_activity_recent: 'Kimi Work 刚有活跃写入，等待空闲',
+  gateway_requests_active: '网关仍有活跃请求，等待完成',
+  settling: '等待官方 Kimi 启动稳定',
+  cooldown: '冷却中，稍后再试',
+  invalid_auto_takeover: '自动重新接管开关参数无效',
   operation_failed: '操作未能完成，请刷新状态或查看诊断信息后重试。',
 };
 
@@ -486,6 +493,7 @@ const ERROR_HINT = {
   subagent_policy_apply_failed: '目标已保存，但当前策略未能应用，请查看运行时状态。',
   invalid_subagent_effort: '此模型未声明所选思考档位，请重新选择。',
   invalid_integration_mode: '接入模式不被接受，只支持本机网关或零网关直连；当前模式未更改。',
+  invalid_auto_takeover: '自动重新接管开关参数无效',
   model_disconnect_failed: '模型来源未能移除，请刷新状态后重试。',
   model_disconnect_unsupported: '当前官方 Kimi 不支持移除模型来源；请升级官方 Kimi 后重试。',
   model_disconnect_contract_changed: '官方模型来源接口返回了无法确认的结果，未继续操作。请查看诊断信息。',
@@ -803,6 +811,8 @@ const dom = {
   integrationModeConfirmText: $('integration-mode-confirm-text'),
   integrationModeCancel: $('integration-mode-cancel'),
   integrationModeSubmit: $('integration-mode-submit'),
+  autoTakeoverEnabled: $('auto-takeover-enabled'),
+  autoTakeoverState: $('auto-takeover-state'),
   directModeNotice: $('direct-mode-notice'),
   directModeSupport: $('direct-mode-support'),
   directModeHosts: $('direct-mode-hosts'),
@@ -882,6 +892,7 @@ const state = {
   subagentErrors: [],
   reachable: null,
   integrationModeConfirm: null,
+  autoTakeoverSaving: false,
   pendingAction: null,
   pendingOpId: null,
   lastSync: null,

@@ -5,13 +5,14 @@
 // cancellation and code/link protection serve both: only the DOM contract and
 // the moment that counts as "finished" differ.
 //
-// Work (local renderer, verified on 3.2.21 / 3.2.23):
+// Work (local renderer, verified on 3.2.28 / 3.2.29):
 //
 //   .think-block
 //     .think-summary          collapse toggle, aria-expanded
+//       .think-label          .shimmer-text while streaming
 //     .think-body-wrap
 //       .think-body           v-if: only exists while expanded
-//         .chat-markdown
+//         .chat-markdown / .markdown
 //
 // Chat (https://www.kimi.com, verified against release a045362):
 //
@@ -78,6 +79,8 @@
   const PROVIDERS = ['bing', 'google', 'custom'];
   const LANGUAGES = ['zh', 'en', 'ja', 'ko', 'es', 'fr', 'de', 'ru'];
   const VIEWS = ['translated', 'original'];
+  const COLLAPSED_HINT = '展开后翻译';
+  const TRANSIENT_STATUSES = new Set([COLLAPSED_HINT, '正在展开…', '请先展开思考内容', '暂无可翻译内容']);
   const ERROR_LABELS = {
     translation_timeout: '翻译超时',
     translation_aborted: '已取消',
@@ -89,6 +92,9 @@
     translation_invalid_config: '翻译配置无效',
     translation_endpoint_required: '未配置端点',
     translation_network_error: '网络错误',
+    translation_busy: '翻译队列繁忙',
+    translation_disabled: '翻译已关闭',
+    translation_input_invalid: '思考内容格式无效',
   };
 
   const WORK = {
@@ -102,7 +108,7 @@
     source(block) {
       const body = block.querySelector('.think-body');
       const scope = body || block;
-      return scope.querySelector('.chat-markdown') || body || null;
+      return scope.querySelector('.chat-markdown') || scope.querySelector('.markdown') || body || null;
     },
     expanded(block) {
       const summary = block.querySelector('.think-summary');
@@ -110,14 +116,25 @@
       const value = summary.getAttribute ? summary.getAttribute('aria-expanded') : summary.ariaExpanded;
       return value !== 'false';
     },
-    // Work publishes no streaming flag, so it is read from the label wording.
-    // A future Kimi that renames the status still cannot stream partial text
-    // into a paid request: the content-quiet window below is wording-blind.
+    expand(block) {
+      if (this.expanded(block)) return true;
+      const summary = block.querySelector('.think-summary');
+      if (summary && typeof summary.click === 'function') {
+        summary.click();
+        return true;
+      }
+      return false;
+    },
+    // Work marks streaming blocks with .shimmer-text on .think-label and
+    // wording like "正在思考" / "Thinking". A future Kimi that renames the
+    // status still cannot stream partial text into a paid request: the
+    // content-quiet window below is wording-blind.
     settled(block) {
       const label = block.querySelector('.think-label') || block.querySelector('.think-summary');
+      if (label?.classList?.contains('shimmer-text')) return false;
       const text = (label?.textContent || '').trim();
       if (!text) return true;
-      if (/thinking|思考中/i.test(text) && !/thought|done|complete|完成/i.test(text)) return false;
+      if (/thinking|正在思考|思考中/i.test(text) && !/thought|done|complete|完成/i.test(text)) return false;
       return true;
     },
     anchor(block) {
@@ -144,6 +161,15 @@
     // container carries no aria-expanded, so the Work rule cannot read it.
     expanded(block) {
       return !!(block.classList && block.classList.contains('is-expanded'));
+    },
+    expand(block) {
+      if (this.expanded(block)) return true;
+      const toggle = block.querySelector('.toolcall-title-container');
+      if (toggle && typeof toggle.click === 'function') {
+        toggle.click();
+        return true;
+      }
+      return false;
     },
     // `running` is the only stable streaming signal: ContainerBlock renders a
     // thinking block outside .toolcall-flow whenever the container holds more
@@ -568,7 +594,8 @@
   // so leaving the mirror visible would put text on screen that the user did
   // not expand.
   function syncVisibility(ctx) {
-    const show = state.settings.view === 'translated' && !!ctx.translation && ctx.surface.expanded(ctx.block);
+    const expanded = ctx.surface.expanded(ctx.block);
+    const show = state.settings.view === 'translated' && !!ctx.translation && expanded;
     if (ctx.mirror) {
       ctx.mirror.hidden = !show;
       if (ctx.mirror.textContent !== ctx.translation) ctx.mirror.textContent = ctx.translation;
@@ -576,6 +603,12 @@
     if (show) ctx.block.classList.add(CLASS.hiding);
     else ctx.block.classList.remove(CLASS.hiding);
     ctx.rendered = show;
+    if (!expanded && !ctx.translation) {
+      if (!ctx.statusEl.textContent) setStatus(ctx, COLLAPSED_HINT, '');
+    } else if (ctx.statusEl.textContent === COLLAPSED_HINT
+      || (expanded && ctx.statusEl.textContent === '请先展开思考内容')) {
+      setStatus(ctx, '', '');
+    }
     updateButtons(ctx);
   }
 
@@ -600,12 +633,13 @@
   }
 
   function clearTranslation(ctx) {
+    const hadOutput = Boolean(ctx.translation || ctx.mirror || ctx.rendered || ctx.block.classList.contains(CLASS.hiding));
     ctx.translation = '';
     ctx.rendered = false;
     detach(ctx.mirror);
     ctx.mirror = null;
     ctx.block.classList.remove(CLASS.hiding);
-    setStatus(ctx, '', '');
+    if (hadOutput) setStatus(ctx, '', '');
   }
 
   // ------------------------------------------------------------------ engine
@@ -679,6 +713,7 @@
       source: '', sourceNode: null, sourceFingerprint: null,
       translation: '', rendered: false, mirror: null,
       token: 0, timer: 0, pending: [], lastMutation: NaN,
+      manualTrigger: false,
     };
     state.ctxs.set(block, ctx);
     state.live.add(ctx);
@@ -687,9 +722,22 @@
     translatedBtn.addEventListener('click', (event) => {
       try {
         stop(event);
-        if (state.settings.view === 'translated') return;
+        const changed = state.settings.view !== 'translated';
         state.settings.view = 'translated';
-        applyView();
+        if (changed) applyView();
+        if (!ctx.surface.expanded(ctx.block)) {
+          if (ctx.surface.expand(ctx.block)) {
+            ctx.manualTrigger = true;
+            setStatus(ctx, '正在展开…', 'busy');
+            schedule(ctx, 80);
+          } else {
+            ctx.manualTrigger = false;
+            setStatus(ctx, '请先展开思考内容', '');
+          }
+        } else if (!ctx.translation) {
+          ctx.manualTrigger = true;
+          schedule(ctx, 0);
+        }
       } catch {}
     });
     originalBtn.addEventListener('click', (event) => {
@@ -715,10 +763,23 @@
         block.classList.remove(CLASS.hiding);
         state.settings.view = 'translated';
         applyView();
-        schedule(ctx, 0);
+        if (!ctx.surface.expanded(ctx.block)) {
+          if (ctx.surface.expand(ctx.block)) {
+            ctx.manualTrigger = true;
+            setStatus(ctx, '正在展开…', 'busy');
+            schedule(ctx, 80);
+          } else {
+            ctx.manualTrigger = false;
+            setStatus(ctx, '请先展开思考内容', '');
+          }
+        } else {
+          ctx.manualTrigger = true;
+          schedule(ctx, 0);
+        }
       } catch {}
     });
 
+    syncVisibility(ctx);
     return ctx;
   }
 
@@ -771,7 +832,12 @@
     // state below is what decides there.
     if (!text) {
       if (!ctx.source) clearTranslation(ctx);
-      else syncVisibility(ctx);
+      if (ctx.manualTrigger) {
+        ctx.manualTrigger = false;
+        setStatus(ctx, surface.expanded(ctx.block) ? '暂无可翻译内容' : '请先展开思考内容', '');
+      } else {
+        syncVisibility(ctx);
+      }
       return;
     }
     if (text !== ctx.source) {
@@ -786,9 +852,18 @@
     }
     // A collapsed block is not visible, whatever its DOM contains. Keeping its
     // existing translation is right; sending the text it hides is not.
-    if (!surface.expanded(ctx.block)) { syncVisibility(ctx); return; }
+    if (!surface.expanded(ctx.block)) {
+      if (ctx.manualTrigger) {
+        ctx.manualTrigger = false;
+        setStatus(ctx, '请先展开思考内容', '');
+      }
+      syncVisibility(ctx);
+      return;
+    }
+    ctx.manualTrigger = false;
+    if (TRANSIENT_STATUSES.has(ctx.statusEl.textContent)) setStatus(ctx, '', '');
     // Chat marks a still-running block with .enable-grow-animation; Work's
-    // equivalent is the label heuristic below.
+    // equivalent is the shimmer class and label wording heuristic below.
     if (!surface.settled(ctx.block)) { syncVisibility(ctx); return; }
     // Content-quiet window, independent of the settle heuristic: text that
     // mutated inside QUIET_MS is still streaming (or mutating under a future
@@ -804,7 +879,7 @@
     const key = cacheKey(text);
     if (state.cache.has(key)) { applyTranslation(ctx, state.cache.get(key)); return; }
     if (recentFailure(key)) { setStatus(ctx, '稍后重试', 'error'); return; }
-    if (ctx.translation) return;
+    if (ctx.translation) { syncVisibility(ctx); return; }
     // Only the same text is de-duplicated. A newer text is dispatched at once
     // with the new token, so the older reply can never match this context.
     const pending = ctx.pending.filter(entry => entry.token === ctx.token);
