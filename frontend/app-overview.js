@@ -21,6 +21,21 @@ function syncNeedsImport(data) {
   return false;
 }
 
+/* 官方 byokSources.list() 返回 feature-disabled 时，连字符与下划线两种写法
+   都可能出现；两者指向同一次「重新准备并同步」。 */
+function nativeImportFeatureDisabled(value) {
+  return value === 'native_import_feature-disabled' || value === 'native_import_feature_disabled';
+}
+
+/* 官方账号已变化且新账号已经确认登录：缺的不是登录，而是一次把模型
+   同步到当前账号的 connect-kimi。 */
+function nativeAccountSyncPending(data) {
+  const info = data?.integration || {};
+  const reason = info.nativeImport?.reason || info.reason || '';
+  return (reason === 'account_changed' || reason === 'native_import_account_changed')
+    && info.readback?.accountVerified === true;
+}
+
 function restartBannerState(data) {
   const auto = autoSyncOf(data);
   const models = Array.isArray(data?.models) ? data.models : [];
@@ -289,6 +304,7 @@ function overviewState(data) {
   const running = data?.kimiProcess?.running === true;
   const managed = data?.integration?.desktop?.managed === true;
   const direct = savedIntegrationMode(data) === 'direct';
+  const info = data?.integration || {};
   const operation = data?.operation || {};
 
   if (modelTakeoverRemoved(data)) {
@@ -340,18 +356,49 @@ function overviewState(data) {
     return { code: 'syncing', tone: 'warn', word: '正在自动同步…',
       note: '正在把已保存的模型写入 Kimi Work；完成后即可在模型下拉框看到。', ...base };
   }
+  if (auto.state === 'failed') {
+    const reason = auto.reason || info.nativeImport?.reason || info.reason || '';
+    if (reason === 'direct_prepare_required') {
+      return { code: 'prepare', tone: 'warn', word: '同步需要处理',
+        note: '直连模式首次写入静态 hosts 需要一次系统授权。点「准备并同步模型」会直接从总览完成授权并同步模型，不需要再到「设置」页手动操作。',
+        launch: 'connect-kimi', launchLabel: '准备并同步模型' };
+    }
+    if (reason === 'native_prepare_required') {
+      return { code: 'prepare', tone: 'warn', word: '同步需要准备解析',
+        note: '本机原生接入解析尚未准备，需要一次系统授权。点「准备并同步模型」会完成这次准备并同步模型目录。',
+        launch: 'connect-kimi', launchLabel: '准备并同步模型' };
+    }
+    if ((reason === 'account_changed' || reason === 'native_import_account_changed') && info.readback?.accountVerified === true) {
+      return { code: 'account-sync', tone: 'warn', word: '当前账号待同步',
+        note: '官方 Kimi 已切换到另一个登录账号。请先在官方窗口确认当前账号，再点「同步到当前账号」把已保存的模型同步过去。',
+        launch: 'connect-kimi', launchLabel: '同步到当前账号' };
+    }
+    if (nativeImportFeatureDisabled(reason)) {
+      return { code: 'prepare', tone: 'warn', word: '需重新准备接入',
+        note: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
+        launch: 'connect-kimi', launchLabel: '重新准备并同步' };
+    }
+    const translated = reason ? reasonText(reason) : '';
+    return { code: 'failed', tone: 'bad', word: '同步需要处理',
+      note: (translated || '后台自动同步未能完成') + '。可在「设置」页查看原因并重试。', ...base };
+  }
+  /* 守护进程重启或一次手动同步失败后，autoSync 可能回到 idle：
+     下面两种状态仍然需要一次 connect-kimi，不能落回「已就绪」或
+     「打开 Kimi 时自动同步」。 */
+  if (nativeAccountSyncPending(data) && info.state === 'needs-native-import' && running && managed) {
+    return { code: 'account-sync', tone: 'warn', word: '当前账号待同步',
+      note: '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录。点「同步到当前账号」即可把已保存的模型同步过去。',
+      launch: 'connect-kimi', launchLabel: '同步到当前账号' };
+  }
+  if (info.applied !== true
+    && (nativeImportFeatureDisabled(info.nativeImport?.reason) || nativeImportFeatureDisabled(info.reason))) {
+    return { code: 'prepare', tone: 'warn', word: '需重新准备接入',
+      note: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
+      launch: 'connect-kimi', launchLabel: '重新准备并同步' };
+  }
   if (auto.state === 'deferred_offline' || (!running && !direct && syncNeedsImport(data))) {
     return { code: 'deferred', tone: 'neutral', word: '已保存，打开 Kimi 时自动同步',
       note: '模型已保存；打开 Kimi Work 时会自动完成同步，不需要再点同步按钮。', ...base };
-  }
-  if (auto.state === 'failed') {
-    if (auto.reason === 'direct_prepare_required') {
-      return { code: 'prepare', tone: 'warn', word: '同步需要处理',
-        note: '直连模式首次写入静态 hosts 需要一次系统授权。打开「设置」页展开「手动重新同步模型目录」，点一次完成授权即可。', ...base };
-    }
-    const reason = auto.reason ? reasonText(auto.reason) : '';
-    return { code: 'failed', tone: 'bad', word: '同步需要处理',
-      note: (reason || '后台自动同步未能完成') + '。可在「设置」页查看原因并重试。', ...base };
   }
   if (direct) {
     const ready = directImportComplete(data) && directStaticHostsReady(data) && !directRouteCleanupPending(data);
@@ -374,7 +421,6 @@ function overviewState(data) {
     return { code: 'pending', tone: 'warn', word: '等待自动同步',
       note: transition + '。' + integrationModeSyncText(data), ...base };
   }
-  const info = data?.integration || {};
   /* 官方给这次导入分配了临时来源标识：模型确实导入成功，但下拉框直切会新建
      空白会话。这里必须排在「已就绪」之前，否则用户会以为可以放心切换。 */
   if (data?.kimiK3State === 'provider_mismatch') {
@@ -758,14 +804,17 @@ function nativeConnectionText(data) {
     native_bridge_waiting_launch: '等待 Kimi 启动并建立接入通道。',
     kimi_process_state_unknown: '无法确认官方 Kimi 当前运行状态。请先手动退出官方 Kimi，再从面板重试。',
     kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
+    native_prepare_required: '本机原生接入解析尚未准备，需要一次系统授权。点「准备并同步模型」或「重新同步模型目录」完成准备并同步。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
+    'native_import_feature-disabled': '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
+    native_import_feature_disabled: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」会自动修复本机解析并同步模型目录。',
     disconnected: '已移除本产品接管的模型来源，本地服务商和模型仍保留。点「重新准备接入」或在设置页「手动重新同步模型目录」可重新接管。',
     profile_missing: '当前账号尚未同步本产品模型目录。请在设置页「手动重新同步模型目录」接入。',
     profile_delisted: '官方 Kimi 中本产品模型来源已断开或停用。请在设置页「手动重新同步模型目录」重新接入。',
     native_scope_unverified: '当前自定义 Kimi 目录无法确认归属，自动接管已暂停。',
-    account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
-    native_import_account_changed: '当前 Kimi 账户已变化，请核对账户后点「打开 / 启动 Kimi」继续。',
+    account_changed: '官方 Kimi 已切换到另一个登录账号。请先在官方窗口确认当前账号，再点「同步到当前账号」或「重新同步模型目录」把模型同步过去。',
+    native_import_account_changed: '官方 Kimi 已切换到另一个登录账号。请先在官方窗口确认当前账号，再点「同步到当前账号」或「重新同步模型目录」把模型同步过去。',
     native_bridge_busy: 'Kimi 正在处理任务，空闲后会自动同步。',
     native_import_retry_pending: '正在等待上一次接入完成。',
   };
@@ -1649,6 +1698,7 @@ function renderActions(data) {
 function renderWorkspaceSync(data) {
   const integration = data.integration || {};
   const models = Array.isArray(data.models) ? data.models : [];
+  const auto = autoSyncOf(data);
   /* 日常保存与切模式都由后台自动同步；只有「必须用户手动触发一次
      connect-kimi」的少数状态才露出这个快捷入口。 */
   const resync = $('workspace-resync');
@@ -1707,6 +1757,33 @@ function renderWorkspaceSync(data) {
           : (integrationModeTransition(data) || '已保存为零网关直连模式') + '。' + integrationModeSyncText(data));
     setHidden($('workspace-restart'), !restart);
     showResync(!restart && (!synced || !hosts || cleanup));
+    return;
+  }
+  /* 自动同步失败、账号待同步或官方入口未就绪时，后台不会自己恢复；
+     模型页也要能直接点一次「重新同步模型目录」，不必回总览或设置页。 */
+  if (auto.state === 'failed') {
+    const reason = auto.reason || integration.nativeImport?.reason || integration.reason || '';
+    const prepare = reason === 'direct_prepare_required' || reason === 'native_prepare_required';
+    setText($('workspace-sync-state'), '同步未完成，可重新同步');
+    setText($('workspace-sync-note'), prepare
+      ? '本机接入解析需要一次系统授权；点「重新同步模型目录」会完成准备并继续同步。'
+      : (reason ? reasonText(reason) : '后台自动同步未能完成') + '点「重新同步模型目录」可立即重试。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
+    return;
+  }
+  if (nativeAccountSyncPending(data)) {
+    setText($('workspace-sync-state'), '当前账号待同步');
+    setText($('workspace-sync-note'), '官方 Kimi 已切换到另一个登录账号，当前账号已确认登录；点「重新同步模型目录」把模型同步到当前账号。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
+    return;
+  }
+  if (nativeImportFeatureDisabled(integration.nativeImport?.reason) || nativeImportFeatureDisabled(integration.reason)) {
+    setText($('workspace-sync-state'), '需重新准备接入');
+    setText($('workspace-sync-note'), '官方 Kimi 的自定义模型入口尚未就绪；点「重新同步模型目录」会先准备本机解析，再同步模型。');
+    setHidden($('workspace-restart'), true);
+    showResync(true);
     return;
   }
   /* 回执要求重启时，重启提示必须先于模式/清理提示；否则用户会去重复同步。 */

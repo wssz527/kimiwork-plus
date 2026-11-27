@@ -40,7 +40,7 @@ const DIRECT_REASON_SOURCE = (() => {
 })();
 const INTEGRATION_HELPERS = [DIAG_REASON_SOURCE, DIRECT_REASON_SOURCE, ...['modelTakeoverRemoved', 'savedIntegrationMode', 'effectiveIntegrationMode', 'integrationModeLabel', 'integrationModeTransition', 'integrationModeSyncText', 'directModeOf',
   'directHasNoEligibleModels', 'directImportComplete', 'directRouteCleanupPending', 'nativeRestartReceipt', 'directStaticHostsReady', 'directModeState',
-  'directRestartRequired', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
+  'directRestartRequired', 'nativeImportFeatureDisabled', 'nativeAccountSyncPending', 'normalizeReasonCode', 'directReasonText', 'reasonText'].map(sourceFunction)];
 
 /* 真实原因码翻译：测试直接执行 app-core.js 的三张表与 reasonText，
    不再手写一张小映射，避免生产表缺项时被假 mock 掩盖。 */
@@ -3092,6 +3092,7 @@ function makeWorkspaceSyncEnv() {
     'const $ = id => nodes[id] || null;',
     'const setText = (element, text) => { if (element) element.textContent = text; };',
     'const setHidden = (element, hidden) => { if (element) element.hidden = Boolean(hidden); };',
+    sourceFunction('autoSyncOf'),
     sourceFunction('renderWorkspaceSync'),
     'return renderWorkspaceSync;',
   ].join('\n');
@@ -6256,6 +6257,125 @@ test('the overview repair action runs the manual sync through the launch button'
   assert.equal(nodes['ob-launch-hint'].hidden, true);
 });
 
+test('recoverable sync failures turn the overview action into a connect-kimi recovery', () => {
+  const overviewState = makeOverviewState();
+  const base = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { imported: false, applied: false, desktop: { managed: true } },
+  };
+  const failed = (reason, extra = {}) => ({
+    ...base,
+    integration: { ...base.integration, autoSync: { state: 'failed', reason }, ...extra },
+  });
+
+  /* 直连首次写 hosts：总览直接给出一次性授权入口，不再指向设置页。 */
+  const directPrepare = overviewState(failed('direct_prepare_required'));
+  assert.equal(directPrepare.code, 'prepare');
+  assert.equal(directPrepare.tone, 'warn');
+  assert.equal(directPrepare.launch, 'connect-kimi');
+  assert.equal(directPrepare.launchLabel, '准备并同步模型');
+  assert.match(directPrepare.note, /准备并同步模型/);
+  assert.doesNotMatch(directPrepare.note, /设置」页展开/);
+
+  /* 网关模式的本机解析同样要一次系统授权。 */
+  const nativePrepare = overviewState(failed('native_prepare_required'));
+  assert.equal(nativePrepare.code, 'prepare');
+  assert.equal(nativePrepare.word, '同步需要准备解析');
+  assert.equal(nativePrepare.launch, 'connect-kimi');
+  assert.equal(nativePrepare.launchLabel, '准备并同步模型');
+  assert.match(nativePrepare.note, /系统授权/);
+
+  /* 账号已变化且新账号已经确认登录：动作是同步到当前账号，不是再登录。 */
+  const accountChanged = overviewState(failed('account_changed', { readback: { accountVerified: true } }));
+  assert.equal(accountChanged.code, 'account-sync');
+  assert.equal(accountChanged.word, '当前账号待同步');
+  assert.equal(accountChanged.launch, 'connect-kimi');
+  assert.equal(accountChanged.launchLabel, '同步到当前账号');
+  assert.match(accountChanged.note, /确认当前账号/);
+  assert.doesNotMatch(accountChanged.note, /打开 \/ 启动 Kimi/);
+
+  /* 官方入口未就绪：连字符与下划线两种回执都指向重新准备。 */
+  for (const reason of ['native_import_feature-disabled', 'native_import_feature_disabled']) {
+    const disabled = overviewState(failed(reason));
+    assert.equal(disabled.code, 'prepare', reason);
+    assert.equal(disabled.word, '需重新准备接入', reason);
+    assert.equal(disabled.launch, 'connect-kimi', reason);
+    assert.equal(disabled.launchLabel, '重新准备并同步', reason);
+    assert.match(disabled.note, /自定义模型入口/, reason);
+  }
+
+  /* 账号还没核实时不能冒充成可同步：仍按登录/失败处理。 */
+  const unverified = overviewState(failed('account_changed'));
+  assert.notEqual(unverified.code, 'account-sync');
+  assert.notEqual(unverified.launch, 'connect-kimi');
+});
+
+test('an idle integration that still needs a native import keeps the recovery action', () => {
+  const overviewState = makeOverviewState();
+  const base = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true, state: 'running' },
+    integration: { state: 'needs-native-import', imported: false, applied: false,
+      desktop: { managed: true }, autoSync: { state: 'idle' } },
+  };
+
+  /* 守护进程重启后 autoSync 回到 idle：仍需把模型同步到已确认的新账号。 */
+  const accountChanged = overviewState({
+    ...base,
+    integration: { ...base.integration, reason: 'account_changed', readback: { accountVerified: true } },
+  });
+  assert.equal(accountChanged.code, 'account-sync');
+  assert.equal(accountChanged.word, '当前账号待同步');
+  assert.equal(accountChanged.launch, 'connect-kimi');
+  assert.equal(accountChanged.launchLabel, '同步到当前账号');
+  assert.match(accountChanged.note, /当前账号已确认登录/);
+
+  /* 外部启动的 Kimi 仍先要求重启接管，不能跳过接管直接同步。 */
+  const unmanaged = overviewState({
+    ...base,
+    integration: { ...base.integration, reason: 'account_changed', readback: { accountVerified: true }, desktop: { managed: false } },
+  });
+  assert.equal(unmanaged.code, 'takeover');
+  assert.equal(unmanaged.launch, 'restart-kimi');
+
+  /* 等待登录优先于账号同步。 */
+  const waitingLogin = overviewState({
+    ...base,
+    integration: { ...base.integration, reason: 'account_changed', readback: { accountVerified: true },
+      autoSync: { state: 'waiting_login' } },
+  });
+  assert.equal(waitingLogin.code, 'login');
+
+  /* 官方入口 feature-disabled 且尚未生效时，后台不会自己恢复。 */
+  const disabled = overviewState({
+    ...base,
+    integration: { ...base.integration, nativeImport: { reason: 'native_import_feature-disabled' } },
+  });
+  assert.equal(disabled.code, 'prepare');
+  assert.equal(disabled.word, '需重新准备接入');
+  assert.equal(disabled.launch, 'connect-kimi');
+  assert.equal(disabled.launchLabel, '重新准备并同步');
+
+  /* 已经生效的配置不因为一条旧回执被降级成「需重新准备」。 */
+  const applied = overviewState({
+    ...base,
+    integration: { ...base.integration, applied: true, nativeImport: { reason: 'native_import_feature_disabled' } },
+  });
+  assert.notEqual(applied.launch, 'connect-kimi');
+
+  /* 兼容性门禁仍然优先，不能靠一次同步绕过。 */
+  const blocked = overviewState({
+    ...base,
+    compatibility: { guards: { modelSyncWriteBlocked: true } },
+    integration: { ...base.integration, nativeImport: { reason: 'native_import_feature-disabled' } },
+  });
+  assert.equal(blocked.code, 'blocked');
+  assert.notEqual(blocked.launch, 'connect-kimi');
+});
+
 test('an empty model list sends the overview action to the models page instead of a launch', () => {
   const { nodes, state, api } = makeOverviewStatusEnv();
   state.data = { integrationMode: 'gateway', models: [], kimiProcess: { running: false } };
@@ -6626,6 +6746,51 @@ test('reasonText translates every reason code the UI can show', () => {
   assert.doesNotMatch(applyFailed, /native_import/);
 });
 
+test('BYOK preparation and disconnection reasons state the exact next step', () => {
+  const reasonText = makeReasonText();
+  const cases = [
+    ['native_prepare_required', /准备并同步模型/, /系统授权/],
+    ['native_import_feature-disabled', /重新准备并同步/, /自定义模型入口/],
+    ['native_import_feature_disabled', /重新准备并同步/, /自定义模型入口/],
+    ['model_disconnect_feature_disabled', /重新同步模型目录/, /模型来源/],
+    ['model_disconnect_no_account', /完成登录/, /未继续移除/],
+    ['model_disconnect_byok_not_ready', /尚未就绪/, /重启官方 Kimi/],
+  ];
+  for (const [code, ...patterns] of cases) {
+    const text = reasonText(code);
+    assert.notEqual(text, code, code + ' must be translated');
+    for (const pattern of patterns) assert.match(text, pattern, code);
+    assert.doesNotMatch(text, /native_|model_disconnect/, code + ' must not leak the raw code');
+  }
+  /* 官方页面给连字符代码，Go 侧可能给下划线代码：同一句文案。 */
+  assert.equal(reasonText('native_import_feature-disabled'), reasonText('native_import_feature_disabled'));
+  assert.equal(reasonText('native_import_feature-disabled'),
+    '官方 Kimi 的自定义模型入口尚未就绪（本机解析未生效或官方进程仍保留旧缓存）。请点击「重新准备并同步」自动准备解析并同步。');
+});
+
+test('the connection line points a changed account at a model sync instead of another launch', () => {
+  const nativeConnectionText = makeNativeConnectionText();
+  for (const reason of ['account_changed', 'native_import_account_changed']) {
+    const text = nativeConnectionText({
+      integrationMode: 'gateway',
+      models: [{ id: 'conn/resp/a' }],
+      integration: { state: 'needs-native-import', nativeImport: { reason }, readback: { accountVerified: true } },
+    });
+    assert.match(text, /同步到当前账号/, reason);
+    assert.match(text, /重新同步模型目录/, reason);
+    assert.doesNotMatch(text, /打开 \/ 启动 Kimi/, reason);
+  }
+  for (const reason of ['native_import_feature-disabled', 'native_import_feature_disabled']) {
+    const text = nativeConnectionText({
+      integrationMode: 'gateway',
+      models: [{ id: 'conn/resp/a' }],
+      integration: { state: 'needs-native-import', nativeImport: { reason } },
+    });
+    assert.match(text, /重新准备并同步/, reason);
+    assert.match(text, /自定义模型入口/, reason);
+  }
+});
+
 test('the workspace bar offers a manual resync when static hosts are still missing', () => {
   const { render, nodes } = makeWorkspaceSyncEnv();
   const models = [{ id: 'conn/resp/model-a' }];
@@ -6637,6 +6802,62 @@ test('the workspace bar offers a manual resync when static hosts are still missi
   assert.equal(nodes['workspace-sync-state'].textContent, '已直连同步到 Kimi');
   assert.match(nodes['workspace-sync-note'].textContent, /补齐静态 hosts/);
   assert.equal(nodes['workspace-resync'].hidden, false, 'missing static hosts needs one manual resync');
+});
+
+test('the models page exposes a one-click resync for recoverable sync failures', () => {
+  const { render, nodes } = makeWorkspaceSyncEnv();
+  const models = [{ id: 'conn/resp/model-a' }];
+  const base = {
+    integrationMode: 'gateway',
+    models,
+    kimiProcess: { running: true, state: 'running' },
+    integration: { imported: false, applied: false, desktop: { managed: true } },
+  };
+
+  render({
+    ...base,
+    integration: { ...base.integration, autoSync: { state: 'failed', reason: 'direct_prepare_required' } },
+  });
+  assert.equal(nodes['workspace-resync'].hidden, false);
+  assert.equal(nodes['workspace-sync-state'].textContent, '同步未完成，可重新同步');
+  assert.match(nodes['workspace-sync-note'].textContent, /系统授权/);
+  assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
+  assert.doesNotMatch(nodes['workspace-sync-note'].textContent, /在设置页/);
+
+  render({
+    ...base,
+    integration: { ...base.integration, autoSync: { state: 'failed', reason: 'direct_import_failed' } },
+  });
+  assert.equal(nodes['workspace-resync'].hidden, false);
+  assert.match(nodes['workspace-sync-note'].textContent, /官方 Kimi 没有接受这次直连写入/);
+  assert.match(nodes['workspace-sync-note'].textContent, /重新同步模型目录/);
+
+  render({
+    ...base,
+    integration: { ...base.integration, state: 'needs-native-import', reason: 'account_changed',
+      readback: { accountVerified: true } },
+  });
+  assert.equal(nodes['workspace-resync'].hidden, false, 'a verified account change needs one manual sync');
+  assert.equal(nodes['workspace-sync-state'].textContent, '当前账号待同步');
+  assert.match(nodes['workspace-sync-note'].textContent, /当前账号/);
+
+  for (const reason of ['native_import_feature-disabled', 'native_import_feature_disabled']) {
+    render({
+      ...base,
+      integration: { ...base.integration, nativeImport: { reason } },
+    });
+    assert.equal(nodes['workspace-resync'].hidden, false, reason + ' needs one manual repair sync');
+    assert.equal(nodes['workspace-sync-state'].textContent, '需重新准备接入');
+    assert.match(nodes['workspace-sync-note'].textContent, /准备本机解析/);
+  }
+
+  /* 账号尚未核实时不冒充可同步：保持普通等待提示并收起按钮。 */
+  render({
+    ...base,
+    integration: { ...base.integration, state: 'needs-native-import', reason: 'account_changed',
+      readback: { accountVerified: false } },
+  });
+  assert.equal(nodes['workspace-resync'].hidden, true);
 });
 
 test('a deleted model drops its stale effort and batch selection instead of submitting an invalid level', async () => {
