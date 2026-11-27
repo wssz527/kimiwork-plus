@@ -38,10 +38,17 @@ function restartBannerState(data) {
     const waitingUnmanaged = auto.state === 'waiting_unmanaged'
       || (running && !managed && models.length > 0 && pendingWork);
     if (waitingUnmanaged) {
+      const takeover = data?.integration?.autoTakeover || {};
+      let text = '检测到外部启动的官方 Kimi Work 正在运行。需要重启并接管一次，才能把最新模型配置同步到它的模型菜单。';
+      if (data?.autoTakeover === true && takeover.state === 'taking_over') {
+        text = '正在自动平滑重启并重新接管官方 Kimi Work…';
+      } else if (data?.autoTakeover === true && takeover.state === 'waiting_idle') {
+        text = '检测到外部启动的官方 Kimi Work，当前有活跃任务，将在空闲后自动平滑重启并接管；也可立即手动重启。';
+      }
       return {
         action: 'restart-kimi',
         label: '重启并接管 Kimi 生效',
-        text: '检测到外部启动的官方 Kimi Work 正在运行。需要重启并接管一次，才能把最新模型配置同步到它的模型菜单。',
+        text,
       };
     }
     /* failed / waiting_login 不是「已写入、只差重启」：同步没成功或还没登录时
@@ -802,11 +809,41 @@ function renderGatewayModeFact(data) {
         : '已保存为零网关直连模式 · ' + integrationModeSyncText(data));
 }
 
+function renderAutoTakeover(data) {
+  const checkbox = dom.autoTakeoverEnabled;
+  if (checkbox) {
+    if (!state.autoTakeoverSaving) checkbox.checked = data?.autoTakeover === true;
+    checkbox.disabled = !configReady(data) || state.autoTakeoverSaving === true;
+  }
+  const note = dom.autoTakeoverState;
+  if (!note) return;
+  const enabled = data?.autoTakeover === true;
+  const info = data?.integration?.autoTakeover || {};
+  let text = '';
+  if (enabled) {
+    if (info.state === 'waiting_idle') {
+      text = `检测到非受管的官方 Kimi，${info.reason ? reasonText(info.reason) : '等待空闲'}，空闲后将自动平滑重启并接管。`;
+    } else if (info.state === 'taking_over') {
+      text = '正在平滑重启并重新接管官方 Kimi…';
+    } else if (info.state === 'recovered') {
+      text = info.lastSuccessAt
+        ? '已于 ' + fmtTime(info.lastSuccessAt) + ' 自动重新接管官方 Kimi。'
+        : '已自动重新接管官方 Kimi。';
+    } else if (info.state === 'failed') {
+      text = `上次自动重接管未完成（${reasonText(info.reason || 'kimi_start_failed')}），请点击「重启并接管 Kimi 生效」手动处理。`;
+    }
+  }
+  setHidden(note, !text);
+  setText(note, text);
+  if (note.classList) note.classList.toggle('note--warn', Boolean(text && (info.state === 'failed' || info.state === 'waiting_idle')));
+}
+
 function renderOverview(data, { view } = {}) {
   const showOverview = !view || view === 'overview';
   const showMaintenance = !view || view === 'maintenance';
   if (showMaintenance) {
     setText($('native-state'), nativeConnectionText(data));
+    renderAutoTakeover(data);
     const scope = desktopScopeInfo(data);
     setHidden(dom.nativeRemote, !scope);
     if (scope) {
@@ -971,8 +1008,8 @@ function renderQuickstartGuide(data) {
 
 function compatToneOf(compat) {
   const st = compat?.status || 'checking';
-  if (st === 'verified') return 'ok';
-  if (st === 'new_version_ok' || st === 'unavailable') return 'warn';
+  if (st === 'verified' || st === 'new_version_ok') return 'ok';
+  if (st === 'unavailable') return 'warn';
   if (st === 'degraded') return 'bad';
   return 'neutral';
 }
@@ -1012,7 +1049,7 @@ function renderCompatibility(data) {
   let headline = compat.summary || '';
   if (!headline) {
     if (st === 'verified') headline = '兼容';
-    else if (st === 'new_version_ok') headline = '新版本，基础检查通过';
+    else if (st === 'new_version_ok') headline = '新版本，自检兼容';
     else if (st === 'degraded') headline = '部分功能不可用';
     else if (st === 'unavailable') headline = '未检测到官方 Kimi';
     else headline = '正在检查…';
@@ -1033,8 +1070,8 @@ function renderCompatibility(data) {
     noteText = `${affected}。已停止受影响功能的写入，本机网关和其他功能照常运行。`;
   } else if (st === 'new_version_ok') {
     noteText = compat.versionChanged && compat.previousVersion
-      ? `检测到官方 Kimi 已从 ${compat.previousVersion} 更新至 ${compat.officialVersion}，目录、账号接口与存储格式检查全部通过。`
-      : '该官方版本尚未列入已验证清单，但目录、账号接口与存储格式检查已全部通过。';
+      ? `检测到官方 Kimi 已从 ${compat.previousVersion} 更新至 ${compat.officialVersion}，目录、账号接口与存储格式检查全部通过，可正常跨版本接管。`
+      : '该官方版本已通过模型目录、账号接口与存储格式只读自检，可正常跨版本接管。';
   } else if (st === 'verified') {
     const format = compat.checks?.storeFormat?.format;
     const formatHint = format === 'accounts' ? 'accounts 格式' : format === 'profiles' ? 'profiles 格式' : '待首次同步';
@@ -1050,8 +1087,13 @@ function renderCompatibility(data) {
 
   const diagDot = $('diag-compat-dot');
   setDot(diagDot, tone);
+  const verState = compat.verifiedVersion
+    ? '已验证兼容'
+    : st === 'new_version_ok'
+      ? '新版本 · 自检兼容'
+      : '新版本';
   const verLabel = compat.officialVersion
-    ? `${compat.officialVersion}（${compat.verifiedVersion ? '已验证兼容' : '新版本'}）`
+    ? `${compat.officialVersion}（${verState}）`
     : '未检测到安装';
   setText($('diag-compat-version'), verLabel);
   const kernelBits = [];
@@ -2440,6 +2482,7 @@ export {
   previewServiceAction,
   refreshOverviewToday,
   renderActions,
+  renderAutoTakeover,
   renderIntegrationMode,
   renderOperation,
   renderOverview,

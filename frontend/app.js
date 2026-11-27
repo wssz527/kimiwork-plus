@@ -1,7 +1,7 @@
 import { applyConnections, applyOnboardBatchContext, applyOnboardPreset, applyProviderPreset, cancelConnectionDelete, closeConnectionEditor, closeConnectionModelPicker, configReady, confirmConnectionDelete, connectionDefaultUpstreamProtocol, connectionDraftFrom, connectionsDirty, discoverConnectionEditorModels, discoverOnboardModels, draftConnectionProtocol, fillOnboardForm, fillOnboardPresets, formatApiErrorWithModels, openConnectionEditor, onboardEditingText, openOnboardWizard, readConnectionEditor, reloadConnectionModelPicker, renderConnection, renderConnectionEditor, renderConnections, renderOnboard, requestConnectionDelete, saveConnectionModelPicker, saveConnections, saveOnboard, savedConnectionsSignature, savedOnboardTarget, setConnectionPickerQuery, setOnboardProtocol, toggleConnectionModelPicker, toggleConnectionPickerItem, toggleConnectionPickerSelectAll, toggleFilteredOnboardModels, useRecommendedOnboardModels } from './app-connections.js';
 import { $, ACTION_LABEL, ACTION_STATE, API, ApiError, KEY_STORE, POLL_MS, SUBTAB_STORE, VIEWS, VIEW_ALIASES, VIEW_COPY, VIEW_STORE, actionUUID, applyTheme, clearKey, dom, fmtTime, initTheme, initWindowChrome, mountUsageRequests, observeMasthead, postWailsMessage, readKey, reasonText, renderErrorList, request, revealWorkspaceSection, scrollMainToElement, setConnErrors, setHidden, setSubtab, setText, showGate, showToast, state } from './app-core.js';
 import { applyBudgetPreset, applyInferredModelDefaults, catalogueWith, chooseUpstreamProtocol, clearModelQuery, closeEditor, closePicker, diffValue, findModel, modelThreeWayDiff, onModelFilter, openEditor, openPicker, pickCandidate, pickerScope, readEditorFields, renderEditor, renderFailoverRows, renderModels, renderPicker, resetModelSignature, runConnectionCheck, runDiscovery, saveCatalogue, scheduleSearch, searchCandidates, suggestedRouteId, toggleEffortChoice, validateEditor } from './app-models.js';
-import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
+import { cancelIntegrationModeConfirm, confirmIntegrationMode, requestIntegrationModeConfirm, dismissQuickstartGuide, exportDiagnostics, isInFlight, previewServiceAction, refreshOverviewToday, renderActions, renderAutoTakeover, renderIntegrationMode, renderOperation, renderOverview, renderPreviewLifecycle, renderShell, renderUpdates, renderWorkspaceSync, reopenQuickstartGuide, resetIntegrationModeSignature, resetRecentSignature, runOverviewIssueAction, toggleQuickstartGuide, updateAction } from './app-overview.js';
 import { appendPoolModel, discardDraft, draftFromSaved, pickEffort, pickModel, pickPoolDefault, pickRoleDefault, pickRoleModel, recomputeDraftDirty, removePoolModel, renderSubagents, resetSubagentSignatures, saveSubagentTarget, setMode } from './app-work.js';
 import { mountConversationsPage } from './app-conversations.js';
 
@@ -556,6 +556,42 @@ async function handleSaveFailure(error, context) {
   await loadState({ silent: true });
 }
 
+async function saveAutoTakeover(enabled) {
+  const nextEnabled = Boolean(enabled);
+  const data = state.data;
+  if (!data || !data.revision || state.autoTakeoverSaving) {
+    if (dom.autoTakeoverEnabled) dom.autoTakeoverEnabled.checked = data?.autoTakeover === true;
+    return false;
+  }
+  const previous = data.autoTakeover === true;
+  const reqKey = state.key;
+  state.autoTakeoverSaving = true;
+  renderAutoTakeover(state.data);
+  try {
+    const result = await request(API.autoTakeover, {
+      method: 'POST',
+      body: { revision: data.revision, enabled: nextEnabled },
+    });
+    if (state.key !== reqKey) return false;
+    state.autoTakeoverSaving = false;
+    if (result?.state) {
+      adoptState(result.state, { external: true });
+      renderAll();
+    } else {
+      renderAutoTakeover(state.data);
+    }
+    showToast(nextEnabled ? '已开启自动重新接管' : '已关闭自动重新接管', 'ok');
+    return true;
+  } catch (error) {
+    if (state.key !== reqKey) return false;
+    state.autoTakeoverSaving = false;
+    if (dom.autoTakeoverEnabled) dom.autoTakeoverEnabled.checked = previous;
+    renderAutoTakeover(state.data);
+    await handleSaveFailure(error, '保存自动重新接管设置失败');
+    return false;
+  }
+}
+
 
 function clearDisconnectConfirm() {
   const active = state.disconnectConfirm;
@@ -965,6 +1001,9 @@ function bindEvents() {
   });
 
   if (dom.theme) dom.theme.addEventListener('change', () => applyTheme(dom.theme.value));
+  dom.autoTakeoverEnabled?.addEventListener('change', () => {
+    void saveAutoTakeover(dom.autoTakeoverEnabled.checked);
+  });
 
   /* 选择卡片只请求确认，确认后的保存回执使旧轮询结果失效。 */
   dom.integrationModeGroup?.addEventListener('change', (event) => {
@@ -1500,6 +1539,7 @@ function adoptLocationKey() {
   if (dom.onboardModelQuery) dom.onboardModelQuery.value = '';
   state.applyUnsupported = false;
   state.applyRefusal = null;
+  state.autoTakeoverSaving = false;
   state.diagnosticsExporting = false;
   state.diagnosticsExportError = '';
   state.diagnosticsExportPath = '';

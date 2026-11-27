@@ -2698,7 +2698,7 @@ test('renderCompatibility distinguishes verified, new version pass, and degraded
   fn({
     compatibility: {
       status: 'new_version_ok',
-      summary: '新版本，基础检查通过',
+      summary: '新版本，自检兼容',
       officialVersion: '3.2.99',
       verifiedVersion: false,
       versionChanged: true,
@@ -2712,9 +2712,29 @@ test('renderCompatibility distinguishes verified, new version pass, and degraded
       guards: { modelSyncWriteBlocked: false, accountSwitchWriteBlocked: false },
     },
   });
-  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'warn');
-  assert.equal(nodes['compat-summary'].textContent, '新版本，基础检查通过');
-  assert.match(nodes['compat-note'].textContent, /3\.2\.28.*3\.2\.99/);
+  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'ok');
+  assert.equal(nodes['compat-dot'].dataset.tone, 'ok');
+  assert.equal(nodes['compat-summary'].textContent, '新版本，自检兼容');
+  assert.match(nodes['compat-note'].textContent, /3\.2\.28.*3\.2\.99.*可正常跨版本接管/);
+  assert.equal(nodes['diag-compat-version'].textContent, '3.2.99（新版本 · 自检兼容）');
+
+  fn({
+    compatibility: {
+      status: 'new_version_ok',
+      officialVersion: '3.2.99',
+      verifiedVersion: false,
+      checks: {
+        catalog: { status: 'pass', modelCount: 5, acceptedCount: 5 },
+        accountApi: { status: 'pass', source: 'preload', getUserProfile: true, byokSourcesList: true },
+        storeFormat: { status: 'pass', format: 'accounts' },
+      },
+      affectedFeatures: [],
+      guards: { modelSyncWriteBlocked: false, accountSwitchWriteBlocked: false },
+    },
+  });
+  assert.equal(nodes['overview-compat-bar'].dataset.tone, 'ok');
+  assert.equal(nodes['compat-summary'].textContent, '新版本，自检兼容');
+  assert.match(nodes['compat-note'].textContent, /只读自检，可正常跨版本接管/);
 
   fn({
     compatibility: {
@@ -2733,6 +2753,7 @@ test('renderCompatibility distinguishes verified, new version pass, and degraded
   });
   assert.equal(nodes['overview-compat-bar'].dataset.tone, 'bad');
   assert.equal(nodes['compat-summary'].textContent, '模型同步不可用');
+  assert.equal(nodes['diag-compat-version'].textContent, '3.3.0（新版本）');
   assert.match(nodes['compat-note'].textContent, /已停止受影响功能的写入/);
   assert.match(nodes['diag-compat-guards'].textContent, /已停止模型同步写入/);
 });
@@ -7879,4 +7900,204 @@ test('conversations batch clear blocks stale in-flight preserveSelection restore
   await pendingRefresh;
   assert.deepEqual(deferredEnv.state.conversations.selected, [], 'in-flight refresh does not restore selection cleared during flight');
   assert.equal(deferredEnv.ui.batch.hidden, true);
+});
+
+test('auto-takeover renders toggle, status states, persists via POST /api/auto-takeover and updates unmanaged banner', async () => {
+  const nativeStart = htmlSource.indexOf('id="native-panel"');
+  const nativeEnd = htmlSource.indexOf('</section>', nativeStart);
+  const nativeSlice = htmlSource.slice(nativeStart, nativeEnd);
+  assert.match(nativeSlice, /id="auto-takeover-choice"/);
+  assert.match(nativeSlice, /id="auto-takeover-enabled"/);
+  assert.match(nativeSlice, /id="auto-takeover-state"/);
+
+  const coreText = readFileSync(new URL('./app-core.js', import.meta.url), 'utf8');
+  const diagBlock = coreText.slice(coreText.indexOf('const DIAG_REASON = {'), coreText.indexOf('\n};', coreText.indexOf('const DIAG_REASON = {')) + 3);
+  const actionLabelBlock = coreText.slice(coreText.indexOf('const ACTION_LABEL = {'), coreText.indexOf('\n};', coreText.indexOf('const ACTION_LABEL = {')) + 3);
+  const diagReasons = new Function(`${diagBlock}; return DIAG_REASON;`)();
+  const actionLabels = new Function(`${actionLabelBlock}; return ACTION_LABEL;`)();
+  assert.equal(actionLabels['auto-takeover'], '自动重新接管 Kimi');
+  assert.equal(diagReasons.work_activity_recent, 'Kimi Work 刚有活跃写入，等待空闲');
+  assert.equal(diagReasons.gateway_requests_active, '网关仍有活跃请求，等待完成');
+  assert.equal(diagReasons.settling, '等待官方 Kimi 启动稳定');
+  assert.equal(diagReasons.cooldown, '冷却中，稍后再试');
+  assert.equal(diagReasons.invalid_auto_takeover, '自动重新接管开关参数无效');
+  assert.ok(diagReasons.kimi_quit_refused && diagReasons.kimi_quit_timeout, 'existing quit reason strings are preserved');
+
+  const makeClassList = () => {
+    const set = new Set();
+    return {
+      toggle(name, force) {
+        const next = force === undefined ? !set.has(name) : Boolean(force);
+        if (next) set.add(name);
+        else set.delete(name);
+      },
+      contains: (name) => set.has(name),
+    };
+  };
+  const dom = {
+    autoTakeoverEnabled: { checked: false, disabled: false },
+    autoTakeoverState: { hidden: true, textContent: '', classList: makeClassList() },
+  };
+  const state = {
+    key: 'panel-key',
+    data: { revision: 'rev-1', configuration: { state: 'ready' }, autoTakeover: false, integration: {} },
+    autoTakeoverSaving: false,
+  };
+  const posts = [];
+  const toasts = [];
+  const failures = [];
+  let renderAllCalls = 0;
+  let nextRequestImpl = async (path, options) => {
+    posts.push([path, options]);
+    return {
+      ok: true,
+      state: {
+        ...state.data,
+        revision: 'rev-2',
+        autoTakeover: options.body.enabled,
+        integration: { autoTakeover: { enabled: options.body.enabled, state: options.body.enabled ? 'watching' : 'disabled' } },
+      },
+    };
+  };
+
+  const api = new Function('dom', 'state', 'request', 'showToast', 'handleSaveFailure', 'onRenderAll', 'DIAG_REASON', `
+    const API = { autoTakeover: '/api/auto-takeover' };
+    const configReady = (data) => data?.configuration?.state === 'ready';
+    const setHidden = (el, flag) => { if (el) el.hidden = Boolean(flag); };
+    const setText = (el, text) => { if (el) el.textContent = String(text ?? ''); };
+    const fmtTime = (ts) => '12:34:56';
+    const reasonText = (code) => DIAG_REASON[code] || code;
+    const adoptState = (next) => { state.data = next; };
+    const renderAll = () => { onRenderAll(); renderAutoTakeover(state.data); };
+    ${sourceFunction('renderAutoTakeover')}
+    ${sourceFunction('saveAutoTakeover')}
+    return { renderAutoTakeover, saveAutoTakeover };
+  `)(
+    dom,
+    state,
+    (path, options) => nextRequestImpl(path, options),
+    (msg, tone) => toasts.push([msg, tone]),
+    async (err, ctx) => { failures.push([err, ctx]); },
+    () => { renderAllCalls += 1; },
+    diagReasons,
+  );
+
+  // Disabled / watching keeps status hidden
+  api.renderAutoTakeover(state.data);
+  assert.equal(dom.autoTakeoverEnabled.checked, false);
+  assert.equal(dom.autoTakeoverEnabled.disabled, false);
+  assert.equal(dom.autoTakeoverState.hidden, true);
+
+  // waiting_idle
+  api.renderAutoTakeover({
+    configuration: { state: 'ready' },
+    autoTakeover: true,
+    integration: { autoTakeover: { enabled: true, state: 'waiting_idle', reason: 'work_activity_recent' } },
+  });
+  assert.equal(dom.autoTakeoverEnabled.checked, true);
+  assert.equal(dom.autoTakeoverState.hidden, false);
+  assert.equal(
+    dom.autoTakeoverState.textContent,
+    '检测到非受管的官方 Kimi，Kimi Work 刚有活跃写入，等待空闲，空闲后将自动平滑重启并接管。',
+  );
+  assert.equal(dom.autoTakeoverState.classList.contains('note--warn'), true);
+
+  // taking_over
+  api.renderAutoTakeover({
+    configuration: { state: 'ready' },
+    autoTakeover: true,
+    integration: { autoTakeover: { enabled: true, state: 'taking_over' } },
+  });
+  assert.equal(dom.autoTakeoverState.hidden, false);
+  assert.equal(dom.autoTakeoverState.textContent, '正在平滑重启并重新接管官方 Kimi…');
+
+  // recovered with timestamp and without timestamp
+  api.renderAutoTakeover({
+    configuration: { state: 'ready' },
+    autoTakeover: true,
+    integration: { autoTakeover: { enabled: true, state: 'recovered', lastSuccessAt: 1732660000000 } },
+  });
+  assert.equal(dom.autoTakeoverState.hidden, false);
+  assert.equal(dom.autoTakeoverState.textContent, '已于 12:34:56 自动重新接管官方 Kimi。');
+
+  api.renderAutoTakeover({
+    configuration: { state: 'ready' },
+    autoTakeover: true,
+    integration: { autoTakeover: { enabled: true, state: 'recovered' } },
+  });
+  assert.equal(dom.autoTakeoverState.textContent, '已自动重新接管官方 Kimi。');
+
+  // failed
+  api.renderAutoTakeover({
+    configuration: { state: 'ready' },
+    autoTakeover: true,
+    integration: { autoTakeover: { enabled: true, state: 'failed', reason: 'kimi_quit_timeout' } },
+  });
+  assert.equal(dom.autoTakeoverState.hidden, false);
+  assert.match(dom.autoTakeoverState.textContent, /上次自动重接管未完成（.*退出超时.*），请点击「重启并接管 Kimi 生效」手动处理。/);
+  assert.equal(dom.autoTakeoverState.classList.contains('note--warn'), true);
+
+  // Toggle ON succeeds
+  dom.autoTakeoverEnabled.checked = true;
+  const saved = await api.saveAutoTakeover(true);
+  assert.equal(saved, true);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0][0], '/api/auto-takeover');
+  assert.deepEqual(posts[0][1], { method: 'POST', body: { revision: 'rev-1', enabled: true } });
+  assert.equal(state.data.autoTakeover, true);
+  assert.equal(dom.autoTakeoverEnabled.checked, true);
+  assert.equal(state.autoTakeoverSaving, false);
+  assert.equal(renderAllCalls, 1);
+  assert.deepEqual(toasts.at(-1), ['已开启自动重新接管', 'ok']);
+
+  // Toggle OFF failure reverts checkbox and forwards error to handleSaveFailure
+  const failErr = Object.assign(new Error('自动重新接管开关参数无效'), { code: 'invalid_auto_takeover', status: 400 });
+  nextRequestImpl = async () => { throw failErr; };
+  dom.autoTakeoverEnabled.checked = false;
+  const failed = await api.saveAutoTakeover(false);
+  assert.equal(failed, false);
+  assert.equal(dom.autoTakeoverEnabled.checked, true, 'checkbox reverts to previous server state on failure');
+  assert.equal(state.autoTakeoverSaving, false);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0][0], failErr);
+  assert.equal(failures[0][1], '保存自动重新接管设置失败');
+
+  // restartBannerState reflects waiting_idle and taking_over when unmanaged Kimi is running
+  const restartBannerState = makeRestartBannerState();
+  const baseUnmanaged = {
+    integrationMode: 'gateway',
+    models: [{ id: 'conn/resp/a' }],
+    kimiProcess: { running: true },
+    autoTakeover: true,
+    integration: {
+      imported: false,
+      desktop: { managed: false },
+      autoSync: { state: 'waiting_unmanaged', pending: true },
+    },
+  };
+  const takingOverBanner = restartBannerState({
+    ...baseUnmanaged,
+    integration: { ...baseUnmanaged.integration, autoTakeover: { enabled: true, state: 'taking_over' } },
+  });
+  assert.equal(takingOverBanner.action, 'restart-kimi');
+  assert.equal(takingOverBanner.label, '重启并接管 Kimi 生效');
+  assert.equal(takingOverBanner.text, '正在自动平滑重启并重新接管官方 Kimi Work…');
+
+  const waitingIdleBanner = restartBannerState({
+    ...baseUnmanaged,
+    integration: { ...baseUnmanaged.integration, autoTakeover: { enabled: true, state: 'waiting_idle', reason: 'gateway_requests_active' } },
+  });
+  assert.equal(waitingIdleBanner.action, 'restart-kimi');
+  assert.equal(waitingIdleBanner.label, '重启并接管 Kimi 生效');
+  assert.equal(waitingIdleBanner.text, '检测到外部启动的官方 Kimi Work，当前有活跃任务，将在空闲后自动平滑重启并接管；也可立即手动重启。');
+
+  const disabledTakeoverBanner = restartBannerState({
+    ...baseUnmanaged,
+    autoTakeover: false,
+    integration: { ...baseUnmanaged.integration, autoTakeover: { enabled: false, state: 'taking_over' } },
+  });
+  assert.equal(
+    disabledTakeoverBanner.text,
+    '检测到外部启动的官方 Kimi Work 正在运行。需要重启并接管一次，才能把最新模型配置同步到它的模型菜单。',
+  );
 });
