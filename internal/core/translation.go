@@ -384,6 +384,13 @@ func (t Translator) Translate(ctx context.Context, text string, c TranslationCon
 	}
 	return out.String(), nil
 }
+
+var defaultTranslationTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = translationProxy
+	return transport
+}()
+
 func (t Translator) request(ctx context.Context, endpoint, contentType, key string, body []byte, custom bool) (any, error) {
 	ctx, cancel := context.WithTimeout(ctx, t.timeout(custom))
 	defer cancel()
@@ -396,11 +403,13 @@ func (t Translator) request(ctx context.Context, endpoint, contentType, key stri
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	client := http.Client{}
-	if t.Client != nil {
-		client = *t.Client
+	client := t.Client
+	if client == nil {
+		client = &http.Client{
+			Transport:     defaultTranslationTransport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	res, e := client.Do(req)
 	if e != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

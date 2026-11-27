@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -31,10 +32,10 @@ func waitNativeOperation(t *testing.T, n *Native, id string) core.Document {
 func TestNativeCompatibilityWriteGuards(t *testing.T) {
 	stateDir := t.TempDir()
 	ctrl, err := kimi.NewController(kimi.ControllerSettings{
-		StateDir:    stateDir,
-		UserDataDir: stateDir,
+		StateDir:     stateDir,
+		UserDataDir:  stateDir,
 		LoginDataDir: stateDir,
-		ProfileMode: kimi.ProfileModeOfficial,
+		ProfileMode:  kimi.ProfileModeOfficial,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,4 +102,34 @@ func TestNativeCompatibilityWriteGuards(t *testing.T) {
 			t.Fatal("model sync should remain unblocked when only account switch failed")
 		}
 	})
+}
+
+func TestCompatibilityRedetectsMissingInstallationAtInterval(t *testing.T) {
+	stateDir := t.TempDir()
+	ctrl, err := kimi.NewController(kimi.ControllerSettings{StateDir: stateDir, UserDataDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	var installs []kimi.Installation
+	n := &Native{
+		service: &Service{StateDir: stateDir}, controller: ctrl,
+		discoverInstallation: func() []kimi.Installation { calls++; return installs },
+	}
+	ctx := context.Background()
+	n.runCompatibilityCheck(ctx, &kimi.ContractResult{State: kimi.StateUnavailable}, false)
+	if calls != 1 {
+		t.Fatalf("startup discovery calls = %d", calls)
+	}
+	install := kimi.Installation{Archive: filepath.Join(stateDir, "app.asar"), Version: "3.2.29"}
+	installs = []kimi.Installation{install}
+	n.maybeRecheckCompatibility(ctx)
+	if calls != 1 || ctrl.Settings().Installation.Archive != "" {
+		t.Fatalf("installation discovery ran before its interval: calls=%d install=%+v", calls, ctrl.Settings().Installation)
+	}
+	n.compatLastMissingCheck = time.Now().Add(-30 * time.Second)
+	n.maybeRecheckCompatibility(ctx)
+	if calls != 2 || ctrl.Settings().Installation != install || n.compatFingerprint.ArchivePath != install.Archive {
+		t.Fatalf("installation was not picked up at the next interval: calls=%d install=%+v", calls, ctrl.Settings().Installation)
+	}
 }

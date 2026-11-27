@@ -20,6 +20,24 @@ func TestRefreshKimiInstallationAfterInitialMissing(t *testing.T) {
 	}
 }
 
+func TestForceRefreshKimiInstallation(t *testing.T) {
+	original := kimi.Installation{Application: `C:\Apps\Kimi\Kimi.exe`, Archive: `C:\Apps\Kimi\resources\app.asar`, Version: "3.2.28"}
+	moved := kimi.Installation{Application: `D:\Kimi\Kimi.exe`, Archive: `D:\Kimi\resources\app.asar`, Version: "3.2.29"}
+	settings := kimi.ControllerSettings{Installation: original, StateDir: "state"}
+	calls := 0
+	settings = forceRefreshKimiInstallation(settings, func() []kimi.Installation {
+		calls++
+		return []kimi.Installation{moved, original}
+	})
+	if calls != 1 || settings.Installation != moved || settings.StateDir != "state" {
+		t.Fatalf("refresh after move: %d %+v", calls, settings)
+	}
+	settings = forceRefreshKimiInstallation(settings, func() []kimi.Installation { calls++; return nil })
+	if calls != 2 || settings.Installation != moved {
+		t.Fatalf("refresh without results: %d %+v", calls, settings.Installation)
+	}
+}
+
 func TestNativeDesktopStateExposesInstallationReason(t *testing.T) {
 	desktop := nativeDesktopState(kimi.ControllerStatus{Native: &kimi.NativeState{Reason: "not_installed"}})
 	if desktop["reason"] != "not_installed" {

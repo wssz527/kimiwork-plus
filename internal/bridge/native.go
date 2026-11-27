@@ -21,32 +21,33 @@ import (
 )
 
 type Native struct {
-	mu                  sync.Mutex
-	compatMu            sync.Mutex
-	profileMu           sync.Mutex
-	profileReason       string
-	service             *Service
-	controller          *kimi.Controller
-	process             core.Document
-	contract            *kimi.ContractResult
-	compatibility       kimi.CompatibilityReport
-	compatFingerprint   kimi.OfficialFingerprint
-	compatLiveProbedPID int
-	operation           core.Document
-	opIdle              chan struct{}
-	opWaiter            bool
-	opSuspended         bool
-	receipt             *nativeImportReceipt
-	jobs                chan struct{}
-	policies            *nativePolicies
-	web                 *webService
-	webKeys             *webKey
-	mcp                 *kimi.MCPManager
-	dns                 byokDNS
-	probe               *byokdns.Probe
-	admin               byokdns.Administrator
-	dnsReason           string
-	resolverPath        string
+	mu                     sync.Mutex
+	compatMu               sync.Mutex
+	profileMu              sync.Mutex
+	profileReason          string
+	service                *Service
+	controller             *kimi.Controller
+	process                core.Document
+	contract               *kimi.ContractResult
+	compatibility          kimi.CompatibilityReport
+	compatFingerprint      kimi.OfficialFingerprint
+	compatLiveProbedPID    int
+	compatLastMissingCheck time.Time
+	operation              core.Document
+	opIdle                 chan struct{}
+	opWaiter               bool
+	opSuspended            bool
+	receipt                *nativeImportReceipt
+	jobs                   chan struct{}
+	policies               *nativePolicies
+	web                    *webService
+	webKeys                *webKey
+	mcp                    *kimi.MCPManager
+	dns                    byokDNS
+	probe                  *byokdns.Probe
+	admin                  byokdns.Administrator
+	dnsReason              string
+	resolverPath           string
 	// hostsPath overrides the static hosts file a Direct Mode prepare writes. It
 	// exists so a test never writes the machine's real /etc/hosts.
 	hostsPath          string
@@ -70,11 +71,14 @@ type Native struct {
 	disconnectModels   func(context.Context) (kimi.DisconnectResult, error)
 	// The probes below exist so a test can place the process and the readback
 	// without starting or touching a real Kimi.
-	managedProbe      func() bool
-	runningProbe      func() bool
-	staticHostsProbe  func() bool
-	autoSyncReconcile func(context.Context) kimi.IntegrationResult
-	autoSync          *autoSyncCoordinator
+	discoverInstallation  func() []kimi.Installation
+	managedProbe          func() bool
+	runningProbe          func() bool
+	staticHostsProbe      func() bool
+	autoSyncReconcile     func(context.Context) kimi.IntegrationResult
+	autoSync              *autoSyncCoordinator
+	autoTakeover          *autoTakeoverCoordinator
+	gatewayActiveRequests func() int
 	// operationStart holds the saved surface digest a manual prepare started
 	// from, keyed by operation id. It is private: the published operation keeps
 	// its existing shape, and the entry is dropped when that operation finishes.
@@ -123,6 +127,8 @@ func AttachNative(ctx context.Context, s *Service, gateway *Runtime) (*Native, e
 	}
 	n.initBYOK()
 	n.autoSync = newAutoSyncCoordinator(ctx, n)
+	n.gatewayActiveRequests = gateway.ActiveRequests
+	n.autoTakeover = newAutoTakeoverCoordinator(n)
 	controller.SetTranslationHandler(n.translate)
 	d, _, e := s.Store.Read()
 	if e != nil {
@@ -234,6 +240,7 @@ func (n *Native) watch(ctx context.Context) {
 		defer n.profileMu.Unlock()
 		_ = n.mcp.Close(context.Background())
 	}()
+	defer n.autoTakeover.stop()
 	native := n.controller.NativeState(ctx)
 	n.mu.Lock()
 	n.contract = native.Contract
@@ -260,7 +267,12 @@ func (n *Native) watch(ctx context.Context) {
 }
 
 func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.FileInfo {
-	n.maybeRecheckCompatibility(ctx)
+	n.mu.Lock()
+	takingOver := n.operation["action"] == autoTakeoverAction && n.operation["state"] == "running"
+	n.mu.Unlock()
+	if !takingOver {
+		n.maybeRecheckCompatibility(ctx)
+	}
 	modelBlocked := n.modelSyncWriteBlocked()
 	accountBlocked := n.accountSwitchWriteBlocked()
 	n.mu.Lock()
@@ -268,8 +280,11 @@ func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.F
 	n.mu.Unlock()
 
 	var checkedProcess core.Document
+	var pids []int
+	var known bool
 	if settings.Installation.Application != "" {
-		pids, known, reason := kimi.WithIdentityTimeout(settings.Installation.Application)
+		var reason string
+		pids, known, reason = kimi.WithIdentityTimeout(settings.Installation.Application)
 		if !known {
 			checkedProcess = core.Document{"running": nil, "state": "unknown", "reason": reason}
 		} else {
@@ -283,7 +298,7 @@ func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.F
 	}
 
 	n.controller.Tick(ctx)
-	if !modelBlocked {
+	if !modelBlocked && !takingOver {
 		// The readback answers for the document it was made against. Two saves
 		// can land between it and the read below, so the store revision has to be
 		// the same on both sides before the readback settles anything.
@@ -294,6 +309,9 @@ func (n *Native) watchStep(ctx context.Context, configObserved os.FileInfo) os.F
 			n.autoSync.observe(&integration, d)
 		}
 		n.autoSync.kickIfReady()
+	}
+	if n.autoTakeover != nil {
+		n.autoTakeover.observe(ctx, pids, known, settings.Installation)
 	}
 	if err := n.syncWorkHome(); err == nil {
 		configObserved = n.reconcile(configObserved)
@@ -618,6 +636,9 @@ func (n *Native) State() core.Document {
 		}
 		out["directMode"] = n.directModeState(d, integration, core.Object(policies["search"]))
 		out["kimiK3State"] = kimiK3State(d, currentIntegration, process["running"] == true)
+		integration["autoTakeover"] = n.autoTakeover.status(core.AutoTakeover(d))
+	} else {
+		integration["autoTakeover"] = n.autoTakeover.status(false)
 	}
 	out["tools"] = n.toolsState(context.Background())
 	out["webTools"] = n.web.State(core.Object(out["search"]))
@@ -769,7 +790,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			}
 		case "launch-kimi":
 			if profileMode == kimi.ProfileModeExistingAuthorized {
-				if err = n.refreshControllerInstallation(); err == nil {
+				if err = n.refreshControllerInstallationForce(); err == nil {
 					err = n.controller.StartWithExistingLogin(deadline)
 				}
 				if err == nil {
@@ -781,7 +802,9 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 		case "open-work":
 			err = n.openWork(deadline)
 		case "restart-kimi":
-			err = n.controller.RestartOfficial(deadline)
+			if err = n.refreshControllerInstallationForce(); err == nil {
+				err = n.controller.RestartOfficial(deadline)
+			}
 			if err == nil {
 				err = n.syncWorkHome()
 			}
@@ -944,17 +967,8 @@ func (n *Native) openWork(ctx context.Context) error {
 	return open(ctx)
 }
 
-func (n *Native) refreshControllerInstallation() error {
-	settings := n.controller.Settings()
-	refreshed := refreshKimiInstallation(settings, func() []kimi.Installation { return kimi.Detect(runtime.GOOS, currentEnvMap()) })
-	if refreshed.Installation != settings.Installation {
-		return n.controller.Configure(refreshed)
-	}
-	return nil
-}
-
 func (n *Native) startManagedOfficial(ctx context.Context) error {
-	if err := n.refreshControllerInstallation(); err != nil {
+	if err := n.refreshControllerInstallationForce(); err != nil {
 		return err
 	}
 	if err := n.controller.StartOfficial(ctx); err != nil {
@@ -1087,6 +1101,27 @@ func (n *Native) beginOperation(ctx context.Context, action string) (string, err
 		n.mu.Unlock()
 	}
 	return id, nil
+}
+
+func (n *Native) isOperationRunning() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.operation["state"] == "running"
+}
+
+func (n *Native) tryBeginBackgroundOperation(action string) (string, bool) {
+	if !n.mu.TryLock() {
+		return "", false
+	}
+	defer n.mu.Unlock()
+	if n.opWaiter || n.operation["state"] == "running" {
+		return "", false
+	}
+	n.autoSync.suspend()
+	id := RandomKey()[:16]
+	n.operation = core.Document{"id": id, "action": action, "state": "running", "startedAt": time.Now().UnixMilli()}
+	n.opSuspended = true
+	return id, true
 }
 
 func (n *Native) notifyOperationIdleLocked() {

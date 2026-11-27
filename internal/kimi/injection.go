@@ -177,13 +177,14 @@ type Host struct {
 	// caller.
 	syncMu sync.Mutex
 
-	mu         sync.Mutex
-	sessions   map[string]*SurfaceSession // keyed by target id
-	stopped    bool
-	replySlots chan struct{}
-	stopCh     chan struct{}
-	stopOnce   sync.Once
-	loopDone   chan struct{}
+	mu             sync.Mutex
+	sessions       map[string]*SurfaceSession // keyed by target id
+	stopped        bool
+	replySlots     chan struct{}
+	busyReplySlots chan struct{}
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	loopDone       chan struct{}
 	// cancelBindings is closed and replaced whenever the attached pages are
 	// withdrawn. A reply in flight reads the channel before it starts, so
 	// disabling translation or retiring the host cancels an upstream request
@@ -211,7 +212,8 @@ func NewHost(pipe *Pipe, options InjectionOptions) *Host {
 	// (or mutates what Options returned) must not change what an injection reads.
 	options.Settings = cloneSettings(options.Settings)
 	host := &Host{pipe: pipe, options: options, sessions: map[string]*SurfaceSession{},
-		replySlots: make(chan struct{}, 8), stopCh: make(chan struct{}), loopDone: make(chan struct{}),
+		replySlots: make(chan struct{}, 8), busyReplySlots: make(chan struct{}, 4),
+		stopCh: make(chan struct{}), loopDone: make(chan struct{}),
 		cancelBindings: make(chan struct{}), withdrawing: make(chan struct{}),
 		contextWaiters: map[*SurfaceSession][]chan int{}}
 	// One permanent reader for unsolicited events. Without it, navigation and
@@ -586,8 +588,7 @@ func (h *Host) detach(ctx context.Context, session *SurfaceSession) error {
 // identity is deliberately left alone; only real evidence drops it.
 func (h *Host) inject(ctx context.Context, session *SurfaceSession, snap settingsSnapshot, targetURL string) error {
 	session.mu.Lock()
-	session.generation++
-	injection := session.generation
+	injection := session.generation + 1
 	session.mu.Unlock()
 
 	configJSON, source, err := h.rendererScript(snap, session.Surface, injection)
@@ -655,6 +656,9 @@ func (h *Host) inject(ctx context.Context, session *SurfaceSession, snap setting
 		_, _ = h.pipe.Send(ctx, "Page.removeScriptToEvaluateOnNewDocument",
 			map[string]any{"identifier": previous}, session.SessionID, h.callTimeout())
 	}
+	session.mu.Lock()
+	session.generation = injection
+	session.mu.Unlock()
 	script, err := h.pipe.Send(ctx, "Page.addScriptToEvaluateOnNewDocument",
 		map[string]any{"source": source}, session.SessionID, h.callTimeout())
 	if err != nil {
@@ -961,41 +965,45 @@ func (h *Host) deliverBinding(session *SurfaceSession, event Event) {
 	if !live {
 		return
 	}
-	timeout := h.replyTimeout()
 	select {
 	case <-h.pipe.Done():
 		return
 	default:
 	}
+	slots, timeout := h.replySlots, h.replyTimeout()
 	select {
-	case h.replySlots <- struct{}{}:
-		go func() {
-			defer func() { <-h.replySlots }()
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			// A provider call is allowed to outlive the page that asked for it by
-			// minutes. A withdrawal, a session that left the surface, a retired host
-			// or the end of the managed child must end it at once instead of holding
-			// a reply slot that the next translation needs.
-			done := make(chan struct{})
-			defer close(done)
-			go func() {
-				select {
-				case <-ctx.Done():
-					return
-				case <-done:
-					return
-				case <-batch:
-				case <-session.retired:
-				case <-h.stopCh:
-				case <-h.pipe.Done():
-				}
-				cancel()
-			}()
-			handler(ctx, session, generation, id, value)
-		}()
+	case slots <- struct{}{}:
 	default:
+		slots, timeout = h.busyReplySlots, 2*time.Second
+		select {
+		case slots <- struct{}{}:
+		default:
+			return
+		}
+		handler = func(ctx context.Context, session *SurfaceSession, generation int, id string, _ any) {
+			_ = h.Reply(ctx, session, generation, id, map[string]any{"id": id, "error": "translation_busy"})
+		}
+		value = nil
 	}
+	go func() {
+		defer func() { <-slots }()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		// A withdrawal, a retired session, or a closed pipe cancels an in-flight
+		// reply before it can hold a slot the next translation needs.
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-batch:
+			case <-session.retired:
+			case <-h.stopCh:
+			case <-h.pipe.Done():
+			}
+			cancel()
+		}()
+		handler(ctx, session, generation, id, value)
+	}()
 }
 
 // Reply delivers an answer to the renderer. It is a no-op when the session is

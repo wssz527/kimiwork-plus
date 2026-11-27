@@ -175,3 +175,30 @@ func TestCredentialStageDoesNotReplaceCurrentOnConflict(t *testing.T) {
 		t.Fatal("active key changed on conflict", e)
 	}
 }
+
+func TestAutoTakeoverHTTPSetting(t *testing.T) {
+	fixture := newDirectHTTPFixture(t)
+	status, state := fixture.call(t, http.MethodGet, "/api/state", nil)
+	if status != http.StatusOK || state[core.AutoTakeoverKey] != false {
+		t.Fatalf("default state: %d %v", status, state[core.AutoTakeoverKey])
+	}
+	const path = "/api/auto-takeover"
+	status, result := fixture.call(t, http.MethodPost, path, core.Document{"enabled": true})
+	if status != http.StatusConflict || core.Object(result["error"])["code"] != "configuration_conflict" {
+		t.Fatalf("missing revision: %d %v", status, result["error"])
+	}
+	status, result = fixture.call(t, http.MethodPost, path, core.Document{"revision": fixture.revision(t), "enabled": "true"})
+	if err := core.Object(result["error"]); status != http.StatusBadRequest || err["code"] != "invalid_auto_takeover" || err["message"] != "自动重新接管开关参数无效。" {
+		t.Fatalf("invalid value: %d %v", status, err)
+	}
+	for _, enabled := range []bool{true, false} {
+		status, result = fixture.call(t, http.MethodPost, path, core.Document{"revision": fixture.revision(t), "enabled": enabled})
+		if saved := core.Object(result["state"])[core.AutoTakeoverKey]; status != http.StatusOK || saved != enabled {
+			t.Fatalf("save %v: %d %v", enabled, status, saved)
+		}
+		status, state = fixture.call(t, http.MethodGet, "/api/state", nil)
+		if status != http.StatusOK || state[core.AutoTakeoverKey] != enabled {
+			t.Fatalf("persisted %v: %d %v", enabled, status, state[core.AutoTakeoverKey])
+		}
+	}
+}

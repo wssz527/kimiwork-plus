@@ -314,6 +314,15 @@ func (c *autoSyncCoordinator) resume() {
 	}
 }
 
+func (c *autoSyncCoordinator) isDisconnected() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.disconnected
+}
+
 // reset ends everything queued when the user removes the managed models.
 func (c *autoSyncCoordinator) reset() {
 	if c == nil {

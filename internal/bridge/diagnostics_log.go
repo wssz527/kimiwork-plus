@@ -514,7 +514,7 @@ func diagnosticPhase(phase string) string {
 }
 
 var diagnosticActions = map[string]struct{}{
-	"launch-kimi": {}, "open-work": {}, "restart-kimi": {}, "connect-kimi": {},
+	"launch-kimi": {}, "open-work": {}, "restart-kimi": {}, "connect-kimi": {}, "auto-takeover": {},
 	"disconnect-models": {}, "prepare-native": {}, "remove-dns": {}, "check-translation": {},
 	"check-compatibility": {}, "apply-connections": {}, "account-capture": {},
 	"account-begin-add": {}, "account-complete-add": {}, "account-cancel-add": {},

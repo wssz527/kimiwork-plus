@@ -3,6 +3,7 @@ package kimi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -97,6 +98,7 @@ type fakePage struct {
 	removals      int
 	detachCalls   int
 	evaluations   []string
+	onEvaluate    func(string)
 	lastSource    string
 	contextID     int
 	generation    int
@@ -251,6 +253,9 @@ func (p *fakePage) handle(write func(string)) func(string) {
 			p.mu.Lock()
 			p.evaluations = append(p.evaluations, expression)
 			p.mu.Unlock()
+			if p.onEvaluate != nil {
+				p.onEvaluate(expression)
+			}
 			switch {
 			case strings.Contains(expression, "status()"),
 				strings.Contains(expression, "__kwgTranslationGeneration"):
@@ -1547,4 +1552,62 @@ func eventually(t *testing.T, what string, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestBindingReceivesBusyReplyWhenTranslationSlotsAreFull(t *testing.T) {
+	evaluated := make(chan string, 1)
+	page := &fakePage{surface: "work", onEvaluate: func(expression string) {
+		if strings.Contains(expression, "__kwgTranslationReceive?.(") {
+			evaluated <- expression
+		}
+	}}
+	harness := newHarness(t, page)
+	providerCalled := make(chan struct{}, 1)
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1",
+		OnReply: func(context.Context, *SurfaceSession, int, string, any) { providerCalled <- struct{}{} }})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("sync: %v", err)
+	}
+	for range cap(host.replySlots) {
+		host.replySlots <- struct{}{}
+	}
+	session := sessions[0]
+	payload := `{"type":"translate","id":"kwg-busy","generation":` + itoa(session.Generation()) + `,"text":"Translate this","protectedTexts":[]}`
+	harness.pipe.dispatch(`{"method":"Runtime.bindingCalled","sessionId":"` + session.SessionID +
+		`","params":{"name":"__kwgTranslate","payload":` + strconv.Quote(payload) +
+		`,"executionContextId":` + itoa(session.ContextID()) + `}}`)
+
+	select {
+	case got := <-evaluated:
+		if want := `globalThis.__kwgTranslationReceive?.("kwg-busy",{"error":"translation_busy","id":"kwg-busy"})`; got != want {
+			t.Fatalf("renderer reply = %s, want %s", got, want)
+		}
+	case <-providerCalled:
+		t.Fatal("a saturated queue submitted a provider request")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the renderer never received a busy reply")
+	}
+}
+
+func TestFailedInjectionPreflightPreservesGeneration(t *testing.T) {
+	harness := newHarness(t, &fakePage{surface: "work"})
+	host := NewHost(harness.pipe, InjectionOptions{Payload: testPayload, Revision: "rev-1"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessions, err := host.Sync(ctx)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("sync: %v", err)
+	}
+	session := sessions[0]
+	generation, script := session.Generation(), session.ScriptID()
+	harness.pipe.Dispose()
+	if err := host.inject(ctx, session, host.snapshot(), "app://localhost/kimi-agent.html"); !errors.Is(err, ErrPipeClosed) {
+		t.Fatalf("expected a preflight transport failure, got %v", err)
+	}
+	if session.Generation() != generation || session.ScriptID() != script {
+		t.Fatalf("failed preflight changed generation or script: %d %q", session.Generation(), session.ScriptID())
+	}
 }

@@ -52,6 +52,29 @@ func currentEnvMap() map[string]string {
 	return env
 }
 
+func forceRefreshKimiInstallation(settings kimi.ControllerSettings, discover func() []kimi.Installation) kimi.ControllerSettings {
+	if installs := discover(); len(installs) > 0 {
+		settings.Installation = installs[0]
+	}
+	return settings
+}
+
+func (n *Native) refreshControllerInstallationForce() error {
+	discover := n.discoverInstallation
+	if discover == nil {
+		discover = func() []kimi.Installation { return kimi.Detect(runtime.GOOS, currentEnvMap()) }
+	}
+	installs := discover()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	settings := n.controller.Settings()
+	refreshed := forceRefreshKimiInstallation(settings, func() []kimi.Installation { return installs })
+	if refreshed.Installation != settings.Installation {
+		return n.controller.Configure(refreshed)
+	}
+	return nil
+}
+
 // runCompatibilityCheck runs the read-only self-check suite and records the
 // resulting guards. When reuseContract is non-nil, it skips a duplicate
 // Inspect subprocess run.
@@ -59,16 +82,13 @@ func (n *Native) runCompatibilityCheck(ctx context.Context, reuseContract *kimi.
 	n.compatMu.Lock()
 	defer n.compatMu.Unlock()
 
-	settings := n.controller.Settings()
-	install := settings.Installation
+	install := n.controller.Settings().Installation
 	if forceRedetect || install.Archive == "" {
-		if installs := kimi.Detect(runtime.GOOS, currentEnvMap()); len(installs) > 0 {
-			install = installs[0]
-			if install != settings.Installation {
-				settings.Installation = install
-				_ = n.controller.Configure(settings)
-			}
+		if install.Archive == "" {
+			n.compatLastMissingCheck = time.Now()
 		}
+		_ = n.refreshControllerInstallationForce()
+		install = n.controller.Settings().Installation
 	}
 
 	capabilities := kimi.ProbeWorkCapabilities(install)
@@ -115,6 +135,15 @@ func (n *Native) runCompatibilityCheck(ctx context.Context, reuseContract *kimi.
 	return report
 }
 
+func (n *Native) compatibilityFingerprintChanged() bool {
+	install := n.controller.Settings().Installation
+	workHome, _ := n.controller.WorkHome()
+	fp := kimi.ReadOfficialFingerprint(install, workHome)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return fp != n.compatFingerprint
+}
+
 // maybeRecheckCompatibility checks lightweight stat/metadata fingerprints on
 // each watch tick. It re-runs the full self-check only when the official
 // install, kernel commit, or BYOK store changed, or when a newly ready managed
@@ -123,8 +152,12 @@ func (n *Native) maybeRecheckCompatibility(ctx context.Context) {
 	if !n.compatMu.TryLock() {
 		return
 	}
-	settings := n.controller.Settings()
-	install := settings.Installation
+	install := n.controller.Settings().Installation
+	missing := install.Archive == ""
+	if missing && time.Since(n.compatLastMissingCheck) < 30*time.Second {
+		n.compatMu.Unlock()
+		return
+	}
 	workHome, _ := n.controller.WorkHome()
 	fp := kimi.ReadOfficialFingerprint(install, workHome)
 
@@ -135,7 +168,7 @@ func (n *Native) maybeRecheckCompatibility(ctx context.Context) {
 	caps := n.workCapabilities
 	n.mu.Unlock()
 
-	if fp != prevFP {
+	if missing || fp != prevFP {
 		n.compatMu.Unlock()
 		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()

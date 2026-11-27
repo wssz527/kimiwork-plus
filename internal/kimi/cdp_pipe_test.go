@@ -150,3 +150,26 @@ func TestPipeSendSerializesConcurrentWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestPipeConsoleSpamDoesNotDropBindings(t *testing.T) {
+	toHostReader, toHostWriter := io.Pipe()
+	pipe := NewPipe(toHostReader, &chunkedWriteCloser{})
+	t.Cleanup(pipe.Dispose)
+
+	const diagnostics = `{"method":"Runtime.consoleAPICalled"}` + "\x00" +
+		`{"method":"Runtime.exceptionThrown"}` + "\x00" + `{"method":"Runtime.inspectRequested"}` + "\x00"
+	const binding = `{"method":"Runtime.bindingCalled","sessionId":"work"}` + "\x00"
+	const world = `{"method":"Runtime.executionContextCreated","sessionId":"work"}` + "\x00"
+	if _, err := io.WriteString(toHostWriter, strings.Repeat(diagnostics, 1024)+binding+world); err != nil {
+		t.Fatal(err)
+	}
+	_ = toHostWriter.Close()
+	<-pipe.Done()
+	var got []Event
+	for event := range pipe.Events() {
+		got = append(got, event)
+	}
+	if len(got) != 2 || got[0].Method != "Runtime.bindingCalled" || got[0].SessionID != "work" || got[1].Method != "Runtime.executionContextCreated" {
+		t.Fatalf("diagnostic events crowded out renderer events: count=%d", len(got))
+	}
+}

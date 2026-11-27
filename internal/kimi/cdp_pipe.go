@@ -131,7 +131,7 @@ func NewPipe(readable io.ReadCloser, writable io.WriteCloser) *Pipe {
 		readable: readable,
 		writable: writable,
 		pending:  map[int]*call{},
-		events:   make(chan Event, 64),
+		events:   make(chan Event, 512),
 		done:     make(chan struct{}),
 	}
 	go pipe.readLoop()
@@ -206,7 +206,8 @@ func (p *Pipe) dispatch(payload string) {
 		}
 		return
 	}
-	if message.Method == "" {
+	switch message.Method {
+	case "", "Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Runtime.inspectRequested":
 		return
 	}
 	select {

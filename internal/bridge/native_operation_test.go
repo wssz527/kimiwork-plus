@@ -332,6 +332,7 @@ func TestRealStartManagedOfficialPreservesErrorCode(t *testing.T) {
 	if err := n.controller.Configure(settings); err != nil {
 		t.Fatal(err)
 	}
+	n.discoverInstallation = func() []kimi.Installation { return nil }
 	n.autoLaunch = n.startManagedOfficial
 
 	if _, err := n.Action(context.Background(), core.Document{"action": "connect-kimi"}); err != nil {

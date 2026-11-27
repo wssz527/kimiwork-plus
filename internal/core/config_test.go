@@ -432,3 +432,22 @@ func TestDeleteConnectionPrunesModelReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoTakeoverConfiguration(t *testing.T) {
+	d := Document{"connections": []any{}, "models": []any{}}
+	if AutoTakeover(d) || Validate(d) != nil {
+		t.Fatal("an absent setting should be valid and disabled")
+	}
+	for _, value := range []any{nil, true, false} {
+		d[AutoTakeoverKey] = value
+		if err := Validate(d); err != nil || AutoTakeover(d) != (value == true) {
+			t.Fatalf("value %v: enabled=%v, err=%v", value, AutoTakeover(d), err)
+		}
+	}
+	for _, value := range []any{"true", float64(1), []any{true}, Document{}} {
+		d[AutoTakeoverKey] = value
+		if err := Validate(d); err == nil || err.Error() != "invalid_auto_takeover" || AutoTakeover(d) {
+			t.Fatalf("accepted invalid value %v: %v", value, err)
+		}
+	}
+}

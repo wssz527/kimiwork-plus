@@ -156,22 +156,24 @@ func TestCheckCompatibilityVerdictsAndGuards(t *testing.T) {
 	}
 
 	t.Run("verified version passes", func(t *testing.T) {
+		contract := *verifiedContract
+		contract.Version = "3.2.29"
 		archive := buildTestAsar(t, map[string]string{
-			"package.json":                        `{"version":"3.2.28"}`,
-			"out/preload/preload-kimi-agent.mjs":  `contextBridge.exposeInMainWorld("kimiAgentAPI",{getUserProfile:()=>{},byokSources:{list:()=>{}}})`,
-			"out/preload/preload-claw.mjs":        `contextBridge.exposeInMainWorld("clawBridgeAPI",{byokSources:{list:()=>{},preview:()=>{},save:()=>{}}})`,
+			"package.json":                       `{"version":"3.2.29"}`,
+			"out/preload/preload-kimi-agent.mjs": `contextBridge.exposeInMainWorld("kimiAgentAPI",{getUserProfile:()=>{},byokSources:{list:()=>{}}})`,
+			"out/preload/preload-claw.mjs":       `contextBridge.exposeInMainWorld("clawBridgeAPI",{byokSources:{list:()=>{},preview:()=>{},save:()=>{}}})`,
 		})
 		workHome := t.TempDir()
 		_ = os.WriteFile(filepath.Join(workHome, NativeWorkStore), []byte(`{"v":3,"accounts":{}}`), 0o600)
 
 		report, _ := CheckCompatibility(context.Background(), CompatibilityOptions{
-			Installation: Installation{Archive: archive, Version: "3.2.28"},
+			Installation: Installation{Archive: archive, Version: "3.2.29"},
 			WorkHome:     workHome,
-			Contract:     verifiedContract,
+			Contract:     &contract,
 			Capabilities: &WorkCapabilities{KernelVersion: "1.0.14", KernelCommit: "303f4196e"},
 			Previous:     &OfficialObservation{OfficialVersion: "3.2.27", KernelCommit: "ecb904a69"},
 		})
-		if report.Status != CompatStatusVerified || report.Summary != "兼容" {
+		if report.Status != CompatStatusVerified || !report.VerifiedVersion || report.Summary != "兼容" {
 			t.Fatalf("unexpected report: %+v", report)
 		}
 		if !report.VersionChanged || report.PreviousVersion != "3.2.27" || report.PreviousKernelCommit != "ecb904a69" {
@@ -198,7 +200,7 @@ func TestCheckCompatibilityVerdictsAndGuards(t *testing.T) {
 			WorkHome:     t.TempDir(),
 			Contract:     &newContract,
 		})
-		if report.Status != CompatStatusNewVersionPass || report.Summary != "新版本，基础检查通过" {
+		if report.Status != CompatStatusNewVersionPass || report.Summary != "新版本，自检兼容" {
 			t.Fatalf("unexpected report: %+v", report)
 		}
 		if report.VerifiedVersion || report.Guards.ModelSyncWriteBlocked || report.Guards.AccountSwitchWriteBlocked {

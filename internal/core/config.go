@@ -77,6 +77,11 @@ func KimiK3Compatibility(d Document) bool {
 	}
 	return true
 }
+
+const AutoTakeoverKey = "autoTakeover"
+
+func AutoTakeover(d Document) bool { return d[AutoTakeoverKey] == true }
+
 func Rows(v any) []any { r, _ := v.([]any); return r }
 func Object(v any) map[string]any {
 	switch m := v.(type) {
@@ -161,6 +166,11 @@ func Validate(d Document) error {
 	if raw, exists := d[KimiK3CompatibilityKey]; exists && raw != nil {
 		if _, ok := raw.(bool); !ok {
 			return errors.New("invalid_kimi_k3_compatibility")
+		}
+	}
+	if raw, exists := d[AutoTakeoverKey]; exists && raw != nil {
+		if _, ok := raw.(bool); !ok {
+			return errors.New("invalid_auto_takeover")
 		}
 	}
 	if _, ok := d["connections"].([]any); !ok {

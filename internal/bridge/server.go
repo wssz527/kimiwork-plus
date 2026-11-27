@@ -324,6 +324,8 @@ func message(code string) string {
 		return "更新设置参数无效，请确认渠道为稳定版或预览版。"
 	case "invalid_integration_mode":
 		return "接入模式无效，请选择网关或直连。"
+	case "invalid_auto_takeover":
+		return "自动重新接管开关参数无效。"
 	case "invalid_kimi_k3_compatibility":
 		return "请在本机网关模式下调整 K3 原会话切换设置。"
 	case "kimi_k3_model_id_conflict":
@@ -593,7 +595,7 @@ func (s *Service) action(ctx context.Context, method, path string, in core.Docum
 				return nil, err
 			}
 			return core.Document{"ok": true, "updates": st}, nil
-		case "/api/workspace", "/api/models", "/api/connections", "/api/connections/delete", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode", "/api/kimi-k3-compatibility":
+		case "/api/workspace", "/api/models", "/api/connections", "/api/connections/delete", "/api/subagents", "/api/translation", "/api/budget/save", "/api/integration-mode", "/api/kimi-k3-compatibility", "/api/auto-takeover":
 			return s.configure(path, in)
 		case "/api/actions", "/api/context", "/api/tools", "/api/web-tools", "/api/quota/code", "/api/quota/magpie", "/api/work/conversations/rebind":
 			if s.Extra != nil {
@@ -757,6 +759,15 @@ func (s *Service) configure(path string, in core.Document) (any, error) {
 				return errors.New("invalid_kimi_k3_compatibility")
 			}
 			d[core.KimiK3CompatibilityKey] = enabled
+		case "/api/auto-takeover":
+			if core.String(in["revision"]) == "" {
+				return core.ErrConflict
+			}
+			enabled, ok := in["enabled"].(bool)
+			if !ok {
+				return errors.New("invalid_auto_takeover")
+			}
+			d[core.AutoTakeoverKey] = enabled
 		}
 		return nil
 	})
@@ -928,6 +939,7 @@ func (s *Service) State() (core.Document, error) {
 		"metrics": core.Document{"requests": 0, "errors": 0}, "diagnostics": core.Document{"operationLog": core.Document{"available": false, "retained": 0, "limit": diagnosticsEventLimit, "lastAt": int64(0), "reason": "diagnostics_unconfigured"}}, "setup": core.Document{"revealed": false, "intranet": core.Document{"passed": false}}, "operation": nil,
 		"integrationMode": core.IntegrationMode(d), "directMode": directModeBase(d),
 		"kimiK3Compatibility": core.KimiK3Compatibility(d),
+		"autoTakeover":        core.AutoTakeover(d),
 	}
 	for k, v := range gatewayState {
 		state[k] = v

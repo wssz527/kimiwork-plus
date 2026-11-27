@@ -38,7 +38,7 @@ const (
 
 // VerifiedOfficialVersions lists the official Kimi desktop versions that have
 // been verified end-to-end with KimiWork +.
-var VerifiedOfficialVersions = []string{"3.2.27", "3.2.28"}
+var VerifiedOfficialVersions = []string{"3.2.27", "3.2.28", "3.2.29"}
 
 func IsVerifiedOfficialVersion(version string) bool {
 	trimmed := strings.TrimSpace(version)
@@ -343,7 +343,7 @@ func CheckCompatibility(ctx context.Context, opts CompatibilityOptions) (Compati
 		report.Summary = "兼容"
 	} else {
 		report.Status = CompatStatusNewVersionPass
-		report.Summary = "新版本，基础检查通过"
+		report.Summary = "新版本，自检兼容"
 	}
 	return report, contract
 }
