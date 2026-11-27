@@ -6763,6 +6763,8 @@ test('BYOK preparation and disconnection reasons state the exact next step', () 
     ['model_disconnect_feature_disabled', /重新同步模型目录/, /模型来源/],
     ['model_disconnect_no_account', /完成登录/, /未继续移除/],
     ['model_disconnect_byok_not_ready', /尚未就绪/, /重启官方 Kimi/],
+    ['native_import_no_account', /完成登录/, /未继续导入模型目录/, /重新同步模型目录/],
+    ['native_import_byok_not_ready', /尚未就绪/, /重启官方 Kimi/, /重新同步模型目录/],
   ];
   for (const [code, ...patterns] of cases) {
     const text = reasonText(code);

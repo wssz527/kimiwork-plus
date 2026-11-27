@@ -359,6 +359,8 @@ const DIAG_REASON = {
   native_bridge_contract_changed: '官方 Kimi 页面接口与预期不一致，未继续写入。请检查官方版本兼容性或更新本软件。',
   native_prepare_required: '本机原生接入解析尚未准备，需要一次系统授权。请点击「准备并同步模型」或到「设置」页手动重新同步完成准备。',
   native_import_waiting_login: '尚未在官方 Kimi 确认登录账号。请先在打开的 Kimi 窗口完成登录，再重试操作。',
+  native_import_no_account: '官方 Kimi 当前尚未确认登录账号，未继续导入模型目录。请先在官方窗口完成登录，再点「重新同步模型目录」。',
+  native_import_byok_not_ready: '官方 Kimi 的模型来源服务尚未就绪，未继续导入模型目录。请稍候或正常重启官方 Kimi 后再点「重新同步模型目录」。',
   waiting_login: '尚未在官方 Kimi 确认登录账号。请先在打开的 Kimi 窗口完成登录，再重试操作。',
   account_changed: '当前官方 Kimi 登录账号已变化。请核对账号并刷新状态后重试。',
   native_import_account_changed: '当前官方 Kimi 登录账号已变化。请核对账号并刷新状态后重试。',

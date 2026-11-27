@@ -818,6 +818,8 @@ function nativeConnectionText(data) {
     kimi_start_failed: '未能自动启动官方 Kimi。请确认官方 Kimi 安装正常，或手动打开后再试。',
     native_prepare_required: '本机原生接入解析尚未准备，需要一次系统授权。点「准备并同步模型」或「重新同步模型目录」完成准备并同步。',
     native_import_waiting_login: '请先在 Kimi Work 登录并确认当前账户，然后点「打开 / 启动 Kimi」继续。',
+    native_import_no_account: '官方 Kimi 当前尚未确认登录账号，未继续导入模型目录。请先在官方窗口完成登录，再点「重新同步模型目录」。',
+    native_import_byok_not_ready: '官方 Kimi 的模型来源服务尚未就绪，未继续导入模型目录。请稍候或正常重启官方 Kimi 后再点「重新同步模型目录」。',
     native_import_disconnected: '检测到原生接入已断开。确认需要恢复后，点「打开 / 启动 Kimi」或「重新准备接入」。',
     'native_import_feature-disabled': '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」或「重新同步模型目录」会自动修复本机解析并同步模型目录。',
     native_import_feature_disabled: '官方 Kimi 的自定义模型入口尚未就绪，通常是本机解析未生效或官方进程仍保留旧缓存。点「重新准备并同步」或「重新同步模型目录」会自动修复本机解析并同步模型目录。',
