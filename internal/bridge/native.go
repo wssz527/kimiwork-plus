@@ -726,16 +726,10 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 	waitForResult := offline || action == "open-work"
 	run := func() error {
 		timeout := 45 * time.Second
-		if action == "prepare-native" || action == "remove-dns" || (action == "disconnect-models" && in["removeDns"] == true) {
-			timeout = 180 * time.Second
-		} else if (action == "connect-kimi" && !n.isDirectMode()) || action == "disconnect-models" {
-			// Auto-launching Kimi plus the 60 second bridge budget (and one
-			// OpenWork retry if Kimi was hidden in the tray) must finish cleanly
-			// before the outer deadline expires.
-			timeout = 120 * time.Second
-		} else if action == "connect-kimi" && n.isDirectMode() {
-			// A direct import settles the static hosts entry first, and that can
-			// need one administrator prompt; the gateway path never does.
+		if action == "prepare-native" || action == "remove-dns" || action == "connect-kimi" || action == "disconnect-models" {
+			// Both import routes settle the BYOK gate first, and that can need one
+			// administrator prompt. The launch, the bridge budget (and one OpenWork
+			// retry if Kimi was hidden in the tray) all share this deadline.
 			timeout = 180 * time.Second
 		} else if strings.HasPrefix(action, "account-") {
 			timeout = 90 * time.Second
@@ -817,7 +811,7 @@ func (n *Native) Action(ctx context.Context, in core.Document) (any, error) {
 			n.setOperationStage(id, diagnosticStageDisconnectModels)
 			var removed kimi.DisconnectResult
 			removed, err = n.disconnectModelsWithAutoStart(deadline)
-			removed, err = n.recoverDisconnectFeatureDisabled(deadline, removed, err)
+			removed, err = n.recoverDisconnectFeatureDisabled(deadline, id, removed, err)
 			if err == nil && !removed.OK {
 				reason := removed.Reason
 				if reason == "" {

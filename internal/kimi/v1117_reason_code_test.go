@@ -3,6 +3,7 @@ package kimi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,5 +257,166 @@ func TestDisconnectLocalStateAuthorizedRefusesAnUnknownProfile(t *testing.T) {
 	result, err := controller.DisconnectLocalStateAuthorized(context.Background())
 	if err != nil || result.OK || result.State != ImportStateWaitingLogin || result.Reason != NativeWaitingLogin {
 		t.Fatalf("local disconnect without an identity = %+v %v", result, err)
+	}
+}
+
+// seedDirectIntent records the active Direct Mode intent this product writes
+// after a verified import. The store key is the account scope, so the recorded
+// digest is one hash above it.
+func seedDirectIntent(t *testing.T, fixture *nativeFixture, account, sourceID string) {
+	t.Helper()
+	fixture.writeJSON(t, filepath.Join(fixture.state, NativeWorkIntent), &nativeIntent{
+		SchemaVersion: NativeWorkSchema, SourceID: "gateway", OwnerID: "owner-1",
+		KimiHome: fixture.dir, Mode: IntegrationModeDirect, DirectSourceID: sourceID,
+		AccountDigest: sha256Hex(account), Aliases: map[string]string{},
+		Entries: ownership{Providers: map[string]ownedEntry{}, Models: map[string]ownedEntry{}},
+		Active:  true, Generation: 3, UpdatedAt: "2026-11-17T00:00:00Z",
+	})
+}
+
+// A gateway import that the official gate refuses must name the gate in the
+// underscore vocabulary every other layer renders.
+func TestGatewayImportModelsDecodesTheGateCodes(t *testing.T) {
+	for code, want := range map[string]string{
+		"feature-disabled": "native_import_feature_disabled",
+		"no-account":       "native_import_no_account",
+		"byok-not-ready":   "native_import_byok_not_ready",
+	} {
+		t.Run(code, func(t *testing.T) {
+			home := kthTestHome(t)
+			vm := goja.New()
+			if _, err := vm.RunString(sourcesMock(`{ok:false,reasonCode:"` + code + `"}`)); err != nil {
+				t.Fatal(err)
+			}
+			page := &fakePage{surface: "work", actions: true, importAPI: true, evaluateAction: executeSourceActions(t, vm)}
+			result, err := kthImportActions(t, home, page).ImportModels(kthImportContext(t), ImportRequest{
+				URL: "http://127.0.0.1:9999/v1", Token: "fixture", ExpectedAccountKey: AccountScope(home)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.OK || result.State != ImportStateFailed || result.Reason != want {
+				t.Fatalf("result = %+v, want reason %q", result, want)
+			}
+		})
+	}
+}
+
+// A Direct Mode source whose display name was changed is still matched through
+// the id its intent recorded, and only for the account that intent names.
+func TestHasActiveManagedStoreSourcesMatchesADirectSourceByIntentID(t *testing.T) {
+	const user = "test-current-account"
+	account := sha256Hex(user)
+	for _, tc := range []struct {
+		name   string
+		intent string
+		want   bool
+	}{
+		{name: "the current account's intent", intent: account, want: true},
+		{name: "another account's intent", intent: "other-account", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newNativeFixture(t)
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+			writeIdentity(t, fixture, user)
+			store := directStoreFixture(account)
+			source := store["accounts"].(map[string]any)[account].(map[string]any)["sources"].([]any)[0].(map[string]any)
+			source["displayName"] = "Renamed provider"
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+			seedDirectIntent(t, fixture, tc.intent, directSourceID)
+			controller := &Controller{settings: ControllerSettings{
+				StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir), KimiHome: fixture.dir,
+			}}
+			hasActive, verified := controller.HasActiveManagedStoreSources()
+			if !verified || hasActive != tc.want {
+				t.Fatalf("hasActive=%v verified=%v, want %v/true", hasActive, verified, tc.want)
+			}
+		})
+	}
+}
+
+// A disconnected direct source whose removal is still pending must keep the
+// official disconnect in play; a settled one must not.
+func TestHasActiveManagedStoreSourcesSeesAPendingDirectRemoval(t *testing.T) {
+	const user = "test-current-account"
+	account := sha256Hex(user)
+	for _, tc := range []struct {
+		name    string
+		pending map[string]any
+		want    bool
+	}{
+		{
+			name:    "removal still pending",
+			pending: map[string]any{"providers": []any{}, "models": []any{}},
+			want:    true,
+		},
+		{
+			name: "removal already applied",
+			pending: map[string]any{"providers": []any{map[string]any{
+				"id": "prov-1", "sourceId": directSourceID, "protocol": "openai",
+				"baseUrl": "https://api.example.com/v1", "credentialRef": "cred-1",
+			}}, "models": []any{map[string]any{
+				"alias": "byok-uuid/model-a", "providerId": "prov-1", "sourceId": directSourceID,
+			}}},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newNativeFixture(t)
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+			writeIdentity(t, fixture, user)
+			store := directStoreFixture(account)
+			row := store["accounts"].(map[string]any)[account].(map[string]any)
+			source := row["sources"].([]any)[0].(map[string]any)
+			source["status"] = "disconnected"
+			row["pending"] = tc.pending
+			fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), store)
+			controller := &Controller{settings: ControllerSettings{
+				StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir), KimiHome: fixture.dir,
+			}}
+			hasActive, verified := controller.HasActiveManagedStoreSources()
+			if !verified || hasActive != tc.want {
+				t.Fatalf("hasActive=%v verified=%v, want %v/true", hasActive, verified, tc.want)
+			}
+		})
+	}
+}
+
+// A local-only disconnect is still a write: it must not run beside an import
+// that already holds the controller's grant.
+func TestDisconnectLocalStateAuthorizedRefusesAConcurrentImport(t *testing.T) {
+	profile, home := nativeProfile(t, "user-1")
+	seedNativeProfile(t, home, "http://127.0.0.1:9999/v1", "cred-1")
+	controller, _ := controllerFor(t, profile, nil)
+	controller.mu.Lock()
+	controller.importGranted = true
+	controller.mu.Unlock()
+	result, err := controller.DisconnectLocalStateAuthorized(context.Background())
+	if !errors.Is(err, ErrImportBusy) || result.OK || result.Reason != ErrImportBusy.Error() {
+		t.Fatalf("a concurrent local disconnect = %+v %v", result, err)
+	}
+	controller.mu.Lock()
+	granted := controller.importGranted
+	controller.mu.Unlock()
+	if !granted {
+		t.Fatal("the refused call released another caller's grant")
+	}
+}
+
+// An unreadable intent could hide the id of a renamed direct source, so the
+// store answer is not verified enough for a local-only clear.
+func TestHasActiveManagedStoreSourcesRefusesAnUnreadableIntent(t *testing.T) {
+	const user = "test-current-account"
+	fixture := newNativeFixture(t)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkConfig), directConfigFixture())
+	writeIdentity(t, fixture, user)
+	fixture.writeJSON(t, filepath.Join(fixture.dir, NativeWorkStore), directStoreFixture(sha256Hex(user)))
+	if err := os.MkdirAll(filepath.Join(fixture.state, NativeWorkIntent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	controller := &Controller{settings: ControllerSettings{
+		StateDir: fixture.state, UserDataDir: filepath.Dir(fixture.dir), KimiHome: fixture.dir,
+	}}
+	if hasActive, verified := controller.HasActiveManagedStoreSources(); hasActive || verified {
+		t.Fatalf("an unreadable intent was trusted: hasActive=%v verified=%v", hasActive, verified)
 	}
 }

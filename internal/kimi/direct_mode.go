@@ -659,6 +659,72 @@ func intentDirectSource(intent *nativeIntent) string {
 	return intent.DirectSourceID
 }
 
+// directStoreActive reports a managed direct source the account still holds:
+// either a live custom source this product created, or a removal the official
+// store has not applied yet. It reads only the account it is given.
+func directStoreActive(account map[string]any, sourceID string) bool {
+	if directSourceRemainsInAccount(account, sourceID) != "" {
+		return true
+	}
+	for _, id := range directManagedIDs(account, sourceID) {
+		if directPendingSettle(account, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// directManagedIDs are the ids a managed direct source can appear under: the one
+// the intent recorded, and every custom source carrying this product's display
+// name.
+func directManagedIDs(account map[string]any, sourceID string) []string {
+	ids := []string{}
+	if sourceID != "" {
+		ids = append(ids, sourceID)
+	}
+	rows, _ := account["sources"].([]any)
+	for _, row := range rows {
+		source, ok := row.(map[string]any)
+		if !ok || stringField(source, "kind") != "custom" || stringField(source, "displayName") != DirectDisplayName {
+			continue
+		}
+		if id := stringField(source, "id"); id != "" && id != sourceID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// directPendingSettle reports a removal the official store has not applied yet:
+// the active snapshot still holds the source while the pending one no longer
+// does. It is the direct-mode counterpart of the gateway scan's pending settle.
+func directPendingSettle(account map[string]any, sourceID string) bool {
+	if sourceID == "" {
+		return false
+	}
+	pending := mapField(account, "pending")
+	return pending != nil && !directSnapshotHolds(pending, sourceID) && directSnapshotHolds(account["active"], sourceID)
+}
+
+func directSnapshotHolds(snapshot any, sourceID string) bool {
+	object, _ := snapshot.(map[string]any)
+	rows, _ := object["providers"].([]any)
+	for _, row := range rows {
+		provider, _ := row.(map[string]any)
+		if stringField(provider, "sourceId") == sourceID {
+			return true
+		}
+	}
+	rows, _ = object["models"].([]any)
+	for _, row := range rows {
+		model, _ := row.(map[string]any)
+		if stringField(model, "sourceId") == sourceID {
+			return true
+		}
+	}
+	return false
+}
+
 // directActiveRows is the applied model set of one source minus the aliases the
 // account blocks. The provider facts are read from `active` only: a fact that
 // exists merely in `pending` has not been applied.

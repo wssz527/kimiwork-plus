@@ -424,18 +424,38 @@ func TestNativeDisconnectFeatureDisabledRestartsOnceForTheStaleGate(t *testing.T
 	})
 }
 
-// Removing the DNS entry after a recovered disconnect still runs.
-func TestNativeDisconnectRecoveryStillRemovesDNS(t *testing.T) {
-	n := newBYOKTestNative(t)
-	home := newManagedKimiHome(t, n, nil)
-	store := managedGatewayStore(kimi.AccountScope(home))
-	encoded, err := json.Marshal(store)
+func writeManagedGatewayStore(t *testing.T, home, account string) {
+	t.Helper()
+	encoded, err := json.Marshal(managedGatewayStore(account))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, "byok-providers.json"), encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type disconnectDNSResult = struct {
+	kimi.DisconnectResult
+	DNSRemoved bool   `json:"dnsRemoved"`
+	DNSWarning string `json:"dnsWarning,omitempty"`
+}
+
+func disconnectResultOf(t *testing.T, op core.Document) disconnectDNSResult {
+	t.Helper()
+	removed, ok := op["result"].(disconnectDNSResult)
+	if !ok {
+		t.Fatalf("operation result = %#v, want the removeDns answer", op["result"])
+	}
+	return removed
+}
+
+// Removing the DNS entry after a recovered disconnect still runs.
+func TestNativeDisconnectRecoveryStillRemovesDNS(t *testing.T) {
+	n := newBYOKTestNative(t)
+	n.dns = &fakeBYOKDNS{port: byokdns.DNSPort}
+	home := newManagedKimiHome(t, n, nil)
+	writeManagedGatewayStore(t, home, kimi.AccountScope(home))
 	n.byokPrepare = func(context.Context) error { return nil }
 	attempts := 0
 	n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
@@ -452,9 +472,138 @@ func TestNativeDisconnectRecoveryStillRemovesDNS(t *testing.T) {
 	if op["state"] != "removed" {
 		t.Fatalf("operation = %+v, want removed", op)
 	}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		if n.dns.Port() != 0 {
-			t.Fatal("removeDns did not stop the listener")
+	removed := disconnectResultOf(t, op)
+	if !removed.DNSRemoved || !removed.OK || removed.State != "disconnected" {
+		t.Fatalf("removeDns result = %+v", removed)
+	}
+	if runtime.GOOS == "darwin" && n.dns.Port() != 0 {
+		t.Fatal("removeDns did not stop the listener")
+	}
+}
+
+// The local-only clear is still a disconnect, so a requested DNS removal runs
+// for it too.
+func TestNativeDisconnectCleanAccountRecoveryStillRemovesDNS(t *testing.T) {
+	n := newBYOKTestNative(t)
+	n.dns = &fakeBYOKDNS{port: byokdns.DNSPort}
+	newManagedKimiHome(t, n, nil)
+	disconnects := 0
+	n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+		disconnects++
+		return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: "model_disconnect_feature_disabled"}, nil
+	}
+	if _, err := n.Action(context.Background(), core.Document{"action": "disconnect-models", "removeDns": true}); err != nil {
+		t.Fatal(err)
+	}
+	op := waitBYOKOperation(t, n)
+	if op["state"] != "removed" || disconnects != 1 {
+		t.Fatalf("operation = %+v, disconnects = %d", op, disconnects)
+	}
+	removed := disconnectResultOf(t, op)
+	if !removed.DNSRemoved || !removed.OK || removed.State != "disconnected" {
+		t.Fatalf("removeDns result = %+v", removed)
+	}
+}
+
+// A BYOK setup the user cancelled is what the panel must show; the gate refusal
+// that led here would hide it.
+func TestNativeDisconnectFeatureDisabledSurfacesPrepareFailure(t *testing.T) {
+	n := newBYOKTestNative(t)
+	home := newManagedKimiHome(t, n, nil)
+	writeManagedGatewayStore(t, home, kimi.AccountScope(home))
+	n.byokPrepare = func(context.Context) error { return errors.New("setup_cancelled") }
+	disconnects := 0
+	n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+		disconnects++
+		return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: "model_disconnect_feature_disabled"}, nil
+	}
+	if _, err := n.Action(context.Background(), core.Document{"action": "disconnect-models"}); err != nil {
+		t.Fatal(err)
+	}
+	op := waitBYOKOperation(t, n)
+	if op["state"] != "failed" || op["reason"] != "setup_cancelled" || op["stage"] != diagnosticStagePrepare {
+		t.Fatalf("operation = %+v", op)
+	}
+	result, ok := op["result"].(kimi.DisconnectResult)
+	if !ok || result.Reason != "setup_cancelled" || result.Reason == "model_disconnect_feature_disabled" {
+		t.Fatalf("result = %+v", op["result"])
+	}
+	if disconnects != 1 {
+		t.Fatalf("disconnects = %d, want the single refused attempt", disconnects)
+	}
+}
+
+// A failed local clear is surfaced as itself, not as the gate that led here.
+func TestNativeDisconnectFeatureDisabledSurfacesLocalStateFailure(t *testing.T) {
+	n := newBYOKTestNative(t)
+	newManagedKimiHome(t, n, nil)
+	stateDir := n.controller.Settings().StateDir
+	if err := os.MkdirAll(filepath.Join(stateDir, kimi.NativeWorkIntent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepared := 0
+	n.byokPrepare = func(context.Context) error {
+		prepared++
+		return nil
+	}
+	disconnects := 0
+	n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+		disconnects++
+		return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: "model_disconnect_feature_disabled"}, nil
+	}
+	if _, err := n.Action(context.Background(), core.Document{"action": "disconnect-models"}); err != nil {
+		t.Fatal(err)
+	}
+	op := waitBYOKOperation(t, n)
+	if op["state"] != "failed" || op["reason"] != "model_disconnect_local_state_failed" {
+		t.Fatalf("operation = %+v", op)
+	}
+	result, ok := op["result"].(kimi.DisconnectResult)
+	if !ok || result.Reason != "model_disconnect_local_state_failed" {
+		t.Fatalf("result = %+v", op["result"])
+	}
+	if disconnects != 1 || prepared != 0 {
+		t.Fatalf("disconnects = %d, prepares = %d", disconnects, prepared)
+	}
+}
+
+// A Native without an initialised probe must still be able to settle the setup
+// instead of dereferencing it.
+func TestNativePrepareWithoutAProbeSettlesTheSetup(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("the setup layer only supports the desktop platforms")
+	}
+	n := newBYOKTestNative(t)
+	n.probe = nil
+	if err := n.prepareBYOK(context.Background()); err != nil {
+		t.Fatalf("prepare without a probe: %v", err)
+	}
+}
+
+// An injected prepare hook must run even when the Native carries no probe.
+func TestNativeDisconnectRecoveryRunsAnInjectedPrepareWithoutAProbe(t *testing.T) {
+	n := newBYOKTestNative(t)
+	n.probe = nil
+	home := newManagedKimiHome(t, n, nil)
+	writeManagedGatewayStore(t, home, kimi.AccountScope(home))
+	prepared := 0
+	n.byokPrepare = func(context.Context) error {
+		prepared++
+		return nil
+	}
+	attempts := 0
+	n.disconnectModels = func(context.Context) (kimi.DisconnectResult, error) {
+		attempts++
+		if attempts == 1 {
+			return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: "model_disconnect_feature_disabled"}, nil
 		}
+		return kimi.DisconnectResult{OK: true, State: "disconnected", Sources: 1}, nil
+	}
+	if _, err := n.Action(context.Background(), core.Document{"action": "disconnect-models"}); err != nil {
+		t.Fatal(err)
+	}
+	op := waitBYOKOperation(t, n)
+	if op["state"] != "removed" || prepared != 1 || attempts != 2 {
+		t.Fatalf("operation = %+v, prepares = %d, attempts = %d", op, prepared, attempts)
 	}
 }

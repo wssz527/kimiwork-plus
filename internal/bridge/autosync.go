@@ -392,6 +392,10 @@ func (c *autoSyncCoordinator) operationFinished(action, startedDigest string, re
 	if manualPrepare {
 		// The user asked for the models again, whatever the import answered.
 		c.disconnected = false
+		// This import answered for the account as it is now, so the catch-up an
+		// earlier account switch queued has nothing left to rebind. Keeping the
+		// flag would let a later foreign sign-in import silently.
+		c.allowAccountRebind = false
 	}
 	if manualPrepare && produced && startedDigest != "" && currentDigest == startedDigest &&
 		(imported.Applied || imported.RequiresRestart) &&
@@ -789,7 +793,7 @@ func (c *autoSyncCoordinator) importCatalog(ctx context.Context, repair kimi.Int
 		// No ensure step: a background timer must never launch Kimi.
 		return n.importDirectWithEnsure(ctx, func(context.Context) error { return nil })
 	}
-	if n.probe != nil {
+	if n.byokPrepare != nil || n.probe != nil {
 		// The shared BYOK gate is what makes the page offer its source API. A
 		// machine that already has it costs nothing and no prompt; one that still
 		// needs the elevated step is reported for the panel to settle.

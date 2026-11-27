@@ -522,10 +522,7 @@ func (a *cdpActions) ImportModels(ctx context.Context, request ImportRequest) (I
 				code = "import-failed"
 			}
 			result.State = ImportStateFailed
-			result.Reason = "native_import_" + safeActionCode(code)
-			if code == "non-canonical-provider" {
-				result.Reason = "native_import_non_canonical_provider"
-			}
+			result.Reason = gatewayImportFailureReason(code)
 		}
 		if code == "non-canonical-provider" && attempt+1 < attempts {
 			if err := a.waitStep(ctx); err != nil {
@@ -1474,6 +1471,24 @@ func isLoopbackGateway(value string) bool {
 		return false
 	}
 	return parsed.Path == "/v1" || parsed.Path == "/v1/"
+}
+
+// gatewayImportFailureReason maps a page code onto the underscore vocabulary the
+// panel, the auto-sync publisher and the recovery helpers share. The official
+// reasonCodes are hyphenated, so the known gates are named explicitly instead of
+// leaking a code that no other layer recognises.
+func gatewayImportFailureReason(code string) string {
+	switch code {
+	case "non-canonical-provider":
+		return "native_import_non_canonical_provider"
+	case "feature-disabled":
+		return "native_import_feature_disabled"
+	case "no-account":
+		return "native_import_no_account"
+	case "byok-not-ready":
+		return "native_import_byok_not_ready"
+	}
+	return "native_import_" + safeActionCode(code)
 }
 
 func directImportFailureReason(code string) string {

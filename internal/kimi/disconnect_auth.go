@@ -86,6 +86,18 @@ func (c *Controller) DisconnectLocalStateAuthorized(ctx context.Context) (Discon
 		return DisconnectResult{State: ImportStateFailed, Reason: safeReason(err)}, err
 	}
 	c.reapChild()
+	c.mu.Lock()
+	if c.importGranted {
+		c.mu.Unlock()
+		return DisconnectResult{State: ImportStateFailed, Reason: ErrImportBusy.Error()}, ErrImportBusy
+	}
+	c.importGranted = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.importGranted = false
+		c.mu.Unlock()
+	}()
 	account, verified := c.profileAccount()
 	if !verified {
 		return DisconnectResult{State: ImportStateWaitingLogin, Reason: NativeWaitingLogin}, nil
@@ -143,21 +155,54 @@ func (c *Controller) HasActiveManagedStoreSources() (hasActive bool, verified bo
 	if !ok {
 		return false, false
 	}
+	// One snapshot decides the answer. Reading the store again for each scan
+	// could fail between the reads and turn a live source into "nothing left to
+	// disconnect", which is exactly the case a local-only clear must not happen.
 	store, kind := readJSONFile(filepath.Join(home, NativeWorkStore), maxStoreBytes)
-	if kind != "" && kind != "absent" {
+	if kind == "absent" {
+		return false, true
+	}
+	if kind != "" {
 		return false, false
 	}
-	if store != nil {
-		if _, ok := store["accounts"].(map[string]any); !ok {
-			return false, false
-		}
+	accounts, ok := store["accounts"].(map[string]any)
+	if !ok {
+		return false, false
 	}
-	gateway := kthStoreState(home, account, settings.GatewayURL)
+	gateway := scanKthStore(store, account, settings.GatewayURL)
 	if gateway.owned || gateway.needsPendingSettle() {
 		return true, true
 	}
-	if DirectSourceRemains(home, account, "") != "" {
+	row, _ := accounts[account].(map[string]any)
+	if row == nil {
+		return false, true
+	}
+	sourceID, known := managedDirectSourceID(settings.StateDir, account)
+	if !known {
+		return false, false
+	}
+	if directStoreActive(row, sourceID) {
 		return true, true
 	}
 	return false, true
+}
+
+// managedDirectSourceID is the custom source an active Direct Mode intent
+// recorded for this account. It is read from the intent file only: the store
+// snapshot above stays the single one this call reads. `known` is false when
+// the intent cannot be read at all, because then an id-only source cannot be
+// ruled out.
+func managedDirectSourceID(stateDir, account string) (sourceID string, known bool) {
+	intent, err := readIntentFile(stateDir)
+	if err != nil {
+		return "", false
+	}
+	if intent == nil || !intent.Active || intent.Mode != IntegrationModeDirect || intent.DirectSourceID == "" {
+		return "", true
+	}
+	scopeDigest := sha256If(account)
+	if scopeDigest != "" && intent.AccountDigest != "" && intent.AccountDigest != scopeDigest {
+		return "", true
+	}
+	return intent.DirectSourceID, true
 }

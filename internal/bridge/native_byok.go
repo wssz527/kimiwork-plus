@@ -118,7 +118,9 @@ func (n *Native) prepareBYOKSilent(ctx context.Context) error {
 }
 
 func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) error {
-	n.probe.Invalidate()
+	if n.probe != nil {
+		n.probe.Invalidate()
+	}
 	// Direct Mode resolves the intranet name from a static hosts entry, so a
 	// listener that cannot bind is not a failure: the port is not used at all.
 	// The one administrator step writes that entry and removes the resolver an
@@ -129,6 +131,9 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 		}
 		if n.dns != nil {
 			_ = n.dns.Close()
+		}
+		if n.probe == nil {
+			return nil
 		}
 		n.probe.Invalidate()
 		status := n.probe.Check(ctx, n.byokFlagFile())
@@ -142,7 +147,7 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 			n.mu.Lock()
 			n.dnsReason = core.ErrorCode(err)
 			n.mu.Unlock()
-			if !n.probe.DNS(ctx).Passed {
+			if n.probe == nil || !n.probe.DNS(ctx).Passed {
 				return err
 			}
 		} else {
@@ -153,6 +158,9 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 	}
 	if err := setup.Run(ctx, "prepare"); err != nil {
 		return err
+	}
+	if n.probe == nil {
+		return nil
 	}
 	n.probe.Invalidate()
 	status := n.probe.Check(ctx, n.byokFlagFile())
@@ -253,21 +261,27 @@ func (n *Native) disconnectAfterStaleFeatureDisabled(ctx context.Context, remove
 // is still in Kimi and the official disconnect has to run: the flag and the
 // intranet name are settled first, and one managed restart clears the official
 // build's own one minute cache if it still refuses.
-func (n *Native) recoverDisconnectFeatureDisabled(ctx context.Context, removed kimi.DisconnectResult, err error) (kimi.DisconnectResult, error) {
+//
+// A failed local clear or BYOK setup is surfaced with its own code: those are
+// steps the user acted on, and folding them into the gate refusal would hide
+// what really failed.
+func (n *Native) recoverDisconnectFeatureDisabled(ctx context.Context, id string, removed kimi.DisconnectResult, err error) (kimi.DisconnectResult, error) {
 	if !isFeatureDisabledReason(removed.Reason) {
 		return removed, err
 	}
 	if hasActive, verified := n.controller.HasActiveManagedStoreSources(); verified && !hasActive {
 		local, localErr := n.controller.DisconnectLocalStateAuthorized(ctx)
 		if localErr != nil {
-			return removed, err
+			return local, localErr
 		}
 		return local, nil
 	}
-	if n.probe != nil {
+	if n.byokPrepare != nil || n.probe != nil {
+		n.setOperationStage(id, diagnosticStagePrepare)
 		if prepareErr := n.prepareBYOK(ctx); prepareErr != nil {
-			return removed, err
+			return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(prepareErr)}, prepareErr
 		}
+		n.setOperationStage(id, diagnosticStageDisconnectModels)
 	}
 	retried, retryErr := n.disconnectModelsWithAutoStart(ctx)
 	if retried.OK || !isFeatureDisabledReason(retried.Reason) {
