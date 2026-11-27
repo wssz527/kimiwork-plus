@@ -87,6 +87,9 @@ func (n *Native) byokState() core.Document {
 }
 
 func (n *Native) prepareBYOK(ctx context.Context) error {
+	if n.byokPrepare != nil {
+		return n.byokPrepare(ctx)
+	}
 	return n.prepareBYOKWith(ctx, n.byokSetup())
 }
 
@@ -94,6 +97,9 @@ func (n *Native) prepareBYOK(ctx context.Context) error {
 // administrator prompt. A machine that still needs the elevated step is
 // reported as needing it, and the panel action performs it when the user asks.
 func (n *Native) prepareBYOKSilent(ctx context.Context) error {
+	if n.byokPrepare != nil {
+		return n.byokPrepare(ctx)
+	}
 	setup := n.byokSetup()
 	refused := false
 	if setup.Admin == nil {
@@ -112,7 +118,9 @@ func (n *Native) prepareBYOKSilent(ctx context.Context) error {
 }
 
 func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) error {
-	n.probe.Invalidate()
+	if n.probe != nil {
+		n.probe.Invalidate()
+	}
 	// Direct Mode resolves the intranet name from a static hosts entry, so a
 	// listener that cannot bind is not a failure: the port is not used at all.
 	// The one administrator step writes that entry and removes the resolver an
@@ -123,6 +131,9 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 		}
 		if n.dns != nil {
 			_ = n.dns.Close()
+		}
+		if n.probe == nil {
+			return nil
 		}
 		n.probe.Invalidate()
 		status := n.probe.Check(ctx, n.byokFlagFile())
@@ -136,7 +147,7 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 			n.mu.Lock()
 			n.dnsReason = core.ErrorCode(err)
 			n.mu.Unlock()
-			if !n.probe.DNS(ctx).Passed {
+			if n.probe == nil || !n.probe.DNS(ctx).Passed {
 				return err
 			}
 		} else {
@@ -148,6 +159,9 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 	if err := setup.Run(ctx, "prepare"); err != nil {
 		return err
 	}
+	if n.probe == nil {
+		return nil
+	}
 	n.probe.Invalidate()
 	status := n.probe.Check(ctx, n.byokFlagFile())
 	if !status.Revealed {
@@ -157,6 +171,123 @@ func (n *Native) prepareBYOKWith(ctx context.Context, setup *byokdns.Setup) erro
 		return errors.New("native_byok_intranet_unavailable")
 	}
 	return nil
+}
+
+// byokIntranetReady reports whether the official gate would pass right now: the
+// availability flag is revealed and the intranet name answers with a private
+// address. It is the evidence that a feature-disabled answer comes from the
+// running application's own cache, not from a machine that is still unready.
+func (n *Native) byokIntranetReady(ctx context.Context) bool {
+	if n.probe == nil {
+		return false
+	}
+	n.probe.Invalidate()
+	status := n.probe.Check(ctx, n.byokFlagFile())
+	return status.Revealed && status.Intranet.Passed
+}
+
+// isFeatureDisabledReason reports the official build's own gate answer. Kimi
+// hides the BYOK surface when its availability flag is missing or the intranet
+// name does not resolve to a private address, and every `byokSources` call then
+// answers `reasonCode: "feature-disabled"`.
+func isFeatureDisabledReason(reason string) bool {
+	switch reason {
+	case "native_import_feature-disabled", "native_import_feature_disabled", "feature-disabled",
+		"model_disconnect_feature-disabled", "model_disconnect_feature_disabled":
+		return true
+	}
+	return false
+}
+
+// staleFeatureDisabled reports the one recoverable feature-disabled answer: the
+// flag and the intranet name are both in place, so only the running official
+// build's one minute negative cache still refuses. A managed restart clears it.
+func (n *Native) staleFeatureDisabled(ctx context.Context, reason string) bool {
+	if !isFeatureDisabledReason(reason) || !n.managedKimiRunning() {
+		return false
+	}
+	return n.byokIntranetReady(ctx)
+}
+
+// restartManagedOfficial restarts the managed application once. Explicit
+// actions use it to clear the official build's cached gate answer; nothing in a
+// background run may restart Kimi.
+func (n *Native) restartManagedOfficial(ctx context.Context) error {
+	if n.restartOfficial != nil {
+		return n.restartOfficial(ctx)
+	}
+	if err := n.refreshControllerInstallationForce(); err != nil {
+		return err
+	}
+	if err := n.controller.RestartOfficial(ctx); err != nil {
+		return err
+	}
+	return n.syncWorkHome()
+}
+
+// importAfterStaleFeatureDisabled retries one import after a managed restart
+// when the page refused the BYOK surface although the machine is ready. The
+// retry runs at most once: a second refusal is a real gate, not a stale cache.
+func (n *Native) importAfterStaleFeatureDisabled(ctx context.Context, imported kimi.ImportResult, err error,
+	run func(context.Context) (kimi.ImportResult, error)) (kimi.ImportResult, error) {
+	if !n.staleFeatureDisabled(ctx, firstCode(imported.Reason, core.ErrorCode(err))) {
+		return imported, err
+	}
+	if restartErr := n.restartManagedOfficial(ctx); restartErr != nil {
+		return imported, err
+	}
+	return run(ctx)
+}
+
+// disconnectAfterStaleFeatureDisabled is the same one-shot retry for an
+// explicit disconnect.
+func (n *Native) disconnectAfterStaleFeatureDisabled(ctx context.Context, removed kimi.DisconnectResult, err error,
+	run func(context.Context) (kimi.DisconnectResult, error)) (kimi.DisconnectResult, error) {
+	if !n.staleFeatureDisabled(ctx, removed.Reason) {
+		return removed, err
+	}
+	if restartErr := n.restartManagedOfficial(ctx); restartErr != nil {
+		return removed, err
+	}
+	return run(ctx)
+}
+
+// recoverDisconnectFeatureDisabled keeps an explicit disconnect working when the
+// official build refuses its BYOK surface.
+//
+// The refusal means two different things. When the profile's store holds no
+// managed source for the signed-in account, only this product's local import
+// record is left, and clearing it needs no official call. Otherwise the source
+// is still in Kimi and the official disconnect has to run: the flag and the
+// intranet name are settled first, and one managed restart clears the official
+// build's own one minute cache if it still refuses.
+//
+// A failed local clear or BYOK setup is surfaced with its own code: those are
+// steps the user acted on, and folding them into the gate refusal would hide
+// what really failed.
+func (n *Native) recoverDisconnectFeatureDisabled(ctx context.Context, id string, removed kimi.DisconnectResult, err error) (kimi.DisconnectResult, error) {
+	if !isFeatureDisabledReason(removed.Reason) {
+		return removed, err
+	}
+	if hasActive, verified := n.controller.HasActiveManagedStoreSources(); verified && !hasActive {
+		local, localErr := n.controller.DisconnectLocalStateAuthorized(ctx)
+		if localErr != nil {
+			return local, localErr
+		}
+		return local, nil
+	}
+	if n.byokPrepare != nil || n.probe != nil {
+		n.setOperationStage(id, diagnosticStagePrepare)
+		if prepareErr := n.prepareBYOK(ctx); prepareErr != nil {
+			return kimi.DisconnectResult{State: kimi.ImportStateFailed, Reason: core.ErrorCode(prepareErr)}, prepareErr
+		}
+		n.setOperationStage(id, diagnosticStageDisconnectModels)
+	}
+	retried, retryErr := n.disconnectModelsWithAutoStart(ctx)
+	if retried.OK || !isFeatureDisabledReason(retried.Reason) {
+		return retried, retryErr
+	}
+	return n.disconnectAfterStaleFeatureDisabled(ctx, retried, retryErr, n.disconnectModelsWithAutoStart)
 }
 
 func (n *Native) removeBYOK(ctx context.Context) error {

@@ -372,9 +372,12 @@ func mapField(object map[string]any, name string) map[string]any {
 const kthDisconnectExpression = `(async()=>{
 const sources=globalThis.clawBridgeAPI?.byokSources;
 if(!sources||typeof sources.list!=="function"||typeof sources.disconnect!=="function")return {ok:true,skipped:true};
-const unwrap=result=>result?.ok===true?result.value:null;
 const loopback=value=>/^http:\/\/(?:127\.0\.0\.1|\[::1\]):\d+\/v1(?:\/models\/api\.json)?\/?$/i.test(String(value??""));
-const snapshot=unwrap(await sources.list());
+const listed=await sources.list();
+if(listed&&typeof listed==="object"&&listed.ok===false){
+  return {ok:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+}
+const snapshot=listed?.ok===true?listed.value:null;
 if(!snapshot||!Array.isArray(snapshot.sources)||typeof snapshot.scopeToken!=="string"||
   typeof snapshot.accountRevision!=="string"||!snapshot.accountRevision)return {ok:false,code:"contract-changed"};
 const existing=snapshot.sources.find(source=>source?.id==="byok-kth");
@@ -391,7 +394,11 @@ if(disconnected?.ok!==true)return {ok:false,code:disconnected?.reasonCode||"disc
 let status=typeof disconnected.value?.status==="string"?disconnected.value.status:"";
 if(status==="pending"&&!hadOtherPending&&typeof sources.applyPending==="function"&&
   typeof disconnected.value?.accountRevision==="string"&&disconnected.value.accountRevision){
-  const latest=unwrap(await sources.list());
+  const listedLatest=await sources.list();
+  if(listedLatest&&typeof listedLatest==="object"&&listedLatest.ok===false){
+    return {ok:false,code:(typeof listedLatest.reasonCode==="string"&&listedLatest.reasonCode)?listedLatest.reasonCode:"failed"};
+  }
+  const latest=listedLatest?.ok===true?listedLatest.value:null;
   if(!latest||latest.scopeToken!==snapshot.scopeToken||latest.accountRevision!==disconnected.value.accountRevision){
     return {ok:false,code:"byok-source-stale"};
   }
@@ -413,6 +420,9 @@ func kthSettlePendingExpression(directSourceID, expectedRevision string) string 
 const sources=globalThis.clawBridgeAPI?.byokSources;
 if(typeof sources?.list!=="function"||typeof sources.applyPending!=="function")return {ok:false,code:"contract-changed"};
 const reply=await sources.list();
+if(reply&&typeof reply==="object"&&reply.ok===false){
+  return {ok:false,code:(typeof reply.reasonCode==="string"&&reply.reasonCode)?reply.reasonCode:"failed"};
+}
 const current=reply?.ok===true?reply.value:null;
 if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string"||
   typeof current.accountRevision!=="string"||!current.accountRevision)return {ok:false,code:"contract-changed"};
@@ -593,6 +603,12 @@ func kthResetFailureReason(code string) string {
 		return NativeAccountChanged
 	case "foreign_source":
 		return "native_import_foreign_source"
+	case "feature_disabled":
+		return "native_import_feature_disabled"
+	case "no_account":
+		return "native_import_no_account"
+	case "byok_not_ready":
+		return "native_import_byok_not_ready"
 	}
 	return "native_import_provider_reset_failed"
 }

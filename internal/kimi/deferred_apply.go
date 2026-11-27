@@ -26,8 +26,11 @@ const sources=globalThis.clawBridgeAPI?.byokSources;
 if(!sources||typeof sources.list!=="function"||typeof sources.applyPending!=="function"){
   return {ok:false,code:"unsupported"};
 }
-const unwrap=result=>result?.ok===true?result.value:null;
-const current=unwrap(await sources.list());
+const reply=await sources.list();
+if(reply&&typeof reply==="object"&&reply.ok===false){
+  return {ok:false,code:(typeof reply.reasonCode==="string"&&reply.reasonCode)?reply.reasonCode:"failed"};
+}
+const current=reply?.ok===true?reply.value:null;
 if(!current||typeof current.scopeToken!=="string")return {ok:false,code:"contract-changed"};
 if(current.scopeToken!==scopeToken)return {ok:false,code:"account-changed"};
 if(current.accountRevision!==expectedRevision)return {ok:false,code:"stale"};
@@ -99,7 +102,11 @@ const statusOf=value=>typeof value?.status==="string"?value.status:"";
 let status=statusOf(reply.value);
 const revision=typeof reply.value?.accountRevision==="string"?reply.value.accountRevision:"";
 if(status==="pending"&&!otherPending&&typeof sources.applyPending==="function"&&revision){
-  const latest=unwrap(await sources.list());
+  const listed=await sources.list();
+  if(listed&&typeof listed==="object"&&listed.ok===false){
+    return {ok:true,settled:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+  }
+  const latest=listed?.ok===true?listed.value:null;
   if(latest&&latest.scopeToken===current.scopeToken&&latest.accountRevision===revision){
     const applied=await sources.applyPending(revision);
     if(applied?.ok!==true)return {ok:false,settled:false};
@@ -124,8 +131,12 @@ if(!sourceID)return {ok:true,settled:true};
 if(!sources||typeof sources.list!=="function"||typeof sources.disconnect!=="function"){
   return {ok:false,settled:false};
 }
-const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS + `
-const current=unwrap(await sources.list());
+` + settleDisconnectJS + `
+const listed=await sources.list();
+if(listed&&typeof listed==="object"&&listed.ok===false){
+  return {ok:false,settled:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+}
+const current=listed?.ok===true?listed.value:null;
 if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string"){
   return {ok:false,settled:false};
 }
@@ -193,10 +204,14 @@ if(!expectedGateway)return {ok:false,settled:false};
 if(!sources||typeof sources.list!=="function"||typeof sources.disconnect!=="function"){
   return {ok:false,settled:false};
 }
-const unwrap=result=>result?.ok===true?result.value:null;` + settleDisconnectJS + `
+` + settleDisconnectJS + `
 const gatewayAddress=value=>String(value??"").trim().replace(/\/models\/api\.json\/?$/i,"").replace(/\/+$/,"").toLowerCase();
 const isLoopback=value=>/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+\//i.test(String(value??""));
-const current=unwrap(await sources.list());
+const listed=await sources.list();
+if(listed&&typeof listed==="object"&&listed.ok===false){
+  return {ok:false,settled:false,code:(typeof listed.reasonCode==="string"&&listed.reasonCode)?listed.reasonCode:"failed"};
+}
+const current=listed?.ok===true?listed.value:null;
 if(!current||!Array.isArray(current.sources)||typeof current.scopeToken!=="string"||
   typeof current.accountRevision!=="string"||!current.accountRevision)return {ok:false,settled:false};
 const gateway=current.sources.find(source=>source.id==="byok-kth"||source.kind==="kth");
