@@ -151,7 +151,7 @@ func (c *autoTakeoverCoordinator) observe(ctx context.Context, pids []int, known
 		return
 	}
 	workHome, _ := n.controller.WorkHome()
-	if workActivityBusy(workHome, 20*time.Second) {
+	if workActivityBusy(workHome, now, 20*time.Second) {
 		c.setStateLocked("waiting_idle", "work_activity_recent")
 		return
 	}
@@ -217,15 +217,22 @@ func unmanagedSignature(pids []int, install kimi.Installation) string {
 	return fmt.Sprintf("%v %q %d %q", pids, install.Archive, modified, install.Version)
 }
 
-func workActivityBusy(workHome string, activityWindow time.Duration) bool {
+func workActivityBusy(workHome string, now time.Time, activityWindow time.Duration) bool {
 	if workHome == "" {
 		return false
 	}
-	cutoff := time.Now().Add(-activityWindow)
-	remaining := 200
+	cutoff := now.Add(-activityWindow)
+	mainSessions := filepath.Join(workHome, "agents", "main", "sessions")
+	database := filepath.Join(mainSessions, "hosted-logical", "conversations.sqlite")
+	for _, path := range []string{database, database + "-wal", database + "-shm"} {
+		if recentSessionFile(path, cutoff) {
+			return true
+		}
+	}
+	remaining := 1000
 	for _, root := range []string{
 		filepath.Join(workHome, "sessions"),
-		filepath.Join(workHome, "agents", "main", "sessions"),
+		mainSessions,
 		filepath.Join(workHome, "runtime", "kimi-code", "home", "sessions"),
 	} {
 		if recentSessionActivity(root, cutoff, 4, &remaining) {
@@ -259,10 +266,15 @@ func recentSessionActivity(root string, cutoff time.Time, depth int, remaining *
 		}
 		switch entry.Name() {
 		case "conversations.sqlite", "conversations.sqlite-wal", "conversations.sqlite-shm", "wire.jsonl":
-			if info, err := os.Stat(filepath.Join(root, entry.Name())); err == nil && info.Mode().IsRegular() && !info.ModTime().Before(cutoff) {
+			if recentSessionFile(filepath.Join(root, entry.Name()), cutoff) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func recentSessionFile(path string, cutoff time.Time) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && !info.ModTime().Before(cutoff)
 }

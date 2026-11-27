@@ -9,7 +9,11 @@ import (
 
 func parseWindowsProxyConfig(proxyServer, proxyOverride string, reqURL *url.URL) (*url.URL, error) {
 	scheme := strings.ToLower(reqURL.Scheme)
-	host, port := strings.ToLower(reqURL.Hostname()), reqURL.Port()
+	host := strings.ToLower(reqURL.Hostname())
+	if host == "localhost" || net.ParseIP(host).IsLoopback() {
+		return nil, nil
+	}
+	port := reqURL.Port()
 	if port == "" {
 		switch scheme {
 		case "http":
@@ -24,7 +28,7 @@ func parseWindowsProxyConfig(proxyServer, proxyOverride string, reqURL *url.URL)
 			continue
 		}
 		if pattern == "<local>" {
-			if !strings.Contains(host, ".") || net.ParseIP(host).IsLoopback() {
+			if !strings.Contains(host, ".") {
 				return nil, nil
 			}
 			continue

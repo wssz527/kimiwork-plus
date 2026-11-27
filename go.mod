@@ -7,6 +7,7 @@ toolchain go1.26.10
 require (
 	github.com/dop251/goja v0.0.0-20261108153707-d8dfb4d8b999
 	github.com/wailsapp/wails/v3 v3.1.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.43.0
 )
 
@@ -19,6 +20,5 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 )

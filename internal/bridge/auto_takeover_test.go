@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -116,12 +117,12 @@ func TestAutoTakeoverWaitsForIdleAndRestartsOnce(t *testing.T) {
 	if err := os.WriteFile(activity, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.observe(70, 80)
-	f.expect(t, true, "waiting_idle", "work_activity_recent", 0)
-	old := time.Now().Add(-21 * time.Second)
-	if err := os.Chtimes(activity, old, old); err != nil {
+	if err := os.Chtimes(activity, f.now, f.now); err != nil {
 		t.Fatal(err)
 	}
+	f.observe(70, 80)
+	f.expect(t, true, "waiting_idle", "work_activity_recent", 0)
+	f.now = f.now.Add(21 * time.Second)
 
 	f.n.mu.Lock()
 	f.n.opWaiter = true
@@ -237,17 +238,45 @@ func TestWorkActivityChecksKnownSessionFiles(t *testing.T) {
 			if err := os.WriteFile(file, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if !workActivityBusy(home, 20*time.Second) {
-				t.Fatal("recent Work activity was missed")
-			}
-			old := time.Now().Add(-time.Minute)
-			if err := os.Chtimes(file, old, old); err != nil {
+			now := time.Now().Truncate(time.Second)
+			if err := os.Chtimes(file, now, now); err != nil {
 				t.Fatal(err)
 			}
-			if workActivityBusy(home, 20*time.Second) {
+			if !workActivityBusy(home, now, 20*time.Second) {
+				t.Fatal("recent Work activity was missed")
+			}
+			if workActivityBusy(home, now.Add(time.Minute), 20*time.Second) {
 				t.Fatal("old session file was treated as recent activity")
 			}
 		})
+	}
+}
+
+func TestWorkActivityChecksSQLiteBeforeDirectoryWalk(t *testing.T) {
+	home := t.TempDir()
+	sessions := filepath.Join(home, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 1000 {
+		if err := os.WriteFile(filepath.Join(sessions, fmt.Sprintf("old-%04d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database := filepath.Join(home, "agents", "main", "sessions", "hosted-logical", "conversations.sqlite")
+	if err := os.MkdirAll(filepath.Dir(database), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{database, database + "-wal", database + "-shm"} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !workActivityBusy(home, time.Now(), 20*time.Second) {
+			t.Fatalf("the directory walk hid activity in %s", filepath.Base(path))
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
